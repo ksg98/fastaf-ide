@@ -8,8 +8,9 @@ vi.mock("../../invoke", async (importOriginal) => {
 	return { ...actual, invoke: invokeMock };
 });
 
-import type { ActionEntry } from "../../actions/actionRegistry";
+import { type ActionEntry, getActionEntries } from "../../actions/actionRegistry";
 import { CommandPalette, isBrowserCommandPaletteAction } from "../../components/CommandPalette/CommandPalette";
+import type { ShortcutHandlers } from "../../hooks/useKeyboardShortcuts";
 import { emitLocalEvent } from "../../invoke";
 import { commandPaletteStore } from "../../stores/commandPalette";
 import { repositoriesStore } from "../../stores/repositories";
@@ -61,6 +62,7 @@ const CONTENT_RESULT: ContentSearchResult = {
 	files_skipped: 0,
 	truncated: false,
 	repos_pending: 0,
+	repos_indexing: 0,
 	repos_searched: 0,
 };
 
@@ -85,22 +87,39 @@ describe("CommandPalette browser mode", () => {
 
 	it("exposes only actions explicitly verified for browser execution", () => {
 		const supported = action("search-files", "Search Files");
+		const designMode = action("start-design-mode-edge", "Start Design Mode in Edge");
+		const designModeChrome = action("start-design-mode-chrome", "Start Design Mode in Chrome");
+		const stopDesignMode = action("stop-design-mode", "Stop Design Mode");
 		const nativeDialog = action("open-file", "Open file");
 		const hostAdministration = action("show-remote-qr", "QR for Remote Mobile Connection");
 		const unknown = action("future-native-action", "Future native action");
 		const { container } = render(() => (
-			<CommandPalette actions={[supported, nativeDialog, hostAdministration, unknown]} browserMode />
+			<CommandPalette actions={[supported, designMode, nativeDialog, hostAdministration, unknown]} browserMode />
 		));
 
 		commandPaletteStore.open();
 
 		expect(isBrowserCommandPaletteAction(supported)).toBe(true);
+		expect(isBrowserCommandPaletteAction(designMode)).toBe(true);
+		expect(isBrowserCommandPaletteAction(designModeChrome)).toBe(true);
+		// Stop must reach a browser client too: otherwise the tab menu is its only way out.
+		expect(isBrowserCommandPaletteAction(stopDesignMode)).toBe(true);
+		// The arm path opens this tab's own microphone over the voice socket.
+		expect(isBrowserCommandPaletteAction(action("toggle-hands-free", "Start hands-free conversation"))).toBe(true);
 		expect(isBrowserCommandPaletteAction(nativeDialog)).toBe(false);
 		expect(isBrowserCommandPaletteAction(hostAdministration)).toBe(false);
 		expect(container.textContent).toContain("Search Files");
+		expect(container.textContent).toContain("Start Design Mode in Edge");
 		expect(container.textContent).not.toContain("Open file");
 		expect(container.textContent).not.toContain("QR for Remote Mobile Connection");
 		expect(container.textContent).not.toContain("Future native action");
+	});
+
+	// Catches: the Plans and Stories entry is registered but missing from BROWSER_ACTION_IDS, so a browser or phone client never sees it.
+	it("lists the real Plans and Stories entry in browser mode", () => {
+		const entry = getActionEntries({} as ShortcutHandlers).find((candidate) => candidate.id === "plans-stories");
+		expect(entry).toBeDefined();
+		expect(isBrowserCommandPaletteAction(entry as ActionEntry)).toBe(true);
 	});
 
 	it("keeps the complete desktop action list when browser mode is off", () => {
@@ -154,6 +173,65 @@ describe("CommandPalette browser mode", () => {
 		expect(container.textContent).toContain("src/App.tsx");
 	});
 
+	/**
+	 * The empty state used to say "N still indexing, retry shortly" for every
+	 * unsearched repo. Under the default `active_and_switch` strategy nothing
+	 * schedules an unvisited repo, so retrying changed nothing — measured at 40
+	 * pending repos across four polls over 80s. The palette must spend the
+	 * backend's `repos_indexing` count, not assume pending means building.
+	 */
+	it("does not promise a retry for repos that nothing is building", async () => {
+		invokeMock.mockImplementation((command: string) =>
+			command === "search_content"
+				? Promise.resolve({
+						matches: [],
+						files_searched: 3,
+						files_skipped: 0,
+						truncated: false,
+						repos_pending: 40,
+						repos_indexing: 0,
+						repos_searched: 1,
+					})
+				: Promise.resolve(undefined),
+		);
+		const { container } = render(() => <CommandPalette actions={[]} browserMode />);
+		commandPaletteStore.open();
+		const input = container.querySelector<HTMLInputElement>('[aria-label="Command palette search"]')!;
+
+		fireEvent.input(input, { target: { value: "? missingNeedle" } });
+		await vi.advanceTimersByTimeAsync(300);
+		await flushPromises();
+
+		expect(container.textContent).toContain("No results in 1 repo — 40 not indexed");
+		expect(container.textContent).not.toContain("retry shortly");
+	});
+
+	/** The other half: a build really in flight earns the retry sentence. */
+	it("promises a retry only for repos with a build in flight", async () => {
+		invokeMock.mockImplementation((command: string) =>
+			command === "search_content"
+				? Promise.resolve({
+						matches: [],
+						files_searched: 3,
+						files_skipped: 0,
+						truncated: false,
+						repos_pending: 2,
+						repos_indexing: 2,
+						repos_searched: 3,
+					})
+				: Promise.resolve(undefined),
+		);
+		const { container } = render(() => <CommandPalette actions={[]} browserMode />);
+		commandPaletteStore.open();
+		const input = container.querySelector<HTMLInputElement>('[aria-label="Command palette search"]')!;
+
+		fireEvent.input(input, { target: { value: "? missingNeedle" } });
+		await vi.advanceTimersByTimeAsync(300);
+		await flushPromises();
+
+		expect(container.textContent).toContain("No results in 3 repos — 2 still indexing (retry shortly)");
+	});
+
 	it("completes HTTP content search without accepting another window's batch", async () => {
 		let resolveContent!: (result: ContentSearchResult) => void;
 		const response = new Promise<ContentSearchResult>((resolve) => {
@@ -178,6 +256,7 @@ describe("CommandPalette browser mode", () => {
 			files_skipped: 0,
 			truncated: false,
 			repos_pending: 0,
+			repos_indexing: 0,
 			repos_searched: 0,
 		});
 		expect(container.textContent).not.toContain("wrong window result");

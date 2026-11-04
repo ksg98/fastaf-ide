@@ -1,6 +1,7 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { createMemo, createSignal } from "solid-js";
 import { invoke } from "../invoke";
+import { closePanel } from "../panelRouter";
 import { appLogger } from "../stores/appLogger";
 import { diffTabsStore } from "../stores/diffTabs";
 import { editorTabsStore } from "../stores/editorTabs";
@@ -8,12 +9,15 @@ import { mdTabsStore } from "../stores/mdTabs";
 import { paneLayoutStore } from "../stores/paneLayout";
 import { currentBranchKey, repositoriesStore } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
-import { tabOrderingStore } from "../stores/tabOrdering";
+import { tabOrderingStore } from "../stores/tabManager";
 import { terminalsStore } from "../stores/terminals";
+import { uiStore } from "../stores/ui";
 import { readClipboard, writeClipboard } from "../utils/clipboard";
 import { getFocusedFrameSelection } from "../utils/focusedSelection";
+import { markdownDocumentPanelId } from "../utils/markdownDocumentPanelId";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { assignTabToActiveGroup } from "../utils/paneTabAssign";
+import { isPaneTabLive } from "../utils/paneTabLiveness";
 import { selectedTextInFocusedEditor } from "../utils/selectAll";
 import { filterValidTerminals } from "../utils/terminalFilter";
 import { clampFontSize, FONT_STEP } from "../utils/terminalZoom";
@@ -92,13 +96,22 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 	};
 
 	/** After closing a non-terminal tab, select a sibling on the same branch or fall back to the last terminal */
-	/** Remove a tab from its pane group; if the group becomes empty, collapse the split. */
+	/** Remove a tab from its pane group; if the group has no live content left, collapse the split.
+	 *  A tab whose content never made it into (or was removed from) its owning store — e.g. a
+	 *  tmux-shim-materialized terminal killed outside the normal close path, or a diff/markdown/
+	 *  editor tab whose store entry was dropped by some other code path — is a ghost: it can never
+	 *  be closed by the user (no tab strip entry, no close button), so a raw tabs.length check can
+	 *  never reach zero and the pane gets stuck open forever. Ghosts don't count as live content
+	 *  for this check (see isPaneTabLive's doc comment). This only re-evaluates a group when ANOTHER
+	 *  of its tabs is closed — a solo-ghost group with no live sibling to ever trigger a close needs
+	 *  the separate terminalsStore.onRemove sweep wired in utils/paneTabLiveness.ts. */
 	const removeTabFromPane = (tabId: string) => {
 		const containingGroup = paneLayoutStore.getGroupForTab(tabId);
 		if (!containingGroup) return;
 		paneLayoutStore.removeTab(containingGroup, tabId);
 		const updated = paneLayoutStore.state.groups[containingGroup];
-		if (!updated || updated.tabs.length === 0) {
+		const hasLiveContent = updated?.tabs.some(isPaneTabLive);
+		if (!updated || !hasLiveContent) {
 			paneLayoutStore.closePane(containingGroup);
 		}
 	};
@@ -114,14 +127,14 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 		const branchKey = currentBranchKey() ?? null;
 		const remaining = store.getVisibleIds(branchKey).filter((i) => i !== closedId);
 		if (remaining.length > 0) {
-			handleTerminalSelect(remaining[remaining.length - 1]);
+			handleTerminalSelect(remaining.at(-1)!);
 		} else {
 			// No more tabs of this type — return to last terminal on active branch (never pick orphans)
 			const activeRepo = repositoriesStore.getActive();
-			const branchTerminals = activeRepo?.activeBranch
-				? (activeRepo.branches[activeRepo.activeBranch]?.terminals ?? [])
+			const branchTerminals = activeRepo?.activeWorkspaceId
+				? (activeRepo.workspaces[activeRepo.activeWorkspaceId]?.terminals ?? [])
 				: [];
-			const nextTerminal = branchTerminals.length > 0 ? branchTerminals[branchTerminals.length - 1] : null;
+			const nextTerminal = branchTerminals.length > 0 ? branchTerminals.at(-1)! : null;
 			if (nextTerminal) {
 				handleTerminalSelect(nextTerminal);
 			}
@@ -137,6 +150,15 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 		}
 
 		if (id.startsWith("md-")) {
+			const panelId = markdownDocumentPanelId(id);
+			if (uiStore.isDetached(panelId)) {
+				uiStore.clearDetached(panelId);
+				try {
+					await closePanel(panelId);
+				} catch (error) {
+					appLogger.warn("app", "Failed to close detached Markdown window", error);
+				}
+			}
 			selectAfterNonTerminalClose(mdTabsStore, id);
 			mdTabsStore.remove(id);
 			removeTabFromPane(id);
@@ -212,7 +234,7 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 
 		const owner = repositoriesStore.findOwnerForTerminal(id);
 		if (owner) {
-			repositoriesStore.removeTerminalFromBranch(owner.repoPath, owner.branchName, id);
+			repositoriesStore.removeTerminalFromWorkspace(owner.repoPath, owner.workspaceId, id);
 		}
 		const activeRepo = repositoriesStore.getActive();
 
@@ -223,10 +245,10 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 		// sets activeId AND calls ref.focus() (terminalsStore.remove sets activeId to null).
 		// Only select terminals from the same branch to avoid cross-repo activation.
 		if (wasActive) {
-			const branchTerminals = activeRepo?.activeBranch
-				? (activeRepo.branches[activeRepo.activeBranch]?.terminals ?? [])
+			const branchTerminals = activeRepo?.activeWorkspaceId
+				? (activeRepo.workspaces[activeRepo.activeWorkspaceId]?.terminals ?? [])
 				: [];
-			const nextId = survivorId ?? (branchTerminals.length > 0 ? branchTerminals[branchTerminals.length - 1] : null);
+			const nextId = survivorId ?? (branchTerminals.length > 0 ? branchTerminals.at(-1)! : null);
 			if (nextId) {
 				// Defer one frame: SolidJS renders the next terminal on remove(),
 				// but ref.focus() inside handleTerminalSelect needs the DOM node present.
@@ -321,7 +343,7 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 		const closed = closedTabs();
 		if (closed.length === 0) return;
 
-		const last = closed[closed.length - 1];
+		const last = closed.at(-1)!;
 		setClosedTabs((prev) => prev.slice(0, -1));
 
 		const canSpawn = await deps.pty.canSpawn();

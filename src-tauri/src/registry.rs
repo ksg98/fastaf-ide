@@ -2,9 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default registry URL — points to the raw `registry.json` in the public GitHub repo.
-const DEFAULT_REGISTRY_URL: &str =
-    "https://raw.githubusercontent.com/sstraus/tuicommander-plugins/main/registry.json";
+/// Registry URL. `None` disables the remote catalogue: FastAF publishes no
+/// plugin registry of its own, and upstream's (sstraus/tuicommander-plugins)
+/// lists archives FastAF would download and install unreviewed. Point this at a
+/// FastAF-owned `registry.json` to turn the catalogue back on.
+const DEFAULT_REGISTRY_URL: Option<&str> = None;
 
 /// A single entry in the remote plugin registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,9 @@ pub struct RegistryEntry {
     pub capabilities: Vec<String>,
     /// Direct HTTPS download URL for the `.zip` archive.
     pub download_url: String,
+    /// SHA-256 of the packaged payload tree; absent in older catalogues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
 }
 
 /// Fetch the remote plugin registry.
@@ -34,7 +39,11 @@ pub struct RegistryEntry {
 /// The caller (TypeScript store) is responsible for caching / TTL.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn fetch_plugin_registry() -> Result<Vec<RegistryEntry>, String> {
-    fetch_registry_from(DEFAULT_REGISTRY_URL).await
+    match DEFAULT_REGISTRY_URL {
+        Some(url) => fetch_registry_from(url).await,
+        // No catalogue: the browser shows no remote plugins rather than an error.
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Inner fetch logic (testable, accepts arbitrary URL).
@@ -99,6 +108,6 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].repo, "");
         assert_eq!(entries[0].min_app_version, "");
-        assert!(entries[0].capabilities.is_empty());
+        assert_eq!(entries[0].capabilities, [] as [std::string::String; 0]);
     }
 }

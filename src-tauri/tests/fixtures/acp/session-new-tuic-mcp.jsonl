@@ -1,0 +1,13 @@
+// The one MCP server a session is given is `tuicommander` on the ACP
+// transport, never anything the request that asked for the session named. The
+// scenario pins the name as well as the transport: the name is a public
+// contract that appears in users' ego rule files, and the ACP transport is
+// what makes the entry safe — it names no command and no address, only the
+// connection it arrived on.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","params":{"mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]},"capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/load","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000bb","mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]},"capture":"load"}
+{"step":"respond","to":"load","result":{"configOptions":[]}}
+{"step":"await_stdin_eof"}

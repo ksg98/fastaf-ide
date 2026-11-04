@@ -11,9 +11,9 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
-import { appLogger } from "./stores/appLogger";
-import { isTauri, rpc } from "./transport";
-import { randomId } from "./utils/randomId";
+import { isTauri, owningConnectionFor, rpc } from "./transport";
+import { emitSseLocalEvent, subscribeSse } from "./transport/sse";
+import { backendMismatchMessage } from "./utils/backendMismatch";
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -59,7 +59,6 @@ const DEDUP_COMMANDS = new Set([
 	"get_last_prompt",
 	"load_config",
 	"load_agents_config",
-	"load_provider_registry",
 	"load_keybindings",
 	"load_notification_config",
 	"load_notes",
@@ -82,217 +81,79 @@ const DEDUP_COMMANDS = new Set([
 	"get_claude_usage_api",
 ]);
 
+function invokeLocal<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+	const result = args !== undefined ? tauriInvoke<T>(cmd, args) : tauriInvoke<T>(cmd);
+	if (!import.meta.env.DEV) return result;
+	return result.catch((failure: unknown) => {
+		const message = failure instanceof Error ? failure.message : failure;
+		if (message === `Command ${cmd} not found`) {
+			throw new Error(backendMismatchMessage(cmd), { cause: failure });
+		}
+		throw failure;
+	});
+}
+
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 	if (isTauri()) {
+		// A repository held by another machine is not reachable over this process's
+		// IPC. The desktop path skips rpc() entirely, so it has to ask the same
+		// resolver rpc() asks — otherwise every call from a desktop satellite runs
+		// against the local backend and quietly answers about the wrong disk.
+		const owner = owningConnectionFor(cmd, args ?? {});
+		if (owner) return rpc<T>(cmd, args ?? {}, owner);
 		if (DEDUP_COMMANDS.has(cmd)) {
 			const key = args !== undefined ? `${cmd}:${JSON.stringify(args)}` : cmd;
 			const existing = _inflight.get(key) as Promise<T> | undefined;
 			if (existing) return existing;
-			const promise = (args !== undefined ? tauriInvoke<T>(cmd, args) : tauriInvoke<T>(cmd)).finally(() =>
-				_inflight.delete(key),
-			);
+			const promise = invokeLocal<T>(cmd, args).finally(() => _inflight.delete(key));
 			_inflight.set(key, promise as Promise<unknown>);
 			return promise;
 		}
-		return args !== undefined ? tauriInvoke<T>(cmd, args) : tauriInvoke<T>(cmd);
+		return invokeLocal<T>(cmd, args);
 	}
 	if (_httpInvoke) return _httpInvoke<T>(cmd, args);
 	return getHttpInvoke().then((fn) => fn<T>(cmd, args));
 }
 
-// ---------------------------------------------------------------------------
-// Browser-mode SSE listener — shared EventSource for all listen() calls
-// ---------------------------------------------------------------------------
-
-let _sseSource: EventSource | null = null;
-/** Listeners registered before or after SSE connects */
-const _sseListeners = new Map<string, Set<(payload: unknown) => void>>();
-/** The `types` filter the server is applying to the live stream. */
-let _sseOpenedFor = "";
-/** The `types` the current connection's URL asked for — what an auto-reconnect resets the server to. */
-let _sseUrlTypes = "";
-/** A coalesced open is already queued. */
-let _sseOpenQueued = false;
-/** Types already wired on the *current* connection — attaching twice dispatches twice. */
-const _sseAttached = new Set<string>();
-/**
- * Identifies this page's stream so its filter can be widened in place.
- *
- * Reconnecting to widen it loses every event published between the close and
- * the new subscription: the server subscribes to the bus at connect time and
- * replays nothing, so a `repo-changed` in that gap leaves a panel stale until
- * something else happens to fire.
- */
-const _sseStreamId = randomId("s");
-
-/**
- * Open (or reopen) the shared stream, filtered to the registered event types.
- *
- * The server fixes the filter at connect time, so a type registered later can
- * only be delivered by reconnecting with a wider filter.
- */
-function openSse(): void {
-	const types = [..._sseListeners.keys()].sort().join(",");
-	// An empty `types=` is not "send everything" — the server reads it as an empty
-	// allowlist and drops every event. Never open a stream that can receive nothing.
-	if (!types) return;
-
-	_sseSource?.close();
-	_sseAttached.clear();
-	_sseOpenedFor = types;
-	_sseUrlTypes = types;
-	const origin = typeof window !== "undefined" ? window.location.origin : "";
-	_sseSource = new EventSource(
-		`${origin}/events?types=${encodeURIComponent(types)}&stream_id=${encodeURIComponent(_sseStreamId)}`,
-	);
-
-	_sseSource.onopen = () => {
-		// An auto-reconnect replays the URL, so the server is back to the filter
-		// this connection was opened with. Anything widened since has to be
-		// re-applied, or those types stop arriving with no error anywhere.
-		if (_sseOpenedFor !== _sseUrlTypes) widenSse(_sseOpenedFor);
-	};
-
-	_sseSource.onerror = () => {
-		// EventSource auto-reconnects; just log
-		appLogger.debug("network", "SSE connection error — will auto-reconnect");
-	};
-
-	for (const eventType of _sseListeners.keys()) {
-		attachSseEventType(eventType);
-	}
-}
-
-/**
- * Make sure the live stream covers every registered event type.
- *
- * Opens are coalesced onto a macrotask because startup registers a dozen types
- * back to back; connecting per `listen()` call would trade the wide filter for a
- * reconnect storm. Shrinking the filter is not worth a reconnect, so an unsubscribe
- * leaves the stream as it is.
- */
-function ensureSse(): void {
-	const live = _sseSource !== null && _sseSource.readyState !== EventSource.CLOSED;
-	const covered = new Set(_sseOpenedFor ? _sseOpenedFor.split(",") : []);
-	if (live && ![..._sseListeners.keys()].some((type) => !covered.has(type))) return;
-	if (_sseOpenQueued) return;
-
-	_sseOpenQueued = true;
-	setTimeout(() => {
-		_sseOpenQueued = false;
-		const types = [..._sseListeners.keys()].sort().join(",");
-		if (_sseSource !== null && _sseSource.readyState !== EventSource.CLOSED && types) {
-			// Widen the live stream instead of replacing it: the replacement
-			// subscribes only after the old one is gone, and nothing covers that gap.
-			widenSse(types);
-			return;
-		}
-		openSse();
-	}, 0);
-}
-
-/**
- * Ask the server to apply `types` to this page's live stream.
- *
- * A 404 means the server is not tracking this stream (it ended, or it has more
- * live streams than it tracks), so the only way to widen is the lossy one.
- */
-function widenSse(types: string): void {
-	const origin = typeof window !== "undefined" ? window.location.origin : "";
-	fetch(`${origin}/events/types`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ stream_id: _sseStreamId, types: types.split(",") }),
-	})
-		.then((response) => {
-			if (!response.ok) {
-				appLogger.debug("network", `SSE filter update refused (${response.status}) — reconnecting instead`);
-				openSse();
-				return;
-			}
-			_sseOpenedFor = types;
-			// The stream was opened before these types existed, so nothing is
-			// listening for them yet on this connection.
-			for (const eventType of _sseListeners.keys()) attachSseEventType(eventType);
-		})
-		.catch((err) => {
-			appLogger.debug("network", `SSE filter update failed (${err}) — reconnecting instead`);
-			openSse();
-		});
-}
-
-/** Attach a native SSE addEventListener for a given event type */
-function attachSseEventType(eventType: string) {
-	if (!_sseSource || _sseAttached.has(eventType)) return;
-	_sseAttached.add(eventType);
-	_sseSource.addEventListener(eventType, ((sseEvent: MessageEvent) => {
-		const listeners = _sseListeners.get(eventType);
-		if (!listeners) return;
-		let payload: unknown;
-		try {
-			payload = JSON.parse(sseEvent.data);
-		} catch (err) {
-			appLogger.warn("network", `SSE event '${eventType}' parse failed`, {
-				data: typeof sseEvent.data === "string" ? sseEvent.data.slice(0, 200) : sseEvent.data,
-				error: String(err),
-			});
-			return;
-		}
-		for (const handler of listeners) handler(payload);
-	}) as EventListener);
-}
-
-/**
- * Dispatch an event to browser-mode `listen()` subscribers without a round-trip.
- *
- * For a command whose desktop half answers over `AppHandle.emit` while its HTTP
- * half answers in the response body, this republishes the body on the same event
- * name so subscribers stay transport-agnostic. In Tauri mode the browser registry
- * is empty (listen() goes to the Tauri bridge), so this is inert.
- */
+/** Dispatch HTTP response events to the same browser subscribers as SSE. */
 export function emitLocalEvent(event: string, payload: unknown): void {
-	const listeners = _sseListeners.get(event);
-	if (!listeners) return;
-	for (const handler of listeners) handler(payload);
+	emitSseLocalEvent(event, payload);
+}
+
+/**
+ * Wrap a Tauri UnlistenFn (from `@tauri-apps/api/event` `listen`/`once`, or any
+ * Window/Webview method built on it — `.listen()`, `.onCloseRequested()`, etc.)
+ * so repeat calls are a safe no-op.
+ *
+ * Tauri's UnlistenFn is `async () => _unlisten(...)`. A second call — a duplicate
+ * dispose, or one racing a webview reload that already cleared the backend
+ * registry — throws *inside* that async fn and surfaces as a rejected promise,
+ * not a sync throw, hence the wrap + `.catch()`. The outer try/catch covers the
+ * (defensive) sync-throw path. The listener is already gone either way; swallow.
+ * Every caller of a Tauri listen-returning API must dispose through this guard
+ * instead of calling the raw UnlistenFn directly.
+ */
+export function guardTauriUnlisten(unlisten: () => unknown): () => void {
+	let disposed = false;
+	return () => {
+		if (disposed) return;
+		disposed = true;
+		try {
+			void Promise.resolve(unlisten()).catch(() => {});
+		} catch {
+			// listener already gone
+		}
+	};
 }
 
 export function listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> {
 	if (isTauri()) {
-		return tauriListen<T>(event, handler).then((unlisten) => {
-			let disposed = false;
-			return () => {
-				if (disposed) return;
-				disposed = true;
-				try {
-					// Tauri's UnlistenFn is `async () => _unlisten(...)`, so a double-unregister
-					// (listeners[eventId] is undefined) throws *inside* the async fn and surfaces
-					// as a rejected promise, not a sync throw — hence the wrap + .catch(). The
-					// outer try/catch covers the (defensive) sync-throw path. The listener is
-					// already gone either way; swallow.
-					void Promise.resolve(unlisten()).catch(() => {});
-				} catch {
-					// listener already gone
-				}
-			};
-		});
+		return tauriListen<T>(event, handler).then((unlisten) => guardTauriUnlisten(unlisten));
 	}
 
-	// Browser mode: SSE via shared EventSource
-	const wrappedHandler = (payload: unknown) => handler({ payload: payload as T });
-
-	if (!_sseListeners.has(event)) _sseListeners.set(event, new Set());
-	_sseListeners.get(event)!.add(wrappedHandler);
-
-	// Connect, or reconnect if this type is outside the live filter. `openSse`
-	// owns attaching — attaching here would not help, since the server never
-	// sends a type the stream did not ask for.
-	ensureSse();
-
-	return Promise.resolve(() => {
-		const listeners = _sseListeners.get(event);
-		if (listeners) {
-			listeners.delete(wrappedHandler);
-			if (listeners.size === 0) _sseListeners.delete(event);
-		}
-	});
+	return Promise.resolve(
+		subscribeSse({
+			[event]: (payload) => handler({ payload: payload as T }),
+		}),
+	);
 }

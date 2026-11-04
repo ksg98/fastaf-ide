@@ -32,17 +32,27 @@ export interface MouseDragCallbacks {
 	onCancel?: () => void;
 }
 
+/**
+ * True when the pointer scrolls by swiping, so a drag must be armed by a hold:
+ * a finger, or a pen on a device without hover (a pen on a hover-capable
+ * desktop drags like a mouse).
+ */
+export function isHoldPointer(e: PointerEvent): boolean {
+	if (e.pointerType === "touch") return true;
+	return e.pointerType === "pen" && !window.matchMedia?.("(hover: hover)").matches;
+}
+
 export function initMouseDrag(
 	e: PointerEvent,
 	sourceEl: HTMLElement,
 	callbacks: MouseDragCallbacks,
 	options?: { threshold?: number; ghostOpacity?: number; touchLongPressMs?: number; touchSlop?: number },
-): void {
+): (() => void) | undefined {
 	if (e.button !== 0) return;
 
 	const threshold = options?.threshold ?? 5;
 	const ghostOpacity = options?.ghostOpacity ?? 0.8;
-	const isTouch = e.pointerType === "touch";
+	const isTouch = isHoldPointer(e);
 	// Touch drag arms after a hold; a move beyond touchSlop before then is a scroll.
 	const longPressMs = options?.touchLongPressMs ?? 350;
 	const touchSlop = options?.touchSlop ?? 10;
@@ -56,6 +66,7 @@ export function initMouseDrag(
 
 	let started = false;
 	let captured = false;
+	let cleaned = false;
 	let ghost: HTMLElement | null = null;
 	// Touch only: set when the long-press timer fires; the drag may begin from then on.
 	let longPressArmed = false;
@@ -153,6 +164,7 @@ export function initMouseDrag(
 	};
 
 	const cleanup = () => {
+		cleaned = true;
 		if (longPressTimer !== undefined) clearTimeout(longPressTimer);
 		document.removeEventListener("pointermove", handleMove);
 		document.removeEventListener("pointerup", handleUp);
@@ -204,4 +216,9 @@ export function initMouseDrag(
 			if (!started) beginDrag(lastX, lastY);
 		}, longPressMs);
 	}
+	return () => {
+		if (cleaned) return;
+		cleanup();
+		if (started) callbacks.onCancel?.();
+	};
 }

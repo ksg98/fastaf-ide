@@ -7,10 +7,11 @@
 
 use std::collections::VecDeque;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 
 /// Maximum execution time for a CLI command (30 seconds).
 const MAX_EXEC_TIMEOUT_SECS: u64 = 30;
@@ -31,6 +32,10 @@ const RATE_LIMIT_PER_MINUTE: usize = 60;
 
 /// Per-plugin sliding-window rate limiter. Tracks timestamps of recent calls
 /// and rejects when the count exceeds RATE_LIMIT_PER_MINUTE within 60 seconds.
+///
+/// `parking_lot::Mutex` has no poison state: a panic taken anywhere near the
+/// critical section leaves the entry usable, where a poisoned `std` mutex would
+/// have disabled exec:cli for that plugin for the rest of the process lifetime.
 fn rate_limiter() -> &'static DashMap<String, Mutex<VecDeque<Instant>>> {
     static LIMITER: OnceLock<DashMap<String, Mutex<VecDeque<Instant>>>> = OnceLock::new();
     LIMITER.get_or_init(DashMap::new)
@@ -42,7 +47,7 @@ fn check_rate_limit(plugin_id: &str) -> Result<(), String> {
     let entry = limiter
         .entry(plugin_id.to_string())
         .or_insert_with(|| Mutex::new(VecDeque::new()));
-    let mut timestamps = entry.lock().unwrap();
+    let mut timestamps = entry.lock();
     let now = Instant::now();
     let window = Duration::from_secs(60);
 
@@ -133,8 +138,26 @@ fn canonical_trusted_dirs() -> &'static [std::path::PathBuf] {
 }
 
 /// Returns true if `path` resides within one of the trusted directories.
+///
+/// Each form is compared against its own. The canonical list alone is not
+/// enough: on Windows `canonicalize` prefixes `\\?\`, which a path nobody
+/// canonicalized cannot match, and a path that does not exist yet cannot be
+/// canonicalized at all — so on Windows this answered false for every plain
+/// path, including the trusted directories themselves. A `..` anywhere
+/// disqualifies the plain comparison, because `starts_with` matches components
+/// and would let the path climb back out of the directory it just entered.
 fn is_in_trusted_dir(path: &std::path::Path) -> bool {
-    canonical_trusted_dirs().iter().any(|d| path.starts_with(d))
+    let climbs = path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    if !climbs && trusted_dirs().iter().any(|d| path.starts_with(d)) {
+        return true;
+    }
+    path.canonicalize().is_ok_and(|canonical| {
+        canonical_trusted_dirs()
+            .iter()
+            .any(|d| canonical.starts_with(d))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +173,13 @@ fn validate_cwd(cwd: &str) -> Result<std::path::PathBuf, String> {
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("Failed to resolve working directory: {e}"))?;
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    // Canonicalized like the path it is compared against: on Windows
+    // `canonicalize` returns a `\\?\`-prefixed path, which a plain home
+    // directory never prefixes, so every working directory would be rejected.
+    let home = dirs::home_dir()
+        .ok_or("Cannot determine home directory")?
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve home directory: {e}"))?;
     if !canonical.starts_with(&home) {
         return Err("Working directory must be within the user's home directory".into());
     }
@@ -242,6 +271,7 @@ async fn plugin_exec_cli_inner(
 
     // Convert to tokio::process::Command for async timeout + kill
     let mut cmd: tokio::process::Command = std_cmd.into();
+    cmd.kill_on_drop(true);
 
     // Audit log: record invocation before execution
     let start = Instant::now();
@@ -252,38 +282,12 @@ async fn plugin_exec_cli_inner(
         .spawn()
         .map_err(|e| format!("Failed to execute \"{binary}\": {e}"))?;
 
-    // Take stdout/stderr handles before waiting so we can read them after wait()
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to capture stdout".to_string())?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Failed to capture stderr".to_string())?;
-
-    let status = match tokio::time::timeout(
+    let (status, stdout, stderr) = capture_cli_output(
+        &mut child,
+        &binary,
         Duration::from_secs(MAX_EXEC_TIMEOUT_SECS),
-        child.wait(),
     )
-    .await
-    {
-        Ok(s) => s.map_err(|e| format!("Failed to execute \"{binary}\": {e}"))?,
-        Err(_) => {
-            // Timeout: kill the child process to prevent zombies
-            let _ = child.kill().await;
-            return Err(format!(
-                "Command \"{binary}\" timed out after {MAX_EXEC_TIMEOUT_SECS}s"
-            ));
-        }
-    };
-
-    // Read captured output after process has exited
-    use tokio::io::AsyncReadExt;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let _ = stdout_pipe.read_to_end(&mut stdout).await;
-    let _ = stderr_pipe.read_to_end(&mut stderr).await;
+    .await?;
 
     let duration_ms = start.elapsed().as_millis();
     let exit_ok = status.success();
@@ -307,15 +311,61 @@ async fn plugin_exec_cli_inner(
             stderr_str.trim()
         ));
     }
-    if stdout.len() > MAX_STDOUT_BYTES {
+    String::from_utf8(stdout).map_err(|e| format!("Command output is not valid UTF-8: {e}"))
+}
+
+async fn read_bounded_pipe(
+    pipe: impl tokio::io::AsyncRead + Unpin,
+    stream: &str,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    pipe.take((MAX_STDOUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| format!("Failed to read {stream}: {error}"))?;
+    if bytes.len() > MAX_STDOUT_BYTES {
         return Err(format!(
-            "Command output exceeds maximum size ({} bytes > {} bytes)",
-            stdout.len(),
-            MAX_STDOUT_BYTES
+            "Command {stream} exceeds maximum size ({MAX_STDOUT_BYTES} bytes)"
         ));
     }
+    Ok(bytes)
+}
 
-    String::from_utf8(stdout).map_err(|e| format!("Command output is not valid UTF-8: {e}"))
+async fn capture_cli_output(
+    child: &mut tokio::process::Child,
+    binary: &str,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+    let capture = async {
+        tokio::try_join!(
+            async {
+                child
+                    .wait()
+                    .await
+                    .map_err(|error| format!("Failed to execute {binary}: {error}"))
+            },
+            read_bounded_pipe(stdout, "stdout"),
+            read_bounded_pipe(stderr, "stderr"),
+        )
+    };
+    let result = match tokio::time::timeout(timeout, capture).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "Command \"{binary}\" timed out after {}s",
+            timeout.as_secs_f64()
+        )),
+    };
+    if let Err(error) = result {
+        child
+            .kill()
+            .await
+            .map_err(|kill_error| format!("{error}; failed to stop child: {kill_error}"))?;
+        return Err(error);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +375,101 @@ async fn plugin_exec_cli_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn output_child(script: &str) -> tokio::process::Child {
+        let (shell, flag) = crate::test_support::host_shell();
+        tokio::process::Command::new(shell)
+            .args([flag, script])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("shell")
+    }
+
+    // Catches: waiting before draining a full stdout/stderr pipe, or rejecting the exact output cap.
+    #[tokio::test]
+    async fn cli_capture_drains_large_pipes_and_accepts_exact_limit() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).expect("tempdir");
+        for (size, stderr_only) in [(200_000, false), (200_000, true), (5 * 1024 * 1024, false)] {
+            let file = dir.path().join("output");
+            let expected = vec![b'x'; size];
+            std::fs::write(&file, &expected).expect("write output");
+            let mut script = tuic_test_support::print_file_script(file.to_str().expect("path"));
+            if stderr_only {
+                script.push_str(" >&2");
+            }
+            let mut child = output_child(&script);
+            let (status, stdout, stderr) =
+                capture_cli_output(&mut child, "shell", Duration::from_secs(30))
+                    .await
+                    .expect("capture");
+            assert!(status.success());
+            if stderr_only {
+                assert_eq!(stdout, [] as [u8; 0]);
+                assert_eq!(stderr, expected);
+            } else {
+                assert_eq!(stdout, expected);
+                assert_eq!(stderr, [] as [u8; 0]);
+            }
+        }
+    }
+
+    // Catches: unbounded buffering or silently truncating overflowing output instead of stopping the child.
+    #[tokio::test]
+    async fn cli_capture_kills_child_when_either_pipe_overflows() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).expect("tempdir");
+        let file = dir.path().join("overflow");
+        std::fs::write(&file, vec![b'x'; 5 * 1024 * 1024 + 1]).expect("write output");
+        for stderr_only in [false, true] {
+            let mut script = tuic_test_support::print_file_script(file.to_str().expect("path"));
+            if stderr_only {
+                script.push_str(" >&2");
+            }
+            let mut child = output_child(&script);
+            let error = capture_cli_output(&mut child, "shell", Duration::from_secs(30))
+                .await
+                .expect_err("overflow");
+            assert!(error.contains("exceeds maximum size"), "{error}");
+            assert!(child.id().is_none(), "overflowing child not reaped");
+        }
+    }
+
+    // Catches: timing out the wait while leaving a child alive.
+    #[tokio::test]
+    async fn cli_capture_timeout_kills_and_reaps_child() {
+        let mut child = output_child(&tuic_test_support::wait_for_stdin_script());
+        // Child::wait closes its stdin; retain the writer so the fixture stays blocked.
+        let _stdin = child.stdin.take().expect("piped stdin");
+        let error = capture_cli_output(&mut child, "shell", Duration::from_millis(100))
+            .await
+            .expect_err("timeout");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(child.id().is_none(), "timed-out child not reaped");
+    }
+
+    // Catches: ignored pipe read failures returning successful empty output.
+    #[tokio::test]
+    async fn cli_capture_propagates_pipe_read_errors() {
+        struct BrokenPipe;
+        impl tokio::io::AsyncRead for BrokenPipe {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("broken pipe fixture")))
+            }
+        }
+        let error = read_bounded_pipe(BrokenPipe, "stdout")
+            .await
+            .expect_err("read failure");
+        assert!(
+            error.contains("Failed to read stdout") && error.contains("broken pipe fixture"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn resolve_binary_finds_mdkb_in_trusted_dir() {
@@ -338,30 +483,54 @@ mod tests {
         }
     }
 
+    /// A panic taken while a plugin's rate-limit entry is locked must not
+    /// disable that plugin's limiter for the rest of the process lifetime.
+    /// `std::sync::Mutex` poisons on panic and `.lock().unwrap()` then panics
+    /// on every later call; `parking_lot::Mutex` has no poison state.
+    #[test]
+    fn rate_limiter_survives_panic_while_entry_is_locked() {
+        let plugin_id = "poison-probe";
+        assert!(check_rate_limit(plugin_id).is_ok(), "first call must pass");
+
+        // Silence the unwind backtrace: the panic below is the fixture, not noise.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(|| {
+            let entry = rate_limiter().get(plugin_id).expect("entry registered");
+            let _guard = entry.lock();
+            panic!("panic inside the rate-limit critical section");
+        })
+        .is_err();
+        std::panic::set_hook(hook);
+        assert!(panicked, "the fixture must actually panic under the lock");
+
+        assert!(
+            check_rate_limit(plugin_id).is_ok(),
+            "limiter unusable after a panic under its lock"
+        );
+    }
+
     #[test]
     fn resolve_binary_returns_none_for_nonexistent() {
         let result = resolve_binary("nonexistent-binary-12345");
         assert!(result.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_binary_rejects_untrusted_symlink() {
         // Create a temp dir outside trusted dirs with a symlink to /bin/echo
-        let tmp = std::env::temp_dir().join("plugin_exec_test_symlink");
-        let _ = std::fs::create_dir_all(&tmp);
-        let link = tmp.join("mdkb");
-        let _ = std::fs::remove_file(&link);
+        let tmp = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let link = tmp.path().join("mdkb");
         #[cfg(unix)]
         {
             let _ = std::os::unix::fs::symlink("/bin/echo", &link);
             // /bin/echo is not in a trusted dir, so even if the symlink exists
             // in a location we check, the canonical path should be rejected.
-            // Since /tmp is not a trusted dir, this symlink won't be found at all.
+            // The test scratch root is not trusted, so this symlink is not found.
             // The point is: resolve_binary only looks in trusted_dirs().
             assert!(resolve_binary("nonexistent-binary-12345").is_none());
         }
-        let _ = std::fs::remove_file(&link);
-        let _ = std::fs::remove_dir(&tmp);
     }
 
     #[test]
@@ -388,8 +557,9 @@ mod tests {
     #[test]
     fn validate_cwd_rejects_outside_home() {
         let home = dirs::home_dir().unwrap();
-        if !std::path::Path::new("/tmp").starts_with(&home) {
-            assert!(validate_cwd("/tmp").is_err());
+        let outside = crate::test_support::dir_outside_home();
+        if !outside.starts_with(&home) {
+            assert!(validate_cwd(&outside.to_string_lossy()).is_err());
         }
     }
 

@@ -1,0 +1,147 @@
+/* Tasks tab: a flat FastAF surface on the well. One 44px bar (view pills,
+   new task, provider settings), one hairline under it, the detail beside the
+   list behind one more hairline. */
+.shell {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--fg-primary);
+  background: var(--bg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 12px;
+  box-sizing: border-box;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+.header label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+/* List / Board / Roadmap: the shared segmented control as view pills —
+   the open view on --row-selected, no accent ring. */
+.header [role="tablist"] {
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.header [role="tablist"] [role="tab"] {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.header [role="tablist"] [role="tab"]:hover:enabled {
+  background: var(--wash-0);
+  color: var(--fg-secondary);
+}
+
+.header [role="tablist"] [role="tab"][aria-selected="true"] {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+  box-shadow: none;
+}
+
+.header :focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.create {
+  margin-left: auto;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.side {
+  flex: 0 0 min(480px, 45%);
+  min-width: 0;
+  overflow: auto;
+  border-left: var(--hairline-w) solid var(--hairline);
+}
+
+.side > .back {
+  display: none;
+  margin: 8px 12px 0;
+}
+
+/* Below 700 px of shell width the list and the detail take turns; the shell is the container, not the viewport. */
+@container (max-width: 699px) {
+  .body[data-detail="open"] .main {
+    display: none;
+  }
+
+  .side {
+    flex: 1 1 100%;
+    border-left: none;
+  }
+
+  .side > .back {
+    display: block;
+  }
+}
+
+.view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.boardPicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.error {
+  padding: 8px 12px;
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: 16px;
+  color: var(--fg-muted);
+}
+
+/* No provider yet: the shared empty state, its install rows under it. */
+.fallback {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}

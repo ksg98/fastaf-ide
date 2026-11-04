@@ -1,0 +1,9 @@
+// A compaction whose successor may or may not have been published. This is
+// the receipt the client must not retry on, so it is the one worth recording.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"_ego/compact","params":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f2"},"capture":"compact"}
+{"step":"respond","to":"compact","result":{"v":1,"sourceSessionId":"01932d5e-0000-7000-8000-0000000000aa","sourceSeq":41,"targetSessionId":"01932d5e-0000-7000-8000-0000000000cc","publication":{"kind":"published_durability_uncertain","diagnostic":"the successor was written and the store did not confirm the flush"},"successorStartRequestId":"01932d5e-0000-7000-8000-0000000000f3"}}
+{"step":"await_stdin_eof"}

@@ -486,11 +486,23 @@
   line-height: 1.5;
 }
 
+.diff-empty {
+  padding: 0 8px;
+}
+
 /* @git-diff-view theme overrides — match FastAF palette */
-.diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root {
+#diff-content .diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root {
   --diff-border--: var(--border-subtle);
   --diff-plain-content--: var(--bg-primary);
   --diff-expand-content--: var(--bg-secondary);
+  --diff-plain-lineNumber--: var(--bg-secondary);
+  --diff-expand-lineNumber--: var(--bg-secondary);
+  --diff-plain-lineNumber-color--: var(--fg-secondary);
+  --diff-expand-lineNumber-color--: var(--fg-secondary);
+  --diff-hunk-lineNumber--: var(--bg-highlight);
+  --diff-hunk-lineNumber-hover--: var(--accent);
+  --diff-add-lineNumber--: color-mix(in srgb, var(--success) 20%, var(--bg-secondary));
+  --diff-del-lineNumber--: color-mix(in srgb, var(--error) 20%, var(--bg-secondary));
   --diff-empty-content--: var(--bg-secondary);
   --diff-add-content--: rgba(158, 206, 106, 0.1);
   --diff-del-content--: rgba(247, 118, 142, 0.1);
@@ -520,4 +532,13 @@
 
 .terminal-pane.md-pane {
   background: var(--bg-primary);
+}
+
+#diff-content .diff-tailwindcss-wrapper [data-state] {
+  color: var(--fg-primary);
+}
+
+html[data-theme="vscode-light"] #diff-content .diff-line-syntax-raw * {
+  color: var(--diff-view-light, inherit);
+  font-weight: var(--diff-view-light-font-weight, inherit);
 }

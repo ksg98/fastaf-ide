@@ -25,7 +25,7 @@ describe("CanvasTerminal Cmd/Ctrl+click on a link", () => {
 
 	it("keeps the press from the app before mousedown forwards anything", () => {
 		const mousedown = between('bindings.listen(canvasRef, "mousedown"', "const flushSelectionDrag");
-		const linkPress = mousedown.indexOf("linkPress = true;");
+		const linkPress = mousedown.indexOf("modifierLinkPress = true;");
 		const forwarding = mousedown.indexOf("if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey)");
 		expect(linkPress).toBeGreaterThan(-1);
 		expect(forwarding).toBeGreaterThan(-1);
@@ -34,7 +34,7 @@ describe("CanvasTerminal Cmd/Ctrl+click on a link", () => {
 
 	it("reports no release for a press the app never saw", () => {
 		const mouseup = between("const onMouseUp = (e: MouseEvent) => {", 'bindings.listen(document, "mouseup"');
-		const quiet = mouseup.indexOf("if (linkPress && e.button === 0) return;");
+		const quiet = mouseup.indexOf("if (modifierLinkPress && e.button === 0) return;");
 		const report = mouseup.indexOf("sgrMouseSequence(");
 		expect(quiet).toBeGreaterThan(-1);
 		expect(quiet).toBeLessThan(report);
@@ -42,10 +42,14 @@ describe("CanvasTerminal Cmd/Ctrl+click on a link", () => {
 
 	it("resolves the link at the pointer on click, as the right-click menu does", () => {
 		const click = between('bindings.listen(canvasRef, "click"', 'bindings.listen(canvasRef, "contextmenu"');
+		// The Cmd/Ctrl path runs its own lookup at the pointer (openLinkAt → resolveLinkAt),
+		// never the hover result.
 		expect(click).toMatch(
-			/if \(pressed \|\| isLinkModifier\(e\)\) \{[\s\S]*?await checkLinksAtRow\(pos\.row, pos\.col\);/,
+			/if \(modifierPressed \|\| \(isLinkModifier\(e\) && !selection\.hasRange\(\)\)\) \{[\s\S]*?void openLinkAt\(at\.row, at\.col\);/,
 		);
-		// A plain click under mouse reporting must not open a link a right-click left hovered.
-		expect(click).toMatch(/if \(currentFrame && currentFrame\.mouseMode > 0 && !e\.shiftKey\) return;/);
+		// A plain click opens only the link its own press claimed, so a link a right-click
+		// left hovered never opens on one (and under mouse reporting the rest is the app's).
+		expect(click).toMatch(/if \(!claimed \|\| e\.detail > 1 \|\| selection\.hasRange\(\)\) \{/);
+		expect(click).not.toMatch(/openLink\(hoveredLink\)/);
 	});
 });

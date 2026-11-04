@@ -1171,13 +1171,13 @@ pub(crate) mod tests {
         set_issuer_override(None);
     }
 
+    // Only the positive case is checked: once the listener drops, another test
+    // thread may bind the same ephemeral port, so "now free" is a race.
     #[test]
     fn a_port_someone_listens_on_counts_as_in_use() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         assert!(loopback_port_in_use(port));
-        drop(listener);
-        assert!(!loopback_port_in_use(port));
     }
 
     #[test]

@@ -1,0 +1,4 @@
+// A version this client does not serve. It must refuse before registering.
+{"step":"expect","method":"initialize","capture":"init"}
+{"step":"respond","to":"init","result":{"protocolVersion":2,"agentInfo":{"name":"ego","version":"fixture"},"agentCapabilities":{}}}
+{"step":"await_stdin_eof"}

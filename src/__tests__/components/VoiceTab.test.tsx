@@ -212,7 +212,8 @@ describe("VoiceTab", () => {
 	it("reflects barge-in state and can turn it off", () => {
 		store.state.config.barge_in = true;
 		render(() => <VoiceTab />);
-		const toggle = screen.getByRole("checkbox") as HTMLInputElement;
+		// A settings row renders the toggle as a switch, like every other settings card.
+		const toggle = screen.getByRole("switch", { name: /barge-in/i }) as HTMLInputElement;
 		expect(toggle.checked).toBe(true);
 		// The hint must not still tell people to use headphones — echo
 		// cancellation is what removed that caveat.
@@ -244,5 +245,14 @@ describe("VoiceTab", () => {
 		store.state.error = "Kokoro 82M (quantized) is not downloaded";
 		render(() => <VoiceTab />);
 		expect(screen.getByText("Kokoro 82M (quantized) is not downloaded")).toBeTruthy();
+	});
+
+	// Catches: the Voice page left on the pre-2.0 layout (bare h3 runs) while
+	// every other Settings page has a page header and cards.
+	it("opens with the page header and groups its rows into cards", () => {
+		const { container } = render(() => <VoiceTab />);
+		expect(container.querySelector("[data-settings-page-header] h2")?.textContent).toBe("Voice");
+		const cards = Array.from(container.querySelectorAll("section h3")).map((h) => h.textContent);
+		expect(cards).toEqual(["Speech model", "Memory", "Voices", "Playback"]);
 	});
 });

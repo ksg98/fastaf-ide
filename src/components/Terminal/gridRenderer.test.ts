@@ -66,10 +66,17 @@ describe("gridRenderer paintRow — background of trailing cells (story 036)", (
 		const r = createGridRenderer(ctx, { fontWeight: () => "normal", getFontFamily: () => "monospace" });
 		r.paintRow(rowWithTrailingBg(7), 0, METRICS);
 
-		// Each trailing bg space (cols 3..9) must be filled at x = c*cellWidth.
-		const filledXs = fillRect.mock.calls.map((c) => c[0] as number);
+		// Every trailing cell is covered, whether fills are per-cell or merged.
 		for (let c = 3; c < 10; c++) {
-			expect(filledXs).toContain(c * METRICS.cellWidth);
+			expect(
+				fillRect.mock.calls.some(
+					([x, y, width, height]) =>
+						x <= c * METRICS.cellWidth &&
+						x + width >= (c + 1) * METRICS.cellWidth &&
+						y === 0 &&
+						height === METRICS.cellHeight,
+				),
+			).toBe(true);
 		}
 	});
 
@@ -115,9 +122,16 @@ describe("gridRenderer paintRow — background of trailing cells (story 036)", (
 		}
 		r.paintRow({ index: 0, count, wrapped: false, codepoints, fg, bg, attrs }, 0, METRICS);
 
-		const filledXs = fillRect.mock.calls.map((c) => c[0] as number);
 		for (let c = 3; c < count; c++) {
-			expect(filledXs).toContain(c * METRICS.cellWidth);
+			expect(
+				fillRect.mock.calls.some(
+					([x, y, width, height]) =>
+						x <= c * METRICS.cellWidth &&
+						x + width >= (c + 1) * METRICS.cellWidth &&
+						y === 0 &&
+						height === METRICS.cellHeight,
+				),
+			).toBe(true);
 		}
 	});
 });

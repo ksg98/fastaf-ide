@@ -1,10 +1,11 @@
 import { batch } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile } from "solid-js/store";
 import { invoke } from "../invoke";
-import { setRemoteBaseUrlLookup } from "../transportRuntime";
-import { startRemoteEventBridge } from "../utils/remoteEventBridge";
+import { settingsRefresh } from "../services/settingsRefresh";
+import { subscribeEvents } from "../transport";
+import { setRemoteBaseUrlLookup, setRemoteTokenLookup } from "../transportRuntime";
+import { ensureAgentConfigs, invalidateAgentConfigs } from "./agentConfigs";
 import { appLogger } from "./appLogger";
-import { tunnelsStore } from "./tunnels";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,6 +17,39 @@ export interface RemoteConnection {
 	transport: RemoteTransport;
 	auth_username: string;
 	enabled: boolean;
+	auto_update?: boolean;
+	deploy: DeployMode;
+	survive_secs: number;
+}
+
+export type DeployMode = "never" | "on_connect" | "installed";
+
+export interface DiscoveredSshHost {
+	/** Name to show and to connect with: the config alias or the known_hosts name. */
+	host: string;
+	/** Resolved machine; with `port` it identifies the entry. */
+	target: string;
+	user: string | null;
+	port: number | null;
+	source: "config" | "known_hosts";
+}
+
+export interface DiscoveredSshHosts {
+	hosts: DiscoveredSshHost[];
+	/** known_hosts entries with hashed names: present on disk, not listable. */
+	hashed_count: number;
+}
+
+export interface SshAgentInfo {
+	keys: { fingerprint: string; comment: string; key_type: string }[];
+	agent_type: string;
+}
+
+export interface SshHostStatus {
+	host: string;
+	target: string;
+	port: number | null;
+	auth: "shell" | "no_shell" | "auth_failed" | "unreachable";
 }
 
 export type RemoteTransport =
@@ -27,17 +61,49 @@ export type RemoteTransport =
 			identity_file: string | null;
 			remote_daemon_port: number;
 	  }
-	| { type: "Direct"; url: string };
+	| { type: "Direct"; url: string }
+	| { type: "Relay" };
 
-export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
+/**
+ * `unauthenticated` is deliberately not `error`: the daemon is reachable and
+ * `/health` answers, but every other route needs a credential this client does
+ * not have. The fix is a password, not a network one, and the panel says so.
+ */
+export type ConnectionStatus = "disconnected" | "connecting" | "deploying" | "connected" | "unauthenticated" | "error";
 
 export interface ConnectionState {
 	connection: RemoteConnection;
 	status: ConnectionStatus;
 	baseUrl?: string;
 	protocolVersion?: number;
+	build?: RemoteBuildIdentity;
+	outOfDate?: boolean;
+	liveSessions?: number;
+	updateNotice?: string;
+	updateInProgress?: boolean;
 	error?: string;
-	tunnelProfileId?: string;
+	retryAfterSecs?: number;
+	deployStep?: string;
+	/** Why a relay connection is down: relay_unreachable, daemon_offline, pairing_rejected or link_lost. */
+	relayFailure?: string;
+}
+
+/** One connection as the backend reports it. Snake case: it is a Rust struct. */
+interface RemoteConnectionStatusPayload {
+	id: string;
+	status: ConnectionStatus;
+	base_url?: string;
+	token?: string;
+	protocol_version?: number;
+	build?: RemoteBuildIdentity;
+	out_of_date?: boolean;
+	live_sessions?: number;
+	update_notice?: string;
+	update_in_progress?: boolean;
+	error?: string;
+	retry_after_secs?: number;
+	step?: string;
+	relay_failure?: string;
 }
 
 interface RemoteConnectionsState {
@@ -45,27 +111,60 @@ interface RemoteConnectionsState {
 	hydrated: boolean;
 }
 
+export interface RemoteBuildIdentity {
+	version: string;
+	target: string;
+	sha256: string;
+}
+
+export interface RemoteUpdatePreview {
+	remote_build: RemoteBuildIdentity | null;
+	desktop_build: RemoteBuildIdentity;
+	source: "release" | "local";
+	session_count: number;
+	out_of_date: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
+/**
+ * This store renders remote connections; it does not run them.
+ *
+ * The state machine — health probe, password-for-token exchange, status polling,
+ * SSH tunnel, base URL — lives in `remote_runtime.rs` (#790-ef85). It has to:
+ * a base URL and a token held in the JS heap can only be used by JS, so no
+ * backend task could ever reach a remote daemon, and everything that makes a
+ * remote session behave like a local one needs exactly that.
+ *
+ * What stays here is what a renderer owns: the merged view of configuration plus
+ * live status. A remote daemon's events are mirrored onto the local bus by
+ * `remote_mirror.rs` and arrive through the ordinary local handlers, so this
+ * store subscribes to no remote stream of its own (#791-055e).
+ */
+
 /** Guard: prevent hydrate from running twice */
 let hydrated = false;
 
-/** Active health poll intervals keyed by connection ID */
-const healthIntervals = new Map<string, ReturnType<typeof setInterval>>();
+/**
+ * Session tokens for connected connections, keyed by connection ID.
+ *
+ * Deliberately outside the store and never persisted: the daemon mints this in
+ * memory and forgets it on every restart, so a stored copy would be a stale
+ * credential sitting on disk. It arrives with each status push; the password it
+ * was traded for never leaves the Rust side.
+ */
+const remoteTokens = new Map<string, string>();
 
-/** Active SSE event bridge cleanup functions keyed by connection ID */
-const eventBridges = new Map<string, () => void>();
-
-const HEALTH_POLL_MS = 5_000;
-const TUNNEL_CONNECT_TIMEOUT_MS = 30_000;
-const TUNNEL_POLL_MS = 500;
-
-/** Pick a random local port in [10000, 60000) */
-function randomLocalPort(): number {
-	return 10_000 + Math.floor(Math.random() * 50_000);
-}
+/**
+ * Whether the status stream has been subscribed.
+ *
+ * A flag rather than the `Unsubscribe` handle: the subscription lasts as long as
+ * the process does, so nothing ever calls it, and an unread handle reads as dead
+ * state. What is load bearing is subscribing exactly once.
+ */
+let statusSubscribed = false;
 
 function createRemoteConnectionsStore() {
 	const [state, setState] = createStore<RemoteConnectionsState>({
@@ -77,60 +176,55 @@ function createRemoteConnectionsStore() {
 	// Internal helpers
 	// ---------------------------------------------------------------------------
 
-	async function pollHealth(id: string): Promise<void> {
-		const connState = state.connections[id];
-		if (!connState?.baseUrl) return;
-		const baseUrl = connState.baseUrl;
-		try {
-			const resp = await fetch(`${baseUrl}/health`);
-			if (resp.ok) {
-				const data = (await resp.json()) as { protocol_version?: number };
-				setState("connections", id, {
-					status: "connected",
-					protocolVersion: data.protocol_version,
-				});
-			} else {
-				setState("connections", id, {
-					status: "error",
-					error: `Health check failed: ${resp.status}`,
-				});
+	/**
+	 * Apply one backend status snapshot.
+	 *
+	 * The payload is the whole client view of a connection, never a delta, so a
+	 * missed push cannot leave this store holding a base URL the backend has
+	 * retracted: the next one overwrites all of it.
+	 */
+	function applyStatus(payload: RemoteConnectionStatusPayload): void {
+		const existing = state.connections[payload.id];
+		if (!existing) {
+			// A status for a connection this store has not hydrated yet. Dropping
+			// it is safe: hydrate reads the same snapshot it came from.
+			return;
+		}
+		if (payload.token) remoteTokens.set(payload.id, payload.token);
+		else remoteTokens.delete(payload.id);
+
+		const wasConnected = existing.status === "connected";
+
+		setState("connections", payload.id, {
+			status: payload.status,
+			baseUrl: payload.base_url,
+			protocolVersion: payload.protocol_version,
+			build: payload.build,
+			outOfDate: payload.out_of_date,
+			liveSessions: payload.live_sessions,
+			updateNotice: payload.update_notice,
+			updateInProgress: payload.update_in_progress,
+			error: payload.error,
+			retryAfterSecs: payload.retry_after_secs,
+			deployStep: payload.step,
+			relayFailure: payload.relay_failure,
+		});
+
+		// A machine's run configs belong to the machine, and a daemon that went
+		// away and came back may have been reconfigured — or be a different box
+		// behind the same name. Drop the cached copy on every edge, then read the
+		// new one straight away so a context menu opened later is already warm:
+		// a menu is built inside the click that opens it and cannot await.
+		if (payload.status === "connected") {
+			if (!wasConnected) {
+				invalidateAgentConfigs(payload.id);
+				void ensureAgentConfigs(payload.id).catch((err) =>
+					appLogger.warn("store", `Failed to read agent config of ${payload.id}`, err),
+				);
 			}
-		} catch (e) {
-			setState("connections", id, {
-				status: "error",
-				error: `Unreachable: ${e}`,
-			});
+		} else if (wasConnected) {
+			invalidateAgentConfigs(payload.id);
 		}
-	}
-
-	function startHealthPolling(id: string): void {
-		stopHealthPolling(id);
-		const interval = setInterval(() => void pollHealth(id), HEALTH_POLL_MS);
-		healthIntervals.set(id, interval);
-	}
-
-	function stopHealthPolling(id: string): void {
-		const existing = healthIntervals.get(id);
-		if (existing !== undefined) {
-			clearInterval(existing);
-			healthIntervals.delete(id);
-		}
-	}
-
-	/** Wait for an SSH tunnel to reach connected state (or error/stopped). */
-	async function waitForTunnel(profileId: string): Promise<boolean> {
-		const deadline = Date.now() + TUNNEL_CONNECT_TIMEOUT_MS;
-		while (Date.now() < deadline) {
-			const status = tunnelsStore.getTunnelStatus(profileId);
-			if (status?.type === "connected") return true;
-			if (status?.type === "stopped" || status?.type === "error") {
-				appLogger.warn("store", `Tunnel ${profileId} failed: ${status.type}`);
-				return false;
-			}
-			await new Promise<void>((resolve) => setTimeout(resolve, TUNNEL_POLL_MS));
-		}
-		appLogger.warn("store", `Tunnel ${profileId} connect timeout`);
-		return false;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -138,7 +232,26 @@ function createRemoteConnectionsStore() {
 	// ---------------------------------------------------------------------------
 
 	const actions = {
-		/** Load connections from backend, set hydrated */
+		startRemoteSync(): () => void {
+			return settingsRefresh.register({
+				section: "connections",
+				read: () => invoke<RemoteConnection[]>("list_remote_connections"),
+				apply: (connections) => {
+					const fresh = Object.fromEntries(
+						(connections ?? []).map((connection) => [
+							connection.id,
+							{
+								...state.connections[connection.id],
+								connection,
+								status: state.connections[connection.id]?.status ?? "disconnected",
+							} as ConnectionState,
+						]),
+					);
+					setState("connections", reconcile(fresh));
+				},
+			});
+		},
+		/** Load connections and their live status, then follow the status pushes. */
 		async hydrate(): Promise<void> {
 			if (hydrated) return;
 			try {
@@ -152,157 +265,110 @@ function createRemoteConnectionsStore() {
 					setState("hydrated", true);
 				});
 				hydrated = true;
+
+				// Status before the subscription would race a change landing in
+				// between; the other order only ever re-applies the same value.
+				if (!statusSubscribed) {
+					await subscribeEvents({
+						"remote-connection-status": (payload) => applyStatus(payload as RemoteConnectionStatusPayload),
+					});
+					statusSubscribed = true;
+				}
+				const statuses = await invoke<RemoteConnectionStatusPayload[]>("remote_connection_statuses");
+				for (const status of statuses ?? []) applyStatus(status);
 			} catch (err) {
 				appLogger.error("store", "Failed to hydrate remote connections", err);
 			}
 		},
 
 		/**
-		 * Connect to a remote connection.
-		 * - SSH: creates a tunnel profile, starts it, sets baseUrl to the local port.
-		 * - Direct: sets baseUrl to the configured URL directly.
-		 * In both cases, health polling begins once the baseUrl is set.
+		 * Ask the backend to bring a connection up.
+		 *
+		 * Every transition it goes through — connecting, then connected or one of
+		 * the two failures — arrives as a status push, so this does not set state
+		 * itself. A rejected password resolves here as a rejection AND as an
+		 * `unauthenticated` status; callers that only render can ignore the throw.
 		 */
 		async connect(id: string): Promise<void> {
-			const connState = state.connections[id];
-			if (!connState) {
+			if (!state.connections[id]) {
 				appLogger.warn("store", `connect: unknown connection ${id}`);
 				return;
 			}
-			if (connState.status === "connecting" || connState.status === "connected") return;
-
-			setState("connections", id, { status: "connecting", error: undefined });
-			appLogger.info("store", `Connecting remote connection ${id} (${connState.connection.name})`);
-
-			const { transport } = connState.connection;
-
-			try {
-				if (transport.type === "Ssh") {
-					const localPort = randomLocalPort();
-					const profileName = `__remote_${id}`;
-
-					// Create (or re-use) a tunnel profile for this connection
-					await tunnelsStore.createProfile({
-						name: profileName,
-						host: transport.ssh_host,
-						port: transport.ssh_port,
-						user: transport.ssh_user,
-						identity_file: transport.identity_file,
-						forwards: [
-							{
-								type: "Local",
-								bind_port: localPort,
-								remote_host: "127.0.0.1",
-								remote_port: transport.remote_daemon_port,
-							},
-						],
-						options: {
-							server_alive_interval: 15,
-							server_alive_count_max: 3,
-							strict_host_key_checking: "AcceptNew",
-						},
-						auto_connect: false,
-					});
-
-					// Find the profile ID we just created (by name)
-					await tunnelsStore.refreshProfiles();
-					const profiles = tunnelsStore.getProfiles();
-					const profile = profiles.find((p) => p.name === profileName);
-					if (!profile) {
-						throw new Error(`Could not find tunnel profile "${profileName}" after creation`);
-					}
-
-					// Start the tunnel and wait for it to connect
-					await tunnelsStore.startTunnel(profile.id);
-					const connected = await waitForTunnel(profile.id);
-					if (!connected) {
-						setState("connections", id, {
-							status: "error",
-							error: "SSH tunnel failed to connect",
-						});
-						return;
-					}
-
-					const baseUrl = `http://127.0.0.1:${localPort}`;
-					setState("connections", id, {
-						baseUrl,
-						tunnelProfileId: profile.id,
-					});
-
-					// Initial health check sets status to "connected" or "error"
-					await pollHealth(id);
-					startHealthPolling(id);
-					eventBridges.get(id)?.();
-					eventBridges.set(id, startRemoteEventBridge(id, baseUrl));
-				} else {
-					// Direct transport — baseUrl is already known
-					setState("connections", id, { baseUrl: transport.url });
-					await pollHealth(id);
-					startHealthPolling(id);
-					eventBridges.get(id)?.();
-					eventBridges.set(id, startRemoteEventBridge(id, transport.url));
-				}
-			} catch (err) {
-				appLogger.error("store", `Failed to connect remote connection ${id}`, err);
-				setState("connections", id, {
-					status: "error",
-					error: String(err),
-				});
-			}
+			await invoke("connect_remote_connection", { id });
 		},
 
-		/** Disconnect from a remote connection. Stops the SSH tunnel if applicable. */
+		/** Ask the backend to take a connection down. */
 		async disconnect(id: string): Promise<void> {
-			const connState = state.connections[id];
-			if (!connState) return;
+			if (!state.connections[id]) return;
+			remoteTokens.delete(id);
+			await invoke("disconnect_remote_connection", { id });
+		},
 
-			stopHealthPolling(id);
-			const bridgeCleanup = eventBridges.get(id);
-			if (bridgeCleanup) {
-				bridgeCleanup();
-				eventBridges.delete(id);
-			}
+		async prepareUpdate(id: string): Promise<RemoteUpdatePreview> {
+			return await invoke<RemoteUpdatePreview>("prepare_remote_update", { id });
+		},
 
-			const { tunnelProfileId } = connState;
-			if (tunnelProfileId) {
-				try {
-					await tunnelsStore.stopTunnel(tunnelProfileId);
-					// Clean up the auto-created profile
-					await tunnelsStore.deleteProfile(tunnelProfileId);
-				} catch (err) {
-					appLogger.warn("store", `Failed to stop/delete tunnel for connection ${id}`, err);
-				}
-			}
+		async updateAndRestart(id: string, confirmedSessions: number, expectedSha256: string): Promise<void> {
+			await invoke("update_and_restart_remote", { id, confirmedSessions, expectedSha256 });
+		},
 
-			setState("connections", id, {
-				status: "disconnected",
-				baseUrl: undefined,
-				protocolVersion: undefined,
-				error: undefined,
-				tunnelProfileId: undefined,
-			});
-			appLogger.info("store", `Disconnected remote connection ${id}`);
+		async install(id: string): Promise<void> {
+			const current = state.connections[id];
+			if (!current) return;
+			await invoke("install_remote_daemon", { id });
+			setState("connections", id, "connection", "deploy", "installed");
+		},
+
+		async uninstall(id: string): Promise<void> {
+			const current = state.connections[id];
+			if (!current) return;
+			await invoke("uninstall_remote_daemon", { id });
+			setState("connections", id, "connection", "deploy", "on_connect");
+		},
+
+		async discoverSshHosts(): Promise<DiscoveredSshHosts> {
+			return (await invoke<DiscoveredSshHosts>("list_discovered_ssh_hosts")) ?? { hosts: [], hashed_count: 0 };
+		},
+
+		async sshAgentInfo(): Promise<SshAgentInfo> {
+			return (await invoke<SshAgentInfo>("list_ssh_agent_keys")) ?? { keys: [], agent_type: "" };
+		},
+
+		/** Probe one discovered host on request; known_hosts entries are only ever probed this way. */
+		async probeSshHost(host: DiscoveredSshHost): Promise<SshHostStatus> {
+			return invoke<SshHostStatus>("probe_discovered_ssh_host", { target: host.target, port: host.port });
+		},
+
+		async probeSshHosts(): Promise<SshHostStatus[]> {
+			return (await invoke<SshHostStatus[]>("probe_ssh_config_hosts")) ?? [];
 		},
 
 		/** Save a new connection to the backend and add it to state */
 		async addConnection(conn: RemoteConnection): Promise<void> {
 			try {
-				await invoke("save_remote_connection", { connection: conn });
-				setState("connections", conn.id, { connection: conn, status: "disconnected" });
+				const base = state.connections[conn.id]?.connection ?? null;
+				await invoke("save_remote_connection", { base, connection: conn });
+				// Saving metadata does not disconnect the backend runtime. Retain its
+				// endpoint/token-backed state until the next authoritative status event.
+				if (state.connections[conn.id]) setState("connections", conn.id, "connection", conn);
+				else setState("connections", conn.id, { connection: conn, status: "disconnected" });
 			} catch (err) {
 				appLogger.error("store", "Failed to save remote connection", err);
 				throw err;
 			}
 		},
 
-		/** Disconnect (if connected), delete from backend, and remove from state */
+		/** Delete from the backend and remove from state */
 		async removeConnection(id: string): Promise<void> {
 			const connState = state.connections[id];
 			if (!connState) return;
 
-			if (connState.status === "connecting" || connState.status === "connected") {
-				await actions.disconnect(id);
-			}
+			// No pre-delete disconnect. `delete_remote_connection` tears the
+			// connection down itself — poll, mirror, mirrored rows, tunnel and
+			// token — before it rewrites the store, so asking from here bought
+			// nothing and hid the fact that the HTTP route never did. Only this
+			// process's token cache is ours to clear.
+			remoteTokens.delete(id);
 
 			try {
 				await invoke("delete_remote_connection", { id });
@@ -318,8 +384,44 @@ function createRemoteConnectionsStore() {
 		},
 
 		/**
-		 * Returns the baseUrl for a connected connection, or undefined if not connected.
-		 * This is the primary API used by transport routing (Step 17).
+		 * Store the Basic Auth password for a connection, or forget it when given
+		 * an empty string. The secret goes straight to the Rust credential vault;
+		 * it is never held here and never read back.
+		 */
+		async setPassword(id: string, password: string): Promise<void> {
+			await invoke("set_remote_connection_password", { id, password });
+		},
+
+		/**
+		 * Import the pairing bundle printed by `tuic-remote --relay-pair`, or forget
+		 * the pairing when given an empty string. Like the password, it goes straight
+		 * to the Rust credential vault and is never read back.
+		 */
+		async setRelayPairing(id: string, bundle: string): Promise<void> {
+			await invoke("set_remote_connection_relay_pairing", { id, bundle });
+		},
+
+		/** Whether a password is stored for this connection. */
+		async hasPassword(id: string): Promise<boolean> {
+			return (await invoke<boolean>("remote_connection_password_exists", { id })) ?? false;
+		},
+
+		/**
+		 * The daemon's session token for a connection, or undefined when none was
+		 * needed or the connection is not authenticated. Read by the transport to
+		 * sign HTTP, WebSocket and SSE alike.
+		 */
+		getToken(connectionId: string): string | undefined {
+			return remoteTokens.get(connectionId);
+		},
+
+		/**
+		 * Returns the baseUrl for a connected connection, or undefined if not
+		 * connected. The primary API used by transport routing.
+		 *
+		 * The backend already withholds the URL for anything but a connected
+		 * connection; the status check here is the same answer stated locally, so
+		 * a stale store cannot route either.
 		 */
 		getBaseUrl(connectionId: string): string | undefined {
 			const connState = state.connections[connectionId];
@@ -348,3 +450,4 @@ function createRemoteConnectionsStore() {
 
 export const remoteConnectionsStore = createRemoteConnectionsStore();
 setRemoteBaseUrlLookup((connectionId) => remoteConnectionsStore.getBaseUrl(connectionId));
+setRemoteTokenLookup((connectionId) => remoteConnectionsStore.getToken(connectionId));

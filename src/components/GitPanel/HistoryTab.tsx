@@ -80,7 +80,7 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 		const current = commits();
 		if (!repo || !file || current.length === 0 || loadingMore()) return;
 
-		const lastHash = current[current.length - 1].hash;
+		const lastHash = current.at(-1)!.hash;
 		setLoadingMore(true);
 		try {
 			const result = await invoke<CommitLogEntry[]>("get_file_history", {

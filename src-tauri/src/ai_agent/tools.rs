@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use super::safety::{KeyRisk, RegexSafetyChecker, SafeKey, SafetyVerdict};
 use super::sandbox::FileSandbox;
-use super::watcher;
 use crate::state::AppState;
 
 /// Max file size accepted by `read_file` / `edit_file` (10 MB).
@@ -345,7 +344,7 @@ pub fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "goal": { "type": "string", "description": "Goal or task description for the scheduled agent (max 500 chars)" },
-                    "interval_minutes": { "type": "integer", "description": "Run interval in minutes (minimum 5)", "minimum": 5 },
+                    "interval_minutes": { "type": "integer", "description": "Run interval in minutes. Only intervals that tick evenly: 5, 6, 10, 12, 15, 20 or 30 minutes; 60, 120, 180, 240, 360, 480 or 720 (1 to 12 hours); or 1440 for once a day at 09:00 UTC.", "enum": [5, 6, 10, 12, 15, 20, 30, 60, 120, 180, 240, 360, 480, 720, 1440] },
                     "one_shot": { "type": "boolean", "description": "If true, run once and disable. Default false.", "default": false }
                 },
                 "required": ["goal", "interval_minutes"]
@@ -368,47 +367,6 @@ pub fn tool_definitions() -> Value {
                     "id": { "type": "string", "description": "Job id to cancel" }
                 },
                 "required": ["id"]
-            }
-        },
-        {
-            "name": "watch_for",
-            "description": "Arm a reactive watch on THIS session: when the trigger fires, a fresh autonomous agent conversation runs your instructions. Requires user approval to arm. Bounded by max_fires and cooldown so it cannot loop unchecked.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "trigger": {
-                        "type": "object",
-                        "description": "Trigger spec. One of: {\"type\":\"command_done\",\"on_failure_only\":true} | {\"type\":\"error\"} | {\"type\":\"idle\"} | {\"type\":\"busy\"} | {\"type\":\"question\",\"confident_only\":true} | {\"type\":\"unseen\"} | {\"type\":\"pattern\",\"regex\":\"...\"}",
-                        "properties": {
-                            "type": { "type": "string", "enum": ["idle", "busy", "command_done", "question", "error", "unseen", "pattern"] }
-                        },
-                        "required": ["type"]
-                    },
-                    "instructions": { "type": "string", "description": "What the agent should do when the watch fires (max 8192 chars)" },
-                    "name": { "type": "string", "description": "Optional human-readable label for the watch" },
-                    "max_fires": { "type": "integer", "description": "Max times this watch may fire before auto-stopping (default 3, min 1)", "minimum": 1 },
-                    "cooldown_secs": { "type": "integer", "description": "Minimum seconds between fires (default 10, min 5)", "minimum": 5 }
-                },
-                "required": ["trigger", "instructions"]
-            }
-        },
-        {
-            "name": "list_watches",
-            "description": "List reactive watches armed on THIS session, with id, name, trigger, status, and fire count.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        },
-        {
-            "name": "cancel_watch",
-            "description": "Cancel a reactive watch on THIS session by id (from list_watches).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "watch_id": { "type": "string", "description": "Watch id to cancel" }
-                },
-                "required": ["watch_id"]
             }
         },
         {
@@ -654,7 +612,7 @@ fn exec_read_screen(state: &AppState, args: &Value) -> ToolResult {
     let max_lines = (args["lines"].as_u64().unwrap_or(50) as usize).min(500);
     let since_cursor = args["since_cursor"].as_u64().map(|v| v as usize);
 
-    let vt_log = match state.vt_log_buffers.get(session_id) {
+    let vt_log = match state.grid.vt_log_buffers.get(session_id) {
         Some(v) => v,
         None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
     };
@@ -709,7 +667,7 @@ fn exec_search_scrollback(state: &AppState, args: &Value) -> ToolResult {
     };
     let limit = (args["limit"].as_u64().unwrap_or(50) as usize).min(500);
 
-    let vt_log = match state.vt_log_buffers.get(session_id) {
+    let vt_log = match state.grid.vt_log_buffers.get(session_id) {
         Some(v) => v,
         None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
     };
@@ -735,7 +693,7 @@ fn exec_get_hyperlinks(state: &AppState, args: &Value) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::err("Missing session_id"),
     };
-    let vt_log = match state.vt_log_buffers.get(session_id) {
+    let vt_log = match state.grid.vt_log_buffers.get(session_id) {
         Some(v) => v,
         None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
     };
@@ -760,7 +718,7 @@ fn exec_get_semantic_zones(state: &AppState, args: &Value) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::err("Missing session_id"),
     };
-    let vt_log = match state.vt_log_buffers.get(session_id) {
+    let vt_log = match state.grid.vt_log_buffers.get(session_id) {
         Some(v) => v,
         None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
     };
@@ -876,7 +834,7 @@ async fn exec_wait_for(state: &Arc<AppState>, args: &Value) -> ToolResult {
         }
 
         let current = {
-            let vt_log = match state.vt_log_buffers.get(&session_id) {
+            let vt_log = match state.grid.vt_log_buffers.get(&session_id) {
                 Some(v) => v,
                 None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
             };
@@ -908,7 +866,7 @@ fn exec_get_state(state: &AppState, args: &Value) -> ToolResult {
         None => return ToolResult::err("Missing session_id"),
     };
 
-    let Some(entry) = state.session_states.get(session_id) else {
+    let Some(entry) = state.session_maps.session_states.get(session_id) else {
         return ToolResult::err(format!("No state for session: {session_id}"));
     };
     match serde_json::to_value(entry.value()) {
@@ -928,6 +886,7 @@ fn exec_get_context(state: &AppState, args: &Value) -> ToolResult {
     };
 
     let shell_state = state
+        .session_maps
         .shell_states
         .get(session_id)
         .and_then(|atom| {
@@ -936,7 +895,7 @@ fn exec_get_context(state: &AppState, args: &Value) -> ToolResult {
         })
         .unwrap_or_else(|| "starting".to_string());
 
-    let ss = state.session_states.get(session_id);
+    let ss = state.session_maps.session_states.get(session_id);
     let agent_type = ss
         .as_ref()
         .and_then(|s| s.agent_type.clone())
@@ -950,6 +909,7 @@ fn exec_get_context(state: &AppState, args: &Value) -> ToolResult {
 
     // Working directory from the live PtySession.
     let cwd = state
+        .session_maps
         .sessions
         .get(session_id)
         .and_then(|s| s.lock().cwd.clone());
@@ -961,6 +921,7 @@ fn exec_get_context(state: &AppState, args: &Value) -> ToolResult {
 
     // Most recent command's exit code from the OSC 133 knowledge store.
     let last_exit_code = state
+        .engine
         .session_knowledge
         .get(session_id)
         .and_then(|entry| entry.lock().commands.back().and_then(|c| c.exit_code));
@@ -995,7 +956,7 @@ fn exec_get_command_history(state: &AppState, args: &Value) -> ToolResult {
     let limit = (args["limit"].as_u64().unwrap_or(20) as usize).min(200);
     let errors_only = args["errors_only"].as_bool().unwrap_or(false);
 
-    let Some(entry) = state.session_knowledge.get(session_id) else {
+    let Some(entry) = state.engine.session_knowledge.get(session_id) else {
         return ToolResult::ok(json!({"commands": []}).to_string());
     };
     let k = entry.lock();
@@ -1025,7 +986,7 @@ fn exec_explain_last_failure(state: &AppState, args: &Value) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::err("Missing session_id"),
     };
-    let Some(entry) = state.session_knowledge.get(session_id) else {
+    let Some(entry) = state.engine.session_knowledge.get(session_id) else {
         return ToolResult::ok(json!({"found": false}).to_string());
     };
     let k = entry.lock();
@@ -1055,7 +1016,7 @@ fn exec_get_error_fixes(state: &AppState, args: &Value) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::err("Missing session_id"),
     };
-    let Some(entry) = state.session_knowledge.get(session_id) else {
+    let Some(entry) = state.engine.session_knowledge.get(session_id) else {
         return ToolResult::ok(json!({"fixes": []}).to_string());
     };
     let k = entry.lock();
@@ -1128,12 +1089,16 @@ async fn exec_drive_agent(state: &Arc<AppState>, args: &Value, skip_safety: bool
         }
 
         // Check shell_state for idle (most reliable signal)
-        let is_idle = state.shell_states.get(&session_id).is_some_and(|atom| {
-            atom.load(std::sync::atomic::Ordering::Relaxed) == crate::pty::SHELL_IDLE
-        });
+        let is_idle = state
+            .session_maps
+            .shell_states
+            .get(&session_id)
+            .is_some_and(|atom| {
+                atom.load(std::sync::atomic::Ordering::Relaxed) == crate::pty::SHELL_IDLE
+            });
 
         let current = {
-            let vt_log = match state.vt_log_buffers.get(&session_id) {
+            let vt_log = match state.grid.vt_log_buffers.get(&session_id) {
                 Some(v) => v,
                 None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
             };
@@ -1166,7 +1131,7 @@ async fn exec_drive_agent(state: &Arc<AppState>, args: &Value, skip_safety: bool
 
     // Step 3: read screen + state
     let since_cursor = args["since_cursor"].as_u64().map(|v| v as usize);
-    let vt_log = match state.vt_log_buffers.get(&session_id) {
+    let vt_log = match state.grid.vt_log_buffers.get(&session_id) {
         Some(v) => v,
         None => return ToolResult::err(format!("No VT buffer for session: {session_id}")),
     };
@@ -1185,11 +1150,13 @@ async fn exec_drive_agent(state: &Arc<AppState>, args: &Value, skip_safety: bool
     };
 
     let session_state = state
+        .session_maps
         .session_states
         .get(&session_id)
         .and_then(|entry| serde_json::to_value(entry.value()).ok());
 
     let shell_state = state
+        .session_maps
         .shell_states
         .get(&session_id)
         .and_then(|atom| {
@@ -1215,14 +1182,14 @@ async fn exec_drive_agent(state: &Arc<AppState>, args: &Value, skip_safety: bool
 /// fallback keeps tests + unconfigured sessions usable; production wiring
 /// will populate the map at agent-loop start.
 fn get_sandbox(state: &AppState, session_id: &str) -> Result<FileSandbox, String> {
-    if let Some(sb) = state.file_sandboxes.get(session_id) {
+    if let Some(sb) = state.engine.file_sandboxes.get(session_id) {
         return Ok(sb.clone());
     }
     Err(format!("No filesystem sandbox for session: {session_id}"))
 }
 
 fn is_session_unrestricted(state: &AppState, session_id: &str) -> bool {
-    state.unrestricted_sessions.contains_key(session_id)
+    state.engine.unrestricted_sessions.contains_key(session_id)
 }
 
 /// Whether the optional, off-by-default "warn before reading known secret
@@ -1951,7 +1918,7 @@ fn exec_search_tools(state: &AppState, args: &Value) -> ToolResult {
     let query = args["query"].as_str().map(|s| s.to_lowercase());
     let limit = args["limit"].as_u64().unwrap_or(20).min(100) as usize;
 
-    let all_tools = state.mcp_upstream_registry.aggregated_tools();
+    let all_tools = state.mcp.upstream_registry.aggregated_tools();
     let descriptors: Vec<Value> = all_tools
         .into_iter()
         .filter(|tool| {
@@ -1986,7 +1953,8 @@ async fn exec_call_tool(state: &AppState, args: &Value) -> ToolResult {
     };
 
     match state
-        .mcp_upstream_registry
+        .mcp
+        .upstream_registry
         .proxy_tool_call(tool_name, call_args)
         .await
     {
@@ -2003,11 +1971,15 @@ async fn exec_call_tool(state: &AppState, args: &Value) -> ToolResult {
 
 fn exec_list_sessions(state: &AppState) -> ToolResult {
     let mut sessions: Vec<Value> = Vec::new();
-    for entry_ref in state.sessions.iter() {
+    for entry_ref in state.session_maps.sessions.iter() {
         let sid = entry_ref.key().clone();
         let pty = entry_ref.value().lock();
-        let ss = state.session_states.get(&sid);
-        let alias = state.term_aliases.get(&sid).map(|e| e.value().clone());
+        let ss = state.session_maps.session_states.get(&sid);
+        let alias = state
+            .session_maps
+            .term_aliases
+            .get(&sid)
+            .map(|e| e.value().clone());
         sessions.push(json!({
             "session_id": sid,
             "alias": alias,
@@ -2025,14 +1997,44 @@ fn exec_list_sessions(state: &AppState) -> ToolResult {
 async fn exec_spawn_session(state: &Arc<AppState>, session_id: &str, args: &Value) -> ToolResult {
     let cwd = args["cwd"].as_str().map(|s| s.to_string()).or_else(|| {
         state
+            .engine
             .file_sandboxes
             .get(session_id)
             .map(|s| s.root().to_string_lossy().to_string())
     });
     let name = args["name"].as_str().map(|s| s.to_string());
 
-    match crate::pty::spawn_session_for_agent(state, cwd, name).await {
-        Ok(new_sid) => ToolResult::ok(json!({ "session_id": new_sid }).to_string()),
+    // Upstream 2.0 removed `pty::spawn_session_for_agent`; the shared spawn path
+    // the MCP `session create` action uses is the same shell launch.
+    let spawn_state = Arc::clone(state);
+    let spawned = tokio::task::spawn_blocking(move || {
+        crate::mcp_http::session::spawn_pty_session(
+            spawn_state,
+            crate::pty::resolve_shell(None),
+            cwd,
+            24,
+            80,
+            None,
+            crate::mcp_http::session::RequestedIdentity::default(),
+        )
+    })
+    .await;
+    match spawned {
+        Ok(Ok(new_sid)) => {
+            if let Some(name) = name
+                && let Some(session) = state.session_maps.sessions.get(&new_sid)
+            {
+                session.lock().set_display_name(Some(name), false);
+            }
+            ToolResult::ok(json!({ "session_id": new_sid }).to_string())
+        }
+        Ok(Err((_, body))) => ToolResult::err(format!(
+            "Failed to spawn session: {}",
+            body.0
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("spawn failed")
+        )),
         Err(e) => ToolResult::err(format!("Failed to spawn session: {e}")),
     }
 }
@@ -2230,12 +2232,10 @@ async fn exec_run_command_inner(
     }
 }
 
-// ── Dispatch ──────────────────────────────────────────────────
-
 // ── schedule_task / list_schedules / cancel_schedule ─────────────────────
 
 fn exec_schedule_task(args: &Value) -> ToolResult {
-    use super::scheduler::{ScheduledJob, load_config, save_config};
+    use super::scheduler::{DEFAULT_MAX_DURATION_SECS, ScheduledJob, add_job};
 
     let goal = match args["goal"].as_str() {
         Some(g) if !g.trim().is_empty() => g.trim().to_string(),
@@ -2245,22 +2245,11 @@ fn exec_schedule_task(args: &Value) -> ToolResult {
         return ToolResult::err("goal must be 500 characters or fewer");
     }
 
-    let interval_minutes = match args["interval_minutes"].as_u64() {
-        Some(m) if m >= 5 => m,
-        Some(_) => return ToolResult::err("interval_minutes must be at least 5"),
-        None => return ToolResult::err("interval_minutes is required"),
+    let Some(interval_minutes) = args["interval_minutes"].as_u64() else {
+        return ToolResult::err("interval_minutes is required");
     };
 
     let one_shot = args["one_shot"].as_bool().unwrap_or(false);
-
-    let mut config = load_config();
-
-    let active_count = config.jobs.iter().filter(|j| j.enabled).count();
-    if active_count >= 10 {
-        return ToolResult::err(
-            "Maximum 10 active scheduled jobs reached — cancel an existing job first",
-        );
-    }
 
     let id = format!(
         "agent-{}",
@@ -2270,22 +2259,25 @@ fn exec_schedule_task(args: &Value) -> ToolResult {
             .next()
             .unwrap_or("x")
     );
-    // 6-field cron: sec min hour dom month dow
-    let cron_expr = format!("0 0/{} * * * *", interval_minutes);
+    // The scheduler is the one authority on which intervals tick evenly.
+    let cron_expr = match super::scheduler::interval_cron(interval_minutes) {
+        Ok(expr) => expr,
+        Err(message) => return ToolResult::err(message),
+    };
 
     let job = ScheduledJob {
         id: id.clone(),
         cron_expr,
         goal,
         target_session: None,
-        max_duration_secs: super::scheduler::DEFAULT_MAX_DURATION_SECS,
+        max_duration_secs: DEFAULT_MAX_DURATION_SECS,
         enabled: true,
         one_shot,
     };
 
-    config.jobs.push(job);
-    if let Err(e) = save_config(&config) {
-        return ToolResult::err(format!("Failed to save schedule: {e}"));
+    // `add_job` names the limit itself; anything else is a write failure.
+    if let Err(e) = add_job(job) {
+        return ToolResult::err(e);
     }
 
     ToolResult::ok(
@@ -2318,133 +2310,14 @@ fn exec_cancel_schedule(args: &Value) -> ToolResult {
         _ => return ToolResult::err("id is required"),
     };
 
-    let mut config = super::scheduler::load_config();
-    let before = config.jobs.len();
-    config.jobs.retain(|j| j.id != id);
-    if config.jobs.len() == before {
-        return ToolResult::err(format!("No job found with id '{id}'"));
-    }
-
-    if let Err(e) = super::scheduler::save_config(&config) {
-        return ToolResult::err(format!("Failed to save schedule: {e}"));
-    }
-
-    ToolResult::ok(json!({ "cancelled": id }).to_string())
-}
-
-// ── watch_for / list_watches / cancel_watch ──────────────────────────────
-// Reactive watches reuse the WatcherEngine (cooldown/burst/max_fires safety).
-// All watches are scoped to the agent's bound session_id — never args — so an
-// agent cannot arm or cancel watches on another session.
-
-fn exec_watch_for(
-    state: &AppState,
-    session_id: &str,
-    args: &Value,
-    skip_safety: bool,
-) -> ToolResult {
-    let trigger: watcher::WatcherTrigger = match serde_json::from_value(args["trigger"].clone()) {
-        Ok(t) => t,
-        Err(e) => return ToolResult::err(format!("Invalid trigger: {e}")),
-    };
-    let instructions = match args["instructions"].as_str() {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return ToolResult::err("Missing instructions"),
-    };
-
-    if !skip_safety {
-        let td = serde_json::to_string(&trigger).unwrap_or_default();
-        let preview: String = instructions.chars().take(80).collect();
-        return ToolResult::approval(
-            format!("Arm reactive watch ({td}) → {preview}"),
-            format!("watch_for {td}"),
-        );
-    }
-
-    let Some(engine) = state.watcher_engine.get() else {
-        return ToolResult::err("Watcher engine not initialized");
-    };
-
-    let rule = watcher::WatcherRule {
-        id: String::new(),
-        name: args["name"].as_str().unwrap_or("model watch").to_string(),
-        session_id: Some(session_id.to_string()),
-        template_id: None,
-        prompt_id: None,
-        repo_path: None,
-        trigger,
-        instructions: Some(instructions),
-        max_fires: args["max_fires"]
-            .as_u64()
-            .map(|v| v as u32)
-            .unwrap_or(3)
-            .max(1),
-        fire_count: 0,
-        cooldown_secs: args["cooldown_secs"]
-            .as_u64()
-            .map(|v| (v as u32).max(5))
-            .unwrap_or_else(watcher::default_cooldown),
-        burst_threshold: watcher::default_burst_threshold(),
-        burst_window_secs: watcher::default_burst_window(),
-        status: watcher::WatcherStatus::Active,
-        created_at: 0,
-    };
-
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    match watcher::create_rule(&mut config, rule) {
-        Ok(id) => ToolResult::ok(json!({ "watch_id": id, "status": "armed" }).to_string()),
-        Err(e) => ToolResult::err(format!("Failed to arm watch: {e}")),
+    match super::scheduler::remove_job(&id) {
+        Ok(true) => ToolResult::ok(json!({ "cancelled": id }).to_string()),
+        Ok(false) => ToolResult::err(format!("No job found with id '{id}'")),
+        Err(e) => ToolResult::err(format!("Failed to save schedule: {e}")),
     }
 }
 
-fn exec_list_watches(state: &AppState, session_id: &str) -> ToolResult {
-    let Some(engine) = state.watcher_engine.get() else {
-        return ToolResult::err("Watcher engine not initialized");
-    };
-    let cfg = engine.config();
-    let config = cfg.read();
-    let watches: Vec<Value> = config
-        .rules
-        .iter()
-        .filter(|r| r.session_id.as_deref() == Some(session_id))
-        .map(|r| {
-            json!({
-                "watch_id": r.id,
-                "name": r.name,
-                "trigger": r.trigger,
-                "status": r.status,
-                "fire_count": r.fire_count,
-                "max_fires": r.max_fires,
-            })
-        })
-        .collect();
-    ToolResult::ok(json!({ "watches": watches }).to_string())
-}
-
-fn exec_cancel_watch(state: &AppState, session_id: &str, args: &Value) -> ToolResult {
-    let watch_id = match args["watch_id"].as_str() {
-        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => return ToolResult::err("Missing watch_id"),
-    };
-    let Some(engine) = state.watcher_engine.get() else {
-        return ToolResult::err("Watcher engine not initialized");
-    };
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    // Scope to the agent's session: only cancel a watch this session owns.
-    let owned = config
-        .rules
-        .iter()
-        .any(|r| r.id == watch_id && r.session_id.as_deref() == Some(session_id));
-    if !owned {
-        return ToolResult::err(format!("No watch '{watch_id}' on this session"));
-    }
-    match watcher::delete_rule(&mut config, &watch_id) {
-        Ok(()) => ToolResult::ok(json!({ "cancelled": watch_id }).to_string()),
-        Err(e) => ToolResult::err(format!("Failed to cancel watch: {e}")),
-    }
-}
+// ── Dispatch ──────────────────────────────────────────────────
 
 /// `args` (the LLM still supplies it) but the dispatch-level value is the
 /// source of truth for cross-session isolation.
@@ -2560,12 +2433,11 @@ async fn dispatch_inner(
         "spawn_session" => exec_spawn_session(state, session_id, args).await,
         "get_agent_status" => exec_get_agent_status(args),
         "drive_agent" => exec_drive_agent(state, args, skip_safety).await,
+        // Blocking config-file IO, but a single small JSON document: cheaper
+        // than the pool hop `blocking_fs_tool` pays for directory walks.
         "schedule_task" => exec_schedule_task(args),
         "list_schedules" => exec_list_schedules(),
         "cancel_schedule" => exec_cancel_schedule(args),
-        "watch_for" => exec_watch_for(state, session_id, args, skip_safety),
-        "list_watches" => exec_list_watches(state, session_id),
-        "cancel_watch" => exec_cancel_watch(state, session_id, args),
         other => ToolResult::err(format!("Unknown tool: {other}")),
     }
 }
@@ -2587,11 +2459,14 @@ mod tests {
     const FILESYSTEM_TOOLS: &[&str] = &["read_file", "write_file", "edit_file"];
     const FILESYSTEM_SEARCH_TOOLS: &[&str] = &["list_files", "search_files"];
 
+    /// 28: FastAF 1.x's 31 tools minus the three watcher tools (`watch_for`,
+    /// `list_watches`, `cancel_watch`) that went with the removed Watchers
+    /// feature. The scheduler tools stay: scheduled tasks are still FastAF's.
     #[test]
-    fn definitions_returns_31_tools() {
+    fn definitions_returns_28_tools() {
         let defs = tool_definitions();
         let arr = defs.as_array().unwrap();
-        assert_eq!(arr.len(), 31);
+        assert_eq!(arr.len(), 28);
     }
 
     #[test]
@@ -2642,9 +2517,6 @@ mod tests {
                 "schedule_task",
                 "list_schedules",
                 "cancel_schedule",
-                "watch_for",
-                "list_watches",
-                "cancel_watch",
                 "search_scrollback",
                 "get_hyperlinks",
                 "get_semantic_zones",
@@ -3167,6 +3039,7 @@ mod tests {
         let state = Arc::new(crate::state::tests_support::make_test_app_state());
         let vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         state
+            .grid
             .vt_log_buffers
             .insert("rs-test".to_string(), parking_lot::Mutex::new(vt));
         let result = dispatch(
@@ -3199,6 +3072,7 @@ mod tests {
             vt.process(format!("new {i}\r\n").as_bytes());
         }
         state
+            .grid
             .vt_log_buffers
             .insert("rs-delta".to_string(), parking_lot::Mutex::new(vt));
         let result = dispatch(
@@ -3226,9 +3100,10 @@ mod tests {
         let state = Arc::new(crate::state::tests_support::make_test_app_state());
         let vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         state
+            .grid
             .vt_log_buffers
             .insert("rs-state".to_string(), parking_lot::Mutex::new(vt));
-        state.shell_states.insert(
+        state.session_maps.shell_states.insert(
             "rs-state".to_string(),
             std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
         );
@@ -3238,7 +3113,10 @@ mod tests {
             ..Default::default()
         };
         ss.agent_type = Some("claude-code".to_string());
-        state.session_states.insert("rs-state".to_string(), ss);
+        state
+            .session_maps
+            .session_states
+            .insert("rs-state".to_string(), ss);
 
         let result = dispatch(
             &state,
@@ -3289,6 +3167,7 @@ mod tests {
             id: 0,
         });
         state
+            .engine
             .session_knowledge
             .insert("kh".into(), parking_lot::Mutex::new(k));
 
@@ -3648,10 +3527,11 @@ mod tests {
         // Insert a VtLogBuffer so the wait loop can read it
         let vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         state
+            .grid
             .vt_log_buffers
             .insert("test-read".to_string(), parking_lot::Mutex::new(vt));
         // Set shell state to idle so it returns immediately
-        state.shell_states.insert(
+        state.session_maps.shell_states.insert(
             "test-read".to_string(),
             std::sync::atomic::AtomicU8::new(0), // 0 = idle
         );
@@ -3680,9 +3560,11 @@ mod tests {
         let state = Arc::new(crate::state::tests_support::make_test_app_state());
         let vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         state
+            .grid
             .vt_log_buffers
             .insert("cur-test".to_string(), parking_lot::Mutex::new(vt));
         state
+            .session_maps
             .shell_states
             .insert("cur-test".to_string(), std::sync::atomic::AtomicU8::new(0));
         let result = dispatch(
@@ -3721,9 +3603,10 @@ mod tests {
             vt.process(format!("new {i}\r\n").as_bytes());
         }
         state
+            .grid
             .vt_log_buffers
             .insert("delta-test".to_string(), parking_lot::Mutex::new(vt));
-        state.shell_states.insert(
+        state.session_maps.shell_states.insert(
             "delta-test".to_string(),
             std::sync::atomic::AtomicU8::new(0),
         );
@@ -3756,7 +3639,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let state = Arc::new(crate::state::tests_support::make_test_app_state());
         let sb = FileSandbox::new(dir.path()).unwrap();
-        state.file_sandboxes.insert(session.to_string(), sb);
+        state.engine.file_sandboxes.insert(session.to_string(), sb);
         (dir, state)
     }
 
@@ -4846,7 +4729,7 @@ mod tests {
             "auth.rs should rank highest for 'authentication'"
         );
         assert!(results[0]["score"].as_f64().unwrap() > 0.0);
-        assert!(!results[0]["snippet"].as_str().unwrap().is_empty());
+        assert_ne!(results[0]["snippet"].as_str().unwrap(), "");
     }
 
     /// Equivalence guard for the #612-9a22 refactor of `exec_search_code`:
@@ -5002,7 +4885,36 @@ mod tests {
     fn schedule_task_rejects_interval_below_5() {
         let r = exec_schedule_task(&json!({ "goal": "do something", "interval_minutes": 4 }));
         assert!(!r.success);
-        assert!(r.output.contains("at least 5"));
+        assert!(r.output.contains("must be one of 5, 6, 10"), "{}", r.output);
+    }
+
+    // Catches: "every 120 minutes" becoming the invalid minute step `0/120`,
+    // and steps that restart every hour or day ticking unevenly (`0/45`
+    // minutes fires at :00 and :45; `0/5` hours leaves a 4-hour gap).
+    #[test]
+    fn schedule_task_saves_even_intervals_and_refuses_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        for (minutes, expr) in [
+            (15, "0 0/15 * * * *"),
+            (120, "0 0 0/2 * * *"),
+            (1440, "0 0 9 * * *"),
+        ] {
+            let r = exec_schedule_task(&json!({ "goal": "g", "interval_minutes": minutes }));
+            assert!(r.success, "{minutes}: {}", r.output);
+            let saved = crate::ai_agent::scheduler::load_config();
+            assert_eq!(saved.jobs.last().map(|j| j.cron_expr.as_str()), Some(expr));
+        }
+        for uneven in [45, 59, 61, 90, 300, 1500, 2880] {
+            let r = exec_schedule_task(&json!({ "goal": "g", "interval_minutes": uneven }));
+            assert!(!r.success, "{uneven}");
+            assert!(
+                r.output.contains("must be one of"),
+                "{uneven}: {}",
+                r.output
+            );
+        }
+        assert_eq!(crate::ai_agent::scheduler::load_config().jobs.len(), 3);
     }
 
     #[test]
@@ -5019,131 +4931,46 @@ mod tests {
         assert!(r.output.contains("id"));
     }
 
-    #[test]
-    fn cancel_schedule_rejects_nonexistent_id() {
-        let r = exec_cancel_schedule(&json!({ "id": "nonexistent-job-xyz" }));
-        assert!(!r.success);
-    }
-
-    // ── watch_for / list_watches / cancel_watch ─────────────────
-
+    /// The agent's three scheduler tools are routed by `dispatch` and share
+    /// the file Settings › AI Chat edits: a scheduled job lists, then cancels.
     #[tokio::test]
-    async fn watch_for_requires_approval_to_arm() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let r = dispatch(
-            &state,
-            "ws-1",
-            "watch_for",
-            &json!({"trigger": {"type": "error"}, "instructions": "investigate"}),
-        )
-        .await;
-        assert!(r.needs_approval, "arming a watch must require approval");
-    }
-
-    #[tokio::test]
-    async fn watch_for_rejects_invalid_trigger() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let r = dispatch(
-            &state,
-            "ws-2",
-            "watch_for",
-            &json!({"trigger": {"type": "nonsense"}, "instructions": "x"}),
-        )
-        .await;
-        assert!(!r.success);
-        assert!(r.output.contains("Invalid trigger"), "got: {}", r.output);
-    }
-
-    #[tokio::test]
-    async fn watch_for_rejects_missing_instructions() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let r = dispatch(
-            &state,
-            "ws-3",
-            "watch_for",
-            &json!({"trigger": {"type": "idle"}}),
-        )
-        .await;
-        assert!(!r.success);
-        assert!(r.output.contains("instructions"), "got: {}", r.output);
-    }
-
-    #[tokio::test]
-    async fn watch_lifecycle_arm_list_cancel_scoped_to_session() {
+    async fn schedule_list_cancel_round_trip_through_dispatch() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
-
         let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let engine = Arc::new(super::super::watcher::WatcherEngine::new(state.clone()));
-        let _ = state.watcher_engine.set(engine);
 
-        // Arm via the approved path (skips safety, as the user just approved).
-        let armed = dispatch_approved(
+        let r = dispatch(
             &state,
-            "wl-1",
-            "watch_for",
-            &json!({
-                "trigger": {"type": "command_done", "on_failure_only": true},
-                "instructions": "summarize the failure",
-                "name": "fail-watch"
-            }),
+            "s1",
+            "schedule_task",
+            &json!({ "goal": "run tests", "interval_minutes": 15, "one_shot": true }),
         )
         .await;
-        assert!(armed.success, "arm failed: {}", armed.output);
-        let armed_json: Value = serde_json::from_str(&armed.output).unwrap();
-        assert_eq!(armed_json["status"], "armed");
-        let watch_id = armed_json["watch_id"].as_str().unwrap().to_string();
+        assert!(r.success, "{}", r.output);
+        let id = serde_json::from_str::<Value>(&r.output).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(id.starts_with("agent-"), "{id}");
 
-        // Reachable via engine.config(), scoped to this session.
-        {
-            let cfg = state.watcher_engine.get().unwrap().config();
-            let config = cfg.read();
-            assert!(
-                config
-                    .rules
-                    .iter()
-                    .any(|r| r.id == watch_id && r.session_id.as_deref() == Some("wl-1")),
-                "armed rule not found in config for session wl-1"
-            );
-        }
+        let saved = crate::ai_agent::scheduler::load_config();
+        assert_eq!(saved.jobs.len(), 1);
+        assert_eq!(saved.jobs[0].cron_expr, "0 0/15 * * * *");
+        assert!(saved.jobs[0].one_shot);
 
-        // list_watches returns it for the owning session.
-        let listed = dispatch(&state, "wl-1", "list_watches", &json!({})).await;
-        assert!(listed.success);
-        let listed_json: Value = serde_json::from_str(&listed.output).unwrap();
-        let watches = listed_json["watches"].as_array().unwrap();
-        assert_eq!(watches.len(), 1);
-        assert_eq!(watches[0]["watch_id"], watch_id);
+        let r = dispatch(&state, "s1", "list_schedules", &json!({})).await;
+        assert!(r.success);
+        let listed: Value = serde_json::from_str(&r.output).unwrap();
+        assert_eq!(listed[0]["id"], id.as_str());
+        assert_eq!(listed[0]["goal"], "run tests");
 
-        // A different session sees none of wl-1's watches.
-        let other = dispatch(&state, "wl-other", "list_watches", &json!({})).await;
-        let other_json: Value = serde_json::from_str(&other.output).unwrap();
-        assert_eq!(other_json["watches"].as_array().unwrap().len(), 0);
+        let r = dispatch(&state, "s1", "cancel_schedule", &json!({ "id": id })).await;
+        assert!(r.success, "{}", r.output);
+        assert_eq!(crate::ai_agent::scheduler::load_config().jobs.len(), 0);
 
-        // A foreign session cannot cancel wl-1's watch.
-        let bad = dispatch(
-            &state,
-            "wl-other",
-            "cancel_watch",
-            &json!({"watch_id": watch_id}),
-        )
-        .await;
-        assert!(!bad.success, "foreign session must not cancel the watch");
-
-        // The owner cancels it.
-        let cancelled = dispatch(
-            &state,
-            "wl-1",
-            "cancel_watch",
-            &json!({"watch_id": watch_id}),
-        )
-        .await;
-        assert!(cancelled.success, "cancel failed: {}", cancelled.output);
-
-        // Gone afterwards.
-        let after = dispatch(&state, "wl-1", "list_watches", &json!({})).await;
-        let after_json: Value = serde_json::from_str(&after.output).unwrap();
-        assert_eq!(after_json["watches"].as_array().unwrap().len(), 0);
+        let r = dispatch(&state, "s1", "cancel_schedule", &json!({ "id": id })).await;
+        assert!(!r.success);
+        assert!(r.output.contains("No job found"), "{}", r.output);
     }
 
     // ── search_scrollback ────────────────────────────────────────
@@ -5154,6 +4981,7 @@ mod tests {
         let mut vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         vt.process(b"the quick brown fox\r\njumped over fox tracks\r\n");
         state
+            .grid
             .vt_log_buffers
             .insert("sb-1".to_string(), parking_lot::Mutex::new(vt));
 
@@ -5195,6 +5023,7 @@ mod tests {
         let mut vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         vt.process(b"match\r\nmatch\r\nmatch\r\n");
         state
+            .grid
             .vt_log_buffers
             .insert("sb-lim".to_string(), parking_lot::Mutex::new(vt));
 
@@ -5219,6 +5048,7 @@ mod tests {
         // OSC 8 hyperlink: ESC ] 8 ; ; URI BEL  text  ESC ] 8 ; ; BEL
         vt.process(b"\x1b]8;;https://example.com/page\x07click here\x1b]8;;\x07\r\n");
         state
+            .grid
             .vt_log_buffers
             .insert("hl-1".to_string(), parking_lot::Mutex::new(vt));
 
@@ -5246,6 +5076,7 @@ mod tests {
         let mut vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         vt.process(b"no links here\r\n");
         state
+            .grid
             .vt_log_buffers
             .insert("hl-2".to_string(), parking_lot::Mutex::new(vt));
 
@@ -5270,6 +5101,7 @@ mod tests {
         // OSC 133: A=prompt, B=input (command), C=output.
         vt.process(b"\x1b]133;A\x07$ \x1b]133;B\x07ls -la\x1b]133;C\x07file1.txt");
         state
+            .grid
             .vt_log_buffers
             .insert("sz-1".to_string(), parking_lot::Mutex::new(vt));
 
@@ -5297,6 +5129,7 @@ mod tests {
         let mut vt = crate::state::VtLogBuffer::new(24, 80, 10_000);
         vt.process(b"plain output, no osc133\r\n");
         state
+            .grid
             .vt_log_buffers
             .insert("sz-2".to_string(), parking_lot::Mutex::new(vt));
 

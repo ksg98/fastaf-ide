@@ -1,0 +1,11 @@
+# Recorded ego wrapped approval — 2102-98ab
+
+Captured on 2026-10-21 through the isolated native `make agent-test` instance `at-2102`, port 19942. Source: `/Users/stefano.straus/Library/Application Support/com.tuic.commander/instances/at-2102/captures/b01bad24-9d63-4ab6-a8d8-6ee776c8fba8.tcap`. SHA-256: `1bebd03c8965767a5ba96819b558978f3d0f33b620a2e918efe292bec7099e57`.
+
+The installed ego reports 0.1.2, model `openai-codex/gpt-6.1-sol`, default permission mode, existing default home/login, with `--bare`. The throwaway cwd was `~/Gits/.tmp/results/fix-2102-live/scratch/parity-ego`. No credential store was read. The capture retains all original input/output bytes, chunks and timestamps. Initial geometry is 41 rows by 128 columns. The compact isolated desktop resized the terminal before the approval; its native footer contains four explicit CRLF rows. An API resize restored 128 columns while waiting; ego retained the hard-wrapped approval text. No geometry or bytes were rewritten in this fixture.
+
+The command is `printf 'PARITY_P_OK\n'`. Output record 40 paints `Allow run printf 'PARITY_P_OK\n'?`, `Risk: unknown - runs a program`, and the wrapped native y/a/n/e/d footer. The current ego uses `yes, remember rule (details: d)` for a; this differs from the earlier desk-2021b recording, whose a label included the newline-bearing rule. Both expose the same fixed-row-count defect. The parser regression test retains the exact earlier three-row footer from `desk-2021b/p-ready.json`.
+
+The mobile page was served by this worktree's Vite server on port 19943, with backend requests proxied only through this instance's Unix socket. Opening the mobile header question displayed the full title and all five native options. Clicking `y yes` generated input record 46 (`y`, without Enter). Native busy follows at record 50; the command exits 0 and prints `PARITY_P_OK`. A later, unrelated progress approval was not answered. The session was deleted, capture disabled, browser tab closed, Vite stopped and `make agent-test-stop` requested before handoff.
+
+Live evidence: `~/Gits/.tmp/results/fix-2102-live/` contains the browser transcript, `mobile-approval.png`, approval state/output, post-answer state/output, empty session-list cleanup, launch plan and build logs. These are browser-page captures, not screenshots of the daily desktop application.

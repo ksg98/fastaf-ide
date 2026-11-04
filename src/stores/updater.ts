@@ -3,29 +3,25 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { createStore } from "solid-js/store";
 import { isTauri, rpc } from "../transport";
+import { compareAppVersion } from "../utils/semver";
+import { clearUpdateRestartMark, markUpdateRestart } from "../utils/updateRestart";
 import { appLogger } from "./appLogger";
 import { settingsStore } from "./settings";
+import { terminalsStore } from "./terminals";
 
-/** Compare two semver strings. Returns true if remote > current.
- *  Strips prerelease suffixes (e.g. "1.0.0-nightly.1" → "1.0.0") so that
- *  a prerelease tagged with the same base version is NOT considered newer. */
+/** How often a deferred relaunch re-checks whether every agent is idle. */
+const IDLE_POLL_MS = 2_000;
+
+/** Sessions an immediate relaunch would interrupt: busy, or waiting on the user. */
+function countBusySessions(): number {
+	return terminalsStore.getIds().filter((id) => terminalsStore.isBusy(id) || !!terminalsStore.get(id)?.awaitingInput)
+		.length;
+}
+
+/** True if remote > current by app-version precedence: 2.0.0 is newer than
+ *  2.0.0-beta.1, and a nightly is newer than the release it was built after. */
 function isNewerVersion(remote: string, current: string): boolean {
-	// Strip leading "v" and prerelease/build suffixes (everything after first "-" or "+")
-	const parse = (v: string) =>
-		v
-			.replace(/^v/, "")
-			.replace(/[-+].*$/, "")
-			.split(".")
-			.map(Number);
-	const r = parse(remote);
-	const c = parse(current);
-	for (let i = 0; i < Math.max(r.length, c.length); i++) {
-		const rv = r[i] ?? 0;
-		const cv = c[i] ?? 0;
-		if (rv > cv) return true;
-		if (rv < cv) return false;
-	}
-	return false;
+	return compareAppVersion(remote, current) > 0;
 }
 
 /** Typed result from the Rust `check_update_channel` command. */
@@ -47,12 +43,28 @@ interface UpdaterState {
 	error: string | null;
 	/** Informational message when no release exists for the channel (not an error) */
 	noRelease: boolean;
+	/** Why the built-in updater cannot run from this binary at all (not an error) */
+	unsupported: string | null;
 	/** For non-stable channels, a URL to the release page for manual download */
 	downloadUrl: string | null;
+	/** Update installed; the relaunch waits for busy sessions to finish */
+	restartPending: boolean;
 }
 
 /** Sentinel to distinguish "check() timed out" from "no update available". */
 const TIMEOUT_SENTINEL = Symbol("timeout");
+
+/** Tauri resolves the running binary through `current_exe()` and refuses a path
+ *  containing a symlink, because it cannot prove what it would be replacing.
+ *  That is not a failure the user can act on: it is a property of where the
+ *  binary sits. A `make dev` build under an mbx target view
+ *  (`src-tauri/target` -> `~/Gits/.mbx/targets/...`) hits it every time, and so
+ *  would a release build installed under a symlinked path. Report it as a
+ *  condition, never as a red "Update failed". */
+function unsupportedBinaryPathReason(message: string): string | null {
+	if (!/current_exe\(\)/i.test(message) || !/symlink/i.test(message)) return null;
+	return "In-app updates are unavailable because this binary runs from a path containing a symlink. Download the update manually.";
+}
 
 /** Run Tauri's built-in stable update check with a 10-second timeout. */
 function checkStableWithTimeout(): Promise<Update | null | typeof TIMEOUT_SENTINEL> {
@@ -81,16 +93,37 @@ function createUpdaterStore() {
 		body: null,
 		error: null,
 		noRelease: false,
+		unsupported: null,
 		downloadUrl: null,
+		restartPending: false,
 	});
 
 	let pendingUpdate: Update | null = null;
+	let idleTimer: ReturnType<typeof setInterval> | null = null;
+
+	function stopIdleWatch(): void {
+		if (idleTimer !== null) clearInterval(idleTimer);
+		idleTimer = null;
+	}
+
+	async function relaunchNow(): Promise<void> {
+		stopIdleWatch();
+		markUpdateRestart();
+		try {
+			await relaunch();
+		} catch (err) {
+			clearUpdateRestartMark();
+			const message = err instanceof Error ? err.message : String(err);
+			appLogger.error("app", "Update relaunch failed", message);
+			setState({ error: message, downloading: false, restartPending: false });
+		}
+	}
 
 	const actions = {
 		async checkForUpdate(): Promise<void> {
 			if (!isTauri()) return;
 			if (state.checking || state.downloading) return;
-			setState({ checking: true, error: null, noRelease: false });
+			setState({ checking: true, error: null, noRelease: false, unsupported: null });
 
 			const channel = settingsStore.state.updateChannel;
 
@@ -127,8 +160,8 @@ function createUpdaterStore() {
 						setState({ available: false, version: null, body: null, downloadUrl: null });
 					}
 				} else {
-					// Nightly: check BOTH stable (via Tauri built-in) and nightly (via Rust)
-					// in parallel. Prefer stable if available — it supports in-app downloadAndInstall.
+					// Prerelease channels check stable (Tauri) and their feed (Rust)
+					// in parallel. Beta picks the newer version; nightly keeps stable-first behavior.
 					const currentVersion = await getVersion();
 
 					const [stableSettled, nightlySettled] = await Promise.allSettled([
@@ -160,8 +193,14 @@ function createUpdaterStore() {
 							nightlySettled.reason instanceof Error ? nightlySettled.reason.message : String(nightlySettled.reason);
 						appLogger.warn("app", "All update sources failed", raw);
 						setState({ error: raw, available: false, version: null, body: null, downloadUrl: null });
-					} else if (stableUpdate) {
-						// Prefer stable (in-app install) over nightly (browser download)
+					} else if (
+						stableUpdate &&
+						(channel !== "beta" ||
+							!nightlyResult?.available ||
+							!nightlyResult.version ||
+							compareAppVersion(stableUpdate.version, nightlyResult.version) >= 0)
+					) {
+						// Stable supports in-app install; prerelease feeds open their release page.
 						pendingUpdate = stableUpdate;
 						setState({
 							available: true,
@@ -192,7 +231,11 @@ function createUpdaterStore() {
 				}
 			} catch (err) {
 				const raw = err instanceof Error ? err.message : String(err);
-				if (channel === "stable" && /fetch|load failed|valid release|404|not found/i.test(raw)) {
+				const unsupported = unsupportedBinaryPathReason(raw);
+				if (unsupported) {
+					appLogger.debug("app", "Built-in updater unavailable for this binary path", raw);
+					setState({ unsupported, available: false, version: null, body: null, downloadUrl: null });
+				} else if (channel === "stable" && /fetch|load failed|valid release|404|not found/i.test(raw)) {
 					// No release published for stable — informational, not an error
 					appLogger.debug("app", `No ${channel} release found`, raw);
 					setState({ noRelease: true });
@@ -225,17 +268,44 @@ function createUpdaterStore() {
 						setState({ progress: pct });
 					}
 				});
-				await relaunch();
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				appLogger.error("app", "Update install failed", message);
 				setState({ error: message, downloading: false });
+				return;
 			}
+			if (settingsStore.state.deferUpdateRelaunch && countBusySessions() > 0) {
+				appLogger.info("app", "Update installed; restart deferred until agents are idle");
+				setState({ downloading: false, restartPending: true });
+				idleTimer = setInterval(() => {
+					if (countBusySessions() === 0) void relaunchNow();
+				}, IDLE_POLL_MS);
+				return;
+			}
+			await relaunchNow();
+		},
+
+		/** Number of sessions a restart right now would interrupt. */
+		busyCount(): number {
+			return countBusySessions();
+		},
+
+		/** Restart immediately, even with busy sessions (the user confirmed). */
+		restartNow(): Promise<void> {
+			return relaunchNow();
 		},
 
 		dismiss(): void {
 			pendingUpdate = null;
-			setState({ available: false, version: null, body: null, error: null, noRelease: false, downloadUrl: null });
+			setState({
+				available: false,
+				version: null,
+				body: null,
+				error: null,
+				noRelease: false,
+				unsupported: null,
+				downloadUrl: null,
+			});
 		},
 
 		/** Simulate an available update (dev/testing only) */

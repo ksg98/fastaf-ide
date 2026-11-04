@@ -1,35 +1,28 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { cleanup, render } from "@solidjs/testing-library";
+import { afterEach, describe, expect, it } from "vitest";
+import { TopBar } from "../components/TopBar";
 
-const sourceCode = readFileSync(resolve(__dirname, "../components/TopBar.tsx"), "utf-8");
+afterEach(cleanup);
 
-describe("TopBar subtitle and notification badge", () => {
-	it("renders the subtitle text when connected", () => {
-		expect(sourceCode).toContain("Manage your sessions");
+describe("TopBar connectivity", () => {
+	// Catches: explanatory copy returns beneath the connected mobile header.
+	it("omits the explanatory subtitle when connected", () => {
+		const view = render(() => TopBar({ isConnected: true }));
+		expect(view.getByText("FastAF")).toBeTruthy();
+		expect(view.queryByText("Manage your sessions")).toBeNull();
+		expect(view.container.querySelector("header")?.textContent).toBe("FastAF");
 	});
 
-	it("shows reconnecting subtitle when offline", () => {
-		expect(sourceCode).toContain("Reconnecting");
+	// Catches: removing the subtitle also hides the actionable offline state.
+	it("keeps the reconnecting status when offline", () => {
+		const view = render(() => TopBar({ isConnected: false }));
+		expect(view.getByText("Reconnecting…")).toBeTruthy();
+		expect(view.getByTitle("Offline")).toBeTruthy();
 	});
 
-	it("has connectivity dot with online/offline classes", () => {
-		expect(sourceCode).toContain("connDot");
-		expect(sourceCode).toContain("connOnline");
-		expect(sourceCode).toContain("connOffline");
-	});
-
-	it("badge is hidden when notificationCount is 0 or undefined", () => {
-		// The Show condition uses nullish coalescing to treat undefined as 0,
-		// then checks > 0 — so both 0 and undefined result in hidden badge.
-		expect(sourceCode).toContain("(props.notificationCount ?? 0) > 0");
-	});
-
-	it("badge displays the notificationCount value", () => {
-		expect(sourceCode).toContain("{props.notificationCount}");
-	});
-
-	it("badge uses .badge CSS class", () => {
-		expect(sourceCode).toContain("styles.badge");
+	it("keeps the connected status dot without narration", () => {
+		const view = render(() => TopBar({ isConnected: true }));
+		expect(view.getByTitle("Connected")).toBeTruthy();
 	});
 });

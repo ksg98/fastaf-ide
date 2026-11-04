@@ -118,7 +118,7 @@ describe("McpPopup", () => {
 		(link as HTMLElement).click();
 
 		// Without the section the tab opens at the top and the block is off-screen.
-		expect(mockOnOpenSettings).toHaveBeenCalledWith("services", SETTINGS_SECTION_UPSTREAM_MCP);
+		expect(mockOnOpenSettings).toHaveBeenCalledWith("mcp", SETTINGS_SECTION_UPSTREAM_MCP);
 		expect(mockClose).toHaveBeenCalled();
 	});
 

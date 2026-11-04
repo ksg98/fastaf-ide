@@ -176,6 +176,29 @@ describe("PostMergeCleanupDialog", () => {
 	// hook that runs it passes `force: true`, so the backend guard never asks
 	// again. If the warning does not show here, nothing warns at all.
 	describe("uncommitted work in the worktree", () => {
+		it("shows backend hazards before a checked cleanup step executes", () => {
+			const props = defaultProps();
+			const { container } = render(() => (
+				<PostMergeCleanupDialog
+					{...props}
+					worktreeAction="delete"
+					removalWarnings={[
+						"This branch has nothing of its own, not merged work",
+						"Live session: Codex: gate work",
+						"4 uncommitted files, including 2 untracked files",
+					]}
+				/>
+			));
+			const warning = container.querySelector("[data-testid='worktree-removal-warnings']");
+			expect(warning?.textContent).toContain("nothing of its own");
+			expect(warning?.textContent).toContain("Codex: gate work");
+			expect(warning?.textContent).toContain("2 untracked files");
+			fireEvent.click(container.querySelector("[data-testid='execute-btn']")!);
+			expect(props.onExecute).toHaveBeenCalledOnce();
+			expect((props.onExecute.mock.calls[0][0] as CleanupStep[]).some((step) => step.id === "worktree")).toBe(true);
+			fireEvent.click(container.querySelector("input[data-testid='step-check-worktree']")!);
+			expect(container.querySelector("[data-testid='worktree-removal-warnings']")).toBeNull();
+		});
 		const warning = (container: Element) => container.querySelector("[data-testid='worktree-dirty-warning']");
 
 		it("warns that deleting the worktree loses the work", () => {

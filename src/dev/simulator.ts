@@ -27,22 +27,22 @@ let pollingWasStopped = false;
 /** Ensure a repo + branch exist so PR data can be injected */
 function ensureRepo(): { repoPath: string; branch: string } {
 	const active = repositoriesStore.getActive();
-	if (active?.activeBranch) {
-		return { repoPath: active.path, branch: active.activeBranch };
+	if (active?.activeWorkspaceId) {
+		return { repoPath: active.path, branch: active.activeWorkspaceId };
 	}
 
 	// Create a temporary simulated repo
 	if (!repositoriesStore.get(SIM_REPO_PATH)) {
 		repositoriesStore.add({ path: SIM_REPO_PATH, displayName: "Sim Repo", initials: "SR" });
-		repositoriesStore.setBranch(SIM_REPO_PATH, "feature/sim", {
-			name: "feature/sim",
+		repositoriesStore.setWorkspace(SIM_REPO_PATH, "feature/sim", {
+			branchName: "feature/sim",
 			isMain: false,
 			worktreePath: null,
 			terminals: [],
 			additions: 0,
 			deletions: 0,
 		});
-		repositoriesStore.setActiveBranch(SIM_REPO_PATH, "feature/sim");
+		repositoriesStore.setActiveWorkspace(SIM_REPO_PATH, "feature/sim");
 		repositoriesStore.setActive(SIM_REPO_PATH);
 	}
 
@@ -72,12 +72,12 @@ const simulator = {
 	git(options: { branch?: string; additions?: number; deletions?: number }): void {
 		const { repoPath } = ensureRepo();
 		if (options.branch) {
-			repositoriesStore.setBranch(repoPath, options.branch);
-			repositoriesStore.setActiveBranch(repoPath, options.branch);
+			repositoriesStore.setWorkspace(repoPath, options.branch);
+			repositoriesStore.setActiveWorkspace(repoPath, options.branch);
 		}
-		const branch = repositoriesStore.get(repoPath)?.activeBranch;
+		const branch = repositoriesStore.get(repoPath)?.activeWorkspaceId;
 		if (branch) {
-			repositoriesStore.updateBranchStats(repoPath, branch, options.additions ?? 0, options.deletions ?? 0);
+			repositoriesStore.updateWorkspaceStats(repoPath, branch, options.additions ?? 0, options.deletions ?? 0);
 		}
 		console.log(`[tuic] Git state updated for ${repoPath}`);
 	},
@@ -101,7 +101,7 @@ const simulator = {
 		const active = repositoriesStore.getActive();
 		if (!active) return;
 
-		const branchState = active.branches[branch];
+		const branchState = active.workspaces[branch];
 		if (!branchState?.terminals.length) {
 			console.error("[tuic] No terminals on active branch. Open a terminal first.");
 			return;
@@ -206,7 +206,7 @@ const simulator = {
 				uiStore.toggleFileBrowserPanel();
 				break;
 			case "notes":
-				uiStore.toggleNotesPanel();
+				uiStore.toggleIdeasPanel();
 				break;
 			default:
 				console.error(`[tuic] Unknown panel: "${name}". Options: diff, markdown, files, notes`);
@@ -361,7 +361,7 @@ const simulator = {
 		const active = repositoriesStore.getActive();
 		const existingPrs: import("../types").BranchPrStatus[] = [];
 		if (active) {
-			for (const branchName of Object.keys(active.branches)) {
+			for (const branchName of Object.keys(active.workspaces)) {
 				const pr = githubStore.getPrStatus(repoPath, branchName);
 				if (pr) existingPrs.push(pr);
 			}
@@ -476,7 +476,7 @@ const simulator = {
   __tuic.panel('diff')             Toggle diff panel
   __tuic.panel('markdown')         Toggle markdown panel
   __tuic.panel('files')            Toggle file browser panel
-  __tuic.panel('notes')            Toggle notes/ideas panel
+  __tuic.panel('notes')            Toggle ideas panel
 
 ── Activity Bell (plugin sections) ───────────────────────────
   __tuic.activity()                                         Add item to "SIMULATED ACTIVITY" section

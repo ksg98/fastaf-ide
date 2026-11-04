@@ -166,16 +166,31 @@ pub(crate) fn parse_user_repos(json: &serde_json::Value) -> Vec<GithubRepoEntry>
 /// github.com token: cached in state, else fresh chain resolve off-thread
 /// (keychain access can block). Mirrors the lazy-resolve in `graphql_with_retry`.
 async fn resolve_github_com_token(state: &AppState) -> Result<Option<String>, String> {
-    let cached = state.github_token.read().clone();
+    let cached = state.github.token.read().clone();
     if cached.is_some() {
         return Ok(cached);
+    }
+    // An explicit runtime disconnect means "no GitHub", not "resolve again".
+    if state
+        .github
+        .disconnected
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return Ok(None);
     }
     let (t, s) = tokio::task::spawn_blocking(crate::github_auth::resolve_token_with_source)
         .await
         .map_err(|e| format!("Token resolve task panicked: {e}"))?;
     if t.is_some() {
-        *state.github_token.write() = t.clone();
-        *state.github_token_source.write() = s;
+        let mut slot = state.github.token.write();
+        if !state
+            .github
+            .disconnected
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            *slot = t.clone();
+            *state.github.token_source.write() = s;
+        }
     }
     Ok(t)
 }
@@ -515,7 +530,7 @@ mod tests {
 
     #[test]
     fn parse_user_repos_non_list() {
-        assert!(parse_user_repos(&serde_json::json!({"message": "Bad credentials"})).is_empty());
+        assert_eq!(parse_user_repos(&serde_json::json!({"message": "Bad credentials"})).len(), 0);
     }
 
     #[test]

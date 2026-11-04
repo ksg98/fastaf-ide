@@ -10,6 +10,7 @@
 }
 
 .header {
+ composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -634,4 +635,31 @@
   font-size: var(--font-xs);
   color: var(--fg-muted);
   line-height: 1.4;
+}
+
+/* ---------------------------------------------------------------------------
+   Codex dashboard — daily token bars.
+   Lives here because CodexUsageDashboard shares this module; a second stylesheet
+   would drift from these tokens on the first theme change.
+   --------------------------------------------------------------------------- */
+
+.codexBars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 120px;
+  width: 100%;
+}
+
+.codexBar {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  opacity: 0.85;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.codexBar:hover {
+  opacity: 1;
 }

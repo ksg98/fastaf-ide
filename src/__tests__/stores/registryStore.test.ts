@@ -28,7 +28,7 @@ describe("registryStore", () => {
 		vi.useRealTimers();
 	});
 
-	function makeEntry(overrides: Partial<{ id: string; latestVersion: string }> = {}) {
+	function makeEntry(overrides: Partial<{ id: string; latestVersion: string; contentSha256: string }> = {}) {
 		return {
 			id: "my-plugin",
 			name: "My Plugin",
@@ -70,6 +70,30 @@ describe("registryStore", () => {
 				await store.fetch();
 				const result = store.hasUpdate("my-plugin", "1.0.0");
 				expect(result).toBeNull();
+			});
+		});
+
+		// Catches: two different bundle contents with the same version treated as identical.
+		it("detects different bundle contents at the same version", async () => {
+			const entry = makeEntry({ contentSha256: "a".repeat(64) });
+			mockInvoke.mockResolvedValueOnce([entry]);
+			await testInScopeAsync(async () => {
+				await store.fetch();
+				expect(store.hasUpdate("my-plugin", "1.0.0", "b".repeat(64))).toEqual(entry);
+			});
+		});
+
+		// Catches: identical/unknown content causes false updates or a newer version is downgraded.
+		it.each([
+			["1.0.0", "a".repeat(64), "a".repeat(64)],
+			["1.0.0", undefined, "b".repeat(64)],
+			["1.0.0", "a".repeat(64), undefined],
+			["2.0.0", "a".repeat(64), "b".repeat(64)],
+		])("does not flag matching, unknown or newer content (%s, %s, %s)", async (version, source, installed) => {
+			mockInvoke.mockResolvedValueOnce([makeEntry({ contentSha256: source })]);
+			await testInScopeAsync(async () => {
+				await store.fetch();
+				expect(store.hasUpdate("my-plugin", version!, installed)).toBeNull();
 			});
 		});
 

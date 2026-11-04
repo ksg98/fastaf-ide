@@ -1,5 +1,5 @@
 import { AGENTS, type AgentType } from "../../agents";
-import { agentConfigsStore } from "../../stores/agentConfigs";
+import { ensureAgentConfigsForRepo } from "../../stores/agentConfigs";
 import { escapeShellArg } from "../../utils/shell";
 
 /** Seed for launching an agent in a freshly created worktree terminal.
@@ -9,10 +9,15 @@ import { escapeShellArg } from "../../utils/shell";
 export type AgentSeed = { agentType: AgentType; initCommand: string; launchCommand: string };
 
 /** Resolve the default agent (Claude) and its launch command, honoring the
- *  user's default run config when present. */
-export function resolveAutofixAgent(): { agentType: AgentType; launchCommand: string } {
+ *  default run config of the machine that holds `repoPath`. The worktree is
+ *  created on that machine, so its agent binary is the one that has to run. */
+export async function resolveAutofixAgent(repoPath?: string | null): Promise<{
+	agentType: AgentType;
+	launchCommand: string;
+}> {
 	const agentType: AgentType = "claude";
-	const cfg = agentConfigsStore.getDefaultConfig(agentType);
+	const configs = await ensureAgentConfigsForRepo(repoPath);
+	const cfg = configs.getDefaultConfig(agentType);
 	const launchCommand = cfg ? [cfg.command, ...cfg.args].join(" ") : AGENTS[agentType].binary;
 	return { agentType, launchCommand };
 }
@@ -22,8 +27,8 @@ export function resolveAutofixAgent(): { agentType: AgentType; launchCommand: st
  *  Windows double-quoted) so the shell forwards it verbatim to the agent.
  *  Terminal.tsx sends `initCommand` on first shell idle via sendCommand.
  *  Shared by the auto-fix and conflict-assist flows. */
-export function buildAgentSeed(prompt: string): AgentSeed {
-	const { agentType, launchCommand } = resolveAutofixAgent();
+export async function buildAgentSeed(prompt: string, repoPath?: string | null): Promise<AgentSeed> {
+	const { agentType, launchCommand } = await resolveAutofixAgent(repoPath);
 	const quotedPrompt = escapeShellArg(prompt);
 	return { agentType, initCommand: `${launchCommand} ${quotedPrompt}`, launchCommand };
 }

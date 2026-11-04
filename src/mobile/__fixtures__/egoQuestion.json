@@ -1,0 +1,19 @@
+{
+  "title": "Does Boss authorize editing the orchestrator registry to integrate the finished mobile question fix?",
+  "options": [
+    {
+      "key": "1",
+      "label": "Yes, authorize registry integration and keep the complete question visible on mobile",
+      "highlighted": true,
+      "destructive": false
+    },
+    {
+      "key": "2",
+      "label": "No, leave the orchestrator registry unchanged and report the remaining work",
+      "highlighted": false,
+      "destructive": true
+    }
+  ],
+  "selection_mode": "navigate-enter",
+  "dismiss_key": "cancel"
+}

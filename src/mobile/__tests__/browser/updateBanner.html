@@ -1,0 +1,14 @@
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div id="mobile-app"></div><script type="module">
+import '/src/mobile/mobile.css';
+import styles from '/src/mobile/MobileApp.module.css';
+import commander from '/src-tauri/src/themes/commander.json';
+import paper from '/src-tauri/src/themes/vscode-light.json';
+window.bannerThemes = {commander, 'vscode-light': paper};
+window.setBannerTheme = key => {
+ const t = window.bannerThemes[key].appChrome;
+ document.documentElement.dataset.theme = key;
+ for (const [name, value] of Object.entries({'--accent':t.accent,'--accent-hover':t.accentHover,'--text-on-accent':t.accentForeground,'--bg-primary':t.background,'--fg-primary':t.foreground})) document.documentElement.style.setProperty(name,value);
+};
+document.querySelector('#mobile-app').innerHTML = `<div class="${styles.shell}"><div class="${styles.updateBanner}"><span>New version available</span><span>Tap to update</span></div></div>`;
+window.setBannerTheme('commander');
+</script></body></html>

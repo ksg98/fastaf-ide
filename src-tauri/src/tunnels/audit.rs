@@ -378,6 +378,13 @@ mod tests {
 
         let pages: i64 = {
             let log = AuditLog::open(&path).expect("open");
+            // Every autocommit insert otherwise fsyncs the WAL: 5000 of them cost
+            // 13-58 s on a loaded box. The checkpoint threshold counts pages, not
+            // syncs, so dropping the fsync leaves what this test pins untouched.
+            log.conn()
+                .expect("connect")
+                .execute_batch("PRAGMA synchronous=OFF;")
+                .expect("pragma");
             for i in 0..5_000_i64 {
                 log.insert("bulk", EventKind::Connected, serde_json::json!({"i": i}))
                     .expect("insert");

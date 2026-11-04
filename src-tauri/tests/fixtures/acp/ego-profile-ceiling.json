@@ -1,0 +1,19 @@
+{
+  "sessionId": "2293c32a-83b6-564b-967f-3c4534548885",
+  "_meta": {
+    "ego": {
+      "profile": "wide",
+      "ceilingProfile": "machine",
+      "effective": {
+        "mode": "default",
+        "sandbox": "workspace",
+        "roots": [],
+        "execPaths": []
+      },
+      "warnings": [
+        "mode yolo exceeds profile ceiling default; using default",
+        "sandbox off exceeds profile ceiling workspace; using workspace"
+      ]
+    }
+  }
+}

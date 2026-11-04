@@ -1,0 +1,71 @@
+/* Provider setup: install rows (the empty Tasks tab) or a provider's settings
+   form (Provider settings). Sentence-case headings, recessed fields, the
+   primary action at the right end. */
+.setup {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+  max-width: 720px;
+  padding: 16px;
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+}
+
+/* Inside the empty state the install rows stack, centred, a row apart. */
+.setup:has(> .install) {
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+}
+
+.form h3 {
+  margin: 0 0 12px;
+  font-size: var(--font-base);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.install {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.setup :focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.setup :is(input, select, textarea)[data-form-control] {
+  width: 100%;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.muted {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.error {
+  margin: 8px 0 0;
+  color: var(--error);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,12 @@
+// Recorded capabilities and turn frames; withhold steer response while keeping transport alive.
+{"step":"expect","method":"initialize","capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-steer-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"active"}
+{"step":"expect","method":"_ego/steer","params":{"prompt":[{"type":"text","text":"earlier correction"}]},"capture":"steer"}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"steer received"}}}}
+{"step":"expect","method":"session/list","capture":"barrier"}
+{"step":"respond","to":"active","result":{"stopReason":"end_turn"}}
+{"step":"respond","to":"barrier","result":{"sessions":[]}}
+{"step":"await_stdin_eof"}

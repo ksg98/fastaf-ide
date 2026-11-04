@@ -3,7 +3,6 @@ export type AgentType =
 	| "claude"
 	| "gemini"
 	| "opencode"
-	| "aider"
 	| "codex"
 	| "amp"
 	| "cursor"
@@ -11,6 +10,7 @@ export type AgentType =
 	| "grok"
 	| "droid"
 	| "pi"
+	| "ego"
 	| "git"
 	| "api";
 
@@ -19,7 +19,6 @@ export const AGENT_TYPES: readonly AgentType[] = [
 	"claude",
 	"gemini",
 	"opencode",
-	"aider",
 	"codex",
 	"amp",
 	"cursor",
@@ -27,6 +26,7 @@ export const AGENT_TYPES: readonly AgentType[] = [
 	"grok",
 	"droid",
 	"pi",
+	"ego",
 	"git",
 	"api",
 ] as const;
@@ -48,7 +48,15 @@ export interface AgentConfig {
 	name: string;
 	binary: string;
 	description: string;
+	/** The CLI starts an interactive session seeded with a trailing positional prompt (`<cli> -- "<prompt>"`): its --help lists the prompt and it honours `--` as the end of options. */
+	interactivePromptArg?: true;
+	/** Listed in Settings › Agents only once its binary is detected. For an agent
+	 * FastAF does not ship or promote, a "Not found" row is noise; support for it
+	 * is otherwise untouched, so an installed copy shows up as usual. */
+	listOnlyWhenDetected?: true;
 	resumeCommand: string | null;
+	/** Mobile Ctrl+Enter: native modified key, or a verified non-submitting newline fallback. */
+	ctrlEnterSequence: string;
 	/**
 	 * Session file discovery config. When set, FastAF will scan the agent's
 	 * session storage directory to find the session ID for manually-launched agents.
@@ -82,9 +90,11 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		name: "Claude Code",
 		binary: "claude",
 		description: "Anthropic's Claude Code CLI",
+		interactivePromptArg: true,
 		defaultHeadlessTemplate:
 			'claude --bare --print --output-format text --no-session-persistence --system-prompt "Output only the raw requested text. No explanations, no markdown fences, no commentary." -p "{prompt}"',
 		resumeCommand: `claude --continue ${SKIP_PERMISSIONS_FLAG}`,
+		ctrlEnterSequence: "\x1b[13;5u",
 		sessionDiscovery: { resumeWithId: (id) => `claude --resume ${id} ${SKIP_PERMISSIONS_FLAG}` },
 		spawnArgs: (prompt, options = {}) => {
 			const args: string[] = [];
@@ -107,8 +117,10 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		name: "Gemini CLI",
 		binary: "gemini",
 		description: "Google's Gemini CLI",
+		interactivePromptArg: true,
 		defaultHeadlessTemplate: 'gemini "{prompt}"',
 		resumeCommand: "gemini --resume",
+		ctrlEnterSequence: "\x1b[13;5u",
 		sessionDiscovery: { resumeWithId: (id) => `gemini --resume ${id}` },
 		spawnArgs: (prompt, options = {}) => {
 			const args: string[] = [];
@@ -131,6 +143,7 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "OpenAI-based coding assistant",
 		defaultHeadlessTemplate: 'opencode "{prompt}"',
 		resumeCommand: "opencode -c",
+		ctrlEnterSequence: "\x1b[13;5u",
 		sessionDiscovery: null, // sessions stored in SQLite DB — not yet supported
 		spawnArgs: (prompt, options = {}) => {
 			const args: string[] = [];
@@ -146,35 +159,15 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 			prompt: [/^\s*\d+[.)]\s+.+$/gm],
 		},
 	},
-	aider: {
-		type: "aider",
-		name: "Aider",
-		binary: "aider",
-		description: "AI pair programming in terminal",
-		defaultHeadlessTemplate: 'aider --yes-always --message "{prompt}"',
-		resumeCommand: "aider --restore-chat-history",
-		sessionDiscovery: null, // single .aider.chat.history.md per project, no session IDs
-		spawnArgs: (prompt, options = {}) => {
-			const args: string[] = ["--yes-always"];
-			if (options.model) args.push("--model", options.model);
-			args.push("--message", prompt);
-			return args;
-		},
-		outputFormat: "text",
-		detectPatterns: {
-			rateLimit: [/rate.?limit/i, /429/, /too many requests/i],
-			completion: [/Applied edit/i, /Committed/i],
-			error: [/error:/i, /failed:/i],
-			prompt: [/\[Y\/n\]/, /Enter.*:/i],
-		},
-	},
 	codex: {
 		type: "codex",
 		name: "Codex CLI",
 		binary: "codex",
 		description: "OpenAI Codex CLI",
+		interactivePromptArg: true,
 		defaultHeadlessTemplate: 'codex "{prompt}"',
 		resumeCommand: "codex resume --last",
+		ctrlEnterSequence: "\n",
 		sessionDiscovery: { resumeWithId: (id) => `codex resume ${id}` },
 		spawnArgs: (prompt, options = {}) => {
 			const args: string[] = [];
@@ -197,6 +190,7 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "Sourcegraph's AI coding agent",
 		defaultHeadlessTemplate: 'amp "{prompt}"',
 		resumeCommand: "amp threads continue",
+		ctrlEnterSequence: "\n",
 		sessionDiscovery: null, // cloud-only, no local session files
 		spawnArgs: (prompt) => {
 			return [prompt];
@@ -216,6 +210,7 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "Cursor's standalone coding agent CLI",
 		defaultHeadlessTemplate: 'cursor-agent "{prompt}"',
 		resumeCommand: "cursor-agent resume",
+		ctrlEnterSequence: "\n",
 		sessionDiscovery: null, // closed-source, storage path undocumented
 		spawnArgs: (prompt) => {
 			return [prompt];
@@ -235,11 +230,13 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "Block's open-source AI coding agent",
 		defaultHeadlessTemplate: 'goose run "{prompt}"',
 		resumeCommand: "goose session --resume",
+		ctrlEnterSequence: "\n",
 		sessionDiscovery: { resumeWithId: (id) => `goose session --resume --name ${id}` },
 		spawnArgs: (prompt, options = {}) => {
-			const args: string[] = ["session"];
+			// goose 1.49: `session` takes no positional prompt; `run -s -t` runs it, then stays interactive.
+			const args: string[] = ["run", "-s"];
 			if (options.model) args.push("--model", options.model);
-			args.push(prompt);
+			args.push("-t", prompt);
 			return args;
 		},
 		outputFormat: "text",
@@ -255,8 +252,10 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		name: "Grok",
 		binary: "grok",
 		description: "xAI's Grok coding CLI (Grok Build)",
+		interactivePromptArg: true,
 		defaultHeadlessTemplate: 'grok --single "{prompt}"',
 		resumeCommand: "grok --continue",
+		ctrlEnterSequence: "\n",
 		sessionDiscovery: { resumeWithId: (id) => `grok --resume ${id}` },
 		spawnArgs: (prompt, options = {}) => {
 			const args: string[] = [];
@@ -279,6 +278,7 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "Factory's agent-native software development CLI",
 		defaultHeadlessTemplate: 'droid "{prompt}"',
 		resumeCommand: null,
+		ctrlEnterSequence: "\x1b[13;5u",
 		sessionDiscovery: null,
 		spawnArgs: (prompt) => {
 			return [prompt];
@@ -298,6 +298,7 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "Earendil's pi coding agent",
 		defaultHeadlessTemplate: 'pi --print "{prompt}"',
 		resumeCommand: "pi --continue",
+		ctrlEnterSequence: "\n",
 		// Sessions live in ~/.pi/agent/sessions/<encoded-cwd>/ as `<ts>_<uuid7>.jsonl`, but
 		// `--continue` already resumes the newest session for the cwd, which is what resume
 		// needs. Disk discovery stays unwired until something requires a specific session id.
@@ -317,12 +318,35 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 			prompt: [/\[y\/n\]/i],
 		},
 	},
+	ego: {
+		type: "ego",
+		name: "ego",
+		binary: "ego",
+		// The terminal CLI only. The AI Chat ego runs over ACP and is not an AgentType.
+		description: "ego coding agent (terminal CLI)",
+		// Upstream's own agent: FastAF neither bundles nor requires it.
+		listOnlyWhenDetected: true,
+		defaultHeadlessTemplate: 'ego run "{prompt}"',
+		// `ego resume` with no id continues the latest session of this workspace.
+		resumeCommand: "ego resume",
+		ctrlEnterSequence: "\x1b[13;5u",
+		sessionDiscovery: { resumeWithId: (id) => `ego resume ${id}` },
+		spawnArgs: (prompt) => [prompt],
+		outputFormat: "text",
+		detectPatterns: {
+			rateLimit: [/rate.?limit/i, /429/, /too many requests/i],
+			completion: [],
+			error: [/error:/i, /failed:/i],
+			prompt: [],
+		},
+	},
 	git: {
 		type: "git",
 		name: "Git",
 		binary: "git",
 		description: "Background git operations (pull, push, fetch, stash)",
 		resumeCommand: null,
+		ctrlEnterSequence: "\x1b[13;5u",
 		sessionDiscovery: null,
 		spawnArgs: () => [],
 		outputFormat: "text",
@@ -340,6 +364,7 @@ export const AGENTS: Record<AgentType, AgentConfig> = {
 		description: "Direct LLM API calls (no agent CLI needed)",
 		defaultHeadlessTemplate: "",
 		resumeCommand: null,
+		ctrlEnterSequence: "\x1b[13;5u",
 		sessionDiscovery: null,
 		spawnArgs: () => [],
 		outputFormat: "text",
@@ -357,13 +382,21 @@ export interface AgentRunConfig {
 	name: string;
 	command: string;
 	args: string[];
+	model?: string;
 	env: Record<string, string>;
 	is_default: boolean;
 }
 
 /** Per-agent settings (matches Rust AgentSettings) */
+export type EgoPermissionMode = "plan" | "default" | "edits" | "auto" | "yolo";
+export type EgoSandbox = "ro" | "workspace";
+
 export interface AgentSettingsConfig {
+	/** Persisted migration marker; removing bypass from args must remain effective. */
+	codex_bypass_migrated?: boolean;
 	run_configs: AgentRunConfig[];
+	/** Minutes before an idle managed child closes; zero disables it. */
+	idle_close_minutes?: number;
 	auto_retry_on_error?: boolean;
 	headless_template?: string;
 	/** Environment feature flags — key→value pairs injected into every spawn of this agent */
@@ -378,24 +411,63 @@ export interface AgentSettingsConfig {
 	 * disabling removes only TUIC's entries. Undefined/false = heuristics (default).
 	 */
 	hook_instrumentation?: boolean;
+	/** Launch-scoped native status signals. Undefined means enabled. */
+	native_status_signals?: boolean;
+	/** Prevent alternate screen when a verified agent control exists. Undefined means enabled. */
+	prevent_alt_screen?: boolean;
+	/** Accept the startup trust picker for managed MCP spawns. Undefined means enabled. */
+	skip_trust_dialog?: boolean;
+	ego_mode?: EgoPermissionMode;
+	ego_sandbox?: EgoSandbox;
+	/** User additions appended after generated modules and global additions. */
+	launch_instructions?: string;
+	launch_modules?: Record<string, boolean>;
+	launch_instructions_disabled?: boolean;
 }
 
 /** Install state of an agent's TUIC hooks (mirrors Rust `InstallState::as_str`). */
-export type AgentHookState = "installed" | "outdated" | "notInstalled" | "unsupported";
+export type AgentHookState = "installed" | "outdated" | "reviewRequired" | "notInstalled" | "unsupported";
 
 /** Full agents config (matches Rust AgentsConfig) */
 export interface AgentsConfig {
+	launch_additions_migrated?: boolean;
+	hibernate_idle_minutes?: number;
+	abandoned_shell_hours?: number;
+	hibernate_scope?: "background_only" | "always";
 	agents: Record<string, AgentSettingsConfig>;
 	/** Which agent CLI to use for headless prompt execution when no agent is in the active terminal */
-	headless_agent?: AgentType;
+	headless_agent?: HeadlessAgentChoice;
+	/** User additions appended after generated modules for every agent. */
+	launch_instructions?: string;
+	launch_modules?: Record<string, boolean>;
+	launch_instructions_disabled?: boolean;
 }
+
+/** A headless agent: a plain agent type, or `<agent>:<run config name>`
+ * (parsed by `useSmartPrompts.executeHeadless`). Rust stores it as a string. */
+export type HeadlessAgentChoice = AgentType | `${AgentType}:${string}`;
+
+/** The picker value as a headless agent choice, or null for "not configured"
+ * and for anything that does not name a known agent. */
+export function toHeadlessAgentChoice(value: string): HeadlessAgentChoice | null {
+	const sep = value.indexOf(":");
+	const agent = sep < 0 ? value : value.slice(0, sep);
+	if (!AGENT_TYPES.includes(agent as AgentType)) return null;
+	if (sep >= 0 && sep === value.length - 1) return null;
+	return value as HeadlessAgentChoice;
+}
+
+/** Agents kept at basic support: busy state is unreliable and no vendor account is available to test. */
+export const LIMITED_SUPPORT_AGENTS: readonly AgentType[] = ["amp", "cursor", "droid"];
+
+/** The label Settings shows for them; docs/user-guide/ai-agents.md quotes it (checked by a test). */
+export const LIMITED_SUPPORT_LABEL = "limited support, need more tests";
 
 /** Which agents support MCP configuration */
 export const MCP_SUPPORT: Record<AgentType, boolean> = {
 	claude: true,
 	gemini: true,
 	opencode: true,
-	aider: false,
 	codex: true,
 	amp: true,
 	cursor: true,
@@ -406,6 +478,8 @@ export const MCP_SUPPORT: Record<AgentType, boolean> = {
 	// auto-install waits for the adapter's ~/.pi/agent/mcp.json; Install here is
 	// explicit, so it writes the file.
 	pi: true,
+	// ego registers MCP servers with its own `ego mcp add`; TUIC writes no config for it.
+	ego: false,
 	git: false,
 	api: false,
 };
@@ -418,7 +492,6 @@ export const HOOK_SUPPORT: Record<AgentType, boolean> = {
 	claude: true,
 	gemini: true,
 	opencode: true,
-	aider: false,
 	codex: true,
 	amp: false,
 	cursor: false,
@@ -428,23 +501,34 @@ export const HOOK_SUPPORT: Record<AgentType, boolean> = {
 	// pi exposes lifecycle events to extensions, but TUIC has no managed installer for
 	// them yet — its screen adapter covers busy/idle without instrumentation.
 	pi: false,
+	// ego reports state natively over OSC 7770 — there is no hook to install.
+	ego: false,
 	git: false,
 	api: false,
 };
 
 /** Agent display info for UI */
-export const AGENT_DISPLAY: Record<AgentType, { icon: string; color: string }> = {
-	claude: { icon: "C", color: "#d97706" },
-	gemini: { icon: "G", color: "#4285f4" },
-	opencode: { icon: "O", color: "#10a37f" },
-	aider: { icon: "A", color: "#9333ea" },
-	codex: { icon: "X", color: "#ffffff" },
-	amp: { icon: "A", color: "#ff5543" },
-	cursor: { icon: "C", color: "#000000" },
-	goose: { icon: "G", color: "#f59e0b" },
-	grok: { icon: "G", color: "#1a1a1a" },
-	droid: { icon: "D", color: "#f97316" },
-	pi: { icon: "π", color: "#c4a7e7" },
-	git: { icon: "G", color: "#f05032" },
-	api: { icon: "⚡", color: "#06b6d4" },
+export const AGENT_DISPLAY: Record<AgentType, { icon: string; color: string; foreground: string }> = {
+	claude: { icon: "C", color: "#d97706", foreground: "var(--identity-on-light)" },
+	gemini: { icon: "G", color: "#4285f4", foreground: "var(--identity-on-light)" },
+	opencode: { icon: "O", color: "#10a37f", foreground: "var(--identity-on-light)" },
+	codex: { icon: "X", color: "#ffffff", foreground: "var(--identity-on-light)" },
+	amp: { icon: "A", color: "#ff5543", foreground: "var(--identity-on-light)" },
+	cursor: { icon: "C", color: "#000000", foreground: "var(--identity-on-dark)" },
+	goose: { icon: "G", color: "#f59e0b", foreground: "var(--identity-on-light)" },
+	grok: { icon: "G", color: "#1a1a1a", foreground: "var(--identity-on-dark)" },
+	droid: { icon: "D", color: "#f97316", foreground: "var(--identity-on-light)" },
+	pi: { icon: "π", color: "#c4a7e7", foreground: "var(--identity-on-light)" },
+	ego: { icon: "ɛ", color: "#38bdf8", foreground: "var(--identity-on-light)" },
+	git: { icon: "G", color: "#f05032", foreground: "var(--identity-on-light)" },
+	api: { icon: "⚡", color: "#06b6d4", foreground: "var(--identity-on-light)" },
 };
+
+/** Preserve the actual modified key for an unknown foreground program. Never
+ * downgrade an unverified key to CR: that can execute a shell command. Registry
+ * choices and observations are recorded in docs/evidence/ctrl-menu-1660. */
+export function getCtrlEnterSequence(agentType?: string | null): string {
+	return agentType && Object.hasOwn(AGENTS, agentType)
+		? AGENTS[agentType as AgentType].ctrlEnterSequence
+		: "\x1b[13;5u";
+}

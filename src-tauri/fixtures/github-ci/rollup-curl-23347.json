@@ -1,0 +1,1545 @@
+[
+  {
+    "data": {
+      "repository": {
+        "object": {
+          "statusCheckRollup": {
+            "contexts": {
+              "nodes": [
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM awslc",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117569"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "autotools & cmake",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270079/job/114437069229"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "checksrc",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:47Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270051/job/114437069234"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM in-tree & maketgz",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437068892"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "GHA and Python",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270018/job/114437068973"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "proselint",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270006/job/114437069115"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Labeler",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128268491/job/114437065377"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Build caches ubuntu-26.04",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:45Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437069283"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "linkcheck",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270029/job/114437069118"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Build caches (windows-11-arm)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:45Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437948032"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Linux",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270008/job/114437069110"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Linux gcc glibc (amd64, arm64)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:47Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270077/job/114437069387"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "iOS, AM libressl arm64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:25Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188143"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dragonflybsd 6.4.2, AM gcc openssl x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087069"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM awslc",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117673"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Build caches ubuntu-26.04-arm",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437069170"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Build caches (windows-2022)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437947919"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "iOS, CM-Xcode libressl arm64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188078"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dragonflybsd 6.4.2, CM gcc openssl x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087070"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM boringssl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117583"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "freebsd 15.1, AM clang openssl x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087138"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM libressl krb5",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117419"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "freebsd 15.1, CM clang openssl !unity !examples x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087061"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM libressl krb5 valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117711"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "freebsd 15.1, CM clang openssl !examples riscv64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:49Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087118"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM libressl krb5 valgrind 2",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117757"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "freebsd 14.3, AM clang openssl !examples arm64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087031"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM libressl clang",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:01Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117626"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "freebsd 14.5, CM clang openssl arm64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087076"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM libressl Fil-C",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117645"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "midnightbsd 4.0.4, CM clang gnutls x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087141"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM mbedtls gss valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117739"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "netbsd 10.1, AM gcc openssl !examples x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087173"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM mbedtls gss valgrind 2",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117684"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "netbsd 11.0, CM gcc openssl x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087093"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM mbedtls clang",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117704"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "openbsd 7.9, AM clang libressl !examples x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087119"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM mbedtls-prev",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117709"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "openbsd 7.9, CM clang libressl x86_64",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087147"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM mbedtls-pkg MultiSSL !pc",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117770"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM rustls valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117682"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM rustls valgrind 2",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117691"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM rustls",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117788"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM wolfssl-all",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117715"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM wolfssl-opensslextra valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117663"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM wolfssl-opensslextra valgrind 2",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117803"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl default",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117693"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl libssh2 sync-resolver valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:03Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117785"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl libssh2 sync-resolver valgrind 2 +analyzer",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117807"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl intel C89",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117713"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl arm C89",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117725"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl -O3 libssh valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117708"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl -O3 libssh valgrind 2",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117694"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl clang krb5 openldap static",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117754"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl clang krb5 LTO",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117670"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl !ipv6 !--libcurl !--digest-auth",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117851"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM curl_global_init_mem debug valgrind 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:01Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117666"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM curl_global_init_mem debug valgrind 2",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117815"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl https-only",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117777"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl torture 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117825"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl torture 2",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117690"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl i686",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117608"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM !ssl !http !smtp !imap",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117680"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang-tidy",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117720"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang-tidy H3 c-ares !examples",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117762"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM address-sanitizer",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117727"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM address-sanitizer H3 c-ares",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117683"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM thread-sanitizer",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:01Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117722"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM memory-sanitizer",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117833"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM event-based",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117744"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM duphandle",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:02Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117852"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM IntelC openssl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117847"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM Slackware GnuTLS gssapi gcc",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:24:59Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117632"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM Alpine MUSL https-rr",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117776"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM Alpine MUSL https-rr c-ares",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:00Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270016/job/114437117842"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM gcc-13 !ssl !debug brotli zstd",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188375"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "C (Linux)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270018/job/114437069097"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "pyspelling",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270006/job/114437069008"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM awslc",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:13Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161873"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "spellcheck, linters, REUSE",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270051/job/114437069294"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "linux-mingw, AM gcc",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:47Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437947742"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "macOS",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270008/job/114437069157"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Linux gcc glibc minimal (amd64)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270077/job/114437069419"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "reproducible releases",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437068895"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AmigaOS, AM gcc AmiSSL m68k",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087140"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM awslc",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:14Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161897"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang !ssl libssh2 AppleIDN",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188332"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "C (Windows)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270018/job/114437069163"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "linux-mingw, CM gcc",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:47Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437947850"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AmigaOS, CM gcc AmiSSL m68k",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437086950"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM clang OpenSSL libssh c-ares",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188285"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM boringssl",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:16Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161860"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "linux-mingw, CM clang-tidy",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:47Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437947907"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM boringssl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:16Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161903"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM llvm@18 OpenSSL libssh",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:29Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188440"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang !ssl HTTP-only c-ares",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188331"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM gnutls",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:14Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161876"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM gnutls",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:13Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161849"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang LibreSSL !ldap +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188273"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang OpenSSL 10.15 C89",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188203"
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": true,
+                "endCursor": "MTAw"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "object": {
+          "statusCheckRollup": {
+            "contexts": {
+              "nodes": [
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM libressl",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:14Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161920"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM libressl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:15Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161844"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM clang OpenSSL SecTrust krb5",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:28Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188253"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:13Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161865"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang OpenSSL event-based",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:25Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188209"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang OpenSSL gsasl AppleIDN SecTrust +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:28Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188424"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:13Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161877"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM openssl-prev",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:16Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161939"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang MultiSSL AppleIDN clang-tidy +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188187"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM openssl-prev",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:17Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161863"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang HTTP/3 clang-tidy",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188205"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang LibreSSL openldap AppleGSS c-ares +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188354"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM quiche",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:17Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437162013"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM quiche",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:16Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161919"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang wolfSSL !ldap brotli zstd",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188348"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM llvm@18 mbedTLS !ldap brotli zstd MultiSSL AppleIDN",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:28Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188388"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM wolfssl",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:14Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161995"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM wolfssl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:15Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270044/job/114437161981"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang GnuTLS !ldap krb5 +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188427"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM gcc-15 aws-lc +analyzer",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:30Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188376"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang Rustls",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:25:28Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188437"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang OpenSSL torture 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:29Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188280"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang OpenSSL torture 2",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188389"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang OpenSSL torture 3",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188386"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "synopsis, man-examples",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:48Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270006/job/114437068939"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "pytype",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270051/job/114437069264"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "cygwin, AM x86_64 openssl R",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968772"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Windows",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270008/job/114437069279"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Linux llvm MUSL (amd64, riscv64)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270077/job/114437069411"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM integration ubuntu-26.04-arm",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437068890"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM gcc-13 macos-26",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:30Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188282"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Android 21, AM !ssl !zstd arm64-v8a",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087136"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "cygwin, CM x86_64 openssl",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968831"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM integration macos-latest",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:58Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437068871"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM gcc-14 macos-26",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:29Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188183"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Android 21, CM !ssl !zstd arm64-v8a",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087158"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM integration windows-2022",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437068980"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM gcc-15 macos-15",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188140"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Android 21, CM !ssl !zstd armeabi-v7a",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087192"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM gcc-15 macos-26",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188240"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Android 35, AM !ssl !zstd arm64-v8a",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087006"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM llvm@20 macos-26",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:30Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188229"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Android 35, CM !ssl !zstd arm64-v8a",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087062"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM llvm@20 xcode-27",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188234"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang macos-26",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:27Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188199"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM clang xcode-27",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:31Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188313"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM clang xcode-27",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:26Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269991/job/114437188168"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "complexity and function sizes",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270051/job/114437069126"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "msys2, CM x86_64 !proxy",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437969022"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "macOS clang cares (x86_64)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:48Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270077/job/114437069198"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Verify tarball downloads",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437068731"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "MS-DOS, AM djgpp !ssl i586",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087126"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "msys2, AM x86_64 default R",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968940"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "MS-DOS, CM djgpp !ssl i586",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:50Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269976/job/114437087077"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, AM clang-x86_64 default",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968930"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, AM ucrt-x86_64 wolfssl c-ares U",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968962"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM clang-x86_64 schannel c-ares U",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968968"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM ucrt-x86_64 schannel U torture 1",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968938"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM ucrt-x86_64 schannel U torture 2",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437969013"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM clang-x86_64 gnutls libssh",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968979"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM clang-aarch64 schannel R",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437969057"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM clang-x86_64 openssl",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968999"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM ucrt-x86_64 openssl uwp",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437969019"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "mingw, CM ucrt-x86_64 schannel dev debug",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437969044"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dl-mingw, CM 16.2.0-x86_64 schannel +analyzer",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968873"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM out-of-tree docs",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:08Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437679043"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "xmllint",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:44Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270051/job/114437069256"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Windows llvm (x64)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270077/job/114437069355"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dl-mingw, CM 9.5.0-x86_64 schannel",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968806"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dl-mingw, CM 7.3.0-x86_64 schannel mbedtls U",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968820"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dl-mingw, CM 6.4.0-i686 MultiSSL !unity",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:52Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968896"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "dl-mingw, CM 4.8.1-x86_64 schannel !examples",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968880"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM out-of-tree (debug)",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:08Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437679136"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "misc checks",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:47Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270051/job/114437069207"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "msvc, CM x64-uwp !ssl +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968812"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "Windows gcc zlib-classic (x64)",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:24:46Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270077/job/114437069379"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "msvc, CM x64-windows openssl +examples",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968876"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "msvc, CM arm64-windows schannel U",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "startedAt": "2026-10-11T09:29:51Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128270007/job/114437968800"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM out-of-tree !perl",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:08Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437679178"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "AM in-tree !perl",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:08Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437678866"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM out-of-tree !perl",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:08Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437679214"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CM in-tree !perl",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:09Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437679329"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "missing files",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED",
+                  "startedAt": "2026-10-11T09:28:09Z",
+                  "detailsUrl": "https://github.com/curl/curl/actions/runs/38128269971/job/114437679513"
+                },
+                {
+                  "__typename": "StatusContext",
+                  "context": "AppVeyor / CM VS2019, RelWithDebInfo, x64, OpenSSL 3.0 + Schannel, Shared, !verbose, Build-tests",
+                  "state": "FAILURE",
+                  "targetUrl": "https://ci.appveyor.com/project/curlorg/curl/builds/54874752/job/5dr7vvw58b7qovsm",
+                  "createdAt": "2026-10-11T09:27:09Z"
+                },
+                {
+                  "__typename": "StatusContext",
+                  "context": "AppVeyor / CM VS2019, Release, x64, OpenSSL 3.0 + Schannel, Shared, Build-tests",
+                  "state": "FAILURE",
+                  "targetUrl": "https://ci.appveyor.com/project/curlorg/curl/builds/54874752/job/wgg1mn7q4xrxb88r",
+                  "createdAt": "2026-10-11T09:27:10Z"
+                },
+                {
+                  "__typename": "StatusContext",
+                  "context": "AppVeyor CI",
+                  "state": "FAILURE",
+                  "targetUrl": "https://ci.appveyor.com/project/curlorg/curl/builds/54874752",
+                  "createdAt": "2026-10-11T09:26:59Z"
+                },
+                {
+                  "__typename": "StatusContext",
+                  "context": "AppVeyor / CM VS2019, Debug, x64, OpenSSL 3.0 + Schannel, Shared, !verbose, Build-tests",
+                  "state": "SUCCESS",
+                  "targetUrl": "https://ci.appveyor.com/project/curlorg/curl/builds/54874752/job/pjw9jtph87wjb18i",
+                  "createdAt": "2026-10-11T09:27:08Z"
+                },
+                {
+                  "__typename": "StatusContext",
+                  "context": "AppVeyor / CM VS2019, RelWithDebInfo, x64, OpenSSL 3.0 + Schannel, Shared, !verbose, Build-tests, WORKAROUND",
+                  "state": "SUCCESS",
+                  "targetUrl": "https://ci.appveyor.com/project/curlorg/curl/builds/54874752/job/x0e9dir8vumid3qp",
+                  "createdAt": "2026-10-11T09:27:09Z"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "name": "CodeQL",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "startedAt": "2026-10-11T09:25:42Z",
+                  "detailsUrl": "https://github.com/curl/curl/runs/114437254110"
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "MTg5"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+]

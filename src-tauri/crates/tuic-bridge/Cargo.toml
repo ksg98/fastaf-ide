@@ -2,7 +2,7 @@
 name = "tuic-bridge"
 version.workspace = true
 description = "MCP stdio-to-IPC bridge sidecar for FastAF"
-authors = ["Stefano Straus <github.com/sstraus>"]
+authors = ["FastAF <https://github.com/ksg98/fastaf-ide>"]
 edition = "2024"
 
 [[bin]]
@@ -10,12 +10,14 @@ name = "tuic-bridge"
 path = "src/main.rs"
 
 [dependencies]
+tuic-ipc = { path = "../tuic-ipc" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
-dirs = "6"
+dirs = "7"
 
 [dev-dependencies]
 tempfile = "3"
+tuic-test-support = { path = "../tuic-test-support" }
 
 [lints]
 workspace = true

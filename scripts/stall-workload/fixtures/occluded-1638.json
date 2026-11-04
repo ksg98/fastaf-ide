@@ -1,0 +1,137 @@
+{
+ "story": "1638-c94c",
+ "kind": "native agent-test load replay; real recorded agent PTY bytes re-paced from their own captures, not the historical 2026-10-09 workload",
+ "provenance": {
+  "captured_utc": "2026-10-20T13:25:57.098Z",
+  "pre_fix_commit": "ac3230c0f850daeecc713ec74157b6d33d235e56",
+  "instance": "make agent-test AGENT_TEST_INSTANCE=at-cc1638 AGENT_TEST_PORT=19951",
+  "binary_sha256": "1a0ce74811ef82c67de815df5ce59b0eb85c766e4f858982c97c71ccad67def3",
+  "window": "640x420 agent-test window present but not on screen (document visibility hidden), no power assertion",
+  "raw_evidence": "~/Gits/.tmp/results/cc-1638/ (webview.jsonl, backend.jsonl, gaps.jsonl, sample-*.txt, agent-test.log, prio-series.txt, unified-1525-1526.log); not committed"
+ },
+ "workload": {
+  "rows": 50,
+  "cols": 180,
+  "profiles": [
+   "replay",
+   "replay",
+   "burst",
+   "churn"
+  ],
+  "captures_per_session": 6,
+  "phases": [
+   {
+    "at_s": 0,
+    "sessions": 4,
+    "clients": 0
+   },
+   {
+    "at_s": 180,
+    "sessions": 12,
+    "clients": 4
+   }
+  ],
+  "client": {
+   "ws_grid_streams": 4,
+   "sse_events": 1,
+   "poll_sessions_ms": 2000,
+   "poll_repo_summary_ms": 5000
+  },
+  "repos": {
+   "count": 3,
+   "files": 300
+  },
+  "duration_s": 720,
+  "corpus": [
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/grok-native-permission-2027.tcap",
+    "sha256": "a50154c7dac3dd04c710bdf8dd4d6354831ccba5384f04bfba1bc2b71f0d5b79"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/grok-native-colour-2027.tcap",
+    "sha256": "b05f5b5f06bdf38b7ac3cff20d2b6a7a23363f6d9c233eb18e05be9df5531625"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-request-user-input-20260929.tcap",
+    "sha256": "29b9dcc2b8ba2d766b95a0974fd95db4d3a7068d757b9778ba4e7d6770f7bafe"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-idle-animation-20260921.tcap",
+    "sha256": "2a103f6858bbf623b31a822d3256dfa44562b4a8aff1180924d8941641fbebad"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/grok-enforced-approval-2027.tcap",
+    "sha256": "68fc0b1472942a063af232133b22a52c331e13a210d096dc64c8c5460372d760"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-0.157.1-no-alt-approval-resize.tcap",
+    "sha256": "05f0f67e57291266ab983bf3991e1b6a4ca2c669af80db3d49d84c91afc98151"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-native-question-2026.tcap",
+    "sha256": "2df707570b6cb729b6ee4a78c339acfbe5698c790810e160bd6738d9c8fd6744"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-0.159-long-brief-swallowed-enter.tcap",
+    "sha256": "8fb0b6727520bd4f7a039a599529822b9c1aad77461f71399a51d7d0a839f3b2"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-0.154-background-terminal-false-ready.tcap",
+    "sha256": "810ca4a60f2afc7d91f6ab99a431ef77ae2b048a283c2b5604a31d8a7a535b00"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-streaming-intent-20260924.tcap",
+    "sha256": "10c9d2d2da327812a66ceca7ae2c101bbffe9a4491bc756dd8d9641c8181fbd6"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/codex-0.154-mid-turn-false-ready.tcap",
+    "sha256": "2b633fa2cae0f46b79ec82c9e2b79b42792dd9dc40b7cf1f431535c8a3174583"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/opencode-1.18.30-mini-narrow-tool-turn.tcap",
+    "sha256": "0ef7c230af2da4bfcf0e1e7d1271fa877ec2e3a0755ea65d29f02492a1153ef7"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/claude-askuser-multi-question-20261012.tcap",
+    "sha256": "1d3daf67b5f77282e5d786ba819d456ea926b2885e05a068d6e20d792a37118b"
+   },
+   {
+    "path": "src-tauri/src/fixtures/agent_prompts/claude-narrow-2093.tcap",
+    "sha256": "4b13e8b4abff2cb7ff3b7f99b5dade9a308277c88d86a5bb5336e1a064da78b7"
+   }
+  ]
+ },
+ "observed_pre_fix": {
+  "webview_callback_gaps_ms": [
+   5225,
+   13495,
+   4661,
+   8986,
+   3890,
+   41587
+  ],
+  "stall": {
+   "callback_gap_ms": 41587,
+   "native_heartbeat_last_ok_before_ms": "see webview.jsonl",
+   "backend_probe": "3 x 15 s timeouts then ECONNREFUSED (accept backlog full) until recovery"
+  },
+  "backend_log_silence_s": 40,
+  "backend_sleep_wake_gap_secs": [
+   19,
+   20,
+   13,
+   5,
+   40,
+   41
+  ],
+  "main_thread": "Tauri IPC save_repositories_request -> persist_atomic_with_mode -> rename(2) in all 3 samples over the 41.6 s gap",
+  "other_threads": "automations RunStore::connect blocked in open(2); 16 PTY readers idle in read(2); tokio workers parked",
+  "priority_band": "ps -M: 84-137 of ~100 threads at priority 4 (background band) in windows 13:34:02-16, 13:34:24-56, 13:34:59-35:12 UTC; backend Sleep-wake reports at 13:34:11, 13:34:38, 13:34:56",
+  "daily_app_comparison": "daily TUIC pid holds PreventUserIdleSystemSleep/PreventSystemSleep 'Agent session active' and stays at 31/47"
+ },
+ "verdict": {
+  "stall_threshold_ms": 30000,
+  "red": "a WebView callback gap >= stall_threshold_ms during the replay",
+  "green": "no WebView callback gap >= stall_threshold_ms for duration_s"
+ }
+}

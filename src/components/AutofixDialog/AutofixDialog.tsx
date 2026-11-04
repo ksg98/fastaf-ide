@@ -68,7 +68,13 @@ export const AutofixDialog: Component<{
 					<span class={s.title}>
 						{t("github.autofixTitle", "Auto-fix issue")} #{props.issueNumber}
 					</span>
-					<button class={s.close} onClick={props.onClose} title={t("common.close", "Close")}>
+					<button
+						type="button"
+						class={s.close}
+						onClick={props.onClose}
+						aria-label={t("common.close", "Close")}
+						title={t("common.close", "Close")}
+					>
 						&times;
 					</button>
 				</div>

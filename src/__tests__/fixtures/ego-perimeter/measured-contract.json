@@ -1,0 +1,11 @@
+{
+  "workspace": "/contract/workspace",
+  "roots": [],
+  "sandbox": "ro",
+  "sandbox_source": "user",
+  "backend": "seatbelt",
+  "capabilities": ["read_scoped", "write_denied", "no_ip_network"],
+  "probe_evidence": "0000000000000000000000000000000000000000000000000000000000000000:128",
+  "network": "offline",
+  "warnings": []
+}

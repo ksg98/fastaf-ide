@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>Extend — FastAF</title>
+  <meta name="description" content="One MCP endpoint for every agent, plugins in plain JavaScript, Smart Prompts, the tuic CLI and an HTTP API." />
+  <meta property="og:title" content="Extend — FastAF" />
+  <meta property="og:description" content="MCP Proxy Hub, plugins, Smart Prompts, the tuic CLI and the HTTP API." />
+  <meta property="og:url" content="https://tuicommander.com/features/extend.html" />
+  <meta name="twitter:title" content="Extend — FastAF" />
+  <meta name="twitter:description" content="MCP Proxy Hub, plugins, Smart Prompts, the tuic CLI and the HTTP API." />
+  <link rel="canonical" href="https://tuicommander.com/features/extend.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Extend</p>
+      <h1><em>MCP.</em> Remote. Plugins.</h1>
+      <p>FastAF is an open platform. Your agents, your tools and your scripts reach the same backend the app uses.</p>
+    </div>
+  </header>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>One endpoint, <em>every</em> MCP server.</h2>
+        <p>The MCP Proxy Hub connects your upstream MCP servers, over HTTP or stdio, to FastAF's own endpoint. Every agent connects once and gets every upstream tool, prefixed with the server's name.</p>
+        <ul class="points">
+          <li>Add or remove servers without restarting anything.</li>
+          <li>Health checks and live status per upstream.</li>
+          <li>Credentials from the OS keyring, secret header rows, and tool filters per server.</li>
+        </ul>
+        <a class="more" href="/docs/user-guide/mcp-proxy.html">Read the MCP Proxy Hub guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/e-mcp.webp" alt="Settings with upstream MCP servers and their status" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Prompts that <em>know</em> the context.</h2>
+        <p>Smart Prompts fill in the branch, the diff, the changed files and the PR before they reach your agent. Run them in the agent terminal, headless as a one-shot, or as a plain shell script. The library (<code>Cmd+Shift+K</code>) keeps the built-in prompts and your own.</p>
+        <a class="more" href="/docs/user-guide/smart-prompts.html">Read the Smart Prompts guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/e-prompts.webp" alt="Smart Prompts Library with search and tabs" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="more-features">
+    <div class="container">
+      <div class="section-head">
+        <h2>Your own tools, in <em>JavaScript</em>.</h2>
+        <p>Plugins are plain JavaScript modules with hot reload. Install them from a folder, a ZIP file or a deep link. Plan Tracker and Stories Ticker are built in.</p>
+      </div>
+      <div class="card-grid">
+        <a class="card" href="/docs/plugins.html">
+          <h3>Plugins and the TUIC SDK</h3>
+          <p>Watch terminal output, add Activity Center items, panels and Markdown content, through capability tiers you grant.</p>
+        </a>
+        <a class="card" href="/docs/user-guide/cli.html">
+          <h3>The <code>fastaf</code> CLI</h3>
+          <p>Open files and repositories, use FastAF as <code>$EDITOR</code>, manage sessions and spawn agents from any shell.</p>
+        </a>
+        <a class="card" href="/docs/api/http-api.html">
+          <h3>HTTP API</h3>
+          <p>Drive sessions, repositories and agents over HTTP and WebSocket, with the same API the browser and the phone use.</p>
+        </a>
+        <div class="card">
+          <h3>Private secret forms</h3>
+          <p>An agent requests named fields with the <code>secret</code> MCP tool. You type into a separate window; the agent receives <code>stored</code> or <code>declined</code>, never the value.</p>
+        </div>
+        <div class="card">
+          <h3>MDKB</h3>
+          <p>Install MDKB on your PATH and FastAF uses it for go-to-definition, references, a symbol outline and long-term memory for agents.</p>
+        </div>
+        <a class="card" href="/docs/plugins.html">
+          <h3>Write a plugin</h3>
+          <p>Plugins are plain JavaScript. Install one from a folder or a .zip; the Plugin API guide covers the rest.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

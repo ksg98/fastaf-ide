@@ -1,0 +1,22 @@
+.page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.page + .page { margin-top: 16px; }
+.group { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 260px); gap: 8px 24px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); min-width: 0; }
+.group > label, .group > div:has(> label) { color: var(--fg-primary); font-weight: 600; font-size: 13px; }
+.group > p { grid-column: 1; margin: 0; }
+.group > input, .group > select { grid-column: 2; grid-row: 1 / span 2; width: 100%; min-width: 0; }
+.group > div { grid-column: 1 / -1; min-width: 0; }
+.group > div:has(> label) { grid-column: 1; grid-row: 1; }
+.toggle { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; color: var(--fg-primary); }
+.toggle input { order: 2; margin-left: auto; accent-color: var(--accent); flex-shrink: 0; }
+.toggle > span { flex: 1; font-weight: 600; }
+.teamActions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 600px) { .group { grid-template-columns: 1fr; gap: 8px; } .group > input, .group > select { grid-column: 1; grid-row: auto; } }
+
+.page header p { overflow-wrap: anywhere; }
+
+.resetCard p { font-size: 12px; line-height: 1.5; color: var(--fg-secondary); }
+
+.switchGroup { border-top: 1px solid var(--border); }
+.switchGroup .rowSwitch { margin-left: auto; }
+
+.page > [data-settings-page-header] { margin-bottom: 8px; }

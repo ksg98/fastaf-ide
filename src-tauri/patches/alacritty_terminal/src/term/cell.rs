@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use arrayvec::ArrayVec;
 use bitflags::bitflags;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::grid::{self, GridCell};
 use crate::index::Column;
 use crate::vte::ansi::{Color, Hyperlink as VteHyperlink, NamedColor};
+
+/// Maximum number of zerowidth characters to retain per grid cell.
+///
+/// This enforces an upper bound on memory usage per cell, to ensure
+/// malicous applications cannot use this as a DoS vector.
+const MAX_ZEROWIDTH_CHARS: usize = 9;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -143,7 +150,7 @@ impl ResetDiscriminant<Color> for Cell {
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CellExtra {
-    zerowidth: Vec<char>,
+    zerowidth: ArrayVec<char, MAX_ZEROWIDTH_CHARS>,
     underline_color: Option<Color>,
     hyperlink: Option<Hyperlink>,
 }
@@ -186,7 +193,7 @@ impl Cell {
     #[inline]
     pub fn push_zerowidth(&mut self, character: char) {
         let extra = self.extra.get_or_insert(Default::default());
-        Arc::make_mut(extra).zerowidth.push(character);
+        let _ = Arc::make_mut(extra).zerowidth.try_push(character);
     }
 
     /// Remove all wide char data from a cell.
@@ -194,7 +201,7 @@ impl Cell {
     pub fn clear_wide(&mut self) {
         self.flags.remove(Flags::WIDE_CHAR);
         if let Some(extra) = self.extra.as_mut() {
-            Arc::make_mut(extra).zerowidth = Vec::new();
+            Arc::make_mut(extra).zerowidth = ArrayVec::new();
         }
         self.c = ' ';
     }
@@ -351,5 +358,47 @@ mod tests {
         row[Column(9)].flags.insert(super::Flags::WRAPLINE);
 
         assert_eq!(row.line_length(), Column(10));
+    }
+
+    #[test]
+    fn zerowidth_storage_is_bounded() {
+        // `echo -en a; while true; do echo -en '\xcc\x81'; done` streams combining marks
+        // forever into a single cell; the per-cell storage must not grow with them.
+        let mut cell = Cell {
+            c: 'a',
+            ..Cell::default()
+        };
+        for _ in 0..10_000 {
+            cell.push_zerowidth('\u{0301}');
+        }
+
+        let zerowidth = cell.zerowidth().expect("zerowidth storage");
+        assert_eq!(zerowidth.len(), MAX_ZEROWIDTH_CHARS);
+        assert!(zerowidth.iter().all(|&c| c == '\u{0301}'));
+
+        // Pinned against the constant AND against 9 on purpose. Comparing only
+        // to MAX_ZEROWIDTH_CHARS is self-referential: raising the bound to a
+        // million would keep this test green and hand the DoS straight back.
+        // Changing the number must be a deliberate act that breaks a test.
+        assert_eq!(MAX_ZEROWIDTH_CHARS, 9, "upstream ede2ac14 chose 9");
+    }
+
+    #[test]
+    fn zerowidth_below_the_bound_is_unchanged() {
+        let marks = ['\u{0301}', '\u{0308}', '\u{0327}'];
+        let mut cell = Cell {
+            c: 'a',
+            ..Cell::default()
+        };
+        for c in marks {
+            cell.push_zerowidth(c);
+        }
+
+        assert_eq!(cell.zerowidth(), Some(&marks[..]));
+        assert!(!cell.is_empty());
+
+        cell.clear_wide();
+        assert_eq!(cell.zerowidth(), Some(&[][..]));
+        assert!(cell.is_empty());
     }
 }

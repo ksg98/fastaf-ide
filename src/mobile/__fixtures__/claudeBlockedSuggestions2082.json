@@ -1,0 +1,28 @@
+{
+  "session_id": "d423a298-b4a9-4083-8f08-fac54ab2bffe",
+  "cwd": "/Users/stefano.straus/Gits/.tmp/results/fix-qchips-capture-6/claude-cwd",
+  "worktree_path": null,
+  "worktree_branch": null,
+  "display_name_is_custom": false,
+  "display_name_from_spawn": false,
+  "is_remote": true,
+  "alias": "cc-1",
+  "tuic_session": "d423a298-b4a9-4083-8f08-fac54ab2bffe",
+  "state": {
+    "awaiting_input": true,
+    "question_text": "rb unreachable; need VPN back up",
+    "question_confident": true,
+    "rate_limited": false,
+    "shell_state": "idle",
+    "agent_state": "awaiting_input",
+    "last_activity_ms": 1792445495870,
+    "agent_type": "claude",
+    "current_task": "Slithering",
+    "last_prompt": "suggest: [ vpn su | rb è giù, aspetta | Mostra lo stato agenti ]",
+    "suggested_actions": [
+      "vpn su",
+      "rb è giù, aspetta",
+      "Mostra lo stato agenti"
+    ]
+  }
+}

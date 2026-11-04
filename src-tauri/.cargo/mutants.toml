@@ -1,0 +1,23 @@
+# cargo-mutants configuration — run through `make mutants`, never bare.
+#
+# nextest runs each test in its own process and stops at the first failure,
+# which is all a mutant run needs to know ("did anything catch it?").
+test_tool = "nextest"
+
+# The lib crate holds every unit test; test binaries and doctests are not
+# rebuilt per mutant.
+additional_cargo_test_args = ["--lib"]
+
+# Generated code and fixtures are not ours to mutate.
+exclude_globs = ["src/fixtures/**", "gen/**"]
+
+# #1366-ea64: functions no test in this crate can reach.
+# - The four `#[tauri::command]` wrappers are one-line delegations to their `_impl`
+#   (pinned by the `_impl` and route tests). Calling one needs a `tauri::State`, which only
+#   the `tauri/test` mock runtime builds; the `--no-default-features` CI job runs the suite
+#   without tauri, so that feature cannot be a dev-dependency.
+# - `run` is the desktop app entry point: it opens windows and never returns.
+exclude_re = [
+    "^src/github\\.rs.* replace (merge_pr_via_github|update_pr_branch|close_pr|get_pr_review_threads) ->",
+    "^src/lib\\.rs.* replace run with \\(\\)",
+]

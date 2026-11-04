@@ -8,7 +8,7 @@
 export const ZOOM_STEPS = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5] as const;
 export const ZOOM_DEFAULT = 1;
 export const ZOOM_MIN = ZOOM_STEPS[0];
-export const ZOOM_MAX = ZOOM_STEPS[ZOOM_STEPS.length - 1];
+export const ZOOM_MAX = ZOOM_STEPS.at(-1) ?? ZOOM_DEFAULT;
 
 /** Nearest ladder step to an arbitrary stored value. */
 function nearestIndex(level: number): number {

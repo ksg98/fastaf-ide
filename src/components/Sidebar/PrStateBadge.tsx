@@ -1,8 +1,10 @@
 import type { Component } from "solid-js";
 import { cx } from "../../utils";
+import { PR_READINESS_LABELS, prReadiness } from "../../utils/prReadiness";
 import s from "./Sidebar.module.css";
 
 const PR_BADGE_CLASSES: Record<string, string> = {
+	"unresolved-comments": s.prReviewRequired,
 	ready: s.prReady,
 	open: s.prOpen,
 	merged: s.prMerged,
@@ -14,6 +16,31 @@ const PR_BADGE_CLASSES: Record<string, string> = {
 	"changes-requested": s.prChangesRequested,
 	"review-required": s.prReviewRequired,
 	"ci-pending": s.prCiPending,
+};
+
+export const prBadgeKind = prReadiness;
+
+/** Every PR state the badge can show, keyed by prBadgeKind. The Help > UI legend must explain each.
+ *  A plain open PR carries no state word, so it has no entry. */
+export const PR_STATE_LABELS: Record<string, string> = Object.fromEntries(
+	Object.entries(PR_READINESS_LABELS).filter(([kind]) => kind !== "open"),
+);
+
+/** Compact form: the state is carried by the marker's color (and, for a
+ *  conflict, its shape) instead of a filled pill. */
+const PR_MARK_CLASSES: Record<string, string> = {
+	"unresolved-comments": s.prMarkReview,
+	ready: s.prMarkOpen,
+	open: s.prMarkOpen,
+	merged: s.prMarkMerged,
+	closed: s.prMarkClosed,
+	draft: s.prMarkDraft,
+	conflict: s.prMarkConflict,
+	checking: s.prMarkPending,
+	"ci-failed": s.prMarkClosed,
+	"changes-requested": s.prMarkChanges,
+	"review-required": s.prMarkReview,
+	"ci-pending": s.prMarkPending,
 };
 
 /** PR state badge — keeps the PR identity visible alongside its highest-priority state. */
@@ -31,31 +58,49 @@ export const PrStateBadge: Component<{
 	ciPassed?: number;
 	ciFailed?: number;
 	ciPending?: number;
+	unresolvedThreads?: number;
+	unresolvedThreadsTruncated?: boolean;
+	/** Files a removal would discard. This badge takes the row's one chip slot,
+	 *  so it carries the warning the lifecycle chip would have shown. */
+	dirtyFiles?: number;
+	/** Branch-row form: a colored marker and the number, the state word moved
+	 *  into a `data-tooltip` (WKWebView never renders a native `title`). */
+	compact?: boolean;
 }> = (props) => {
+	const dirtySuffix = () =>
+		props.dirtyFiles ? ` — ${props.dirtyFiles} uncommitted file${props.dirtyFiles === 1 ? "" : "s"}` : "";
 	const badge = (): { label: string; cls: string } => {
 		const withNumber = (state: string) => `#${props.prNumber} ${state}`;
-		if (props.isDraft) return { label: withNumber("Draft"), cls: "draft" };
-		const state = props.state?.toLowerCase();
-		if (state === "merged") return { label: withNumber("Merged"), cls: "merged" };
-		if (state === "closed") return { label: withNumber("Closed"), cls: "closed" };
-		if (props.conflictState === "conflicting") return { label: withNumber("Conflicts"), cls: "conflict" };
-		if (props.conflictState === "checking") return { label: withNumber("Checking"), cls: "checking" };
-		if ((props.ciFailed ?? 0) > 0) return { label: withNumber("CI Failed"), cls: "ci-failed" };
-		if (props.reviewDecision === "CHANGES_REQUESTED") {
-			return { label: withNumber("Changes Req."), cls: "changes-requested" };
-		}
-		if (props.reviewDecision === "REVIEW_REQUIRED") {
-			return { label: withNumber("Review Req."), cls: "review-required" };
-		}
-		if ((props.ciPending ?? 0) > 0) return { label: withNumber("CI Running"), cls: "ci-pending" };
-		if (props.mergeable === "MERGEABLE" && props.reviewDecision === "APPROVED") {
-			return { label: withNumber("Ready"), cls: "ready" };
-		}
-		return { label: `#${props.prNumber}`, cls: "open" };
+		const cls = prBadgeKind(props);
+		const label = PR_STATE_LABELS[cls];
+		return { label: label ? withNumber(label) : `#${props.prNumber}`, cls };
 	};
 
+	if (props.compact) {
+		const tooltip = () => {
+			const label = PR_STATE_LABELS[badge().cls];
+			return `PR #${props.prNumber}${label ? ` · ${label}` : ""}${dirtySuffix()}`;
+		};
+		return (
+			<span
+				class={cx(s.prBadge, s.prBadgeCompact, PR_MARK_CLASSES[badge().cls])}
+				data-tooltip={tooltip()}
+				data-tooltip-pos="bottom"
+				data-tooltip-align="right"
+				aria-label={tooltip()}
+			>
+				<span class={s.prMark} aria-hidden="true" />#{props.prNumber}
+			</span>
+		);
+	}
+
 	return (
-		<span class={cx(s.prBadge, PR_BADGE_CLASSES[badge().cls])} title={`PR #${props.prNumber}`}>
+		<span
+			class={cx(s.prBadge, PR_BADGE_CLASSES[badge().cls])}
+			data-tooltip={`PR #${props.prNumber}${dirtySuffix()}`}
+			data-tooltip-pos="bottom"
+			data-tooltip-align="right"
+		>
 			{badge().label}
 		</span>
 	);

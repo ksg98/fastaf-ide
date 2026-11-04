@@ -1,27 +1,18 @@
-/* AI Chat Panel — a conversation, not a control panel.
- *
- * The frame surface hosts a flat thread: assistant text sits directly on the
- * panel, the user's turns are quiet tinted blocks, and everything the agent
- * does (tool calls, approvals, progress) is a row inside the thread rather
- * than a banner above it. Every knob that shapes a turn (mode, model, effort,
- * steps, approvals) lives on the composer, next to the text it applies to. */
+/* AI Chat Panel */
 .panel {
   position: relative;
   width: 500px;
   min-width: 300px;
   max-width: 50%;
-  background: var(--surface-glass);
-  backdrop-filter: var(--blur-glass);
-  -webkit-backdrop-filter: var(--blur-glass);
-  border-left: var(--hairline-w) solid var(--hairline);
+  background: var(--bg-primary);
+  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-/* Compound selectors outrank the `display` each target sets on its own — .panel
-   is declared above this rule, .messageList below it, so source order alone
-   would hide one and not the other. */
+/* Compound forms so the suppressor wins regardless of rule order (see
+   hiddenStateSpecificity.test.ts; FastAF's panel in this folder applies both). */
 .panel.hidden,
 .messageList.hidden,
 .hidden {
@@ -32,198 +23,279 @@
 .headerActions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
 }
 
-.headerBtn {
-  composes: iconBtn from "../shared/controls.module.css";
+
+.headerBtnActive {
+  color: var(--accent);
 }
 
-.headerActions .headerBtnActive,
-.headerActions .headerBtnActive:hover:not(:disabled) {
-  color: var(--fg-primary);
-  background: var(--row-selected);
+.headerBtnDanger {
+  color: var(--error);
 }
 
-/* Attached-terminal dot: green when a terminal is focused, hollow when not. */
-.sessionDot {
+.attachIndicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+}
+
+.statusDot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.sessionDotOn {
+.statusDotAttached {
   background: var(--success);
 }
 
-.sessionDotOff {
-  box-shadow: inset 0 0 0 1.5px var(--fg-muted);
+.statusDotDetached {
+  background: var(--fg-muted);
+}
+
+.terminalSelect {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  padding: 1px 4px;
+  max-width: 160px;
+  outline: none;
+}
+
+.terminalSelect:focus {
+  border-color: var(--accent);
 }
 
 .terminalName {
-  font-size: var(--font-md);
-  font-weight: 400;
-  color: var(--fg-muted);
-  padding: 0;
-  background: transparent;
-  border-radius: 0;
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+  padding: 1px 6px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* ── Thread ─────────────────────────────────────────────── */
+.chatTabs {
+  composes: toolbar from "../ui/FormControls.module.css";
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chatTab {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.chatTabActive {
+  background: var(--bg-highlight);
+  box-shadow: inset 0 -2px var(--accent);
+}
+
+
+.chatTab button:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.newChatTab {
+  color: var(--fg-secondary);
+}
+
+.frozenBanner {
+  padding: 4px 16px;
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+
+.transcriptViewport {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.newTextBadge {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+}
+
+
+/* ── Messages ───────────────────────────────────────────── */
 .messageList {
+  overflow-anchor: none;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px 8px;
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
+}
+
+.messageList, .messageList * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.messageList button {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.findBar {
+  composes: toolbar from "../ui/FormControls.module.css";
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+
+.findBar input {
+  min-width: 0;
+  flex: 1 1 100px;
+}
+
+
+.copyAction {
+  opacity: 0;
+  margin-left: auto;
+}
+
+/* The bubble is only as tall as its text. Copy sits in the gutter to its left
+   (the bubble is capped at 85% of the row) instead of holding a hidden row. */
+.userMsg .copyAction {
+  white-space: nowrap;
+  position: absolute;
+  right: 100%;
+  bottom: 6px;
+  margin: 0 6px 0 0;
+}
+
+.userMsg:hover .copyAction,
+.userMsg:focus-within .copyAction,
+.assistantMsg:hover .copyAction,
+.assistantMsg:focus-within .copyAction {
+  opacity: 1;
 }
 
 .messageList > * {
   flex-shrink: 0;
 }
 
-/* Empty state — a quiet prompt, then the first moves as plain rows (no
-   boxes), the way Codex lists its suggestions. */
 .emptyState {
   flex: 1;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 6px;
-  padding: 8px 0 32px;
-  max-width: 360px;
-}
-
-.emptyMark {
-  display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin: 0 0 8px;
-  color: var(--fg-secondary);
-}
-
-.emptyTitle {
-  font-size: 17px;
-  font-weight: 500;
-  color: var(--fg-primary);
-  letter-spacing: -0.01em;
-  text-wrap: balance;
-}
-
-.emptyHint {
-  font-size: var(--font-md);
   color: var(--fg-muted);
-  line-height: 1.5;
-  text-wrap: pretty;
+  font-size: var(--font-base);
+  text-align: center;
+  padding: 40px 20px;
 }
 
-.starters {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  width: calc(100% + 16px);
-  margin: 14px -8px 0;
-}
-
-.starter {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: 32px;
-  padding: 0 8px;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  color: color-mix(in srgb, var(--fg-primary) 86%, transparent);
-  font-family: inherit;
-  font-size: 13.5px;
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
-}
-
-.starter:hover {
-  background: var(--row-selected);
-  color: var(--fg-primary);
-}
-
-.starterLabel {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.starterArrow {
-  display: inline-flex;
-  color: var(--fg-muted);
-}
-
-.starter:hover .starterArrow {
-  color: var(--fg-primary);
-}
-
-.starterKind {
-  font-size: var(--font-xs);
-  font-weight: 500;
-  color: var(--fg-muted);
-  padding: 1px 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-/* The user's turn: a quiet block on the right, no bubble tail. */
-/* Off-screen turns are skipped during layout.
-   A conversation is rendered in full — `<For each={conversationStore.messages()}>`
-   with no windowing — so without this, every layout in the whole document walks
-   every message ever sent, and a long session gets permanently slower. That is
-   the cost the freeze report caught: a renderer pinned in layout while the app
-   process sat idle, RSS climbing until macOS recycled it.
-
-   Measured in a standalone WKWebView, 400 messages of agent prose with long
-   unbreakable paths, 12 relayouts: 51 ms without, 6 ms with — 8.5x. The same
-   test showed kerning makes no difference for wrapping prose, so this, not
-   font shaping, is what dominates a long conversation.
-
-   `auto` in contain-intrinsic-size makes the browser remember each turn's last
-   rendered height, so the scrollbar does not jump as turns scroll out. */
+/* DEFERRED (2026-10-31) — reported right-edge user clipping does not reproduce
+   in the real Transcript at 420px or 960px. Preserve authored text and newlines;
+   do not guess at a PTY unwrapping fix without the failing source/layout. */
 .userMsg {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 80px;
+  position: relative;
   align-self: flex-end;
-  max-width: 88%;
-  background: var(--wash-1);
+  max-width: 85%;
+  background: var(--prompt-tint);
+  box-shadow: none;
   color: var(--fg-primary);
-  padding: 7px 12px;
-  border-radius: 12px 12px 4px 12px;
-  box-shadow: var(--highlight-inset);
-  font-size: var(--font-md);
+  padding: 4px 8px;
+  border-radius: var(--radius-lg);
+  font-size: var(--font-base);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* The assistant's turn sits flat on the panel — the panel is its bubble. */
 .assistantMsg {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
+  position: relative;
   align-self: flex-start;
   width: 100%;
-  font-size: var(--font-md);
-  line-height: 1.55;
-  color: var(--fg-primary);
+  font-size: var(--font-base);
+  line-height: 1.5;
 }
+
+.assistantMsg.intermediateMsg {
+  color: var(--fg-primary);
+  font-size: var(--font-sm, 0.875em);
+}
+
+/* Keep the intermediate size preference without reducing prose contrast. */
+.assistantMsg.intermediateMsg :global(#markdown-content) {
+  color: inherit;
+  font-size: inherit;
+}
+
+.systemNotice {
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
+
+.attachmentChip {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+  white-space: normal;
+}
+
+.agentIntent {
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  margin-bottom: 8px;
+}
+
+.agentIntent span {
+  color: var(--accent);
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.suggestedReplies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 
 .assistantMsg :global(#markdown-content) {
   padding: 0;
@@ -236,10 +308,8 @@
   word-break: break-all;
   padding: 8px 10px;
   margin-bottom: 8px;
-  border-radius: var(--radius-lg);
-  background: var(--bg-primary);
-  box-shadow: 0 0 0 1px var(--border-subtle);
-  font-size: 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-md);
 }
 
 .assistantMsg :global(#markdown-content code) {
@@ -298,18 +368,16 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--sheen-strong), var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--highlight-inset);
   color: var(--fg-secondary);
   cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .codeActionBtn:hover {
-  background: var(--sheen-strong), var(--bg-highlight);
+  background: var(--bg-highlight);
   color: var(--fg-primary);
 }
 
@@ -317,143 +385,247 @@
   color: var(--success);
 }
 
-/* ── Inline status rows (agent progress, results, errors) ── */
-.statusRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 28px;
-  padding: 0 4px 0 10px;
-  border-radius: var(--radius-md);
-  background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.18);
-  color: var(--accent);
-  font-size: var(--font-sm);
-}
-
-.statusRowDone {
-  background: var(--wash-0);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
-  color: var(--fg-secondary);
-}
-
-.statusRowError {
-  background: color-mix(in srgb, var(--error) 10%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--error) 30%, transparent);
-  color: var(--error);
-}
-
-.statusDot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.6;
-  flex-shrink: 0;
-}
-
-.statusDotLive {
-  opacity: 1;
-  animation: statusPulse 1.4s ease-in-out infinite;
-}
-
-@keyframes statusPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.45); }
-  60% { box-shadow: 0 0 0 5px rgba(var(--accent-rgb), 0); }
-}
-
-.statusText {
-  flex: 1;
-  min-width: 0;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.statusMeta {
-  color: var(--fg-secondary);
-  font-size: var(--font-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.statusBtn {
-  composes: iconBtn from "../shared/controls.module.css";
-}
-
-.statusRow .statusBtn {
-  width: 24px;
-  height: 24px;
-  color: inherit;
-}
-
-.statusRow .statusBtn:hover:not(:disabled) {
-  color: inherit;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.statusRow .statusBtnDanger,
-.statusRow .statusBtnDanger:hover:not(:disabled) {
-  color: var(--error);
-}
-
-.thinkingPulse {
-  animation: thinkingPulse 1.2s ease-in-out infinite;
-}
-
-@keyframes thinkingPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-/* Request errors — inline, with the retry right beside the message. */
+/* ── Error banner ───────────────────────────────────────── */
 .errorBanner {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 28px;
-  padding: 4px 6px 4px 10px;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--error) 10%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--error) 30%, transparent);
+  padding: 8px 16px;
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
   color: var(--error);
   font-size: var(--font-sm);
 }
 
 .errorText {
   flex: 1;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.retryBtn {
-  composes: btnGhost from "../shared/controls.module.css";
-}
 
-.errorBanner .retryBtn {
-  min-height: 22px;
-  padding: 0 8px;
-  font-size: var(--font-xs);
-  color: var(--error);
-}
-
-.errorBanner .retryBtn:hover:not(:disabled) {
-  color: var(--error);
-  background: color-mix(in srgb, var(--error) 14%, transparent);
-}
-
-/* ── Tool calls — one compact row each, expandable ─────── */
-.toolCalls {
+/* ── Input area ─────────────────────────────────────────── */
+.inputArea {
+  padding: 0;
   display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.inputBody {
+  display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
+  min-width: 0;
+}
+
+
+.filePreviews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filePreview {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+  font-size: var(--font-xs);
+}
+
+.filePreview button {
+  margin-left: 6px;
+}
+
+.imagePreviews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.imagePreview {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.imagePreview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.imagePreview button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
+
+.pasteError {
+  color: var(--error);
+  font-size: var(--font-xs);
+}
+
+.inputArea:not(.mobileComposer) .textarea {
+  flex: 0 0 auto;
+  resize: none;
+  overflow-y: hidden;
+  transition: height 0.12s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inputArea:not(.mobileComposer) .textarea {
+    transition: none;
+  }
+}
+
+
+.textarea::placeholder {
+  color: var(--fg-muted);
+  opacity: 1;
+}
+
+
+/* ── Agent mode ────────────────────────────────────────── */
+.agentBanner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  font-size: var(--font-sm);
+  color: var(--accent);
+}
+
+.agentBannerText {
+  flex: 1;
+  font-weight: 500;
+}
+
+.agentBannerIteration {
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+}
+
+.agentBannerBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  font-size: var(--font-sm);
+  padding: 1px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease;
+}
+
+.agentBannerBtn:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.agentBannerBtnDanger {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.agentBannerBtnDanger:hover {
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+}
+
+.agentDoneBanner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: color-mix(in srgb, var(--fg-muted) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg-muted) 20%, transparent);
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+}
+
+.agentDoneBannerError {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--error) 25%, transparent);
+  color: var(--error);
+}
+
+.unrestrictedBanner {
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  border-bottom: 1px solid var(--error);
+  color: var(--error);
+  font-size: var(--font-xs);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 12px;
+  text-align: center;
+}
+
+/* ── Tool call cards ───────────────────────────────────── */
+.toolActivity {
+  border: none;
+  border-radius: 0;
+  font-size: var(--font-xs);
+  overflow: hidden;
+}
+
+.toolActivitySummary,
+.toolActivityCallSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.toolActivitySummary:hover,
+.toolActivityCallSummary:hover {
+  background: var(--bg-highlight);
+}
+
+.toolActivityTitles {
+  flex: 1;
+  color: var(--fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.toolCallCount,
+.toolActivitySummary .toolCallDuration {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.toolActivityCalls {
+  border-top: 1px solid var(--border);
+}
+
+.toolActivityCall + .toolActivityCall {
+  border-top: 1px solid var(--border);
+}
+
+.toolActivityCallSummary {
+  padding-left: 18px;
 }
 
 .toolCallCard {
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  margin: 4px 0;
   font-size: var(--font-sm);
   overflow: hidden;
 }
@@ -461,32 +633,35 @@
 .toolCallHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 26px;
-  padding: 0 8px;
-  border-radius: var(--radius-md);
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
   cursor: pointer;
   user-select: none;
-  color: var(--fg-secondary);
 }
 
 .toolCallHeader:hover {
-  background: var(--surface-hover);
+  background: var(--bg-highlight);
 }
 
 .toolCallName {
-  font-family: var(--font-mono);
-  font-size: var(--font-xs);
+  font-weight: 500;
   color: var(--fg-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
+
+/* Inline syntax roles reuse the current app theme; no row geometry changes. */
+.toolLabel,
+.shellCommand { color: var(--accent); }
+.toolPath,
+.shellString { color: var(--success); }
+.shellFlag { color: var(--warning); }
+.shellOperator { color: var(--attention); }
+.shellVariable { color: var(--fg-primary); }
+.shellComment { color: var(--fg-secondary); }
 
 .toolCallDuration {
   color: var(--fg-muted);
   font-size: var(--font-xs);
-  font-variant-numeric: tabular-nums;
   margin-left: auto;
 }
 
@@ -516,14 +691,11 @@
 }
 
 .toolCallBody {
-  margin: 2px 0 4px 8px;
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  background: var(--bg-primary);
-  box-shadow: 0 0 0 1px var(--border-subtle);
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: var(--font-xs);
-  line-height: 1.45;
+  line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--fg-secondary);
@@ -535,34 +707,31 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 4px;
   margin-bottom: 2px;
-  color: var(--fg-muted);
 }
 
 .toolCallOutput {
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--fg-primary);
 }
 
 .toolCallCopyBtn {
   background: none;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--fg-muted);
   font-size: var(--font-xs);
   font-family: var(--font-ui);
-  padding: 0 5px;
+  padding: 0 4px;
   cursor: pointer;
-  line-height: 1.5;
-  transition: color var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
+  line-height: 1.4;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 
 .toolCallCopyBtn:hover {
   color: var(--fg-primary);
-  border-color: var(--border-strong);
+  border-color: var(--fg-secondary);
 }
 
 .toolCallCopyBtnCopied {
@@ -575,111 +744,133 @@
   border: none;
   color: var(--accent);
   font-size: var(--font-xs);
-  font-family: var(--font-ui);
-  padding: 4px 0 0;
+  font-family: var(--font-mono);
+  padding: 2px 0;
   cursor: pointer;
+  text-decoration: underline;
 }
 
-/* ── Approval card — the one thing that must not be missed ─ */
+/* ── Approval prompt ───────────────────────────────────── */
 .approvalCard {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: var(--radius-lg);
-  background: var(--sheen), color-mix(in srgb, var(--warning) 9%, transparent);
-  box-shadow: var(--highlight-inset), 0 0 0 1px color-mix(in srgb, var(--warning) 32%, transparent);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  margin: 4px 0;
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
 }
 
 .approvalText {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   font-size: var(--font-sm);
   color: var(--fg-primary);
-}
-
-.approvalLead {
-  font-weight: 600;
-}
-
-.approvalCommand {
-  font-family: var(--font-mono);
-  font-size: var(--font-xs);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-primary);
-  box-shadow: 0 0 0 1px var(--border-subtle);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.approvalReason {
-  font-size: var(--font-xs);
-  color: var(--fg-secondary);
-  line-height: 1.45;
+  margin-bottom: 6px;
 }
 
 .approvalActions {
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
-/* Approval buttons ride the shared btn recipe; approve/deny paint semantic
-   fills on top, alwaysAllow keeps the quiet default. */
-.approvalBtn {
-  composes: btn from "../shared/controls.module.css";
+
+.approveBtn {
+  background: var(--success);
+  color: var(--text-on-accent);
 }
 
-.approvalActions .approvalBtn {
-  min-height: 26px;
-  padding: 0 10px;
-  font-size: var(--font-sm);
-}
-
-.approvalActions .approveBtn {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--success) 82%, white), var(--success));
-  color: var(--text-on-success);
-  border-color: transparent;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 1px 2px rgba(0, 0, 0, 0.4);
-}
-
-.approvalActions .approveBtn:hover:not(:disabled) {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--success) 70%, white), var(--success));
-  color: var(--text-on-success);
-}
-
-.approvalActions .denyBtn {
-  background: transparent;
-  color: var(--error);
-  border-color: color-mix(in srgb, var(--error) 45%, transparent);
-  box-shadow: none;
-}
-
-.approvalActions .denyBtn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--error) 14%, transparent);
-  color: var(--error);
-  border-color: var(--error);
+.denyBtn {
+  background: var(--error);
+  color: var(--text-on-error);
 }
 
 .alwaysAllowBtn {
-  /* Default btn styling — no additional emphasis. */
+  background: color-mix(in srgb, var(--success) 18%, var(--bg-primary));
+  color: var(--success);
+  box-shadow: inset 0 0 0 1px var(--success);
 }
 
-/* ── History ────────────────────────────────────────────── */
+/* ── Model picker ──────────────────────────────────────── */
+.modelPicker { max-width: 180px; }
+
+
+/* ── Step count input ──────────────────────────────────── */
+.stepInput {
+  font-size: var(--font-xs);
+  background: var(--bg-secondary);
+  color: var(--fg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1px 4px;
+  width: 48px;
+  text-align: center;
+}
+
+/* ── Input queue badge ─────────────────────────────────── */
+.queueBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  padding: 0 4px;
+}
+
+.queueList {
+  display: flex;
+  flex: 0 0 100%;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.queueHeader {
+  composes: toolbar from "../ui/FormControls.module.css";
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+}
+
+.queueRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.queueText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+}
+
+
+/* ── History panel ──────────────────────────────────── */
 .historyPanel {
   flex: 1;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 8px 6px;
-  background: transparent;
+  padding: 8px 0;
+  background: var(--bg-primary);
 }
 
+/* Section label: sentence case, 12px/600, no tracking (STYLE_GUIDE › Typography). */
 .historyHeader {
-  padding: 4px 10px 8px;
+  padding: 4px 16px 8px;
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--fg-secondary);
@@ -696,19 +887,18 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 10px;
+  padding: 6px 16px;
   background: none;
   border: none;
-  border-radius: var(--radius-md);
   cursor: pointer;
   text-align: left;
   color: var(--fg-primary);
   font-family: var(--font-ui);
-  font-size: var(--font-md);
+  font-size: var(--font-sm);
 }
 
 .historyItem:hover {
-  background: var(--surface-hover);
+  background: var(--bg-highlight);
 }
 
 .historyTitle {
@@ -738,20 +928,36 @@
 }
 
 .historyModel {
-  color: var(--fg-muted);
+  color: var(--accent);
+  font-size: 10px;
+  opacity: 0.8;
 }
 
 .historyDate {
   color: var(--fg-muted);
   margin-left: auto;
-  font-variant-numeric: tabular-nums;
 }
 
-/* ── Reasoning disclosure (Opus 4.7+ extended thinking) ── */
+/* ── Usage footer ───────────────────────────────────────── */
+.usageFooter {
+  padding: 3px 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--fg-muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-family: var(--font-mono);
+  line-height: 1.4;
+}
+
+
+/* Extended-thinking disclosure (Opus 4.7+ reasoning) */
 .reasoningDisclosure {
-  margin: 0;
-  border-left: 2px solid var(--border-subtle);
-  padding-left: 10px;
+  margin: 4px 0;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
 }
 
 .reasoningSummary {
@@ -766,8 +972,7 @@
   content: "▸";
   display: inline-block;
   margin-right: 6px;
-  color: var(--fg-muted);
-  transition: transform var(--duration-base) var(--ease-out);
+  transition: transform var(--t-norm, 0.15s);
 }
 
 .reasoningDisclosure[open] > .reasoningSummary::before {
@@ -778,409 +983,494 @@
   margin-top: 4px;
   font-size: var(--font-sm);
   color: var(--fg-muted);
+  opacity: 0.85;
 }
 
-/* ── Voice stage — the agent you can watch ─────────────── */
-.voiceStage {
+/* --- The ego panel (#785-58ca) --------------------------------------------
+   Everything above is the frame the embedded engine left behind and is reused
+   as-is. What follows is only what the ACP conversation added and had no home:
+   the agent's plan, an elicitation form, and the row of session controls. */
+
+.controlBar {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 0 12px;
-  padding: 6px 10px 6px 8px;
-  border-radius: var(--radius-lg);
-  background: var(--sheen), rgba(var(--accent-rgb), 0.06);
-  box-shadow: var(--highlight-inset), 0 0 0 1px rgba(var(--accent-rgb), 0.14);
-  min-width: 0;
+  gap: 6px;
+  flex-wrap: nowrap;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
 }
 
-.voiceText {
+.controlSpacer {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
 }
 
-.voiceLabel {
-  font-size: var(--font-md);
-  font-weight: 500;
-  color: var(--fg-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.controlBar .headerBtn {
+  flex-shrink: 0;
 }
 
-.voiceHint {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ── Live mic strips (dictation, voice session) ─────────── */
-.micLive {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 12px;
-  padding: 6px 10px;
-  border-radius: var(--radius-md);
-  background: var(--wash-0);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
-  font-size: var(--font-sm);
+.sessionSettingsSummary {
   color: var(--fg-secondary);
-  min-width: 0;
-}
-
-.micLabel {
+  font-size: var(--font-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 220px;
   min-width: 0;
 }
 
-.micDot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--error);
-  animation: micPulse 1s ease-in-out infinite;
-  flex-shrink: 0;
+.sessionSettingsDialog {
+  width: min(420px, calc(100vw - 32px));
 }
 
-/* Muted: the dot stops pulsing, because nothing is being heard. */
-.micDotMuted {
-  composes: micDot;
-  background: var(--fg-muted);
-  animation: none;
+.sessionSettingRow + .sessionSettingRow {
+  margin-top: 16px;
 }
 
-/* Voice-strip controls, pinned to the trailing edge so they sit clear of the
-   meter and do not shift as the status text changes length. */
-.micActions {
-  margin-left: auto;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.micStopBtn {
-  composes: btnGhost from "../shared/controls.module.css";
-}
-
-.micActions .micStopBtn {
-  min-height: 22px;
-  padding: 0 8px;
-  gap: 5px;
-  font-size: var(--font-xs);
-}
-
-/* Muted is a state the user has to be able to spot without reading the label —
-   a chat that has stopped answering looks the same as one that cannot hear. */
-.micMuteBtnActive {
-  composes: micStopBtn;
-}
-
-.micActions .micMuteBtnActive {
-  background: color-mix(in srgb, var(--error) 16%, transparent);
-  color: var(--error);
-}
-
-.micActions .micMuteBtnActive:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--error) 24%, transparent);
-  color: var(--error);
-}
-
-@keyframes micPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-.micError {
-  margin: 4px 12px 0;
-  font-size: var(--font-xs);
-  color: var(--error);
-}
-
-/* ── Composer — the same card as the compose dock (ComposeDock.module.css):
-   one raised tone, no border, 18px radius, 28px round controls; glass (sheen
-   and rim light) in a flat theme, plain in a tonal one. ── */
-.inputArea {
-  margin: 8px 12px 12px;
-  padding: 12px 10px 10px 14px;
+.sessionSettingLabel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  background: var(--sheen), var(--surface-composer);
-  border: none;
-  border-radius: 18px;
-  box-shadow: var(--rim);
-  transition: box-shadow var(--duration-fast) var(--ease-out);
-}
-
-.inputArea:focus-within {
-  box-shadow: var(--rim), 0 0 0 1px var(--border-strong);
-}
-
-.inputAreaFrozen {
-  opacity: 0.6;
-}
-
-.textarea {
-  width: 100%;
-  background: transparent;
-  border: none;
-  border-radius: 0;
+  gap: 6px;
   color: var(--fg-primary);
-  font-size: var(--font-lg);
-  font-family: var(--font-ui);
-  padding: 0;
-  resize: none;
-  min-height: 22px;
-  max-height: 180px;
-  line-height: 1.45;
-  box-sizing: border-box;
-  overflow-y: auto;
-  outline: none;
+  font-size: var(--font-md);
 }
 
-.textarea:focus {
-  outline: none;
-}
-
-.textarea::placeholder {
+.sessionSettingDescription {
+  margin: 4px 0 0;
   color: var(--fg-muted);
+  font-size: var(--font-sm);
 }
 
-.composerRow {
+.sessionSettingSelect { width: 100%; }
+
+
+.planList {
+  list-style: none;
+  margin: 0;
+  padding: 6px 10px;
+  font-size: var(--font-sm);
+}
+
+.planItem {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+  align-items: baseline;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.planItemActive {
+  color: var(--fg-primary);
+}
+
+.planItemDone {
+  color: var(--fg-muted);
+  text-decoration: line-through;
+}
+
+.noticeCard {
+  align-self: flex-start;
+  width: 100%;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  font-size: var(--font-sm);
+  line-height: 1.5;
+}
+
+.noticeTitle {
+  color: var(--accent);
+  font-size: var(--font-xs);
+  margin-bottom: 4px;
+}
+
+.noticeBody {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.noticeAction {
+  margin-top: 8px;
+}
+
+
+.settledNote {
+  align-self: center;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.formField {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0;
+}
+
+.formLabel {
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+}
+
+.formInput { width: 100%; }
+
+
+.setupActions {
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+
+/* ── Provider retry status ─────────────────────────────── */
+.providerRetry {
+  padding: 4px 8px;
+  border-left: 2px solid var(--warning);
+  color: var(--warning);
+  font-size: var(--font-xs);
+}
+
+.replyActions {
+  /* Reserve the real control height, including the touch minimum. */
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
   gap: 8px;
-  min-width: 0;
 }
 
-.composerChips {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
+.replyActions .copyAction {
+  margin-left: 0;
 }
 
-.composerActions {
-  display: flex;
-  align-items: center;
+.historyBoundary {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+}
+
+/* Mobile shares the session input contract, including native field sizing. */
+.inputArea.mobileComposer {
+  position: relative;
+  padding: 4px 2px;
   gap: 2px;
   flex-shrink: 0;
 }
 
-/* Chips: the turn's knobs. A chip is either a native <select> dressed as a
-   chip (WKWebView pops the system menu, which is the right thing on a Mac),
-   a labelled number field, or a toggle button. */
-.chip {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: var(--radius-pill);
-  background: var(--chip-fill);
-  color: var(--fg-secondary);
-  font-family: inherit;
+.mobileComposer .inputBody { flex: 1; min-width: 0; }
+.mobileComposer textarea { min-width: 0; }
+.composerActions { display: contents; }
+
+
+/* Keep Park and Stop beside the input instead of reserving another row. */
+.mobileComposerActions { display: contents; }
+.mobileComposer .filePreview { max-width: 100%; overflow-wrap: anywhere; }
+
+/* A flex item's automatic minimum must never widen the phone transcript. */
+.mobileTranscript { min-width: 0; }
+/* Phone reading size applies to earlier explanatory blocks as well as final answers. */
+.mobileTranscript .assistantMsg.intermediateMsg { font-size: var(--font-base); }
+.mobileTranscript > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.mobileTranscript .suggestedReplies button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.mobileTranscript .toolActivitySummary,
+.mobileTranscript .toolActivityCallSummary { flex-wrap: wrap; }
+.mobileTranscript .toolCallName { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.mobileTranscript .toolCallDuration { white-space: normal; }
+.mobileTranscript :global(#markdown-content table) { display: block; max-width: 100%; overflow-x: auto; }
+
+
+/* Terminal Chat owns its reading layout; AI Chat retains the live conversation layout. */
+.messageList[data-terminal-chat] .userMsg {
+  width: fit-content;
+  max-width: min(80ch, 85%);
+  box-shadow: none;
+  /* FastAF: same bubble as the AI Chat panel (FastAFChatPanel.module.css .userMsg). */
+  padding: 7px 12px;
+  border-radius: 12px 12px 4px 12px;
   font-size: var(--font-md);
-  font-weight: 400;
-  white-space: nowrap;
-  cursor: pointer;
-  border: none;
-  box-shadow: var(--rim);
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
 }
 
-.chip:hover {
-  background: var(--chip-fill-hover);
-  color: var(--fg-primary);
+.messageList[data-terminal-chat] .assistantMsg {
+  max-width: 96ch;
 }
 
-.chip > svg {
-  flex-shrink: 0;
-  color: var(--fg-muted);
+.messageList[data-terminal-chat] [data-answer-card] {
+  padding: 12px 16px;
 }
 
-.chipAccent {
-  background: var(--chip-accent-fill);
-  color: var(--accent);
+.messageList[data-terminal-chat]:not(.mobileTranscript) [data-answer-card] .replyActions {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  left: auto;
 }
 
-.chipAccent:hover {
-  background: var(--chip-accent-fill-hover);
-  color: var(--accent);
+.messageList[data-terminal-chat] .systemNotice {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
 }
 
-.chipAccent > svg {
-  color: inherit;
+/* Scope the rule to the CLI planner's answer blocks, never the whole message. */
+.messageList[data-terminal-chat] .assistantMsg :global(#markdown-content [data-tuic-answer]) {
+  border-left: 3px solid var(--answer-rule);
+  margin-left: -16px;
 }
 
-.chipDanger {
-  background: color-mix(in srgb, var(--error) 16%, transparent);
-  color: var(--error);
+/* Fenced code keeps its own inset, including room for the Copy control. */
+.messageList[data-terminal-chat] .assistantMsg :global(#markdown-content [data-tuic-answer]:not(pre)) {
+  padding: 0 0 0 13px;
+  margin-top: 0;
+  margin-bottom: 8px;
 }
 
-.chipDanger:hover {
-  background: color-mix(in srgb, var(--error) 24%, transparent);
-  color: var(--error);
+/* Outside list markers need Markdown's normal gutter in addition to the answer inset. */
+.messageList[data-terminal-chat] .assistantMsg :global(#markdown-content :is(ul, ol)[data-tuic-answer]) {
+  padding-left: calc(13px + 2em);
 }
 
-.chipButton {
-  padding: 0 9px 0 7px;
+/* Only the last block of the last segment ends the card; every earlier segment's last block keeps its gap. */
+.messageList[data-terminal-chat] .assistantMsg :global(#markdown-content > div:last-child > [data-tuic-answer]:last-child) {
+  margin-bottom: 0;
 }
 
-.chipButton > svg {
-  color: inherit;
+.conversationList { position: relative; }
+.conversationRows {
+	position: absolute;
+	right: 0;
+	top: 100%;
+	z-index: 10;
+	width: min(360px, 80vw);
+	max-height: 300px;
+	overflow-y: auto;
+	background: var(--bg-secondary);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	padding: 4px;
 }
-
-.chipLabel {
-  color: inherit;
-}
-
-/* The chip shows its value as text and the native <select> lies invisibly on
-   top of it, so the chip is exactly as wide as its label (a bare select
-   reserves the width of its longest option) and macOS still pops the system
-   menu on click. */
-.chipValue {
-  max-width: 140px;
+.conversationRow { display: flex; align-items: center; gap: 4px; }
+.conversationName {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.chipSelect {
-  appearance: none;
-  -webkit-appearance: none;
+
+.mobileComposerContainer { display: contents; }
+
+.composerCard {
+  flex-shrink: 0;
+  margin: 6px 8px 8px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+/* Actions keep their shared control size at the bottom of the growing editor. */
+.composerCard .composerActions {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.composerCard .composerActions .textarea {
+  flex: 1;
+}
+.composerHeader {
+  composes: toolbar from "../ui/FormControls.module.css";
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+}
+.composerHeader > button { margin-left: auto; }
+.repoContext { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--fg-secondary); font-size: var(--font-xs); }
+.repoContext > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repoContext strong { color: var(--fg-primary); font-weight: 600; }
+.contextUsage { min-width: 0; }
+
+/* The header contains shared desktop/touch targets without clipping. */
+.tidyHeader {
+  composes: toolbar from "../ui/FormControls.module.css"; display: flex; align-items: center; gap: 4px; flex-shrink: 0; box-sizing: border-box; padding: 4px 8px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+.sessionHeader { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1; }
+.conversationSwitcher { position: relative; flex: 1; min-width: 0; }
+.conversationLabel { box-sizing: border-box; height: var(--control-height, 36px); padding: 0 var(--control-padding-x, 8px); display: flex; align-items: center; gap: 5px; font-weight: 600; font-size: 12px; min-width: 0; }
+.conversationLabel span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversationLabel svg { flex-shrink: 0; }
+
+.conversationSwitcher:focus-within { outline: 1px solid var(--accent); border-radius: var(--radius-sm); }
+.sessionHeader > .headerBtn { flex-shrink: 0; gap: 4px; font-size: 12px; }
+.actionsMenu { position: relative; flex-shrink: 0; }
+.actionsMenu > summary { list-style: none; font-size: 18px; }
+.actionsMenu > summary::-webkit-details-marker { display: none; }
+.actionsMenuItems {
+  composes: form from "../ui/FormControls.module.css"; position: absolute; top: 100%; right: 0; z-index: 20; min-width: 230px; max-height: 65vh; overflow-y: auto; padding: 4px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-dropdown); }
+.actionsMenuItems > .headerBtn, .actionsMenuItems > .conversationList > summary {
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+.actionsMenuItems > .conversationList > summary::-webkit-details-marker { display: none; }
+.menuSeparator { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
+.menuHint { margin-left: auto; font-size: 10px; color: var(--fg-muted); white-space: nowrap; }
+.actionsMenuItems .conversationRows { position: static; box-shadow: none; border: none; }
+.composerMeta { composes: toolbar from "../ui/FormControls.module.css"; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 11px; color: var(--fg-secondary); min-width: 0; }
+.composerMeta .sessionSettingsSummary { margin-left: auto; font-size: inherit; }
+.stepTitle { color: var(--accent); font-weight: 600; white-space: nowrap; max-width: 35%; overflow: hidden; text-overflow: ellipsis; }
+.stepDescription { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-secondary); }
+.toolActivitySummary { white-space: nowrap; }
+.toolActivitySummary .toolCallDuration { font-size: 10px; }
+.mobileTranscript .toolActivitySummary { flex-wrap: nowrap; }
+
+.panel .messageList { padding: 12px; gap: 6px; }
+.panel .assistantMsg { margin-bottom: 4px; }
+.panel .assistantMsg :global(#markdown-content ul), .panel .assistantMsg :global(#markdown-content ol) { padding-left: 20px; margin-bottom: 8px; }
+.assistantMsg :global(#markdown-content .chat-table-source) { white-space: pre; overflow-x: auto; word-break: normal; }
+
+/* One scroll surface keeps tabular columns aligned and each version fully tinted. */
+.editDiff {
+  margin: 8px 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.editDiff figcaption { padding: 6px 8px; overflow-wrap: anywhere; font-size: var(--font-xs); }
+.editDiffScroll { max-width: 100%; overflow-x: auto; }
+.editDiffVersions { width: max-content; min-width: 100%; }
+.editDiffOld { background: color-mix(in srgb, var(--error) 12%, var(--bg-primary)); }
+.editDiffNew { background: color-mix(in srgb, var(--success) 12%, var(--bg-primary)); }
+.editDiffOld > span, .editDiffNew > span { display: block; padding: 4px 8px 0; font-size: var(--font-xs); font-weight: 600; }
+.editDiff pre { margin: 0; padding: 4px 8px 8px; white-space: pre; tab-size: 4; font: var(--font-sm)/1.5 var(--font-mono); color: var(--fg-primary); }
+
+/* Native pickers keep platform activation over the shared-height visible frame. */
+.conversationSwitcher > select[data-control-layout="overlay-picker"] {
   position: absolute;
   inset: 0;
   width: 100%;
+  max-width: none;
   height: 100%;
-  margin: 0;
-  padding: 0;
   opacity: 0;
-  border: none;
-  font: inherit;
   cursor: pointer;
 }
 
-.chipSelect:focus-visible {
-  outline: none;
+/* Preserve native details activation and Escape focus return, not a custom menu. */
+summary.headerBtn[data-control-layout="disclosure"] {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: var(--control-height, 36px);
+  padding: 0 var(--control-padding-x, 8px);
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  color: var(--fg-secondary);
+  cursor: pointer;
 }
-
-.chip:focus-within {
-  box-shadow: var(--rim), 0 0 0 2px rgba(var(--accent-rgb), 0.35);
-}
-
-.stepInput {
-  width: 30px;
-  background: transparent;
-  border: none;
+.actionsMenu > summary.headerBtn[data-control-layout="disclosure"] {
+  width: var(--control-height, 36px);
+  justify-content: center;
   padding: 0;
-  color: var(--fg-primary);
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  outline: none;
-  -moz-appearance: textfield;
+}
+summary.headerBtn[data-control-layout="disclosure"]:hover { background: var(--bg-highlight); }
+summary.headerBtn[data-control-layout="disclosure"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Preserve the tested panel-relative editor cap and one-line reset on shared Textarea. */
+.textarea[data-control-layout="composer-editor"] { min-height: var(--control-height, 36px); }
+@media (max-width: 600px) {
+  .conversationLabel { height: max(44px, var(--control-height, 36px)); }
+  summary.headerBtn[data-control-layout="disclosure"] { height: max(44px, var(--control-height, 36px)); }
+  .actionsMenu > summary.headerBtn[data-control-layout="disclosure"] { width: max(44px, var(--control-height, 36px)); }
+  .textarea[data-control-layout="composer-editor"] { min-height: max(44px, var(--control-height, 36px)); }
 }
 
-.stepInput::-webkit-inner-spin-button,
-.stepInput::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+
+/* Slash offers share the composer's width and stay scrollable on small screens. */
+.slashCommands {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
 }
 
-/* Send: a 28px circle in the text colour with the arrow cut out of it —
-   Codex's send. Stop takes its place while streaming, same circle, ■. */
-.sendBtn {
-  width: 28px;
-  height: 28px;
+button[data-control-layout="row"].slashCommand {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 4px;
-  background: var(--fg-primary);
-  color: var(--bg-primary);
-  border: none;
-  border-radius: var(--radius-full);
-  box-shadow: none;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background var(--duration-fast) var(--ease-out),
-    opacity var(--duration-fast) var(--ease-out);
-}
-
-.sendBtn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
-}
-
-.sendBtn:disabled {
-  background: var(--wash-2);
-  color: var(--fg-primary);
-  opacity: 0.45;
-  cursor: default;
-}
-
-.stopBtn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 4px;
-  background: var(--fg-primary);
-  color: var(--bg-primary);
-  border: none;
-  border-radius: var(--radius-full);
-  box-shadow: none;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: opacity var(--duration-fast) var(--ease-out);
-}
-
-.stopBtn:hover {
-  opacity: 0.85;
-}
-
-/* Voice and dictation: ghost icon buttons; the active one turns red. */
-.micBtn,
-.micBtnActive {
-  composes: iconBtn from "../shared/controls.module.css";
-}
-
-.composerActions .micBtn,
-.composerActions .micBtnActive {
-  border-radius: var(--radius-full);
-}
-
-.composerActions .micBtnActive,
-.composerActions .micBtnActive:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--error) 18%, transparent);
-  color: var(--error);
-}
-
-/* ── Usage — one quiet line, numbers only ─────────────── */
-.usageFooter {
-  padding: 0 16px 8px;
-  margin-top: -4px;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 0;
   background: transparent;
-  font-size: var(--font-2xs);
+  color: var(--fg-primary);
+  text-align: left;
+  gap: 3px;
+  cursor: pointer;
+}
+
+button[data-control-layout="row"].slashCommand[aria-selected="true"],
+button[data-control-layout="row"].slashCommand:hover {
+  background: var(--bg-highlight);
+}
+
+.slashCommand span,
+.slashCommand code,
+.commandNotice {
+  color: var(--fg-secondary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* Pending receipts and host-owned queued prompts share the muted palette. */
+.userMsg[data-pending] {
   color: var(--fg-muted);
+  background: var(--bg-tertiary);
+}
+
+.pendingLabel {
+  display: block;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
+
+/* Treat inline code as one chip; only tokens wider than the reading column wrap inside it. */
+.messageList[data-terminal-chat] .assistantMsg :global(#markdown-content :not(pre) > code) {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detectedEgo {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
   align-items: center;
-  font-family: var(--font-ui);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.4;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  color: var(--fg-primary);
+  overflow-wrap: anywhere;
+}
+
+.pendingActions {
+  composes: toolbar from "../ui/FormControls.module.css";
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  gap: 4px;
+  margin-inline-start: 8px;
 }

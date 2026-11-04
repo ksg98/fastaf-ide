@@ -5,11 +5,39 @@ import { ACTION_NAMES } from "../../keybindingDefaults";
 import { settingsStore } from "../../stores/settings";
 
 describe("KeyboardShortcutsTab", () => {
+	// Catches: migrating Rebind loses its capture handler or Escape changes the saved binding.
+	it("cancels a rebind without changing its current shortcut", () => {
+		const view = render(() => <KeyboardShortcutsTab />);
+		const row = view.container.querySelector("tr")!;
+		const before = row.querySelector("kbd")!.textContent;
+		fireEvent.click(row.querySelector("button")!);
+		const recorder = view.getByText("Press a key...");
+		fireEvent.keyDown(recorder, { key: "Escape", code: "Escape" });
+		expect(row.querySelector("kbd")!.textContent).toBe(before);
+		expect(row.querySelector("button")!.textContent).toBe("Rebind");
+	});
+	// Catches: named rebind controls disappearing or obsolete permanent walkthroughs returning.
+	it("shows named Rebind actions without a permanent walkthrough", () => {
+		const view = render(() => <KeyboardShortcutsTab />);
+		expect(view.getByRole("region", { name: "Shortcut groups" })).toBeTruthy();
+		expect(view.getAllByRole("button", { name: "Rebind" }).length).toBeGreaterThan(0);
+		expect(view.container.textContent).not.toContain("Click Rebind to change a shortcut.");
+		expect(view.container.textContent).not.toContain("pencil icon");
+	});
+
 	it("renders the heading", () => {
 		const { container } = render(() => <KeyboardShortcutsTab />);
-		const heading = container.querySelector("h3");
+		const heading = container.querySelector("h2");
 		expect(heading).not.toBeNull();
 		expect(heading!.textContent).toBe("Keyboard Shortcuts");
+	});
+
+	it("keeps each action before its binding controls in reading and focus order", () => {
+		// Catches a visual-only reversal that leaves screen readers hearing keys before the action.
+		const { container } = render(() => <KeyboardShortcutsTab />);
+		const firstRow = container.querySelector("tr");
+		expect(firstRow?.firstElementChild?.textContent).toBe("New terminal tab");
+		expect(firstRow?.lastElementChild?.querySelector("button")?.textContent).toContain("Rebind");
 	});
 
 	it("has a search input", () => {
@@ -70,6 +98,9 @@ describe("KeyboardShortcutsTab completeness", () => {
 		"next-tab",
 		...Array.from({ length: 9 }, (_, i) => `switch-tab-${i + 1}`),
 		...Array.from({ length: 9 }, (_, i) => `switch-branch-${i + 1}`),
+		// FastAF: desktop hides upstream's hands-free conversation (its voice agent is
+		// the one hands-free mode); the row still shows in browser mode.
+		"toggle-hands-free",
 	]);
 
 	it("renders a row for every canonical action (no silent drift from ACTION_NAMES)", () => {

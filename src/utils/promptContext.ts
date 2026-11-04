@@ -1,10 +1,11 @@
 import type { ContextMenuItem } from "../components/ContextMenu";
-import type { useSmartPrompts } from "../hooks/useSmartPrompts";
+import type { SmartPromptResult, useSmartPrompts } from "../hooks/useSmartPrompts";
 import { t } from "../i18n";
 import { appLogger } from "../stores/appLogger";
 import { promptLibraryStore, type SavedPrompt } from "../stores/promptLibrary";
 import { toastsStore } from "../stores/toasts";
 import type { BranchPrStatus } from "../types";
+import { promptError } from "./promptError";
 
 /**
  * Shared helpers for `placement: "file-context"` smart prompts.
@@ -105,13 +106,22 @@ async function runFileContextPrompt(
 	smartPrompts: ReturnType<typeof useSmartPrompts>,
 ): Promise<void> {
 	promptLibraryStore.markAsUsed(prompt.id);
+	await runWithFeedback(prompt, () => smartPrompts.executeSmartPrompt(prompt, vars));
+}
+
+/**
+ * Run a smart prompt from a menu or shortcut and tell the user when it did not run.
+ * A prompt that cannot start (no headless agent, unresolved variable) returns
+ * `{ ok: false, reason }`; dropping that leaves the click looking like a no-op.
+ */
+export async function runWithFeedback(prompt: SavedPrompt, run: () => Promise<SmartPromptResult>): Promise<void> {
 	try {
-		const result = await smartPrompts.executeSmartPrompt(prompt, vars);
+		const result = await run();
 		if (!result.ok) {
 			toastsStore.add(prompt.name, result.reason ?? "Failed", "warn");
 		}
 	} catch (err) {
 		appLogger.error("prompts", `Failed to execute "${prompt.name}"`, err);
-		toastsStore.add(prompt.name, String(err), "error");
+		toastsStore.add(prompt.name, promptError(err), "error");
 	}
 }

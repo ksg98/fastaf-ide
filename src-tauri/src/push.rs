@@ -1,9 +1,15 @@
 //! Web Push notification support — VAPID keys, subscription management, push sending.
 
 use base64ct::{Base64UrlUnpadded, Encoding};
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use web_push_native::p256;
+
+pub(crate) mod crypto;
+#[cfg(test)]
+use crypto::{encrypt_push_record, push_key_material};
+#[cfg(test)]
+mod crypto_guards;
 
 /// Known push service host suffixes. Endpoints not matching these are rejected (SSRF prevention).
 const ALLOWED_PUSH_HOSTS: &[&str] = &[
@@ -148,18 +154,90 @@ impl PushStore {
 /// Generate a new ES256 VAPID key pair for Web Push.
 /// Returns (private_key_base64url, public_key_base64url).
 pub(crate) fn generate_vapid_keys() -> Result<(String, String), String> {
-    use p256::ecdsa::SigningKey;
-
-    let signing_key = SigningKey::random(&mut rand_core::OsRng);
+    let signing_key = p256::SecretKey::random(&mut rand_core::OsRng);
     let private_b64 = Base64UrlUnpadded::encode_string(signing_key.to_bytes().as_ref());
-    let uncompressed = signing_key.verifying_key().to_encoded_point(false);
+    let uncompressed = signing_key.public_key().to_encoded_point(false);
     let public_b64 = Base64UrlUnpadded::encode_string(uncompressed.as_bytes());
 
     Ok((private_b64, public_b64))
 }
 
-/// Send a push notification to a list of subscriptions.
-/// Returns endpoints that should be removed (410 Gone = revoked).
+/// Push-service acceptance, failures, and subscriptions revoked by the service.
+#[derive(Default)]
+pub(crate) struct PushBatchResult {
+    pub sent: usize,
+    pub failed: usize,
+    pub stale_endpoints: Vec<String>,
+}
+
+/// Reserve the shared 30-second mobile alert window for one session.
+pub(crate) fn reserve_push_slot(
+    last_push_ms: &mut Option<u64>,
+    now_ms: u64,
+    eligible: bool,
+) -> bool {
+    if !eligible || last_push_ms.is_some_and(|last| now_ms.saturating_sub(last) < 30_000) {
+        return false;
+    }
+    *last_push_ms = Some(now_ms);
+    true
+}
+
+/// Build the user-facing session notice separately from its navigation identity.
+pub(crate) fn session_push_payload(
+    session_id: &str,
+    display_name: Option<&str>,
+    agent_type: Option<&str>,
+    cwd: Option<&str>,
+    prompt: &str,
+) -> (String, String) {
+    let usable = |value: &str| !value.trim().is_empty() && value.trim() != session_id;
+    let name = display_name
+        .filter(|value| usable(value))
+        .map(str::trim)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let agent = agent_type
+                .filter(|value| usable(value))
+                .unwrap_or("Terminal");
+            let repo = cwd
+                .and_then(|path| path.rsplit(['/', '\\']).find(|part| !part.is_empty()))
+                .filter(|value| usable(value));
+            match repo {
+                Some(repo) => format!("{agent} · {repo}"),
+                None => agent.to_owned(),
+            }
+        });
+    let prompt = prompt.trim();
+    // Progress tool rows are presentation chrome, not the user's question.
+    let progress = prompt
+        .split_once('{')
+        .filter(|(prefix, _)| prefix.split_whitespace().last() == Some("progress"));
+    let progress_text = progress.and_then(|(_, json)| {
+        serde_json::from_str::<serde_json::Value>(&format!("{{{json}"))
+            .ok()?
+            .get("text")?
+            .as_str()
+            .map(str::to_owned)
+    });
+    let text = if progress.is_some() {
+        progress_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or("awaiting input")
+    } else if prompt.is_empty() {
+        "awaiting input"
+    } else {
+        prompt
+    };
+    (
+        format!("{name}: {text}"),
+        format!("/mobile/session/{session_id}"),
+    )
+}
+
+/// Send a push notification to a list of subscriptions. `sent` counts accepted
+/// push-service requests, not notifications displayed by a phone.
 pub(crate) async fn send_push_batch(
     subs: Vec<PushSubscription>,
     config: &crate::config::AppConfig,
@@ -167,16 +245,14 @@ pub(crate) async fn send_push_batch(
     title: &str,
     body: &str,
     url: &str,
-) -> Vec<String> {
-    use p256::ecdsa::SigningKey;
-
-    let mut stale_endpoints: Vec<String> = Vec::new();
+) -> PushBatchResult {
+    let mut result = PushBatchResult::default();
 
     if !config.services.push.enabled
         || config.services.push.vapid_private_key.is_empty()
         || subs.is_empty()
     {
-        return stale_endpoints;
+        return result;
     }
 
     let payload = serde_json::json!({ "title": title, "body": body, "url": url });
@@ -186,17 +262,16 @@ pub(crate) async fn send_push_batch(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(source = "push", "Invalid VAPID private key encoding: {e}");
-            return stale_endpoints;
+            result.failed = subs.len();
+            return result;
         }
     };
-    let vapid_kp = match p256::SecretKey::from_slice(&kp_bytes)
-        .map(|sk| SigningKey::from(&sk))
-        .map_err(|e| e.to_string())
-    {
+    let vapid_kp = match p256::SecretKey::from_slice(&kp_bytes) {
         Ok(kp) => kp,
         Err(e) => {
             tracing::error!(source = "push", "Failed to load VAPID key pair: {e}");
-            return stale_endpoints;
+            result.failed = subs.len();
+            return result;
         }
     };
 
@@ -207,7 +282,7 @@ pub(crate) async fn send_push_batch(
             build_push_request(
                 sub,
                 &vapid_kp,
-                &config.services.push.vapid_subject,
+                config.services.push.effective_vapid_subject(),
                 &payload_bytes,
             )
         })
@@ -230,11 +305,11 @@ pub(crate) async fn send_push_batch(
                             source = "push",
                             "Subscription revoked (410 Gone), removing"
                         );
-                        Some(endpoint)
+                        (false, Some(endpoint))
                     }
                     Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 201 => {
                         tracing::debug!(source = "push", "Push sent successfully");
-                        None
+                        (true, None)
                     }
                     Ok(resp) => {
                         let status = resp.status().as_u16();
@@ -246,40 +321,49 @@ pub(crate) async fn send_push_batch(
                                 source = "push",
                                 "Subscription stale (status={status}), removing: {body_text}"
                             );
-                            return Some(endpoint);
+                            return (false, Some(endpoint));
                         }
                         tracing::warn!(
                             source = "push",
                             "Push delivery failed: status={status} body={body_text}"
                         );
-                        None
+                        (false, None)
                     }
                     Err(e) => {
                         tracing::warn!(source = "push", "Push request error: {e}");
-                        None
+                        (false, None)
                     }
                 }
             }
         })
         .collect();
 
-    let results = futures_util::future::join_all(futures).await;
-    for result in results.into_iter().flatten() {
-        stale_endpoints.push(result);
+    result.failed = subs.len() - futures.len();
+    for (accepted, stale_endpoint) in futures_util::future::join_all(futures).await {
+        if accepted {
+            result.sent += 1;
+        } else if let Some(endpoint) = stale_endpoint {
+            result.stale_endpoints.push(endpoint);
+        } else {
+            result.failed += 1;
+        }
     }
 
-    stale_endpoints
+    result
 }
 
 /// Build an RFC 8292 VAPID `Authorization` header value.
 /// JWT header+claims are ES256-signed with the P-256 key; signature is IEEE P1363 (r||s).
 fn build_vapid_authorization(
-    signing_key: &p256::ecdsa::SigningKey,
+    signing_key: &p256::SecretKey,
     endpoint: &axum::http::Uri,
     subject: &str,
     valid_secs: u64,
 ) -> Result<axum::http::HeaderValue, String> {
-    use p256::ecdsa::{Signature, signature::Signer};
+    use ring::{
+        rand::SystemRandom,
+        signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair},
+    };
 
     let jwt_header = Base64UrlUnpadded::encode_string(br#"{"alg":"ES256","typ":"JWT"}"#);
 
@@ -302,15 +386,25 @@ fn build_vapid_authorization(
     let jwt_claims = Base64UrlUnpadded::encode_string(claims_json.as_bytes());
 
     let signing_input = format!("{jwt_header}.{jwt_claims}");
-    let sig: Signature = signing_key.sign(signing_input.as_bytes());
-    let sig_b64 = Base64UrlUnpadded::encode_string(&sig.to_bytes());
+    // ring cannot derive the public point from the persisted private scalar alone.
+    // p256 retains scalar-only loading; ring performs ES256 signing.
+    let rng = SystemRandom::new();
+    let public = signing_key.public_key().to_encoded_point(false);
+    let pair = EcdsaKeyPair::from_private_key_and_public_key(
+        &ECDSA_P256_SHA256_FIXED_SIGNING,
+        signing_key.to_bytes().as_ref(),
+        public.as_bytes(),
+        &rng,
+    )
+    .map_err(|e| format!("Invalid VAPID key: {e}"))?;
+    let sig = pair
+        .sign(&rng, signing_input.as_bytes())
+        .map_err(|_| "VAPID signing failed".to_string())?;
+    let sig_b64 = Base64UrlUnpadded::encode_string(sig.as_ref());
     let jwt = format!("{signing_input}.{sig_b64}");
 
     let public_b64 = Base64UrlUnpadded::encode_string(
-        signing_key
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes(),
+        signing_key.public_key().to_encoded_point(false).as_bytes(),
     );
 
     axum::http::HeaderValue::try_from(format!("vapid t={jwt}, k={public_b64}"))
@@ -320,7 +414,7 @@ fn build_vapid_authorization(
 /// Build a single push request for a subscription. Returns None if the subscription is invalid.
 fn build_push_request(
     sub: &PushSubscription,
-    vapid_signing_key: &p256::ecdsa::SigningKey,
+    vapid_signing_key: &p256::SecretKey,
     vapid_subject: &str,
     payload_bytes: &[u8],
 ) -> Option<(String, axum::http::Request<Vec<u8>>)> {
@@ -356,12 +450,6 @@ fn build_push_request(
         tracing::warn!(source = "push", endpoint = %sub.endpoint, "Invalid auth secret length ({})", auth_bytes.len());
         return None;
     }
-    let ua_auth: web_push_native::Auth = {
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(&auth_bytes);
-        arr.into()
-    };
-
     let auth_header = match build_vapid_authorization(
         vapid_signing_key,
         &endpoint,
@@ -375,14 +463,25 @@ fn build_push_request(
         }
     };
 
-    let builder = web_push_native::WebPushBuilder::new(endpoint, ua_public, ua_auth);
-    match builder.build(payload_bytes.to_vec()) {
-        Ok(mut request) => {
-            request
-                .headers_mut()
-                .insert(axum::http::header::AUTHORIZATION, auth_header);
-            Some((sub.endpoint.clone(), request))
+    let ua_public = ua_public.to_encoded_point(false);
+    let payload = match crypto::encrypt_push(ua_public.as_bytes(), &auth_bytes, payload_bytes) {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::warn!(source = "push", "Failed to encrypt push request: {e}");
+            return None;
         }
+    };
+    match axum::http::Request::builder()
+        .uri(endpoint)
+        .method(axum::http::Method::POST)
+        .header("TTL", 12 * 3600)
+        .header(axum::http::header::CONTENT_ENCODING, "aes128gcm")
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CONTENT_LENGTH, payload.len())
+        .header(axum::http::header::AUTHORIZATION, auth_header)
+        .body(payload)
+    {
+        Ok(request) => Some((sub.endpoint.clone(), request)),
         Err(e) => {
             tracing::warn!(source = "push", "Failed to build push request: {e}");
             None
@@ -393,6 +492,73 @@ fn build_push_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches custom names being replaced by a machine identity and ordinary questions being lost.
+    #[test]
+    fn session_push_payload_preserves_display_name_and_question() {
+        assert_eq!(
+            session_push_payload(
+                "id",
+                Some("Reviewer"),
+                Some("ego"),
+                Some("/repo"),
+                "Approve deployment?"
+            )
+            .0,
+            "Reviewer: Approve deployment?"
+        );
+        assert_eq!(
+            session_push_payload("id", Some("Reviewer"), None, None, "completed").0,
+            "Reviewer: completed"
+        );
+    }
+
+    // Catches empty/UUID names leaking into fallback and Windows paths losing their repo label.
+    #[test]
+    fn session_push_payload_falls_back_without_uuid() {
+        for name in [None, Some("  "), Some("id")] {
+            assert_eq!(
+                session_push_payload("id", name, Some("ego"), Some(r"C:\repos\mdkb\"), "").0,
+                "ego · mdkb: awaiting input"
+            );
+        }
+        assert_eq!(
+            session_push_payload("id", None, None, None, "").0,
+            "Terminal: awaiting input"
+        );
+    }
+
+    // Catches malformed or empty tool arguments being shown as raw JSON.
+    #[test]
+    fn session_push_payload_suppresses_unreadable_progress() {
+        for prompt in [
+            r#"✓ progress {"text":""}"#,
+            "✓ progress {bad json}",
+            r#"✓ progress {"type":"blocked"}"#,
+        ] {
+            assert_eq!(
+                session_push_payload("id", Some("Reviewer"), None, None, prompt).0,
+                "Reviewer: awaiting input"
+            );
+        }
+    }
+
+    // Catches the observed UUID + raw progress-tool JSON reaching a phone.
+    #[test]
+    fn session_push_payload_hides_uuid_and_progress_json() {
+        let id = "31e5f82e-93e0-425e-94af-09b2f48091a4";
+        let (body, url) = session_push_payload(
+            id,
+            None,
+            Some("ego"),
+            Some("/repo/mdkb"),
+            r#"✓ progress {"type":"blocked","text":"Prompt recall e setup ego"}"#,
+        );
+        assert_eq!(body, "ego · mdkb: Prompt recall e setup ego");
+        assert!(!body.contains(id));
+        assert!(!body.contains('{'));
+        assert_eq!(url, format!("/mobile/session/{id}"));
+    }
 
     #[test]
     fn push_store_crud() {
@@ -493,12 +659,56 @@ mod tests {
         assert_eq!(loaded_pub.as_bytes(), pub_bytes.as_slice());
     }
 
+    #[tokio::test]
+    async fn gone_push_service_marks_subscription_stale() {
+        use axum::http::StatusCode;
+        use axum::routing::post;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/push", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route("/push", post(|| async { StatusCode::GONE })),
+            )
+            .await
+            .unwrap();
+        });
+        let client_key = p256::SecretKey::random(&mut rand_core::OsRng);
+        let sub = PushSubscription {
+            endpoint: endpoint.clone(),
+            keys: PushSubscriptionKeys {
+                p256dh: Base64UrlUnpadded::encode_string(
+                    client_key.public_key().to_encoded_point(false).as_bytes(),
+                ),
+                auth: Base64UrlUnpadded::encode_string(&[7u8; 16]),
+            },
+            created_at: chrono::Utc::now(),
+        };
+        let (private, public) = generate_vapid_keys().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.services.push.enabled = true;
+        config.services.push.vapid_private_key = private;
+        config.services.push.vapid_public_key = public;
+        let result = send_push_batch(
+            vec![sub],
+            &config,
+            &reqwest::Client::new(),
+            "Test",
+            "Is the phone reachable?",
+            "/mobile",
+        )
+        .await;
+        assert_eq!(result.stale_endpoints, vec![endpoint]);
+        assert_eq!(result.sent, 0);
+        server.abort();
+    }
+
     #[test]
     fn build_vapid_authorization_produces_valid_jwt_structure() {
         use base64ct::Encoding;
-        use p256::ecdsa::SigningKey;
 
-        let signing_key = SigningKey::random(&mut rand_core::OsRng);
+        let signing_key = p256::SecretKey::random(&mut rand_core::OsRng);
         let endpoint: axum::http::Uri = "https://fcm.googleapis.com/fcm/send/test".parse().unwrap();
         let header_val =
             build_vapid_authorization(&signing_key, &endpoint, "mailto:test@example.com", 3600)
@@ -534,6 +744,27 @@ mod tests {
         assert_eq!(jwt_claims["aud"], "https://fcm.googleapis.com");
         assert!(jwt_claims["exp"].as_u64().unwrap() > 0);
         assert_eq!(jwt_claims["sub"], "mailto:test@example.com");
+
+        // RFC 8292 also accepts an https subject, which is FastAF's default.
+        let https = build_vapid_authorization(
+            &signing_key,
+            &endpoint,
+            "https://github.com/ksg98/fastaf-ide",
+            3600,
+        )
+        .unwrap();
+        let https = https.to_str().unwrap();
+        let claims = https
+            .split("vapid t=")
+            .nth(1)
+            .unwrap()
+            .split('.')
+            .nth(1)
+            .unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&base64ct::Base64UrlUnpadded::decode_vec(claims).unwrap())
+                .unwrap();
+        assert_eq!(claims["sub"], "https://github.com/ksg98/fastaf-ide");
 
         // Signature must be 64 bytes (IEEE P1363 r||s)
         let sig_bytes = base64ct::Base64UrlUnpadded::decode_vec(parts[2]).unwrap();

@@ -2,17 +2,19 @@
 export const CODING_EXT =
 	"rs|ts|tsx|js|jsx|mjs|cjs|py|go|java|kt|kts|swift|c|h|cpp|hpp|cc|cs|rb|php|lua|zig|nim|ex|exs|erl|hs|ml|mli|fs|fsx|scala|clj|cljs|r|R|jl|dart|v|sv|vhdl|sol|move|css|scss|sass|less|html|htm|vue|svelte|astro|json|jsonc|json5|yaml|yml|toml|ini|cfg|conf|env|xml|plist|csv|tsv|sql|graphql|gql|proto|thrift|avsc|md|mdx|txt|rst|tex|adoc|org|sh|bash|zsh|fish|ps1|psm1|bat|cmd|dockerfile|containerfile|tf|tfvars|hcl|nix|cmake|make|mk|gradle|sbt|cabal|gemspec|podspec|lock|sum|mod|workspace|editorconfig|gitignore|gitattributes|dockerignore|eslintrc|prettierrc|babelrc|nvmrc|tool-versions|pdf|png|jpg|jpeg|gif|webp|svg|avif|ico|bmp|mp4|webm|mov|ogg|mp3|wav|flac|aac|m4a|log";
 
+/** Box-drawing block, as a regex class fragment: an agent TUI glues its panel borders to the text. */
+const BOX_DRAWING = "\\u2500-\\u257F";
+
 /** Factory — returns a fresh RegExp (has lastIndex state, not safe to share). */
 export function filePathRegex(): RegExp {
 	return new RegExp(
-		`(?:^|[\\s"'\`(\\[{])` +
-			`((?:(?:~/|/|\\.\\.?/|[\\w@.-]+/)` +
-			`[\\w./@-]*` +
-			`|[\\w@.-]+)` +
-			`\\.(?:${CODING_EXT})` +
-			// `:line`, `:line:col`, or a `:start-end` line range (agents cite ranges).
-			`(?::\\d+(?::\\d+|-\\d+)?)?)` +
-			`(?=[\\s"'\`),;.!?:\\]}>]|$)`,
+		`(?:^|[\\s"'\`(\\[{${BOX_DRAWING}])` +
+			// Each form takes `:line`, `:line:col`, or a `:start-end` line range (agents cite ranges).
+			`((?:[A-Za-z]:[\\\\/][\\w.\\\\/@-]+(?::\\d+(?::\\d+|-\\d+)?)?` +
+			`|(?:~/|/|\\.\\.?/|[\\w@.-]+/)[\\w./@-]+(?::\\d+(?::\\d+|-\\d+)?)?` +
+			`|[\\w@.-]+\\.(?:${CODING_EXT})(?::\\d+(?::\\d+|-\\d+)?)?))` +
+			// Exclude sentence periods, but keep a final parent-directory segment.
+			`(?:(?<!\\.)|(?<=[/\\\\]\\.\\.))(?=[\\s"'\`),;.!?:\\]}>${BOX_DRAWING}]|$)`,
 		"g",
 	);
 }
@@ -28,9 +30,9 @@ export interface FilePathMatch {
 
 /** Where a path that may hold spaces can begin: an absolute or `~/` path after
  *  the same boundary characters `filePathRegex` accepts. */
-const SPACED_PATH_START_SOURCE = `(?:^|[\\s"'\`([{])(~/|/)`;
+const SPACED_PATH_START_SOURCE = `(?:^|[\\s"'\`([{${BOX_DRAWING}])(~/|/)`;
 /** A known extension plus optional `:line[:col|-end]`, then a boundary. */
-const PATH_END_SOURCE = `\\.(?:${CODING_EXT})(?::\\d+(?::\\d+|-\\d+)?)?(?=[\\s"'\`),;.!?:\\]}>]|$)`;
+const PATH_END_SOURCE = `\\.(?:${CODING_EXT})(?::\\d+(?::\\d+|-\\d+)?)?(?=[\\s"'\`),;.!?:\\]}>${BOX_DRAWING}]|$)`;
 /** `"…"`, `'…'` or a backticked path holding at least one space. */
 const QUOTED_PATH_SOURCE = `(["'\`])([^"'\`\\n]*\\s[^"'\`\\n]*?\\.(?:${CODING_EXT})(?::\\d+(?::\\d+|-\\d+)?)?)\\1`;
 /** Past these a "path" is prose: no real file name runs this long or this spaced. */
@@ -85,6 +87,12 @@ export function matchFilePaths(text: string): FilePathMatch[] {
 	while ((m = quoted.exec(text)) !== null) add(m.index + 1, m[2]);
 
 	return found.sort((a, b) => a.index - b.index || b.text.length - a.text.length);
+}
+
+/** True when the whole text, ignoring surrounding whitespace, is a single file path. */
+export function isWholeFilePath(text: string): boolean {
+	const trimmed = text.trim();
+	return [...trimmed.matchAll(filePathRegex())].some((match) => match[1] === trimmed);
 }
 
 /** Factory — returns a fresh file:// URL regex. */

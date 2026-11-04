@@ -42,3 +42,56 @@ describe("PrStateBadge conflict rendering", () => {
 		).toBe("#8 Ready");
 	});
 });
+
+describe("PrStateBadge unresolved threads", () => {
+	it("shows Comments instead of Ready when an approved PR has unresolved threads", () => {
+		const text = render(() => (
+			<PrStateBadge
+				prNumber={9}
+				state="open"
+				conflictState="clear"
+				mergeable="MERGEABLE"
+				reviewDecision="APPROVED"
+				unresolvedThreads={3}
+			/>
+		)).container.textContent;
+		expect(text).toBe("#9 Comments");
+	});
+});
+
+/**
+ * The branch-row form drops the pill and the state word to save width, so the
+ * state must survive somewhere a reader can reach it: the tooltip, which has to
+ * be `data-tooltip` because WKWebView never renders a native `title`.
+ */
+describe("PrStateBadge compact form", () => {
+	const renderCompact = (props: Parameters<typeof PrStateBadge>[0]) =>
+		render(() => <PrStateBadge compact {...props} />).container.querySelector(".prBadge") as HTMLElement;
+
+	it("shows only the number and moves the state into the tooltip", () => {
+		const badge = renderCompact({ prNumber: 256, state: "open", reviewDecision: "REVIEW_REQUIRED" });
+		expect(badge.textContent).toBe("#256");
+		expect(badge.getAttribute("data-tooltip")).toBe("PR #256 · Review");
+		expect(badge.getAttribute("aria-label")).toBe("PR #256 · Review");
+		expect(badge.getAttribute("title")).toBeNull();
+	});
+
+	it("keeps the uncommitted-file warning in the tooltip", () => {
+		const badge = renderCompact({ prNumber: 12, state: "open", dirtyFiles: 3 });
+		expect(badge.getAttribute("data-tooltip")).toBe("PR #12 — 3 uncommitted files");
+	});
+
+	it("tells review-required apart from changes-requested, as the pill did", () => {
+		const review = renderCompact({ prNumber: 1, state: "open", reviewDecision: "REVIEW_REQUIRED" });
+		const changes = renderCompact({ prNumber: 2, state: "open", reviewDecision: "CHANGES_REQUESTED" });
+		expect(review.classList.contains("prMarkReview")).toBe(true);
+		expect(changes.classList.contains("prMarkChanges")).toBe(true);
+		expect(changes.classList.contains("prMarkReview")).toBe(false);
+	});
+
+	it("marks a conflict with its own shape, not only its color", () => {
+		const badge = renderCompact({ prNumber: 1078, state: "open", conflictState: "conflicting" });
+		expect(badge.classList.contains("prMarkConflict")).toBe(true);
+		expect(badge.getAttribute("data-tooltip")).toBe("PR #1078 · Conflicts");
+	});
+});

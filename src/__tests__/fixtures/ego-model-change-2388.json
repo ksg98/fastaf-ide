@@ -1,0 +1,190 @@
+{
+  "before": [
+    {
+      "id": "model",
+      "name": "Model",
+      "description": "The model the next generation uses.",
+      "category": "model",
+      "type": "select",
+      "currentValue": "openai-codex/gpt-6.1-sol",
+      "options": [
+        {
+          "value": "openai-codex/gpt-6.1-sol",
+          "name": "openai-codex/gpt-6.1-sol"
+        },
+        {
+          "value": "ollama/gemma4:12b-mlx",
+          "name": "ollama/gemma4:12b-mlx"
+        },
+        {
+          "value": "ollama/gemma4:e4b-mlx",
+          "name": "ollama/gemma4:e4b-mlx"
+        }
+      ]
+    },
+    {
+      "id": "effort",
+      "name": "Reasoning effort",
+      "description": "How much the model is asked to think, within what it supports.",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "low",
+      "options": [
+        {
+          "value": "low",
+          "name": "low"
+        }
+      ]
+    },
+    {
+      "id": "mode",
+      "name": "Mode",
+      "description": "The permission mode the next generation is judged under. auto is unavailable in this session. It needs a configured [permissions] judge: ego config set 'permissions.judge=\"openai-codex/gpt-6.1-sol\"'. If this session uses a profile, add --profile <name> to that command. Start a new session after configuration. The session max_mode can also restrict auto.",
+      "category": "mode",
+      "type": "select",
+      "currentValue": "default",
+      "options": [
+        {
+          "value": "plan",
+          "name": "plan"
+        },
+        {
+          "value": "default",
+          "name": "default"
+        },
+        {
+          "value": "accept-edits",
+          "name": "accept-edits"
+        },
+        {
+          "value": "yolo",
+          "name": "yolo"
+        }
+      ]
+    },
+    {
+      "id": "sandbox",
+      "name": "Sandbox",
+      "description": "How much of the filesystem a command this session runs can reach. The list is what the operator who started this process allowed and this machine can enforce; it can be narrowed here and not widened.",
+      "category": "sandbox",
+      "type": "select",
+      "currentValue": "adaptive",
+      "options": [
+        {
+          "value": "ro",
+          "name": "ro"
+        },
+        {
+          "value": "workspace",
+          "name": "workspace"
+        },
+        {
+          "value": "adaptive",
+          "name": "adaptive"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "id": "model",
+      "name": "Model",
+      "description": "The model the next generation uses.",
+      "category": "model",
+      "type": "select",
+      "currentValue": "ollama/gemma4:12b-mlx",
+      "options": [
+        {
+          "value": "ollama/gemma4:12b-mlx",
+          "name": "ollama/gemma4:12b-mlx"
+        },
+        {
+          "value": "ollama/gemma4:e4b-mlx",
+          "name": "ollama/gemma4:e4b-mlx"
+        }
+      ]
+    },
+    {
+      "id": "effort",
+      "name": "Reasoning effort",
+      "description": "How much the model is asked to think, within what it supports.",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "__ego_unselected__",
+      "options": [
+        {
+          "value": "__ego_unselected__",
+          "name": "Choose a value"
+        },
+        {
+          "value": "off",
+          "name": "off"
+        },
+        {
+          "value": "low",
+          "name": "low"
+        },
+        {
+          "value": "medium",
+          "name": "medium"
+        },
+        {
+          "value": "high",
+          "name": "high"
+        },
+        {
+          "value": "max",
+          "name": "max"
+        }
+      ]
+    },
+    {
+      "id": "mode",
+      "name": "Mode",
+      "description": "The permission mode the next generation is judged under. auto is unavailable in this session. It needs a configured [permissions] judge: ego config set 'permissions.judge=\"openai-codex/gpt-6.1-sol\"'. If this session uses a profile, add --profile <name> to that command. Start a new session after configuration. The session max_mode can also restrict auto.",
+      "category": "mode",
+      "type": "select",
+      "currentValue": "default",
+      "options": [
+        {
+          "value": "plan",
+          "name": "plan"
+        },
+        {
+          "value": "default",
+          "name": "default"
+        },
+        {
+          "value": "accept-edits",
+          "name": "accept-edits"
+        },
+        {
+          "value": "yolo",
+          "name": "yolo"
+        }
+      ]
+    },
+    {
+      "id": "sandbox",
+      "name": "Sandbox",
+      "description": "How much of the filesystem a command this session runs can reach. The list is what the operator who started this process allowed and this machine can enforce; it can be narrowed here and not widened.",
+      "category": "sandbox",
+      "type": "select",
+      "currentValue": "adaptive",
+      "options": [
+        {
+          "value": "ro",
+          "name": "ro"
+        },
+        {
+          "value": "workspace",
+          "name": "workspace"
+        },
+        {
+          "value": "adaptive",
+          "name": "adaptive"
+        }
+      ]
+    }
+  ]
+}

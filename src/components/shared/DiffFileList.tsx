@@ -3,7 +3,7 @@ import { type Component, createSignal, For, type JSX, Show } from "solid-js";
 import type { DiffViewMode } from "../../stores/ui";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
-import { type DiffFileSection, DiffViewer } from "../ui/DiffViewer";
+import { type DiffFileSection, DiffViewer, type DiffViewerProps } from "../ui/DiffViewer";
 import s from "./diffFileList.module.css";
 
 /** Reconstruct the raw diff string for a single file section. */
@@ -13,20 +13,26 @@ export function sectionToRawDiff(section: DiffFileSection): string {
 
 /** A single collapsible file diff. The chevron and header toggle collapse; the
  *  file path opens the file when `onOpen` is provided (working-tree view). */
-const FileSection: Component<{ file: DiffFileSection; mode: DiffViewMode; onOpen?: () => void }> = (props) => {
-	const [collapsed, setCollapsed] = createSignal(false);
-
+const FileSection: Component<{
+	file: DiffFileSection;
+	mode: DiffViewMode;
+	collapsed: boolean;
+	onToggle: () => void;
+	onOpen?: () => void;
+	viewerProps?: Omit<DiffViewerProps, "diff" | "mode">;
+	extras?: JSX.Element;
+}> = (props) => {
 	return (
 		<div class={s.fileSection}>
 			<div
 				class={s.fileHeader}
 				role="button"
 				tabIndex={0}
-				onClick={() => setCollapsed(!collapsed())}
-				onKeyDown={onClickKeyDown(() => setCollapsed(!collapsed()))}
+				onClick={() => props.onToggle()}
+				onKeyDown={onClickKeyDown(() => props.onToggle())}
 			>
 				<svg
-					class={cx(s.chevron, collapsed() && s.chevronCollapsed)}
+					class={cx(s.chevron, props.collapsed && s.chevronCollapsed)}
 					width="12"
 					height="12"
 					viewBox="0 0 16 16"
@@ -54,9 +60,10 @@ const FileSection: Component<{ file: DiffFileSection; mode: DiffViewMode; onOpen
 					</Show>
 				</span>
 			</div>
-			<Show when={!collapsed()}>
+			<Show when={!props.collapsed}>
 				<div class={s.fileDiff}>
-					<DiffViewer diff={sectionToRawDiff(props.file)} mode={props.mode} />
+					{props.extras}
+					<DiffViewer {...props.viewerProps} diff={sectionToRawDiff(props.file)} mode={props.mode} />
 				</div>
 			</Show>
 		</div>
@@ -72,6 +79,12 @@ export interface DiffFileListProps {
 	scrollRef?: (el: HTMLElement) => void;
 	/** Optional content rendered above the list (sticky summary header). */
 	header?: JSX.Element;
+	/** Files that start collapsed; a click expands them. */
+	collapsedByDefault?: (file: DiffFileSection) => boolean;
+	/** Extra `DiffViewer` props per file (annotations, widgets). */
+	viewerProps?: (file: DiffFileSection) => Omit<DiffViewerProps, "diff" | "mode">;
+	/** Content rendered above a file's diff (e.g. outdated review threads). */
+	fileExtras?: (file: DiffFileSection) => JSX.Element;
 }
 
 /**
@@ -87,6 +100,16 @@ export interface DiffFileListProps {
  */
 export const DiffFileList: Component<DiffFileListProps> = (props) => {
 	let scrollEl: HTMLDivElement | undefined;
+	// The virtualizer unmounts off-screen sections, so collapse state lives here, not in FileSection.
+	const [toggled, setToggled] = createSignal<ReadonlySet<string>>(new Set());
+	const isCollapsed = (file: DiffFileSection) =>
+		(props.collapsedByDefault?.(file) ?? false) !== toggled().has(file.path);
+	const toggle = (path: string) =>
+		setToggled((prev) => {
+			const next = new Set(prev);
+			if (!next.delete(path)) next.add(path);
+			return next;
+		});
 
 	const virtualizer = createVirtualizer({
 		get count() {
@@ -112,12 +135,20 @@ export const DiffFileList: Component<DiffFileListProps> = (props) => {
 					{(vi) => (
 						<div
 							data-index={vi.index}
-							ref={(el) => virtualizer.measureElement(el)}
+							ref={(el) => {
+								// Solid assigns `data-index` after `ref` runs, and measureElement reads it at once.
+								el.dataset.index = String(vi.index);
+								virtualizer.measureElement(el);
+							}}
 							style={{ position: "absolute", top: `${vi.start}px`, left: "0", width: "100%" }}
 						>
 							<FileSection
 								file={props.files[vi.index]}
 								mode={props.mode}
+								collapsed={isCollapsed(props.files[vi.index])}
+								onToggle={() => toggle(props.files[vi.index].path)}
+								viewerProps={props.viewerProps?.(props.files[vi.index])}
+								extras={props.fileExtras?.(props.files[vi.index])}
 								onOpen={props.onOpenFile ? () => props.onOpenFile?.(props.files[vi.index].path) : undefined}
 							/>
 						</div>

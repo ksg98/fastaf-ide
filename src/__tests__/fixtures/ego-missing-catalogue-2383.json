@@ -1,0 +1,8 @@
+{
+  "code": "agent_error",
+  "message": "Resource not found: \"session not found\"",
+  "connectionId": "01a17d72-21f5-77e3-b1e2-db6c76d4a277",
+  "sessionId": null,
+  "operation": "list",
+  "retryable": false
+}

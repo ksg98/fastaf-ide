@@ -3,6 +3,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type Component, createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Terminal } from "./components/Terminal";
 import { IconReattach } from "./components/ui/PanelWindowControls";
+import { guardTauriUnlisten } from "./invoke";
 import { isMacOS } from "./platform";
 import { appLogger } from "./stores/appLogger";
 import { settingsStore } from "./stores/settings";
@@ -167,7 +168,7 @@ export const FloatingTerminal: Component = () => {
 				await emitTo("main", "reattach-terminal", { tabId, sessionId });
 			})
 			.then((unlisten) => {
-				unlistenClose = unlisten;
+				unlistenClose = guardTauriUnlisten(unlisten);
 			})
 			.catch((e) => appLogger.error("terminal", "Failed to close floating terminal", { error: String(e) }));
 

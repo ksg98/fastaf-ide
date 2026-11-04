@@ -32,6 +32,24 @@
       }
     </style>
     <script>
+      // Opened as http://user:pass@host/, the document URL keeps the credentials
+      // (document.baseURI) while the response URL of every fetched module drops
+      // them. The entry script is then keyed WITH credentials and its chunks
+      // resolve "./main-*.js" WITHOUT: the browser evaluates the entry a second
+      // time and mounts the App twice (story 1292). A <base> without credentials
+      // makes every URL of the page resolve the same way. This must stay ahead of
+      // the first element that carries a URL. mobile.html holds an inline copy of
+      // this guard: keep both in step.
+      (function () {
+        var u = new URL(document.baseURI);
+        if (u.username || u.password) {
+          var base = document.createElement('base');
+          base.href = u.origin + u.pathname + u.search;
+          document.head.appendChild(base);
+        }
+      })();
+    </script>
+    <script>
       // Early error catcher — runs before the SolidJS bundle loads.
       // Captures load failures, syntax errors, and uncaught exceptions that
       // would otherwise produce a blank white screen with no diagnostics.

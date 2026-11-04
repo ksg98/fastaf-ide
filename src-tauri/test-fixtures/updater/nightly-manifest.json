@@ -1,0 +1,39 @@
+{
+  "version": "1.8.0-nightly.20261010.t1329",
+  "notes": "**Rolling build from `main` — always the latest code.**\n\nUpdated on every push to main. May contain experimental features.\nFor stable releases, see the [latest versioned release](https://github.com/sstraus/tuicommander/releases/latest).",
+  "pub_date": "2026-10-10T14:11:11.807Z",
+  "platforms": {
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWE0dE1keTZaQWc2TURyVU1WVW5OSGRFWnhoS0xTTzVOVWhHVDl3ak9kZzYxazZSSW9wUENtWmdLUzhjUER6a1BwS0tqZGdIT0N3R1VURU1nN2paZGd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQwNTI4CWZpbGU6VFVJQ29tbWFuZGVyXzEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjlfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjoxLjguMC1uaWdodGx5LjIwMjYxMDEwLnQxMzI5CmZkTk9KVFJBS3oyeXUvRjlnZXh2amVNMWQ5bWpWNnY1NWFZc0hoQmFzbE5BT2I4cHZ1c3RkQUpoQnYvTEhGa052bm1YUXVhNXdHZ0tPOXlyNzBPOEFnPT0K",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_1.8.0-nightly.20261010.t1329_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWE0dE1keTZaQWc2TURyVU1WVW5OSGRFWnhoS0xTTzVOVWhHVDl3ak9kZzYxazZSSW9wUENtWmdLUzhjUER6a1BwS0tqZGdIT0N3R1VURU1nN2paZGd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQwNTI4CWZpbGU6VFVJQ29tbWFuZGVyXzEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjlfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjoxLjguMC1uaWdodGx5LjIwMjYxMDEwLnQxMzI5CmZkTk9KVFJBS3oyeXUvRjlnZXh2amVNMWQ5bWpWNnY1NWFZc0hoQmFzbE5BT2I4cHZ1c3RkQUpoQnYvTEhGa052bm1YUXVhNXdHZ0tPOXlyNzBPOEFnPT0K",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_1.8.0-nightly.20261010.t1329_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNVZCenhkMlc3SDJVK05sdHVXUjBHNFUwNUU4RzV3QUo2YTE1TGZoeWdHUW5sd1pVV1dsMU1TNitsSi9oQVh0UVRFbmRRYmpRZmRyZ0xPVTVGdjdjTHdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQwNTI3CWZpbGU6VFVJQ29tbWFuZGVyXzEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjlfYW1kNjQuZGViCXZlcnNpb246MS44LjAtbmlnaHRseS4yMDI2MTAxMC50MTMyOQpWcGd2clNmdHdzT0RqNElpQnNFanhoa0gzLzJtSU1tT3JyTjl6QWo3UEhCUkVwckgvQmoyWlQ0OVRaWk50WSs1dHhqaDlVKzgxM0lIcFJpbXMxZjVDQT09Cg==",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_1.8.0-nightly.20261010.t1329_amd64.deb"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNVJVRnN2OGNySHpCYkRibGkrSjVsQktqbUxiTFFrTDl2cWo0TUY2dVpOS3NjNUEzVWM2c3lqdi9aRW9NQjlWdVZmUXAzRGhGQ3FxSzlGMWh4cE5xdXdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQwNTI4CWZpbGU6VFVJQ29tbWFuZGVyLTEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjktMS54ODZfNjQucnBtCXZlcnNpb246MS44LjAtbmlnaHRseS4yMDI2MTAxMC50MTMyOQo3SGR3UWlXK0hmVnFMRCtCTEhHOHU4NmNmS2wzU3ZvUFltcWIwcDRSZ2lJeXczakpOTzBsVVlhRHM4dkJPWVVxVnJDaHY5THpaZUV6am5ZS3N5MGtEdz09Cg==",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander-1.8.0-nightly.20261010.t1329-1.x86_64.rpm"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNVN5d2FXcS9jNGkzbWp0SlhnL2YxajNmYU43RG9MWnd2aDFYZlViNlFNUTFuVWhoRnZaU09BZXNVQ21BNjhWZzN3dG9GeFJoUTcwUnVtb0U3KzRPNFF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQxNDA5CWZpbGU6VFVJQ29tbWFuZGVyLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjguMC1uaWdodGx5LjIwMjYxMDEwLnQxMzI5CkRXMGxkMmx0d0Z4YThlRjFDUEJNQllqS0lkV1pYcEZ4QkVUOVFHQjdDQWlhc2orK29CYWNVRDd4NXFUSHRUSjBybStKTXArSmRkYmxJcVJOMmo3eEFnPT0K",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_aarch64.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNVN5d2FXcS9jNGkzbWp0SlhnL2YxajNmYU43RG9MWnd2aDFYZlViNlFNUTFuVWhoRnZaU09BZXNVQ21BNjhWZzN3dG9GeFJoUTcwUnVtb0U3KzRPNFF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQxNDA5CWZpbGU6VFVJQ29tbWFuZGVyLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjguMC1uaWdodGx5LjIwMjYxMDEwLnQxMzI5CkRXMGxkMmx0d0Z4YThlRjFDUEJNQllqS0lkV1pYcEZ4QkVUOVFHQjdDQWlhc2orK29CYWNVRDd4NXFUSHRUSjBybStKTXArSmRkYmxJcVJOMmo3eEFnPT0K",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_aarch64.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNVZWeUNmRVNQN2VoQTFUMXpYbUdnOTJacDBmREVvNEVwRnFFZmZic1BPVWE4V1JmSGpzbmFpMzNCK0M2a25sODVlUUdkVVV1NE1TR0dzSXZxMGsyeHdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQxNDY4CWZpbGU6VFVJQ29tbWFuZGVyXzEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjlfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjkKd2U4dzB4QWtxMTJVY2piSG5qajJWR3ExcmNGcklERDBtWUswSWloRHRxRzMvSmpqVEZpWDM5dk9MWm1odno5SzRpbDMzQ1MzK1VZemdPWWVuNnE1Qnc9PQo=",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_1.8.0-nightly.20261010.t1329_x64-setup.exe"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNVZWeUNmRVNQN2VoQTFUMXpYbUdnOTJacDBmREVvNEVwRnFFZmZic1BPVWE4V1JmSGpzbmFpMzNCK0M2a25sODVlUUdkVVV1NE1TR0dzSXZxMGsyeHdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQxNDY4CWZpbGU6VFVJQ29tbWFuZGVyXzEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjlfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjEuOC4wLW5pZ2h0bHkuMjAyNjEwMTAudDEzMjkKd2U4dzB4QWtxMTJVY2piSG5qajJWR3ExcmNGcklERDBtWUswSWloRHRxRzMvSmpqVEZpWDM5dk9MWm1odno5SzRpbDMzQ1MzK1VZemdPWWVuNnE1Qnc9PQo=",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/nightly/TUICommander_1.8.0-nightly.20261010.t1329_x64-setup.exe"
+    }
+  }
+}

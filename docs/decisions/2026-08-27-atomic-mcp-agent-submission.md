@@ -15,7 +15,7 @@ writer can intervene, and Codex can treat the Enter as a composer newline.
 ## Decision
 
 Add `session action=submit` for one non-empty managed-agent command. The action
-claims a confirmed-idle, empty composer; writes the existing Ctrl-U, bracketed
+claims a confirmed-idle, empty composer; writes the existing Ctrl-U, 50 ms gap, bracketed
 paste, 50 ms gap, and CR sequence; advances the existing input FSM and turn
 epoch; then waits internally for bounded post-Enter terminal movement. One MCP
 response carries the submission id, write state, acknowledgement state, turn

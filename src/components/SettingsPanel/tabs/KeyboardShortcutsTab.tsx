@@ -10,7 +10,12 @@ import { isTauri } from "../../../transport";
 import { comboToDisplay, keyFor } from "../../../utils/hotkey";
 import { keyEventToCombo, validateGlobalHotkeyCombo } from "../../../utils/keyRecorder";
 import { KeyComboCapture } from "../../shared/KeyComboCapture";
+import { Button } from "../../ui/Button";
+import { Input } from "../../ui/Input";
+import { ContextualHelp } from "../ContextualHelp";
 import s from "../Settings.module.css";
+import { SectionCard, SettingPageHeader, SettingRow } from "../SettingsPrimitives";
+import w from "./WorkspaceTabs.module.css";
 
 /**
  * Guard that remembers the pre-capture global-hotkey value and restores it
@@ -87,9 +92,12 @@ export function getShortcutSections(): ShortcutSection[] {
 				{
 					action: "run-command",
 					keys: keyFor("run-command"),
-					description: t("helpPanel.runSavedCommand", `Run saved command (${editKey} to edit)`),
+					description: editKey
+						? t("helpPanel.runSavedCommand", `Run saved command (${editKey} to edit)`)
+						: t("helpPanel.runSavedCommandNoEdit", "Run saved command"),
 				},
 				{ action: "edit-command", keys: keyFor("edit-command"), description: "Edit saved command" },
+				{ action: "reload-tab", keys: keyFor("reload-tab"), description: "Reload active tab" },
 				{
 					action: "reopen-closed-tab",
 					keys: keyFor("reopen-closed-tab"),
@@ -129,6 +137,7 @@ export function getShortcutSections(): ShortcutSection[] {
 				{ action: "block-next", keys: keyFor("block-next"), description: "Next command block" },
 				{ action: "block-fold-toggle", keys: keyFor("block-fold-toggle"), description: "Toggle block fold" },
 				{ action: "block-search-toggle", keys: keyFor("block-search-toggle"), description: "Search in block" },
+				{ action: "answers-only", keys: keyFor("answers-only"), description: "Toggle answers-only view" },
 			],
 		},
 		{
@@ -140,17 +149,17 @@ export function getShortcutSections(): ShortcutSection[] {
 				{
 					action: "zoom-in-all",
 					keys: keyFor("zoom-in-all"),
-					description: t("helpPanel.zoomInAll", "Zoom in all terminals"),
+					description: t("helpPanel.zoomInAll", "Zoom in all tabs"),
 				},
 				{
 					action: "zoom-out-all",
 					keys: keyFor("zoom-out-all"),
-					description: t("helpPanel.zoomOutAll", "Zoom out all terminals"),
+					description: t("helpPanel.zoomOutAll", "Zoom out all tabs"),
 				},
 				{
 					action: "zoom-reset-all",
 					keys: keyFor("zoom-reset-all"),
-					description: t("helpPanel.resetZoomAll", "Reset zoom all terminals"),
+					description: t("helpPanel.resetZoomAll", "Reset zoom all tabs"),
 				},
 			],
 		},
@@ -199,6 +208,7 @@ export function getShortcutSections(): ShortcutSection[] {
 					keys: keyFor("command-palette"),
 					description: t("helpPanel.commandPalette", "Command palette"),
 				},
+				{ action: "progress", keys: keyFor("progress"), description: "Open Terminal Progress" },
 				{
 					action: "activity-dashboard",
 					keys: keyFor("activity-dashboard"),
@@ -221,10 +231,20 @@ export function getShortcutSections(): ShortcutSection[] {
 					description: "Focus mode (hide sidebar & panels)",
 				},
 				{ action: "command-overview", keys: keyFor("command-overview"), description: "Command overview" },
-				{ action: "ai-triage", keys: keyFor("ai-triage"), description: "AI Triage" },
+				{ action: "open-tasks", keys: keyFor("open-tasks"), description: "Open Tasks" },
 				{ action: "toggle-outline", keys: keyFor("toggle-outline"), description: "Toggle outline panel" },
 				{ action: "toggle-compose-panel", keys: keyFor("toggle-compose-panel"), description: "Toggle compose panel" },
 				{ action: "toggle-tunnels", keys: keyFor("toggle-tunnels"), description: "SSH Tunnels" },
+				// Desktop has no upstream hands-free conversation: FastAF's voice agent is the one hands-free mode.
+				...(isTauri()
+					? []
+					: [
+							{
+								action: "toggle-hands-free",
+								keys: keyFor("toggle-hands-free"),
+								description: "Start/stop hands-free conversation",
+							},
+						]),
 				{
 					action: "open-secondary-window",
 					keys: keyFor("open-secondary-window"),
@@ -278,6 +298,16 @@ export function getShortcutSections(): ShortcutSection[] {
 					description: "Return to last terminal",
 				},
 				{
+					action: "history-back",
+					keys: keyFor("history-back"),
+					description: "Back in terminal history",
+				},
+				{
+					action: "history-forward",
+					keys: keyFor("history-forward"),
+					description: "Forward in terminal history",
+				},
+				{
 					action: "jump-waiting-terminal",
 					keys: keyFor("jump-waiting-terminal"),
 					description: "Jump to waiting terminal",
@@ -315,7 +345,7 @@ export function getShortcutSections(): ShortcutSection[] {
 				{
 					action: "toggle-file-browser",
 					keys: keyFor("toggle-file-browser"),
-					description: t("helpPanel.toggleFileBrowser", "Toggle file browser panel"),
+					description: t("helpPanel.toggleFileBrowser", "Toggle file browser"),
 				},
 				{
 					action: "toggle-file-browser-content-search",
@@ -363,13 +393,6 @@ export function getShortcutSections(): ShortcutSection[] {
 		},
 	];
 }
-
-/** Pencil SVG icon for the edit button */
-const PencilIcon = () => (
-	<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.65-.65l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5zM11.207 2.5 3.5 10.207 2.293 13.707l3.5-1.207L13.5 4.793 11.207 2.5z" />
-	</svg>
-);
 
 /** Reset icon (counter-clockwise arrow) */
 const ResetIcon = () => (
@@ -555,180 +578,175 @@ export const KeyboardShortcutsTab: Component = () => {
 	}
 
 	return (
-		<div class={s.section}>
-			<h3>{t("settings.keyboardShortcuts", "Keyboard Shortcuts")}</h3>
+		<div class={`${s.section} ${w.page}`}>
+			<SettingPageHeader
+				title={t("settings.keyboardShortcuts", "Keyboard Shortcuts")}
+				description="Find actions and customize their keyboard bindings."
+				scope="This client"
+				breadcrumb="Workspace / Keyboard Shortcuts"
+			/>
 
 			<Show when={isTauri()}>
-				<div class={s.group}>
-					<label>{t("settings.globalHotkey", "Global Hotkey (Toggle Window)")}</label>
-					<p class={s.hint} style={{ "margin-bottom": "8px" }}>
-						{t("settings.globalHotkeyHint", "Set an OS-level shortcut to show/hide FastAF from any application.")}
-					</p>
-					<div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
-						<KeyComboCapture
-							value={settingsStore.state.globalHotkey ? tauriToDisplay(settingsStore.state.globalHotkey) : ""}
-							onChange={handleGlobalHotkeyChange}
-							placeholder={t("settings.globalHotkeyPlaceholder", "Click to set hotkey")}
-							onCapturingChange={handleGlobalCapturingChange}
-						/>
-						<Show when={settingsStore.state.globalHotkey}>
-							<button
-								onClick={clearGlobalHotkey}
-								style={{
-									background: "none",
-									border: "1px solid var(--border)",
-									"border-radius": "var(--radius-md)",
-									padding: "4px 8px",
-									color: "var(--fg-secondary)",
-									cursor: "pointer",
-									"font-size": "var(--font-sm)",
-								}}
-							>
-								{t("settings.clear", "Clear")}
-							</button>
-						</Show>
-					</div>
-					<Show when={globalHotkeyError()}>
-						<p style={{ color: "var(--error)", "font-size": "var(--font-sm)", "margin-top": "4px" }}>
-							{globalHotkeyError()}
-						</p>
-					</Show>
-				</div>
+				<SectionCard title="Global Hotkey">
+					<SettingRow
+						label={t("settings.globalHotkey", "Global Hotkey (Toggle Window)")}
+						hint={t("settings.globalHotkeyHint", "Set an OS-level shortcut to show/hide FastAF from any application.")}
+						error={globalHotkeyError() ?? undefined}
+					>
+						{() => (
+							<>
+								<div
+									role="group"
+									aria-label="Global Hotkey (Toggle Window)"
+									style={{ display: "flex", "align-items": "center", gap: "8px" }}
+								>
+									<KeyComboCapture
+										settingId="app.global_hotkey"
+										value={settingsStore.state.globalHotkey ? tauriToDisplay(settingsStore.state.globalHotkey) : ""}
+										onChange={handleGlobalHotkeyChange}
+										placeholder={t("settings.globalHotkeyPlaceholder", "Click to set hotkey")}
+										onCapturingChange={handleGlobalCapturingChange}
+									/>
+									<Show when={settingsStore.state.globalHotkey}>
+										<Button
+											data-setting-id="keybindings.bindings.{action}.key"
+											class={w.secondaryButton}
+											onClick={clearGlobalHotkey}
+										>
+											{t("settings.clear", "Clear")}
+										</Button>
+									</Show>
+								</div>
+							</>
+						)}
+					</SettingRow>
+				</SectionCard>
 			</Show>
 
-			<div class={s.group}>
-				<input
-					ref={inputRef}
-					type="text"
-					placeholder={t("helpPanel.searchPlaceholder", "Search shortcuts...")}
-					value={filter()}
-					onInput={(e) => setFilter(e.currentTarget.value)}
-				/>
-			</div>
-
-			<p class={s.hint} style={{ "margin-bottom": "12px" }}>
-				{t("helpPanel.editableNote", "Click the pencil icon to rebind a shortcut. Press Escape to cancel.")}
-			</p>
-
-			<For each={filteredSections()}>
-				{(section) => (
-					<div class={s.group}>
-						<label>{section.title}</label>
-						<table style={{ width: "100%", "border-collapse": "collapse" }}>
-							<For each={section.shortcuts}>
-								{(shortcut) => (
-									<tr style={{ cursor: "default" }}>
-										<td style={{ width: "140px", padding: "4px 8px", "vertical-align": "middle" }}>
-											<Show
-												when={editingAction() === shortcut.action}
-												fallback={
-													<div style={{ display: "flex", "align-items": "center", gap: "4px" }}>
-														<kbd
-															style={{
-																display: "inline-block",
-																padding: "2px 8px",
-																background:
-																	shortcut.action && keybindingsStore.isOverridden(shortcut.action)
-																		? "var(--accent-subtle, rgba(100, 149, 237, 0.15))"
-																		: "var(--bg-tertiary)",
-																border: "1px solid var(--border)",
-																"border-radius": "var(--radius-md)",
-																"font-family": "var(--font-mono)",
-																"font-size": "var(--font-sm)",
-																color:
-																	shortcut.action && keybindingsStore.isOverridden(shortcut.action)
-																		? "var(--accent)"
-																		: "var(--fg-secondary)",
-															}}
-														>
-															{shortcut.keys}
-														</kbd>
-														<Show when={shortcut.action}>
-															<button
-																onClick={() => startEditing(shortcut.action!)}
-																title="Edit shortcut"
+			<SectionCard title="Shortcut groups">
+				<div class={w.shortcutSearch}>
+					<Input
+						data-non-setting="Filter keyboard shortcut rows"
+						ref={inputRef}
+						type="text"
+						placeholder={t("helpPanel.searchPlaceholder", "Search shortcuts...")}
+						value={filter()}
+						onInput={(e) => setFilter(e.currentTarget.value)}
+					/>
+				</div>
+				<For each={filteredSections()}>
+					{(section) => (
+						<div class={w.shortcutCategory}>
+							<label>{section.title}</label>
+							<table class={w.shortcuts}>
+								<For each={section.shortcuts}>
+									{(shortcut) => (
+										<tr style={{ cursor: "default" }}>
+											<td style={{ padding: "4px 8px", "font-size": "var(--font-base)", color: "var(--fg-primary)" }}>
+												{shortcut.description}
+											</td>
+											<td style={{ width: "140px", padding: "4px 8px", "vertical-align": "middle" }}>
+												<Show
+													when={editingAction() === shortcut.action}
+													fallback={
+														<div class={w.binding}>
+															<kbd
 																style={{
-																	background: "none",
-																	border: "none",
-																	cursor: "pointer",
-																	color: "var(--fg-muted)",
-																	padding: "2px",
-																	"border-radius": "var(--radius-sm)",
-																	display: "flex",
-																	"align-items": "center",
-																	opacity: "0.5",
-																	transition: "opacity 0.15s",
-																}}
-																onMouseEnter={(e) => {
-																	e.currentTarget.style.opacity = "1";
-																}}
-																onMouseLeave={(e) => {
-																	e.currentTarget.style.opacity = "0.5";
+																	display: "inline-block",
+																	padding: "2px 8px",
+																	background:
+																		shortcut.action && keybindingsStore.isOverridden(shortcut.action)
+																			? "var(--accent-subtle, rgba(100, 149, 237, 0.15))"
+																			: "var(--bg-tertiary)",
+																	border: "1px solid var(--border)",
+																	"border-radius": "var(--radius-md)",
+																	"font-family": "var(--font-mono)",
+																	"font-size": "var(--font-sm)",
+																	color:
+																		shortcut.action && keybindingsStore.isOverridden(shortcut.action)
+																			? "var(--accent)"
+																			: "var(--fg-secondary)",
 																}}
 															>
-																<PencilIcon />
-															</button>
-															<Show when={keybindingsStore.isOverridden(shortcut.action!)}>
-																<button
-																	onClick={() => keybindingsStore.resetAction(shortcut.action!)}
-																	title="Reset to default"
-																	style={{
-																		background: "none",
-																		border: "none",
-																		cursor: "pointer",
-																		color: "var(--fg-muted)",
-																		padding: "2px",
-																		"border-radius": "var(--radius-sm)",
-																		display: "flex",
-																		"align-items": "center",
-																		opacity: "0.5",
-																		transition: "opacity 0.15s",
-																	}}
-																	onMouseEnter={(e) => {
-																		e.currentTarget.style.opacity = "1";
-																	}}
-																	onMouseLeave={(e) => {
-																		e.currentTarget.style.opacity = "0.5";
-																	}}
+																{shortcut.keys || "Not set"}
+															</kbd>
+															<Show when={shortcut.action}>
+																<Button
+																	data-setting-id="keybindings.bindings.{action}.key"
+																	onClick={() => startEditing(shortcut.action!)}
+																	title="Edit shortcut"
 																>
-																	<ResetIcon />
-																</button>
+																	Rebind
+																</Button>
+																<Show when={keybindingsStore.isOverridden(shortcut.action!)}>
+																	<button
+																		data-setting-id="keybindings.bindings.{action}.key"
+																		onClick={() => keybindingsStore.resetAction(shortcut.action!)}
+																		title="Reset to default"
+																		style={{
+																			background: "none",
+																			border: "none",
+																			cursor: "pointer",
+																			color: "var(--fg-muted)",
+																			padding: "2px",
+																			"border-radius": "var(--radius-sm)",
+																			display: "flex",
+																			"align-items": "center",
+																			opacity: "0.5",
+																			transition: "opacity 0.15s",
+																		}}
+																		onMouseEnter={(e) => {
+																			e.currentTarget.style.opacity = "1";
+																		}}
+																		onMouseLeave={(e) => {
+																			e.currentTarget.style.opacity = "0.5";
+																		}}
+																	>
+																		<ResetIcon /> Reset
+																	</button>
+																</Show>
 															</Show>
-														</Show>
-													</div>
-												}
-											>
-												<RecordingIndicator
-													conflict={conflict()}
-													onKeyDown={handleKeyDown}
-													onCancel={cancelEditing}
-													onConfirmReplace={confirmConflictReplace}
-												/>
-											</Show>
-										</td>
-										<td style={{ padding: "4px 8px", "font-size": "var(--font-base)", color: "var(--fg-secondary)" }}>
-											{shortcut.description}
-										</td>
-									</tr>
-								)}
-							</For>
-						</table>
-					</div>
-				)}
-			</For>
-
+															<Show when={!shortcut.action}>
+																<span class={w.rebindSlot} aria-hidden="true" />
+															</Show>
+														</div>
+													}
+												>
+													<RecordingIndicator
+														conflict={conflict()}
+														onKeyDown={handleKeyDown}
+														onCancel={cancelEditing}
+														onConfirmReplace={confirmConflictReplace}
+													/>
+												</Show>
+											</td>
+										</tr>
+									)}
+								</For>
+							</table>
+						</div>
+					)}
+				</For>
+			</SectionCard>
 			<Show when={pluginCommandRows().length > 0}>
-				<div class={s.group}>
+				<div class={w.shortcutCategory}>
 					<label>{t("helpPanel.pluginCommands", "Plugin Commands")}</label>
-					<table style={{ width: "100%", "border-collapse": "collapse" }}>
+					<ContextualHelp label={t("helpPanel.pluginCommands", "Plugin Commands")} />
+					<table class={w.shortcuts}>
 						<For each={pluginCommandRows()}>
 							{(cmd) => (
 								<tr style={{ cursor: "default" }}>
+									<td style={{ padding: "4px 8px", "font-size": "var(--font-base)", color: "var(--fg-secondary)" }}>
+										<span style={{ color: "var(--fg-muted)", "font-size": "var(--font-sm)", "margin-right": "6px" }}>
+											[{cmd.pluginId}]
+										</span>
+										{cmd.label}
+									</td>
 									<td style={{ width: "140px", padding: "4px 8px", "vertical-align": "middle" }}>
 										<Show
 											when={editingAction() === cmd.action}
 											fallback={
-												<div style={{ display: "flex", "align-items": "center", gap: "4px" }}>
+												<div class={w.binding}>
 													<kbd
 														style={{
 															display: "inline-block",
@@ -748,6 +766,7 @@ export const KeyboardShortcutsTab: Component = () => {
 														{cmd.keys || t("helpPanel.unbound", "unbound")}
 													</kbd>
 													<button
+														data-setting-id="keybindings.bindings.{action}.key"
 														onClick={() => startEditing(cmd.action)}
 														title="Edit shortcut"
 														style={{
@@ -762,10 +781,11 @@ export const KeyboardShortcutsTab: Component = () => {
 															opacity: "0.5",
 														}}
 													>
-														<PencilIcon />
+														Rebind
 													</button>
 													<Show when={keybindingsStore.isOverridden(cmd.action)}>
 														<button
+															data-setting-id="keybindings.bindings.{action}.key"
 															onClick={() => keybindingsStore.resetAction(cmd.action)}
 															title="Reset to default"
 															style={{
@@ -780,7 +800,7 @@ export const KeyboardShortcutsTab: Component = () => {
 																opacity: "0.5",
 															}}
 														>
-															<ResetIcon />
+															<ResetIcon /> Reset
 														</button>
 													</Show>
 												</div>
@@ -793,12 +813,6 @@ export const KeyboardShortcutsTab: Component = () => {
 												onConfirmReplace={confirmConflictReplace}
 											/>
 										</Show>
-									</td>
-									<td style={{ padding: "4px 8px", "font-size": "var(--font-base)", color: "var(--fg-secondary)" }}>
-										<span style={{ color: "var(--fg-muted)", "font-size": "var(--font-sm)", "margin-right": "6px" }}>
-											[{cmd.pluginId}]
-										</span>
-										{cmd.label}
 									</td>
 								</tr>
 							)}
@@ -815,6 +829,7 @@ export const KeyboardShortcutsTab: Component = () => {
 
 			<div style={{ "margin-top": "16px", "text-align": "right" }}>
 				<button
+					data-setting-id="keybindings.bindings.{action}.key"
 					class={s.hint}
 					onClick={() => keybindingsStore.resetAll()}
 					style={{
@@ -849,6 +864,8 @@ const RecordingIndicator: Component<{
 	// Replace — the Tab fires onBlur first. Fixing this requires either a
 	// containing element that owns focus or a conflict-confirm modal; both are
 	// larger refactors. Captured here as tech debt.
+	// DEFERRED (2026-10-25) — Chromium geometry fixture observes an unfocused recorder after
+	// Rebind activation; investigate capture focus separately from the audited button sizing.
 	const handleMount = (el: HTMLDivElement) => {
 		el.focus();
 	};
@@ -890,6 +907,7 @@ const RecordingIndicator: Component<{
 				>
 					<span>Already used by "{props.conflict!.action}"</span>
 					<button
+						data-setting-id="keybindings.bindings.{action}.key"
 						onMouseDown={(e) => {
 							e.preventDefault();
 							props.onConfirmReplace();

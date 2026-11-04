@@ -11,6 +11,8 @@ vi.mock("../../invoke", () => ({
 
 vi.mock("../../transport", () => ({
 	isTauri: () => false,
+	owningConnectionFor: () => undefined,
+	rpc: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../stores/appLogger", () => ({

@@ -4,6 +4,8 @@ pub(crate) mod backoff;
 pub(crate) mod classifier;
 pub(crate) mod command;
 pub(crate) mod commands;
+pub(crate) mod discovery;
+pub(crate) mod exec;
 pub(crate) mod manager;
 pub(crate) mod port;
 pub(crate) mod profile;

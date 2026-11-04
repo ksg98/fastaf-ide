@@ -1,0 +1,12 @@
+.finding { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.chip { border: 1px solid currentColor; border-radius: var(--radius-sm); padding: 0 6px; font-size: var(--font-xs); color: var(--fg-secondary); text-transform: capitalize; }
+.critical { color: var(--error); }
+.high { color: var(--error); }
+.medium { color: var(--warning); }
+.low { color: var(--accent); }
+.info { color: var(--fg-muted); }
+.title { font-weight: 600; overflow-wrap: anywhere; }
+.meta { color: var(--fg-muted); font-size: var(--font-xs); }
+.block summary { cursor: pointer; color: var(--fg-secondary); font-size: var(--font-xs); }
+.block pre { margin: 4px 0 0; padding: 6px; max-height: 240px; overflow: auto; background: var(--bg-tertiary); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-xs); }

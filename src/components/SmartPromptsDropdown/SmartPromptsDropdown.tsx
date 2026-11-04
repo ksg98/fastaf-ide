@@ -1,4 +1,5 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
 import { useSmartPrompts } from "../../hooks/useSmartPrompts";
 import { appLogger } from "../../stores/appLogger";
 import { promptLibraryStore, type SavedPrompt } from "../../stores/promptLibrary";
@@ -6,6 +7,7 @@ import { smartPromptsDropdownStore } from "../../stores/smartPromptsDropdown";
 import { terminalsStore } from "../../stores/terminals";
 import { cx } from "../../utils";
 import { IconBolt } from "../icons";
+import { Button, Input } from "../ui";
 import s from "./SmartPromptsDropdown.module.css";
 import { VariableInputDialog } from "./VariableInputDialog";
 
@@ -22,6 +24,9 @@ const CATEGORY_ORDER: Record<string, { label: string; order: number }> = {
 
 export interface SmartPromptsDropdownProps {
 	repoPath?: string;
+	/** Size of the trigger only; popup controls keep their default geometry. */
+	triggerSize?: "default" | "compact";
+	/** Opens Settings on the Smart Prompts tab. */
 	onOpenSettings?: () => void;
 }
 
@@ -53,17 +58,7 @@ export const SmartPromptsDropdown: Component<SmartPromptsDropdownProps> = (props
 	/** Group prompts by their first non-"smart" tag */
 	const groupedPrompts = createMemo(() => {
 		const groups: { tag: string; label: string; order: number; prompts: SavedPrompt[] }[] = [];
-		const groupMap = new Map<string, SavedPrompt[]>();
-
-		for (const prompt of filteredPrompts()) {
-			const tag = prompt.tags?.find((t) => t !== "smart") ?? "other";
-			let list = groupMap.get(tag);
-			if (!list) {
-				list = [];
-				groupMap.set(tag, list);
-			}
-			list.push(prompt);
-		}
+		const groupMap = Map.groupBy(filteredPrompts(), (prompt) => prompt.tags?.find((t) => t !== "smart") ?? "other");
 
 		for (const [tag, prompts] of groupMap) {
 			const meta = CATEGORY_ORDER[tag] ?? { label: tag.toUpperCase(), order: 99 };
@@ -113,17 +108,8 @@ export const SmartPromptsDropdown: Component<SmartPromptsDropdownProps> = (props
 		onCleanup(() => document.removeEventListener("keydown", handler));
 	});
 
-	/** Close on outside click */
-	createEffect(() => {
-		if (!open()) return;
-		const handler = (e: MouseEvent) => {
-			if (wrapperRef && !wrapperRef.contains(e.target as Node)) {
-				close();
-			}
-		};
-		document.addEventListener("mousedown", handler);
-		onCleanup(() => document.removeEventListener("mousedown", handler));
-	});
+	/** Close on outside press (the wrapper holds the trigger, dropdown and variable dialog) */
+	useOutsideDismiss({ inside: () => [wrapperRef], onClose: close, enabled: open });
 
 	const handleItemClick = async (prompt: SavedPrompt) => {
 		const check = smartPrompts.canExecute(prompt);
@@ -157,15 +143,21 @@ export const SmartPromptsDropdown: Component<SmartPromptsDropdownProps> = (props
 
 	return (
 		<div class={s.wrapper} ref={wrapperRef}>
-			<button class={cx(s.trigger, open() && s.triggerActive)} onClick={toggle} title="Smart Prompts Library">
+			<Button
+				size={props.triggerSize}
+				variant="ghost"
+				class={cx(s.trigger, open() && s.triggerActive)}
+				aria-pressed={open()}
+				onClick={toggle}
+				title="Smart Prompts Library"
+			>
 				<IconBolt size={16} />
-			</button>
+			</Button>
 
 			<Show when={open()}>
-				<div class={s.overlay} onClick={close} />
 				<div class={s.dropdown}>
 					<div class={s.searchWrapper}>
-						<input
+						<Input
 							ref={searchRef}
 							class={s.searchInput}
 							type="text"
@@ -224,7 +216,8 @@ export const SmartPromptsDropdown: Component<SmartPromptsDropdownProps> = (props
 
 					<Show when={props.onOpenSettings}>
 						<div class={s.footer}>
-							<button
+							<Button
+								variant="ghost"
 								class={s.manageLink}
 								onClick={() => {
 									close();
@@ -232,7 +225,7 @@ export const SmartPromptsDropdown: Component<SmartPromptsDropdownProps> = (props
 								}}
 							>
 								Manage Smart Prompts...
-							</button>
+							</Button>
 						</div>
 					</Show>
 				</div>

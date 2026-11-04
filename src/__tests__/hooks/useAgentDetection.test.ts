@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../mocks/tauri";
 import { AGENT_TYPES } from "../../agents";
 import { useAgentDetection } from "../../hooks/useAgentDetection";
@@ -16,7 +16,6 @@ describe("useAgentDetection", () => {
 			"claude",
 			"gemini",
 			"opencode",
-			"aider",
 			"codex",
 			"amp",
 			"cursor-agent",
@@ -25,6 +24,7 @@ describe("useAgentDetection", () => {
 			"git",
 			"grok",
 			"pi",
+			"ego",
 		];
 		const result: Record<string, { path: string | null; version: string | null }> = {};
 		for (const bin of allBinaries) {
@@ -55,10 +55,10 @@ describe("useAgentDetection", () => {
 				expect(map.get("claude")?.available).toBe(true);
 				expect(map.get("gemini")?.available).toBe(false);
 				expect(map.get("opencode")?.available).toBe(true);
-				expect(map.get("aider")?.available).toBe(false);
 				expect(map.get("codex")?.available).toBe(true);
 				expect(map.get("grok")?.available).toBe(false);
 				expect(map.get("pi")?.available).toBe(false);
+				expect(map.get("ego")?.available).toBe(false);
 			});
 		});
 
@@ -74,6 +74,35 @@ describe("useAgentDetection", () => {
 				});
 				expect(getDetection("api")?.available).toBe(false);
 			});
+		});
+
+		// Catches: detection skipped outside the Tauri webview, which left every "+" long press
+		// (agent list) empty in a browser or tablet session although /agents/detect-all exists.
+		it("detects agents in browser mode too", async () => {
+			const realFetch = globalThis.fetch;
+			(globalThis as Record<string, unknown>).__TAURI_SHIM__ = true;
+			const fetchMock = vi.fn(
+				async (_url: string) =>
+					new Response(JSON.stringify(batchResponse({ claude: "/bin/claude" })), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					}),
+			);
+			globalThis.fetch = fetchMock as unknown as typeof fetch;
+			try {
+				await testInScopeAsync(async () => {
+					const { detectAll, getAvailable } = useAgentDetection();
+
+					await detectAll();
+
+					expect(mockInvoke).not.toHaveBeenCalled();
+					expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/agents/detect-all");
+					expect(getAvailable().map((a) => a.type)).toEqual(["claude"]);
+				});
+			} finally {
+				delete (globalThis as Record<string, unknown>).__TAURI_SHIM__;
+				globalThis.fetch = realFetch;
+			}
 		});
 	});
 

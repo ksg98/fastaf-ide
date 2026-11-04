@@ -140,11 +140,14 @@ vi.mock("../../stores/ui", () => ({
 		isDetached: vi.fn(() => false),
 		setDetached: vi.fn(),
 		clearDetached: vi.fn(),
+		setAiChatPanelMeasuredWidth: vi.fn(),
 	},
 }));
 
 vi.mock("../../transport", () => ({
 	isTauri: () => true,
+	owningConnectionFor: () => undefined,
+	rpc: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../stores/voice", () => ({

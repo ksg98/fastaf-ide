@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "desktop")]
@@ -27,6 +27,69 @@ where
         .map_err(|e| format!("fs task failed: {e}"))?
 }
 
+#[cfg(test)]
+use tuic_core::path_spelling::windows_portable_spelling;
+pub(crate) use tuic_core::path_spelling::{is_absolute_on_any_platform, portable_spelling};
+
+/// The same directory, named the way the filesystem stores it.
+///
+/// Windows still hands out 8.3 short names — `C:\Users\RUNNER~1\…` for a
+/// profile whose real name is longer — and any consumer that treats `~` as
+/// meaning the home directory then reads the path as something else entirely.
+/// Canonicalising resolves the short name; the `\\?\` prefix it adds is dropped
+/// again, because most things that read a path back are not Windows APIs.
+/// A path that cannot be canonicalised is returned unchanged: the caller asked
+/// for a better spelling, not for existence.
+///
+/// Test-only so far: production paths reach TUIC from the user, who spells them
+/// the long way.
+#[cfg(test)]
+pub(crate) fn long_form(path: &std::path::Path) -> std::path::PathBuf {
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    if cfg!(windows) {
+        std::path::PathBuf::from(windows_portable_spelling(&canonical.to_string_lossy()))
+    } else {
+        canonical
+    }
+}
+
+/// A stock Windows tool, spelled as an absolute path. On unix the bare name is
+/// already absolute enough — nothing there lives in a system directory a shell
+/// cannot reach.
+///
+/// `CreateProcess` finds a system binary whether or not `PATH` names its
+/// directory, but `cmd` resolves the commands *inside* a script through `PATH`
+/// alone. On the Windows CI runner that split is visible: every test spawning
+/// `cmd` started fine and then reported `'ping' is not recognized as an
+/// internal or external command`. Nothing that must run should depend on what
+/// the host put in `PATH`.
+#[cfg(any(windows, test))]
+pub(crate) fn system32_exe(exe: &str) -> String {
+    if cfg!(windows) {
+        // No quoting: `SystemRoot` holds no spaces, and a quoted first token
+        // makes `cmd /C` apply its own quote-stripping rule to the whole line.
+        format!(
+            "{}\\System32\\{exe}",
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
+        )
+    } else {
+        exe.to_string()
+    }
+}
+
+/// Windows reports `Modify(Any)` for existing directory metadata as well as
+/// for file content. Event-driven file caches must not treat that notification
+/// as a subtree replacement: child events identify changed files. Missing paths,
+/// create/remove/rename events and watcher rescan flags still require recovery.
+pub(crate) fn is_directory_metadata_event(kind: &notify::EventKind, path: &Path) -> bool {
+    matches!(
+        kind,
+        notify::EventKind::Modify(notify::event::ModifyKind::Any)
+    ) && path.is_dir()
+}
+
 /// A directory entry returned by `list_directory`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DirEntry {
@@ -41,6 +104,12 @@ pub struct DirEntry {
     pub git_status: String,
     /// Whether the file is listed in .gitignore.
     pub is_ignored: bool,
+    /// Link text from read_link; absent for ordinary entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
+    /// Target metadata only: directory, file, or unavailable (dangling/inaccessible).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symlink_target_kind: Option<&'static str>,
 }
 
 /// A single line match returned by `search_content`.
@@ -71,11 +140,20 @@ pub struct ContentSearchResult {
     /// `true` when the global match limit was reached.
     pub truncated: bool,
     /// Cross-repo search only: registered repos whose content index was not
-    /// ready yet, so they contributed nothing to this result. A build is kicked
-    /// off for each, so a later search covers them. Zero for single-repo search.
-    /// Non-zero means "not found HERE yet" — never report a clean miss.
+    /// ready yet, so they contributed nothing to this result. Zero for
+    /// single-repo search. Non-zero means "not found HERE yet" — never report a
+    /// clean miss. Search does NOT kick off a build for these: the configured
+    /// warm strategy owns scheduling (see `search_content_all_impl`), so under
+    /// the default `active_and_switch` most of them are waiting for a repo
+    /// switch, not for a builder. Read `repos_indexing` before telling the user
+    /// that waiting helps.
     #[serde(default)]
     pub repos_pending: u32,
+    /// Subset of `repos_pending` with a build actually in flight. This is the
+    /// only count that justifies "still indexing, retry shortly" — the rest are
+    /// pending on a scheduling event that may never come.
+    #[serde(default)]
+    pub repos_indexing: u32,
     /// Cross-repo search only: registered repos actually searched.
     #[serde(default)]
     pub repos_searched: u32,
@@ -96,6 +174,9 @@ pub struct ContentSearchBatch {
     /// Mirrors `ContentSearchResult` — lets the UI distinguish "no match" from
     /// "not searched yet" on a cross-repo search.
     pub repos_pending: u32,
+    /// Mirrors `ContentSearchResult::repos_indexing` — lets the UI distinguish
+    /// "not searched yet, but building" from "not searched yet, and unscheduled".
+    pub repos_indexing: u32,
     pub repos_searched: u32,
 }
 
@@ -362,6 +443,16 @@ pub async fn stat_path(path: String) -> PathStat {
     stat_path_impl(path)
 }
 
+/// Return the home directory of the machine serving this request.
+/// The remote repository picker must not infer it from the client's platform.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn get_home_directory() -> Result<String, String> {
+    let home = dirs::home_dir().ok_or("Home directory is unavailable")?;
+    home.into_os_string()
+        .into_string()
+        .map_err(|_| "Home directory is not valid UTF-8".to_string())
+}
+
 /// List entries in a directory within a repository.
 ///
 /// Not the microsecond `read_dir` it looks like: `list_directory_impl` runs
@@ -426,7 +517,26 @@ pub(crate) fn list_directory_impl(
             .map_err(|e| format!("Failed to read metadata for {name}: {e}"))?;
 
         let is_dir = metadata.is_dir();
-        let size = if is_dir { 0 } else { metadata.len() };
+        let is_symlink = metadata.file_type().is_symlink();
+        let symlink_target = if is_symlink {
+            std::fs::read_link(entry.path())
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        let symlink_target_kind = is_symlink.then(|| match std::fs::metadata(entry.path()) {
+            Ok(target) if target.is_dir() => "directory",
+            Ok(target) if target.is_file() => "file",
+            _ => "unavailable",
+        });
+        // A link's lstat length counts its target spelling, not file content.
+        // Keep is_dir/navigation unchanged; target kind is display metadata only.
+        let size = if is_dir || is_symlink {
+            0
+        } else {
+            metadata.len()
+        };
         let modified_at = metadata
             .modified()
             .ok()
@@ -484,6 +594,8 @@ pub(crate) fn list_directory_impl(
             modified_at,
             git_status,
             is_ignored,
+            symlink_target,
+            symlink_target_kind,
         });
     }
 
@@ -520,13 +632,16 @@ pub async fn search_files(
     .await
 }
 
+/// Warm a repo's content index — invoked on repo switch. `warm_index`, not
+/// `ensure_index`: the switch is only allowed to index under a strategy that
+/// asked for it, and that gate must be identical on both transports.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn warm_content_index(
     app_state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     repo_path: String,
 ) {
-    crate::content_index::ensure_index(&app_state, &repo_path);
+    crate::content_index::warm_index(&app_state, &repo_path);
 }
 
 /// Split a `ContentSearchResult` into `content-search-batch` payloads of 50
@@ -556,6 +671,7 @@ fn dispatch_content_batches(
             files_skipped: result.files_skipped,
             truncated: result.truncated,
             repos_pending: result.repos_pending,
+            repos_indexing: result.repos_indexing,
             repos_searched: result.repos_searched,
         });
     };
@@ -652,7 +768,10 @@ fn search_content_all_impl_with_cancel(
     let mut all_matches = Vec::new();
     let mut files_searched: u32 = 0;
     let mut repos_searched: u32 = 0;
-    let mut repos_pending: u32 = 0;
+    // Collected rather than counted: the caller needs to know how many of these
+    // are actually being built, and that is a question about `index_in_flight`,
+    // not about this loop.
+    let mut pending_repos: Vec<&String> = Vec::new();
 
     for repo_path in &repo_paths {
         if cancel.load(Ordering::Relaxed) {
@@ -663,11 +782,11 @@ fn search_content_all_impl_with_cancel(
             .get(repo_path)
             .map(|entry| Arc::clone(entry.value()))
         else {
-            repos_pending += 1;
+            pending_repos.push(repo_path);
             continue;
         };
         let Some(plan) = prepare_index_search(&index_arc, query, 50) else {
-            repos_pending += 1;
+            pending_repos.push(repo_path);
             continue;
         };
         repos_searched += 1;
@@ -688,6 +807,12 @@ fn search_content_all_impl_with_cancel(
         }
     }
 
+    let repos_pending = pending_repos.len() as u32;
+    let repos_indexing = pending_repos
+        .iter()
+        .filter(|repo| state.index_in_flight.contains(repo.as_str()))
+        .count() as u32;
+
     let truncated = all_matches.len() >= global_limit;
     ContentSearchResult {
         matches: all_matches,
@@ -695,6 +820,7 @@ fn search_content_all_impl_with_cancel(
         files_skipped: 0,
         truncated,
         repos_pending,
+        repos_indexing,
         repos_searched,
     }
 }
@@ -898,6 +1024,10 @@ fn prepare_index_search(
     candidate_limit: usize,
 ) -> Option<IndexSearchPlan> {
     let index = index.read();
+    // The read path is what "recently used" means for the memory budget: a repo
+    // the user keeps searching must outlive one they indexed and walked away
+    // from. Recorded even when the index is not ready — the interest is real.
+    index.touch();
     index
         .is_ready()
         .then(|| index_search_plan(&index, query, candidate_limit))
@@ -1046,6 +1176,93 @@ fn grep_file_with_cancel(
     Ok(stopped_by_cancel)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FILENAME_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Path-only inventories are shared by both transports. Per-repo locking
+/// coalesces cold queries; invalidation never waits for a blocking tree walk.
+#[derive(Default)]
+struct FilenameInventorySlot {
+    generation: std::sync::atomic::AtomicU64,
+    inventory: parking_lot::Mutex<Option<FilenameInventory>>,
+}
+
+struct FilenameInventory {
+    generation: u64,
+    built_at: std::time::Instant,
+    paths: Arc<Vec<(String, String)>>,
+}
+
+static FILENAME_INVENTORIES: std::sync::LazyLock<
+    moka::sync::Cache<PathBuf, Arc<FilenameInventorySlot>>,
+> = std::sync::LazyLock::new(|| {
+    moka::sync::Cache::builder()
+        .max_capacity(8)
+        .time_to_idle(std::time::Duration::from_secs(10 * 60))
+        .build()
+});
+
+pub(crate) fn invalidate_filename_inventory(repo_path: &str) {
+    if let Ok(repo) = std::fs::canonicalize(repo_path)
+        && let Some(slot) = FILENAME_INVENTORIES.get(&repo)
+    {
+        slot.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+pub(crate) fn invalidate_all_filename_inventories() {
+    for (_, slot) in FILENAME_INVENTORIES.iter() {
+        slot.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+fn filename_inventory(repo: &Path) -> Arc<Vec<(String, String)>> {
+    let slot = FILENAME_INVENTORIES.get_with(repo.to_path_buf(), || {
+        Arc::new(FilenameInventorySlot::default())
+    });
+    let mut inventory = slot.inventory.lock();
+    let generation = slot.generation.load(Ordering::Acquire);
+    if let Some(current) = inventory.as_ref()
+        && current.generation == generation
+        && current.built_at.elapsed() < std::time::Duration::from_secs(60)
+    {
+        return Arc::clone(&current.paths);
+    }
+    #[cfg(test)]
+    FILENAME_WALKS.with(|walks| walks.set(walks.get() + 1));
+    let paths = Arc::new(
+        ignore::WalkBuilder::new(repo)
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .filter_entry(|e| !is_always_excluded_dir(e))
+            .build()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+            .filter_map(|e| {
+                let relative = e
+                    .path()
+                    .strip_prefix(repo)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some((e.file_name().to_string_lossy().into_owned(), relative))
+            })
+            .collect(),
+    );
+    // Keep the generation sampled BEFORE the walk. An event during traversal
+    // makes the next query rebuild, rather than publishing that walk as current.
+    *inventory = Some(FilenameInventory {
+        generation,
+        built_at: std::time::Instant::now(),
+        paths: Arc::clone(&paths),
+    });
+    paths
+}
+
 pub(crate) fn search_files_impl(
     repo_path: String,
     query: String,
@@ -1061,45 +1278,20 @@ pub(crate) fn search_files_impl(
 
     let mut results = Vec::new();
 
-    // Walk using the `ignore` crate: respects .gitignore, .git/info/exclude,
-    // global gitignore — skips ignored directories entirely during traversal.
-    let walker = ignore::WalkBuilder::new(&canonical_repo)
-        .hidden(false) // show dotfiles (except .git which is always skipped)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .filter_entry(|e| !is_always_excluded_dir(e))
-        .build();
-
-    for entry in walker {
+    if max_results == 0 {
+        return Ok(results);
+    }
+    let paths = filename_inventory(&canonical_repo);
+    for (name, relative) in paths.iter() {
         if results.len() >= max_results {
             break;
         }
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
-        if !is_file {
+        if !pattern.is_match(name) && !pattern.is_match(relative) {
             continue;
         }
-
-        let relative = match entry.path().strip_prefix(&canonical_repo) {
-            Ok(p) => p.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
-
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // Match against file name or relative path
-        if !pattern.is_match(&name) && !pattern.is_match(&relative) {
-            continue;
-        }
-
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
+        let metadata = match std::fs::metadata(canonical_repo.join(relative)) {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
         };
 
         let modified_at = metadata
@@ -1109,13 +1301,15 @@ pub(crate) fn search_files_impl(
             .map_or(0, |d| d.as_secs());
 
         results.push(DirEntry {
-            name,
-            path: relative,
+            name: name.clone(),
+            path: relative.clone(),
             is_dir: false,
             size: metadata.len(),
             modified_at,
             git_status: String::new(), // populated below
             is_ignored: false,         // walker already filtered gitignored entries
+            symlink_target: None,
+            symlink_target_kind: None,
         });
     }
 
@@ -1477,6 +1671,37 @@ pub fn create_file(repo_path: String, file: String) -> Result<(), String> {
     }
 }
 
+/// Write `content` only when the file on disk still equals `expected`, the text
+/// the caller rendered its edit from. `Ok(false)` means the file changed in the
+/// meantime and nothing was written, so a stale view never overwrites newer bytes.
+/// The compare and the atomic rename are not one critical section: a writer that
+/// lands between them still loses, but the window is that of a local read.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn write_file_if_unchanged(
+    repo_path: String,
+    file: String,
+    expected: String,
+    content: String,
+) -> Result<bool, String> {
+    spawn_blocking_fs(move || write_file_if_unchanged_impl(repo_path, file, expected, content))
+        .await
+}
+
+fn write_file_if_unchanged_impl(
+    repo_path: String,
+    file: String,
+    expected: String,
+    content: String,
+) -> Result<bool, String> {
+    let (_canonical_repo, canonical_target) = validate_path(&repo_path, &file)?;
+    if crate::read_file_impl(repo_path, file)? != expected {
+        return Ok(false);
+    }
+    atomic_write(&canonical_target, content.as_bytes())
+        .map_err(|e| format!("Failed to write file: {e}"))?;
+    Ok(true)
+}
+
 /// Create a directory (and parents) within a repository.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn create_directory(repo_path: String, dir: String) -> Result<(), String> {
@@ -1522,13 +1747,25 @@ pub async fn delete_path(repo_path: String, path: String) -> Result<(), String> 
 }
 
 fn delete_path_impl(repo_path: String, path: String) -> Result<(), String> {
-    let (_canonical_repo, canonical_target) = validate_path(&repo_path, &path)?;
+    // Resolve the parent, not the selected entry: canonicalizing the final link
+    // rejects dangling links and turns deletion into deletion of their targets.
+    let (_canonical_repo, target) = validate_path_for_creation(&repo_path, &path)?;
+    let metadata =
+        std::fs::symlink_metadata(&target).map_err(|e| format!("Failed to inspect path: {e}"))?;
 
-    if canonical_target.is_dir() {
-        std::fs::remove_dir_all(&canonical_target)
-            .map_err(|e| format!("Failed to delete directory: {e}"))
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if metadata.file_type().is_symlink_dir() {
+            return std::fs::remove_dir(&target)
+                .map_err(|e| format!("Failed to delete directory link: {e}"));
+        }
+    }
+
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to delete directory: {e}"))
     } else {
-        std::fs::remove_file(&canonical_target).map_err(|e| format!("Failed to delete file: {e}"))
+        std::fs::remove_file(&target).map_err(|e| format!("Failed to delete file: {e}"))
     }
 }
 
@@ -2170,9 +2407,27 @@ const TCC_PROTECTED_DIRS: &[&str] = &[
     "Photos Library.photoslibrary",
 ];
 
+/// Resolve `.` and `..` components without touching disk: even checking
+/// existence on a path that reaches ~/Library through `..` can trigger TCC.
+fn lexically_normalized(path: &std::path::Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 /// The TCC-protected folder under `home` that `path` falls in (`"Desktop"`…).
+/// `path` is normalized lexically first, so `~/repo/../Library` counts.
 fn tcc_protected_root_in(path: &std::path::Path, home: &std::path::Path) -> Option<&'static str> {
-    let first = path.strip_prefix(home).ok()?.components().next()?;
+    let normalized = lexically_normalized(path);
+    let first = normalized.strip_prefix(home).ok()?.components().next()?;
     let name = first.as_os_str().to_string_lossy();
     TCC_PROTECTED_DIRS
         .iter()
@@ -2246,6 +2501,200 @@ pub fn resolve_terminal_path(cwd: String, candidate: String) -> Option<ResolvedF
         }),
         Err(_) => None,
     }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MarkdownLinkTarget {
+    Heading {
+        anchor: String,
+    },
+    File {
+        absolute_path: String,
+        open_path: String,
+        is_directory: bool,
+        same_document: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        anchor: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        line: Option<usize>,
+    },
+    Missing {
+        path: String,
+    },
+    Blocked {
+        reason: String,
+    },
+}
+
+fn decode_markdown_link_part(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| (b as char).to_digit(16).map(|n| n as u8);
+            let hi = hex(*bytes.get(i + 1)?)?;
+            let lo = hex(*bytes.get(i + 2)?)?;
+            decoded.push(hi << 4 | lo);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn is_unc_markdown_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if path.starts_with(r"\\?\")
+        && bytes.len() >= 7
+        && bytes[4].is_ascii_alphabetic()
+        && bytes[5] == b':'
+        && matches!(bytes[6], b'/' | b'\\')
+    {
+        return false;
+    }
+    bytes.len() >= 2 && matches!(bytes[0], b'/' | b'\\') && matches!(bytes[1], b'/' | b'\\')
+}
+
+fn resolve_markdown_link_impl(root: &str, current_file: &str, href: &str) -> MarkdownLinkTarget {
+    resolve_markdown_link_with_home(root, current_file, href, dirs::home_dir().as_deref())
+}
+
+/// `~/rest` under `home`, or `None` when the path has no `~/` prefix or `rest` would not stay
+/// under home. Leading separators are trimmed (`~//x` must not join as an absolute path) and a
+/// drive-prefixed rest (`~/C:\x`) is refused: on Windows `join` would replace home with it.
+fn expand_home_prefix(path: &str, home: &Path) -> Option<String> {
+    let rest = path.strip_prefix("~/")?.trim_start_matches(['/', '\\']);
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return None;
+    }
+    Some(home.join(rest).to_string_lossy().into_owned())
+}
+
+/// `~/` in a link names the home directory, as it does in the terminal paths.
+fn resolve_markdown_link_with_home(
+    root: &str,
+    current_file: &str,
+    href: &str,
+    home: Option<&Path>,
+) -> MarkdownLinkTarget {
+    // An in-document open link names a file, not an OS protocol handler. Decode
+    // its delimiter before the normal local-path/UNC and filesystem checks.
+    let tuic_path;
+    let href = if href
+        .get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tuic://open/"))
+    {
+        let path = &href[12..];
+        tuic_path = if path.starts_with('/') {
+            format!("/{}", path.trim_start_matches('/'))
+        } else {
+            path.to_string()
+        };
+        tuic_path.as_str()
+    } else {
+        href
+    };
+    let (raw_path, raw_anchor) = href.split_once('#').unwrap_or((href, ""));
+    let raw_path = raw_path.split_once('?').map_or(raw_path, |(path, _)| path);
+    let Some(mut path) = decode_markdown_link_part(raw_path) else {
+        return MarkdownLinkTarget::Blocked {
+            reason: "Invalid link encoding".into(),
+        };
+    };
+    let Some(mut anchor) = decode_markdown_link_part(raw_anchor) else {
+        return MarkdownLinkTarget::Blocked {
+            reason: "Invalid anchor encoding".into(),
+        };
+    };
+    if is_unc_markdown_path(&path) {
+        return MarkdownLinkTarget::Blocked {
+            reason: "Network paths are not supported in Markdown links".into(),
+        };
+    }
+    if let Some(expanded) = home.and_then(|home| expand_home_prefix(&path, home)) {
+        path = expanded;
+    }
+    let mut line = anchor
+        .strip_prefix('L')
+        .or_else(|| anchor.strip_prefix('l'))
+        .and_then(|number| number.parse::<usize>().ok())
+        .filter(|number| *number > 0);
+    if line.is_some() {
+        anchor.clear();
+    } else if anchor.is_empty() {
+        let without_suffix = strip_line_col_suffix(&path);
+        if without_suffix != path
+            && let Some(number) = path[without_suffix.len() + 1..].split(':').next()
+            && let Ok(parsed) = number.parse::<usize>()
+            && parsed > 0
+        {
+            path = without_suffix.to_string();
+            line = Some(parsed);
+        }
+    }
+    if path.is_empty() && !anchor.is_empty() {
+        return MarkdownLinkTarget::Heading { anchor };
+    }
+
+    let root_path = PathBuf::from(root);
+    let current = if PathBuf::from(current_file).is_absolute() {
+        PathBuf::from(current_file)
+    } else {
+        root_path.join(current_file)
+    };
+    // Relative links use the opened file's location, even when that file is a
+    // symlink. Canonicalize separately for same-document comparison only.
+    let canonical_current = current.canonicalize().unwrap_or_else(|_| current.clone());
+    let target = if path.is_empty() {
+        current.clone()
+    } else if PathBuf::from(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else {
+        current.parent().unwrap_or(&root_path).join(&path)
+    };
+    if is_tcc_protected_path(&target) {
+        return MarkdownLinkTarget::Blocked {
+            reason: "Protected path".into(),
+        };
+    }
+    let Ok(target) = target.canonicalize() else {
+        return MarkdownLinkTarget::Missing {
+            path: if path.is_empty() {
+                current_file.into()
+            } else {
+                path
+            },
+        };
+    };
+    let absolute_path = portable_spelling(&target.to_string_lossy());
+    let canonical_root = root_path.canonicalize().unwrap_or(root_path);
+    let open_path = target
+        .strip_prefix(&canonical_root)
+        .map(|relative| portable_spelling(&relative.to_string_lossy()))
+        .unwrap_or_else(|_| absolute_path.clone());
+    MarkdownLinkTarget::File {
+        absolute_path,
+        open_path,
+        is_directory: target.is_dir(),
+        same_document: target == canonical_current,
+        anchor: (!anchor.is_empty()).then_some(anchor),
+        line,
+    }
+}
+
+/// Resolve a rendered Markdown link on the filesystem without probing UNC hosts.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn resolve_markdown_link(
+    root: String,
+    current_file: String,
+    href: String,
+) -> Result<MarkdownLinkTarget, String> {
+    spawn_blocking_fs(move || Ok(resolve_markdown_link_impl(&root, &current_file, &href))).await
 }
 
 /// Validate many path candidates from one screen in a single call.
@@ -2372,10 +2821,74 @@ mod tests {
             files_skipped: 0,
             truncated: false,
             repos_pending: 0,
+            repos_indexing: 0,
             repos_searched: 0,
         };
         let wire = serde_json::to_value(&batch).unwrap();
         assert_eq!(wire["search_id"], "cs-7");
+    }
+
+    /// The frontend takes the Markdown-viewer branch only when `line` is absent;
+    /// a serialised `null` once sent every .md link to the text editor.
+    #[test]
+    fn markdown_file_link_omits_absent_anchor_and_line() {
+        let target = MarkdownLinkTarget::File {
+            absolute_path: "/r/a.md".into(),
+            open_path: "a.md".into(),
+            is_directory: false,
+            same_document: false,
+            anchor: None,
+            line: None,
+        };
+        let wire = serde_json::to_value(&target).unwrap();
+        assert!(wire.get("anchor").is_none() && wire.get("line").is_none());
+        let with = MarkdownLinkTarget::File {
+            absolute_path: "/r/a.md".into(),
+            open_path: "a.md".into(),
+            is_directory: false,
+            same_document: false,
+            anchor: Some("x".into()),
+            line: Some(3),
+        };
+        let wire = serde_json::to_value(&with).unwrap();
+        assert_eq!(wire["anchor"], "x");
+        assert_eq!(wire["line"], 3);
+    }
+
+    /// IPC and HTTP are two transports for one backend, and the browser store
+    /// reads these counts by literal key off the JSON body. `repos_indexing` is
+    /// the field the empty-state message is built from, so a rename on either
+    /// struct silently turns "40 not indexed" back into a retry that never lands
+    /// — with nothing else to fail.
+    #[test]
+    fn both_result_shapes_carry_repos_indexing_under_that_exact_name() {
+        let result = serde_json::to_value(ContentSearchResult::default()).unwrap();
+        assert_eq!(
+            result["repos_indexing"], 0,
+            "the HTTP body must expose repos_indexing"
+        );
+
+        let batch = serde_json::to_value(ContentSearchBatch {
+            search_id: "cs-7".to_string(),
+            matches: Vec::new(),
+            is_final: true,
+            files_searched: 0,
+            files_skipped: 0,
+            truncated: false,
+            repos_pending: 3,
+            repos_indexing: 1,
+            repos_searched: 2,
+        })
+        .unwrap();
+        assert_eq!(
+            batch["repos_indexing"], 1,
+            "the streamed batch must expose repos_indexing"
+        );
+        // Same name, same casing, same meaning on both transports.
+        assert_eq!(
+            result.as_object().unwrap().contains_key("repos_indexing"),
+            batch.as_object().unwrap().contains_key("repos_indexing"),
+        );
     }
 
     /// A failed search has to be as correlated as a successful one, or the
@@ -2406,6 +2919,7 @@ mod tests {
             files_searched: 12,
             files_skipped: 3,
             truncated: false,
+            repos_indexing: 0,
             repos_pending: 0,
             repos_searched: 1,
         }
@@ -2517,6 +3031,86 @@ mod tests {
             .unwrap();
 
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_listing_does_not_disguise_external_directory_as_file_bytes() {
+        let dir = setup_test_repo();
+        let outside = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked-dir")).unwrap();
+        let entries = list_directory_impl(dir.path().to_string_lossy().into(), ".".into()).unwrap();
+        let link = entries.iter().find(|e| e.name == "linked-dir").unwrap();
+        let wire = serde_json::to_value(link).unwrap();
+        assert_eq!(
+            wire["symlink_target"],
+            outside.path().to_string_lossy().as_ref()
+        );
+        assert_eq!(wire["symlink_target_kind"], "directory");
+        assert_eq!(link.size, 0, "link text length is not file content size");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_open_names_external_target_instead_of_generic_access_denied() {
+        let dir = setup_test_repo();
+        let outside = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked-dir")).unwrap();
+        let error = crate::read_file_impl(dir.path().to_string_lossy().into(), "linked-dir".into())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "Cannot open symbolic link \"linked-dir\": target \"{}\" is outside the repository.",
+                outside.path().canonicalize().unwrap().display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_metadata_preserves_internal_reads_and_dangling_entries() {
+        // Catches following links for lstat size, dropping broken links, or denying internal reads.
+        let dir = setup_test_repo();
+        let outside = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        std::fs::write(outside.path().join("private.txt"), "outside content").unwrap();
+        for (name, target) in [
+            ("internal", PathBuf::from("README.md")),
+            ("external", outside.path().join("private.txt")),
+            ("dangling", PathBuf::from("missing")),
+        ] {
+            std::os::unix::fs::symlink(target, dir.path().join(name)).unwrap();
+        }
+        let repo = dir.path().to_string_lossy().into_owned();
+        let entries = list_directory_impl(repo.clone(), ".".into()).unwrap();
+        for (name, kind) in [
+            ("internal", "file"),
+            ("external", "file"),
+            ("dangling", "unavailable"),
+        ] {
+            let link = entries.iter().find(|e| e.name == name).unwrap();
+            let wire = serde_json::to_value(link).unwrap();
+            assert_eq!(wire["symlink_target_kind"], kind, "{name}");
+            assert_eq!(link.size, 0, "{name}");
+        }
+        assert_eq!(
+            crate::read_file_impl(repo.clone(), "internal".into()).unwrap(),
+            "# Test"
+        );
+        assert!(
+            crate::read_file_impl(repo.clone(), "external".into())
+                .unwrap_err()
+                .contains("is outside the repository")
+        );
+        assert!(crate::read_file_impl(repo, "dangling".into()).is_err());
+        let ordinary = entries.iter().find(|e| e.name == "README.md").unwrap();
+        assert!(
+            serde_json::to_value(ordinary)
+                .unwrap()
+                .get("symlink_target")
+                .is_none()
+        );
+        assert_eq!(ordinary.size, 6);
     }
 
     #[test]
@@ -2685,6 +3279,73 @@ mod tests {
             fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "world"
         );
+    }
+
+    #[test]
+    fn write_file_if_unchanged_refuses_when_disk_content_differs() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+        let target = dir.path().join("note.md");
+        fs::write(&target, "- [ ] a\n").unwrap();
+
+        // Matching expectation: written.
+        assert!(
+            write_file_if_unchanged_impl(
+                repo_path.clone(),
+                "note.md".to_string(),
+                "- [ ] a\n".to_string(),
+                "- [x] a\n".to_string(),
+            )
+            .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "- [x] a\n");
+
+        // Another writer edited the file after the caller read it: nothing is written.
+        fs::write(&target, "- [x] a\nnew line from desktop\n").unwrap();
+        assert!(
+            !write_file_if_unchanged_impl(
+                repo_path,
+                "note.md".to_string(),
+                "- [x] a\n".to_string(),
+                "- [ ] a\n".to_string(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "- [x] a\nnew line from desktop\n"
+        );
+    }
+
+    #[test]
+    fn write_file_if_unchanged_rejects_traversal_and_missing_file() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+        let outside = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("outside-if-unchanged.txt");
+        fs::write(&outside, "x").unwrap();
+
+        let traversal = write_file_if_unchanged_impl(
+            repo_path.clone(),
+            "../outside-if-unchanged.txt".to_string(),
+            "x".to_string(),
+            "bad".to_string(),
+        );
+        assert!(traversal.is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "x");
+        fs::remove_file(&outside).unwrap();
+
+        let missing = write_file_if_unchanged_impl(
+            repo_path,
+            "gone.md".to_string(),
+            String::new(),
+            "created".to_string(),
+        );
+        assert!(missing.is_err());
+        assert!(!dir.path().join("gone.md").exists());
     }
 
     #[test]
@@ -3260,7 +3921,7 @@ mod tests {
             TransferMode::Copy,
         );
 
-        assert!(r.pasted.is_empty());
+        assert_eq!(r.pasted.len(), 0);
         assert_eq!(r.errors.len(), 1);
         assert!(r.errors[0].starts_with("gone.txt: "), "{r:?}");
     }
@@ -3363,6 +4024,126 @@ mod tests {
     }
 
     // --- search_files tests ---
+
+    /// Catches a fresh repository traversal for every selective/no-match query.
+    /// The second query must filter the inventory already collected by the first.
+    #[test]
+    fn test_search_files_reuses_inventory_for_no_match_queries() {
+        let dir = setup_test_repo();
+        let repo = dir.path().to_string_lossy().to_string();
+        FILENAME_WALKS.with(|walks| walks.set(0));
+        assert!(
+            search_files_impl(repo.clone(), "absent-needle-one".into(), None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_files_impl(repo, "absent-needle-two".into(), None)
+                .unwrap()
+                .is_empty()
+        );
+        FILENAME_WALKS.with(|walks| {
+            assert_eq!(
+                walks.get(),
+                1,
+                "no-match queries must share one inventory walk"
+            )
+        });
+    }
+
+    /// Catches inventory reuse after file membership or ignore rules change,
+    /// and stale result metadata being returned from the path-only cache.
+    #[test]
+    fn test_search_files_inventory_invalidation_and_fresh_metadata() {
+        let dir = setup_test_repo();
+        let repo = dir.path().to_string_lossy().to_string();
+        assert!(
+            search_files_impl(repo.clone(), "new-needle".into(), None)
+                .unwrap()
+                .is_empty()
+        );
+        fs::write(dir.path().join("new-needle.txt"), "one").unwrap();
+        invalidate_filename_inventory(&repo);
+        let first = search_files_impl(repo.clone(), "new-needle".into(), None).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].size, 3);
+        fs::write(dir.path().join("new-needle.txt"), "a longer payload").unwrap();
+        let updated = search_files_impl(repo.clone(), "new-needle".into(), None).unwrap();
+        assert_eq!(updated[0].size, 16, "metadata is not cached with names");
+        fs::write(dir.path().join(".gitignore"), "new-needle.txt\n").unwrap();
+        invalidate_filename_inventory(&repo);
+        assert!(
+            search_files_impl(repo.clone(), "new-needle".into(), None)
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_file(dir.path().join("new-needle.txt")).unwrap();
+        invalidate_filename_inventory(&repo);
+        assert!(
+            search_files_impl(repo, "new-needle".into(), None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Catches a zero-limit request performing a cold walk, or a stale
+    /// generation remaining valid until TTL despite an explicit invalidation.
+    #[test]
+    fn test_search_files_zero_limit_and_inventory_expiry() {
+        let dir = setup_test_repo();
+        let repo = dir.path().to_string_lossy().to_string();
+        let canonical = dir.path().canonicalize().unwrap();
+        FILENAME_WALKS.with(|walks| walks.set(0));
+        assert!(
+            search_files_impl(repo.clone(), "needle".into(), Some(0))
+                .unwrap()
+                .is_empty()
+        );
+        FILENAME_WALKS.with(|walks| assert_eq!(walks.get(), 0));
+        let first = filename_inventory(&canonical);
+        let slot = FILENAME_INVENTORIES.get(&canonical).unwrap();
+        slot.inventory.lock().as_mut().unwrap().built_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(60);
+        let second = filename_inventory(&canonical);
+        assert!(!Arc::ptr_eq(&first, &second));
+        slot.generation.fetch_add(1, Ordering::AcqRel);
+        let third = filename_inventory(&canonical);
+        assert!(!Arc::ptr_eq(&second, &third));
+        FILENAME_WALKS.with(|walks| assert_eq!(walks.get(), 3));
+    }
+
+    /// Explicit corpus measurement; also catches a warm lookup rebuilding the
+    /// measured cold inventory instead of reusing its allocation.
+    #[test]
+    #[ignore = "benchmark: requires TUIC_FILENAME_INVENTORY_REPO pointing at an authorized corpus"]
+    fn filename_inventory_cold_walk_measurement_2099() {
+        let repo = PathBuf::from(
+            std::env::var("TUIC_FILENAME_INVENTORY_REPO").expect("authorized corpus path"),
+        )
+        .canonicalize()
+        .unwrap();
+        FILENAME_INVENTORIES.invalidate(&repo);
+        FILENAME_WALKS.with(|walks| walks.set(0));
+        let start = std::time::Instant::now();
+        let paths = filename_inventory(&repo);
+        let elapsed = start.elapsed();
+        let capacity_bytes = std::mem::size_of_val(paths.as_ref())
+            + paths.capacity() * std::mem::size_of::<(String, String)>()
+            + paths
+                .iter()
+                .map(|(name, relative)| name.capacity() + relative.capacity())
+                .sum::<usize>();
+        println!(
+            "{}",
+            serde_json::json!({
+                "repo": repo, "files": paths.len(), "elapsed_micros": elapsed.as_micros(),
+                "retained_vector_and_string_capacity_bytes": capacity_bytes,
+                "excludes": "allocator headers, Arc headers, slot and cache-map overhead"
+            })
+        );
+        assert!(Arc::ptr_eq(&paths, &filename_inventory(&repo)));
+        FILENAME_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+    }
 
     #[test]
     fn test_search_files_basic() {
@@ -3934,6 +4715,614 @@ mod tests {
 
     // --- resolve_terminal_path tests ---
 
+    #[test]
+    fn tcc_guard_rejects_parent_traversal_into_protected_home_directories() {
+        let home = dirs::home_dir().unwrap();
+        for candidate in [
+            home.join("Projects/repo/../../Library/Mail"),
+            home.join("Projects/../Documents/report.md"),
+            home.join("Downloads/inside.txt"),
+        ] {
+            assert!(is_tcc_protected_path(&candidate), "{candidate:?}");
+        }
+        assert!(!is_tcc_protected_path(
+            &home.join("Downloads/../Projects/readme.md")
+        ));
+    }
+
+    // Catches: tuic://open is treated as a relative filesystem name instead of a local link.
+    #[test]
+    fn markdown_tuic_open_links_resolve_local_file_types_and_directories() {
+        let fixture = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let root = fixture.path().join("active");
+        std::fs::create_dir_all(&root).unwrap();
+        for directory in ["active", "other-worktree", "unregistered"] {
+            let directory = fixture.path().join(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            for name in ["target.md", "image.png", "index.html", "folder"] {
+                let target = directory.join(name);
+                if name == "folder" {
+                    std::fs::create_dir_all(&target).unwrap();
+                } else {
+                    std::fs::write(&target, "fixture").unwrap();
+                }
+                let target = portable_spelling(&target.to_string_lossy());
+                let href = format!("tuic://open/{target}");
+                let resolved =
+                    resolve_markdown_link_impl(&root.to_string_lossy(), "report.md", &href);
+                assert!(
+                    matches!(resolved, MarkdownLinkTarget::File { absolute_path, is_directory, .. }
+                    if absolute_path == target && is_directory == (name == "folder")),
+                    "{href}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_links_open_files_with_line_and_column_suffixes() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("review.md"), "").unwrap();
+        fs::write(dir.path().join("file.rs"), "").unwrap();
+        fs::write(dir.path().join("Makefile"), "").unwrap();
+        let root = dir.path().to_string_lossy();
+        for (href, file, line) in [
+            ("file.rs:42:7", "file.rs", 42),
+            ("Makefile:42:7", "Makefile", 42),
+            ("file.rs:42", "file.rs", 42),
+        ] {
+            assert!(
+                matches!(
+                    resolve_markdown_link_impl(&root, "review.md", href),
+                    MarkdownLinkTarget::File { open_path, line: Some(actual), .. }
+                        if open_path == file && actual == line
+                ),
+                "{href}"
+            );
+        }
+    }
+
+    /// Wire contract through the real resolver: an .md link without anchor or line
+    /// must reach the frontend with neither key (a `null` line routes to the editor).
+    #[test]
+    fn resolved_markdown_links_serialize_without_null_anchor_or_line() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("review.md"), "").unwrap();
+        fs::write(dir.path().join("next.md"), "").unwrap();
+        let root = dir.path().to_string_lossy();
+        let absolute = dir.path().join("next.md").to_string_lossy().into_owned();
+        for href in ["next.md", "./next.md", absolute.as_str(), "next.md#"] {
+            let wire =
+                serde_json::to_value(resolve_markdown_link_impl(&root, "review.md", href)).unwrap();
+            assert_eq!(wire["kind"], "file", "{href}");
+            assert!(wire.get("line").is_none(), "{href}: {wire}");
+            assert!(wire.get("anchor").is_none(), "{href}: {wire}");
+        }
+        let wire = serde_json::to_value(resolve_markdown_link_impl(
+            &root,
+            "review.md",
+            "next.md#intro",
+        ))
+        .unwrap();
+        assert_eq!(wire["anchor"], "intro");
+        assert!(wire.get("line").is_none());
+        let wire =
+            serde_json::to_value(resolve_markdown_link_impl(&root, "review.md", "next.md#L9"))
+                .unwrap();
+        assert_eq!(wire["line"], 9);
+        assert!(
+            wire.get("anchor").is_none(),
+            "an L-anchor is a line, not a heading: {wire}"
+        );
+    }
+
+    #[test]
+    fn markdown_link_resolution_decodes_paths_and_keeps_encoded_hashes() {
+        let dir = TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        fs::write(docs.join("review.md"), "").unwrap();
+        fs::write(docs.join("a#b.md"), "").unwrap();
+        fs::write(docs.join("Makefile"), "").unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let result = resolve_markdown_link_impl(&root, "docs/review.md", "a%23b.md?view=1#section");
+        assert!(
+            matches!(result, MarkdownLinkTarget::File { open_path, anchor: Some(anchor), .. }
+            if open_path == "docs/a#b.md" && anchor == "section")
+        );
+        assert_eq!(
+            resolve_markdown_link_impl(&root, "docs/review.md", "#target-heading"),
+            MarkdownLinkTarget::Heading {
+                anchor: "target-heading".into()
+            }
+        );
+        assert!(matches!(
+            resolve_markdown_link_impl(&root, "docs/review.md", "missing.rs"),
+            MarkdownLinkTarget::Missing { .. }
+        ));
+        assert!(matches!(
+            resolve_markdown_link_impl(&root, "docs/review.md", "#L42"),
+            MarkdownLinkTarget::File {
+                same_document: true,
+                line: Some(42),
+                ..
+            }
+        ));
+        assert!(matches!(
+            resolve_markdown_link_impl(&root, "docs/review.md", "Makefile:42"),
+            MarkdownLinkTarget::File {
+                open_path,
+                line: Some(42),
+                ..
+            } if open_path == "docs/Makefile"
+        ));
+        assert!(matches!(
+            resolve_markdown_link_impl(&root, "docs/review.md", "./"),
+            MarkdownLinkTarget::File {
+                is_directory: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn markdown_link_expands_home_prefix_and_keeps_line_suffix() {
+        let home = TempDir::new().unwrap();
+        fs::create_dir(home.path().join("notes")).unwrap();
+        fs::write(home.path().join("notes/design.md"), "").unwrap();
+        #[cfg(unix)]
+        let expected = format!(
+            "{}/notes/design.md",
+            home.path().canonicalize().unwrap().display()
+        );
+        #[cfg(windows)]
+        let expected = format!(
+            "{}/notes/design.md",
+            home.path().display().to_string().replace('\\', "/")
+        );
+        for (href, line) in [
+            ("~/notes/design.md", None),
+            ("~/notes/design.md:7", Some(7)),
+        ] {
+            let target = resolve_markdown_link_with_home(
+                "/repo",
+                "/repo/review.md",
+                href,
+                Some(home.path()),
+            );
+            assert!(
+                matches!(
+                    &target,
+                    MarkdownLinkTarget::File { absolute_path, open_path, line: actual, .. }
+                        if absolute_path == &expected && open_path == &expected && *actual == line
+                ),
+                "{href}"
+            );
+            let MarkdownLinkTarget::File { absolute_path, .. } = target else {
+                unreachable!()
+            };
+            assert_eq!(
+                Path::new(&absolute_path).canonicalize().unwrap(),
+                home.path().join("notes/design.md").canonicalize().unwrap()
+            );
+        }
+        assert!(matches!(
+            resolve_markdown_link_with_home(
+                "/repo",
+                "/repo/review.md",
+                "~/notes/gone.md",
+                Some(home.path())
+            ),
+            MarkdownLinkTarget::Missing { .. }
+        ));
+    }
+
+    #[test]
+    fn critic_markdown_link_home_prefix_with_doubled_slash_stays_under_home() {
+        // Catches: `Path::join` with an absolute remainder replaces the home
+        // dir, so `~//etc/hosts` resolved to `/etc/hosts` instead of `$HOME/etc/hosts`.
+        let home = TempDir::new().unwrap();
+        fs::create_dir(home.path().join("notes")).unwrap();
+        fs::write(home.path().join("notes/design.md"), "").unwrap();
+        #[cfg(unix)]
+        let expected = format!(
+            "{}/notes/design.md",
+            home.path().canonicalize().unwrap().display()
+        );
+        #[cfg(windows)]
+        let expected = format!(
+            "{}/notes/design.md",
+            home.path().display().to_string().replace('\\', "/")
+        );
+        let target = resolve_markdown_link_with_home(
+            "/repo",
+            "/repo/review.md",
+            "~//notes/design.md",
+            Some(home.path()),
+        );
+        assert!(
+            matches!(
+                &target,
+                MarkdownLinkTarget::File { absolute_path, .. } if absolute_path == &expected
+            ),
+            "~//notes/design.md must resolve inside home"
+        );
+        let MarkdownLinkTarget::File { absolute_path, .. } = target else {
+            unreachable!()
+        };
+        assert_eq!(
+            Path::new(&absolute_path).canonicalize().unwrap(),
+            home.path().join("notes/design.md").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn critic_markdown_link_home_prefix_alone_is_the_home_directory() {
+        // Catches: a bare `~/` treated as a relative path next to the file.
+        let home = TempDir::new().unwrap();
+        #[cfg(unix)]
+        let canonical = home.path().canonicalize().unwrap().display().to_string();
+        #[cfg(windows)]
+        let canonical = home.path().display().to_string().replace('\\', "/");
+        let target =
+            resolve_markdown_link_with_home("/repo", "/repo/review.md", "~/", Some(home.path()));
+        assert!(matches!(
+            &target,
+            MarkdownLinkTarget::File { absolute_path, is_directory: true, .. } if absolute_path == &canonical
+        ));
+        let MarkdownLinkTarget::File { absolute_path, .. } = target else {
+            unreachable!()
+        };
+        assert_eq!(
+            Path::new(&absolute_path).canonicalize().unwrap(),
+            home.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn critic_markdown_link_bare_tilde_and_unknown_home_stay_relative() {
+        // Catches: `~user/x` or a missing home dir panicking or expanding to the wrong root.
+        let dir = TempDir::new().unwrap();
+        let review = dir.path().join("review.md");
+        fs::write(&review, "").unwrap();
+        for (href, home) in [("~user/x.md", Some(dir.path())), ("~/x.md", None)] {
+            assert!(
+                matches!(
+                    resolve_markdown_link_with_home(
+                        dir.path().to_str().unwrap(),
+                        review.to_str().unwrap(),
+                        href,
+                        home
+                    ),
+                    MarkdownLinkTarget::Missing { .. }
+                ),
+                "{href}"
+            );
+        }
+    }
+
+    #[test]
+    fn critic2_markdown_link_home_prefix_into_tcc_dir_is_blocked() {
+        // Catches: `~/Library/x.md` bypassing the TCC guard (the guard must see the
+        // expanded path, including when `..` reaches the protected dir).
+        let Some(home) = dirs::home_dir() else { return };
+        for href in [
+            "~/Library/x.md",
+            "~/Desktop/x.md",
+            "~/notes/../Documents/x.md",
+        ] {
+            assert!(
+                matches!(
+                    resolve_markdown_link_with_home("/repo", "/repo/review.md", href, Some(&home)),
+                    MarkdownLinkTarget::Blocked { .. }
+                ),
+                "{href}"
+            );
+        }
+    }
+
+    #[test]
+    fn critic2_markdown_link_home_prefix_keeps_heading_anchor() {
+        // Catches: expansion running before the anchor split, losing `#L9` / `#heading`.
+        let home = TempDir::new().unwrap();
+        fs::write(home.path().join("a.md"), "").unwrap();
+        assert!(matches!(
+            resolve_markdown_link_with_home("/repo", "/repo/r.md", "~/a.md#L9", Some(home.path())),
+            MarkdownLinkTarget::File {
+                line: Some(9),
+                anchor: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            resolve_markdown_link_with_home("/repo", "/repo/r.md", "~/a.md#intro", Some(home.path())),
+            MarkdownLinkTarget::File { anchor: Some(a), .. } if a == "intro"
+        ));
+    }
+
+    #[test]
+    fn critic2_markdown_link_percent_encoded_tilde_expands_like_literal() {
+        // Catches: expansion on the raw href so `%7E/a.md` resolves next to the file instead of home.
+        let home = TempDir::new().unwrap();
+        fs::write(home.path().join("a.md"), "").unwrap();
+        assert!(matches!(
+            resolve_markdown_link_with_home("/repo", "/repo/r.md", "%7E/a.md", Some(home.path())),
+            MarkdownLinkTarget::File { .. }
+        ));
+    }
+
+    #[test]
+    fn home_prefix_expansion_never_escapes_home() {
+        let home = Path::new("/home/boss");
+        assert_eq!(
+            expand_home_prefix("~/a/b.md", home).as_deref(),
+            Some(if cfg!(windows) {
+                r"/home/boss\a/b.md"
+            } else {
+                "/home/boss/a/b.md"
+            })
+        );
+        assert_eq!(
+            expand_home_prefix("~//a.md", home).as_deref(),
+            Some(if cfg!(windows) {
+                r"/home/boss\a.md"
+            } else {
+                "/home/boss/a.md"
+            })
+        );
+        // A drive-prefixed rest would replace home in a Windows join.
+        assert_eq!(expand_home_prefix("~/C:\\x.md", home), None);
+        assert_eq!(expand_home_prefix("~/c:/x.md", home), None);
+        assert_eq!(expand_home_prefix("notes/a.md", home), None);
+
+        let fixture = TempDir::new().unwrap();
+        fs::create_dir_all(fixture.path().join("a")).unwrap();
+        fs::write(fixture.path().join("a/b.md"), "nested").unwrap();
+        fs::write(fixture.path().join("a.md"), "flat").unwrap();
+        for (href, relative) in [("~/a/b.md", "a/b.md"), ("~//a.md", "a.md")] {
+            let target = resolve_markdown_link_with_home(
+                "/repo",
+                "/repo/review.md",
+                href,
+                Some(fixture.path()),
+            );
+            let MarkdownLinkTarget::File { absolute_path, .. } = target else {
+                panic!("{href}: {target:?}")
+            };
+            assert_eq!(
+                Path::new(&absolute_path).canonicalize().unwrap(),
+                fixture.path().join(relative).canonicalize().unwrap()
+            );
+        }
+        for href in ["~/C:\\x.md", "~/c:/x.md", "notes/a.md"] {
+            assert!(
+                matches!(
+                    resolve_markdown_link_with_home(
+                        "/repo",
+                        "/repo/review.md",
+                        href,
+                        Some(fixture.path())
+                    ),
+                    MarkdownLinkTarget::Missing { .. }
+                ),
+                "{href}"
+            );
+        }
+    }
+
+    #[test]
+    fn critic3_expand_home_prefix_edges() {
+        // Catches: a drive hidden behind leading separators (`~/\\C:\x`) slipping past the
+        // guard because the trim ran after the check; a multibyte first char panicking the
+        // byte probe; a 2-letter `CD:x` first segment refused as a drive.
+        let home = Path::new("/home/boss");
+        assert_eq!(expand_home_prefix("~/\\C:\\x.md", home), None);
+        assert_eq!(expand_home_prefix("~//c:/x.md", home), None);
+        assert_eq!(expand_home_prefix("~/C:", home), None);
+        assert_eq!(
+            expand_home_prefix("~/é:x", home).as_deref(),
+            Some(if cfg!(windows) {
+                r"/home/boss\é:x"
+            } else {
+                "/home/boss/é:x"
+            })
+        );
+        assert_eq!(
+            expand_home_prefix("~/CD:x", home).as_deref(),
+            Some(if cfg!(windows) {
+                r"/home/boss\CD:x"
+            } else {
+                "/home/boss/CD:x"
+            })
+        );
+        assert_eq!(
+            expand_home_prefix("~/", home).as_deref(),
+            Some(if cfg!(windows) {
+                r"/home/boss\"
+            } else {
+                "/home/boss/"
+            })
+        );
+        assert_eq!(expand_home_prefix("~", home), None);
+        assert_eq!(expand_home_prefix("~user/a", home), None);
+
+        let fixture = TempDir::new().unwrap();
+        for href in ["~/\\C:\\x.md", "~//c:/x.md", "~/C:", "~", "~user/a"] {
+            assert!(
+                matches!(
+                    resolve_markdown_link_with_home(
+                        "/repo",
+                        "/repo/review.md",
+                        href,
+                        Some(fixture.path())
+                    ),
+                    MarkdownLinkTarget::Missing { .. }
+                ),
+                "{href}"
+            );
+        }
+        for name in ["é:x", "CD:x"] {
+            // These are literal Unix filenames; Windows forbids colons in a filename.
+            #[cfg(unix)]
+            fs::write(fixture.path().join(name), "literal colon").unwrap();
+            let href = format!("~/{name}");
+            let target = resolve_markdown_link_with_home(
+                "/repo",
+                "/repo/review.md",
+                &href,
+                Some(fixture.path()),
+            );
+            #[cfg(unix)]
+            {
+                let MarkdownLinkTarget::File { absolute_path, .. } = target else {
+                    panic!("{href}: {target:?}")
+                };
+                assert_eq!(
+                    Path::new(&absolute_path).canonicalize().unwrap(),
+                    fixture.path().join(name).canonicalize().unwrap()
+                );
+            }
+            #[cfg(windows)]
+            assert!(
+                matches!(target, MarkdownLinkTarget::Missing { .. }),
+                "{href}: {target:?}"
+            );
+        }
+        let target =
+            resolve_markdown_link_with_home("/repo", "/repo/review.md", "~/", Some(fixture.path()));
+        let MarkdownLinkTarget::File {
+            absolute_path,
+            is_directory,
+            ..
+        } = target
+        else {
+            panic!("{target:?}")
+        };
+        assert!(is_directory);
+        assert_eq!(
+            Path::new(&absolute_path).canonicalize().unwrap(),
+            fixture.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn critic3_markdown_link_home_prefix_with_dot_segments_into_tcc_dir_is_blocked() {
+        // Catches: `~/./Desktop/x.md` or `~//Library/x.md` reaching a TCC dir because the
+        // expansion left a `.`/doubled separator the guard does not normalise.
+        let Some(home) = dirs::home_dir() else { return };
+        for href in [
+            "~/./Desktop/x.md",
+            "~//Library/x.md",
+            "~/%2E/Documents/x.md",
+        ] {
+            assert!(
+                matches!(
+                    resolve_markdown_link_with_home("/repo", "/repo/review.md", href, Some(&home)),
+                    MarkdownLinkTarget::Blocked { .. }
+                ),
+                "{href}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_link_resolution_blocks_invalid_percent_encoding() {
+        for href in ["file%ZZ.md", "file.md#%ZZ", "file%E0.md"] {
+            assert!(matches!(
+                resolve_markdown_link_impl("/repo", "README.md", href),
+                MarkdownLinkTarget::Blocked { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn markdown_link_resolution_allows_parent_and_symlink_targets() {
+        let dir = TempDir::new().unwrap();
+        let root_dir = dir.path().join("repo");
+        fs::create_dir(&root_dir).unwrap();
+        fs::write(root_dir.join("review.md"), "").unwrap();
+        fs::write(dir.path().join("shared.rs"), "").unwrap();
+        let root = root_dir.to_string_lossy().to_string();
+        let parent = resolve_markdown_link_impl(&root, "review.md", "../shared.rs:42");
+        assert!(matches!(
+            parent,
+            MarkdownLinkTarget::File { line: Some(42), .. }
+        ));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("shared.rs"), root_dir.join("linked.rs"))
+                .unwrap();
+            let linked = resolve_markdown_link_impl(&root, "review.md", "linked.rs");
+            assert!(matches!(linked, MarkdownLinkTarget::File { .. }));
+
+            fs::create_dir(root_dir.join("docs")).unwrap();
+            fs::write(root_dir.join("docs/guide.md"), "").unwrap();
+            std::os::unix::fs::symlink(root_dir.join("review.md"), root_dir.join("docs/linked.md"))
+                .unwrap();
+            let from_link = resolve_markdown_link_impl(&root, "docs/linked.md", "guide.md");
+            assert!(
+                matches!(from_link, MarkdownLinkTarget::File { open_path, .. }
+                if open_path == "docs/guide.md")
+            );
+
+            std::os::unix::fs::symlink(&root_dir, dir.path().join("repo-alias")).unwrap();
+            let alias = dir.path().join("repo-alias").to_string_lossy().to_string();
+            let aliased = resolve_markdown_link_impl(&alias, "review.md", "review.md#section");
+            assert!(
+                matches!(aliased, MarkdownLinkTarget::File { open_path, same_document: true, .. }
+                if open_path == "review.md")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn markdown_link_resolution_returns_portable_windows_paths() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("readme.md"), "").unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let result = resolve_markdown_link_impl(&root, "readme.md", "readme.md");
+        assert!(
+            matches!(result, MarkdownLinkTarget::File { absolute_path, open_path, .. }
+            if !absolute_path.starts_with(r"\\?\") && open_path == "readme.md")
+        );
+    }
+
+    #[test]
+    fn markdown_link_resolution_rejects_unc_before_touching_filesystem() {
+        assert!(!is_unc_markdown_path(r"\\?\C:\repo\README.md"));
+        let result =
+            resolve_markdown_link_impl("/repo", "README.md", "//attacker.example/share/x.md");
+        assert!(matches!(result, MarkdownLinkTarget::Blocked { .. }));
+        let result =
+            resolve_markdown_link_impl("/repo", "README.md", r"\\attacker.example\share\x.md");
+        assert!(matches!(result, MarkdownLinkTarget::Blocked { .. }));
+        let encoded =
+            resolve_markdown_link_impl("/repo", "README.md", "%5C%5Cattacker.example/share/x.md");
+        assert!(matches!(encoded, MarkdownLinkTarget::Blocked { .. }));
+        let encoded_slashes =
+            resolve_markdown_link_impl("/repo", "README.md", "%2F%2Fattacker.example/share/x.md");
+        assert!(matches!(
+            encoded_slashes,
+            MarkdownLinkTarget::Blocked { .. }
+        ));
+        for mixed in [
+            r"\/attacker.example\share\x.md",
+            r"/\attacker.example\share\x.md",
+        ] {
+            assert!(matches!(
+                resolve_markdown_link_impl("/repo", "README.md", mixed),
+                MarkdownLinkTarget::Blocked { .. }
+            ));
+        }
+        let verbatim = resolve_markdown_link_impl(
+            "/repo",
+            "README.md",
+            r"\\?\UNC\attacker.example\share\x.md",
+        );
+        assert!(matches!(verbatim, MarkdownLinkTarget::Blocked { .. }));
+    }
+
     /// The link verifier issued one IPC per candidate per row and awaited each
     /// row before starting the next, so a screen with links on many rows cost one
     /// round trip per link, serially. Batching removes the round trips, not the
@@ -4016,7 +5405,7 @@ mod tests {
         assert!(result.is_some());
         let resolved = result.unwrap();
         assert!(!resolved.is_directory);
-        assert!(resolved.absolute_path.ends_with("src/lib.rs"));
+        assert!(crate::test_support::slashed(&resolved.absolute_path).ends_with("src/lib.rs"));
     }
 
     #[test]
@@ -4422,7 +5811,7 @@ mod tests {
 
         assert_eq!(res.moved, 1);
         assert_eq!(res.skipped, 1);
-        assert!(res.errors.is_empty());
+        assert_eq!(res.errors, [] as [std::string::String; 0]);
     }
 
     // --- Cross-repo content search (search_content_all_impl) ---
@@ -4570,6 +5959,95 @@ mod tests {
         assert!(
             !state.content_indices.contains_key(&unvisited_path),
             "cross-repo search must not enqueue a build for every registered repo"
+        );
+    }
+
+    /// `repos_pending` alone cannot tell the user whether waiting helps. Under the
+    /// default `active_and_switch` strategy a registered repo nobody switched to is
+    /// not queued for anything, so "still indexing, retry shortly" is a promise the
+    /// scheduler never keeps. `repos_indexing` is the subset with a build actually
+    /// running — the only count that earns that sentence.
+    #[test]
+    fn search_content_all_reports_only_in_flight_repos_as_indexing() {
+        let cfg = TempDir::new().unwrap();
+        let _config_guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+
+        let indexed = TempDir::new().unwrap();
+        fs::write(indexed.path().join("a.txt"), "the zebrafish swims here\n").unwrap();
+        let building = TempDir::new().unwrap();
+        fs::write(building.path().join("b.txt"), "zebrafish here too\n").unwrap();
+        let never_visited = TempDir::new().unwrap();
+        fs::write(never_visited.path().join("c.txt"), "zebrafish again\n").unwrap();
+
+        let indexed_path = indexed.path().to_string_lossy().to_string();
+        let building_path = building.path().to_string_lossy().to_string();
+        let unvisited_path = never_visited.path().to_string_lossy().to_string();
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": {
+                indexed_path.clone(): {},
+                building_path.clone(): {},
+                unvisited_path.clone(): {},
+            }
+        }))
+        .unwrap();
+
+        // The shape `ensure_index` leaves behind mid-build: an unready placeholder
+        // in the map plus the repo key in `index_in_flight`.
+        let state = state_with_indices(vec![
+            (indexed_path.clone(), ready_index(indexed.path())),
+            (
+                building_path.clone(),
+                Arc::new(parking_lot::RwLock::new(
+                    crate::content_index::ContentIndex::empty(building.path().to_path_buf()),
+                )),
+            ),
+        ]);
+        state.index_in_flight.insert(building_path.clone());
+
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
+
+        assert_eq!(
+            result.repos_searched, 1,
+            "only the ready repo is searchable"
+        );
+        assert_eq!(
+            result.repos_pending, 2,
+            "both the building and the never-visited repo are unavailable"
+        );
+        assert_eq!(
+            result.repos_indexing, 1,
+            "only the repo with a build in flight may be reported as indexing"
+        );
+    }
+
+    /// The counterpart: with nothing in flight, no repo may be described as
+    /// indexing, however many are pending. This is the default steady state and
+    /// the one the UI used to misreport.
+    #[test]
+    fn search_content_all_reports_no_indexing_when_no_build_is_scheduled() {
+        let cfg = TempDir::new().unwrap();
+        let _config_guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+
+        let indexed = TempDir::new().unwrap();
+        fs::write(indexed.path().join("a.txt"), "the zebrafish swims here\n").unwrap();
+        let never_visited = TempDir::new().unwrap();
+        fs::write(never_visited.path().join("b.txt"), "zebrafish here too\n").unwrap();
+
+        let indexed_path = indexed.path().to_string_lossy().to_string();
+        let unvisited_path = never_visited.path().to_string_lossy().to_string();
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": { indexed_path.clone(): {}, unvisited_path.clone(): {} }
+        }))
+        .unwrap();
+
+        let state = state_with_indices(vec![(indexed_path.clone(), ready_index(indexed.path()))]);
+
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
+
+        assert_eq!(result.repos_pending, 1);
+        assert_eq!(
+            result.repos_indexing, 0,
+            "a repo nobody scheduled must not be reported as indexing"
         );
     }
 
@@ -4732,6 +6210,84 @@ mod tests {
             .unwrap();
 
         assert!(dir.path().join("a/b/c").is_dir());
+    }
+
+    // Catches final-component canonicalization rejecting a dangling link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_path_dangling_symlink_removes_link_not_missing_target() {
+        let dir = setup_test_repo();
+        let target = dir.path().join("missing-target");
+        let link = dir.path().join("dangling-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        delete_path(
+            dir.path().to_string_lossy().into_owned(),
+            "dangling-link".into(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "link must be removed"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target).is_err(),
+            "target must stay absent"
+        );
+    }
+
+    // Catches deleting the resolved file/directory instead of the selected link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_path_existing_symlinks_preserve_targets_and_contents() {
+        let dir = setup_test_repo();
+        let outside = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        for root in [dir.path(), outside.path()] {
+            let file = root.join("kept-file");
+            let folder = root.join("kept-dir");
+            std::fs::write(&file, "keep file bytes").unwrap();
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::write(folder.join("child"), "keep child bytes").unwrap();
+            for (name, target) in [("file-link", &file), ("dir-link", &folder)] {
+                let link = dir.path().join(name);
+                std::os::unix::fs::symlink(target, &link).unwrap();
+                delete_path(dir.path().to_string_lossy().into_owned(), name.into())
+                    .await
+                    .unwrap();
+                assert!(
+                    std::fs::symlink_metadata(&link).is_err(),
+                    "{name} must be removed"
+                );
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep file bytes");
+                assert_eq!(
+                    std::fs::read_to_string(folder.join("child")).unwrap(),
+                    "keep child bytes"
+                );
+            }
+        }
+    }
+
+    // Catches parent-only validation accidentally allowing a symlinked parent escape.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_path_rejects_external_parent_and_missing_entry() {
+        let dir = setup_test_repo();
+        let outside = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        std::fs::write(outside.path().join("kept"), "keep bytes").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("outside")).unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        assert!(
+            delete_path(repo.clone(), "outside/kept".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("kept")).unwrap(),
+            "keep bytes"
+        );
+        assert!(delete_path(repo, "missing".into()).await.is_err());
     }
 
     #[tokio::test]

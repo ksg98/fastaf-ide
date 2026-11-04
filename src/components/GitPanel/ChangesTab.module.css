@@ -449,12 +449,14 @@
 }
 
 .fileEntry:hover .actions,
+.fileEntry:focus-within .actions,
 .fileSelected:not(.filePicked) .actions,
 .container:focus .fileFocused .actions {
   visibility: visible;
 }
 
 .fileEntry:hover .diffStats,
+.fileEntry:focus-within .diffStats,
 .fileSelected:not(.filePicked) .diffStats,
 .container:focus .fileFocused .diffStats {
   visibility: hidden;

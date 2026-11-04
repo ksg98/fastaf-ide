@@ -1,6 +1,7 @@
 import { type Component, createMemo, createSignal, For, lazy, Match, Show, Suspense, Switch } from "solid-js";
 import { initMouseDrag } from "../../hooks/useMouseDrag";
 import { invoke } from "../../invoke";
+import { appLogger } from "../../stores/appLogger";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { findPaneGroupAtPoint } from "../../stores/dragDrop";
 import { editorTabsStore } from "../../stores/editorTabs";
@@ -18,6 +19,9 @@ import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
+import { uiStore } from "../../stores/ui";
+import { markdownDocumentPanelId } from "../../utils/markdownDocumentPanelId";
 import { pathBasename } from "../../utils/pathUtils";
 import { getRepoColor } from "../../utils/repoColor";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu/ContextMenu";
@@ -35,6 +39,7 @@ const DiffTab = lazy(() => import("../DiffTab/DiffTab").then((module) => ({ defa
 
 export const PaneNodeView: Component<{
 	node: PaneNode;
+	visible?: () => boolean;
 	onCloseTab: (id: string) => void;
 	onOpenFilePath: (path: string, line?: number, col?: number) => void;
 	onTerminalFocus: (id: string) => void;
@@ -46,6 +51,7 @@ export const PaneNodeView: Component<{
 			<Match when={props.node.type === "branch"}>
 				<PaneBranchView
 					branch={props.node as PaneBranch}
+					visible={props.visible}
 					onCloseTab={props.onCloseTab}
 					onOpenFilePath={props.onOpenFilePath}
 					onTerminalFocus={props.onTerminalFocus}
@@ -56,6 +62,7 @@ export const PaneNodeView: Component<{
 			<Match when={props.node.type === "leaf"}>
 				<PaneGroupView
 					groupId={(props.node as PaneLeaf).id}
+					visible={props.visible}
 					onCloseTab={props.onCloseTab}
 					onOpenFilePath={props.onOpenFilePath}
 					onTerminalFocus={props.onTerminalFocus}
@@ -71,6 +78,7 @@ export const PaneNodeView: Component<{
 
 const PaneBranchView: Component<{
 	branch: PaneBranch;
+	visible?: () => boolean;
 	onCloseTab: (id: string) => void;
 	onOpenFilePath: (path: string, line?: number, col?: number) => void;
 	onTerminalFocus: (id: string) => void;
@@ -159,6 +167,7 @@ const PaneBranchView: Component<{
 						<div class="pane-slot" style={{ flex: flexFor(i()) }}>
 							<PaneNodeView
 								node={child}
+								visible={props.visible}
 								onCloseTab={props.onCloseTab}
 								onOpenFilePath={props.onOpenFilePath}
 								onTerminalFocus={props.onTerminalFocus}
@@ -187,6 +196,7 @@ const PaneBranchView: Component<{
 
 const PaneGroupView: Component<{
 	groupId: string;
+	visible?: () => boolean;
 	onCloseTab: (id: string) => void;
 	onOpenFilePath: (path: string, line?: number, col?: number) => void;
 	onTerminalFocus: (id: string) => void;
@@ -245,7 +255,9 @@ const PaneGroupView: Component<{
 				{
 					label: "Toggle AI Suggestions",
 					action: () => {
-						invoke("toggle_ai_suggestions", { sessionId: id });
+						void invoke<boolean>("toggle_ai_suggestions", { sessionId: id })
+							.then((on) => toastsStore.add(on ? "AI suggestions on" : "AI suggestions off", "", "info"))
+							.catch((err) => appLogger.warn("terminal", "Failed to toggle AI suggestions", err));
 					},
 				},
 			);
@@ -376,7 +388,7 @@ const PaneGroupView: Component<{
 							<div class="pane-tab-content" classList={{ "pane-tab-content-active": tab.id === group()?.activeTabId }}>
 								<PaneTabContent
 									tab={tab}
-									visible={() => tab.id === group()?.activeTabId}
+									visible={() => (props.visible?.() ?? true) && tab.id === group()?.activeTabId}
 									onCloseTab={props.onCloseTab}
 									onOpenFilePath={props.onOpenFilePath}
 									onTerminalFocus={props.onTerminalFocus}
@@ -475,7 +487,7 @@ const TerminalPane: Component<{
 const MarkdownPane: Component<{ tabId: string; onClose: (id: string) => void; visible: () => boolean }> = (props) => {
 	const mdTab = () => mdTabsStore.get(props.tabId);
 	return (
-		<Show when={mdTab()} keyed>
+		<Show when={!uiStore.isDetached(markdownDocumentPanelId(props.tabId)) && mdTab()} keyed>
 			{(tab) => <MdTabContent tab={tab} onClose={() => props.onClose(props.tabId)} visible={props.visible} />}
 		</Show>
 	);
@@ -512,6 +524,7 @@ const EditorPane: Component<{ tabId: string; onClose: (id: string) => void }> = 
 						repoPath={editTab().repoPath}
 						filePath={editTab().filePath}
 						initialLine={editTab().initialLine}
+						initialCol={editTab().initialCol}
 						externalEditable={editTab().externalEditable}
 						onClose={() => props.onClose(props.tabId)}
 					/>
@@ -553,6 +566,8 @@ function tabTitle(tab: PaneTab): string {
 			if (!m) return tab.id;
 			if (m.type === "file") return m.fileName || pathBasename(m.filePath) || tab.id;
 			if (m.type === "claude-usage") return "Claude Usage";
+			if (m.type === "codex-usage") return "Codex Usage";
+			if (m.type === "grok-usage") return "Grok Usage";
 			if (m.type === "github-ops") return "GitHub Ops";
 			if (m.type === "plugin-panel") return (m as { title?: string }).title ?? "Plugin";
 			if (m.type === "pr-diff") return `PR #${(m as { prNumber: number }).prNumber}`;

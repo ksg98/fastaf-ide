@@ -1,70 +1,41 @@
-import { AGENTS, type AgentType, SKIP_PERMISSIONS_FLAG } from "../agents";
-import { agentConfigsStore } from "../stores/agentConfigs";
+import type { AgentType } from "../agents";
 import { rpc } from "../transport";
 import { pathBasename } from "./pathUtils";
 
-/** Join command parts, collapsing repeated --dangerously-skip-permissions to a
- *  single occurrence. The Claude resume default carries the flag, and the user's
- *  own launch command / run config may already include it — without this the
- *  merged command would list it twice. */
-function joinDedupingSkipPerms(parts: string[]): string {
-	let seen = false;
-	const out: string[] = [];
-	for (const part of parts) {
-		if (part === SKIP_PERMISSIONS_FLAG) {
-			if (seen) continue;
-			seen = true;
+/** Split a command into tokens, keeping single-quoted spans (paths with spaces) whole. */
+function tokenize(command: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quoted = false;
+	let started = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (ch === "\\" && !quoted && i + 1 < command.length) {
+			current += ch + command[++i];
+			started = true;
+		} else if (ch === "'") {
+			quoted = !quoted;
+			current += ch;
+			started = true;
+		} else if (ch === " " && !quoted) {
+			if (started) tokens.push(current);
+			current = "";
+			started = false;
+		} else {
+			current += ch;
+			started = true;
 		}
-		out.push(part);
 	}
-	return out.join(" ");
+	if (started) tokens.push(current);
+	return tokens;
 }
 
-/**
- * Apply the agent's default run config to a resume command.
- *
- * The AGENTS table hardcodes the binary (e.g. "claude --resume <id>"), but the
- * user may have configured a custom command/args in their run config (e.g. a
- * "c2" wrapper with "--model claude-opus-4-6"). This helper strips the original
- * binary, swaps in the run config's command, and appends the run config's args
- * AFTER the resume flag so model/profile settings apply to the resumed session.
- *
- * Example: "claude --resume abc" + run config (c2, --model opus) →
- *          "c2 --resume abc --model opus"
- *
- * Returns the original command unchanged when there's no run config (keeps
- * fallback behaviour; used by tests that don't set up the store).
- */
-/**
- * Apply a run config to a resume command, preferring the original launch command
- * over the current default. This ensures that e.g. resuming a session started
- * with `c` (claude with custom flags/config-dir) doesn't switch to `c2`.
- */
-function applyDefaultRunConfig(agentType: AgentType, command: string, launchCommand?: string | null): string {
-	const launchParts = launchCommand?.split(" ");
-	const runConfig = launchParts ? null : agentConfigsStore.getDefaultConfig(agentType);
-	if (!launchParts && !runConfig) return command;
-
-	const parts = command.split(" ");
-	const resumeFlags = parts.slice(1); // drop the hardcoded binary
-
-	if (launchParts) {
-		// Use the original launch binary + its args, with resume flags in between
-		const [launchBinary, ...launchArgs] = launchParts;
-		return joinDedupingSkipPerms([launchBinary, ...resumeFlags, ...launchArgs]);
-	}
-	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-	return joinDedupingSkipPerms([runConfig!.command, ...resumeFlags, ...runConfig!.args]);
-}
-
-/** Resolve the environment of the run config that produced a persisted launch command. */
-function resolveLaunchEnv(agentType: AgentType, launchCommand?: string | null): Record<string, string> {
-	const config = launchCommand
-		? agentConfigsStore
-				.getRunConfigs(agentType)
-				.find((candidate) => [candidate.command, ...candidate.args].join(" ") === launchCommand)
-		: agentConfigsStore.getDefaultConfig(agentType);
-	return config?.env ?? {};
+/** Separate a command's leading `KEY=VALUE` assignments from the command itself. */
+function splitEnvPrefix(command: string): { env: string[]; argv: string[] } {
+	const tokens = tokenize(command);
+	const cut = tokens.findIndex((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token));
+	const at = cut === -1 ? tokens.length : cut;
+	return { env: tokens.slice(0, at), argv: tokens.slice(at) };
 }
 
 /**
@@ -82,39 +53,43 @@ export function buildAgentLaunchCommand(
 	agentSessionId?: string | null,
 	agentType?: AgentType | null,
 ): string {
-	if (!agentSessionId) return command;
+	let result = command;
+	if (agentSessionId) {
+		const parts = command.split(" ");
+		const binary = parts[0];
+		const binaryName = pathBasename(binary) ?? "";
 
-	const parts = command.split(" ");
-	const binary = parts[0];
-	const binaryName = pathBasename(binary) ?? "";
+		const isClaude = agentType === "claude" || binaryName.startsWith("claude");
+		if (isClaude) result = [binary, "--session-id", agentSessionId, ...parts.slice(1)].join(" ");
+	}
 
-	const isClaude = agentType === "claude" || binaryName.startsWith("claude");
-	if (!isClaude) return command;
-
-	// Insert --session-id right after the binary
-	const rest = parts.slice(1);
-	return [binary, "--session-id", agentSessionId, ...rest].join(" ");
+	return result;
 }
 
-/**
- * Build the resume command for restoring an agent session.
- *
- * For Claude Code with a persisted session UUID, returns "claude --resume <uuid>".
- * For all other cases, falls back to the static resumeCommand from AGENTS config.
- */
-export function buildResumeCommand(
+/** Rust owns flag selection, capability probing and subcommand exemptions. */
+export async function prepareAgentLaunchCommand(
+	command: string,
+	agentSessionId: string | null | undefined,
 	agentType: AgentType,
-	agentSessionId?: string | null,
-	launchCommand?: string | null,
-): string | null {
-	let base: string | null = null;
-	if (agentSessionId) {
-		const disc = AGENTS[agentType].sessionDiscovery;
-		if (disc) base = disc.resumeWithId(agentSessionId);
+	cwd?: string | null,
+): Promise<string> {
+	const base = buildAgentLaunchCommand(command, agentSessionId, agentType);
+	const parts = splitEnvPrefix(base);
+	const [binary, ...args] = parts.argv;
+	if (!binary) return base;
+	try {
+		const prepared = await rpc<string[]>("prepare_agent_launch_args", {
+			agentType,
+			binaryPath: binary,
+			args,
+			repoPath: cwd,
+		});
+		if (!Array.isArray(prepared) || !prepared.every((arg) => typeof arg === "string")) return base;
+		return [...parts.env, binary, ...prepared].join(" ");
+	} catch {
+		// If the backend is unavailable, launch without an unverified CLI flag.
+		return base;
 	}
-	if (base === null) base = AGENTS[agentType].resumeCommand;
-	if (base === null) return null;
-	return applyDefaultRunConfig(agentType, base, launchCommand);
 }
 
 /**
@@ -124,7 +99,7 @@ export function buildResumeCommand(
  * Discovery-backed agents use agentSessionId, which is the ID the agent wrote
  * to disk. TUIC's tab UUID is not a valid substitute unless an agent explicitly
  * supports forced binding (those agents do not expose sessionDiscovery).
- * Falls back gracefully when verify_agent_session is unavailable (browser mode).
+ * Rust verifies and builds the command over the same IPC/HTTP operation.
  */
 export async function verifyAndBuildResumeCommand(
 	agentType: AgentType,
@@ -133,31 +108,21 @@ export async function verifyAndBuildResumeCommand(
 	agentSessionId?: string | null,
 	launchCommand?: string | null,
 ): Promise<string | null> {
-	const disc = AGENTS[agentType].sessionDiscovery;
+	return (await resolveAgentResume(agentType, cwd, tuicSession, agentSessionId, launchCommand)).cmd;
+}
 
-	const sessionId = disc ? agentSessionId : (tuicSession ?? agentSessionId);
-
-	if (sessionId && cwd && disc) {
-		try {
-			// At restore time the agent process has exited, so agentPid is null.
-			// Preserve profile-root overrides such as CODEX_HOME.
-			const exists = await rpc<boolean>("verify_agent_session", {
-				agentType,
-				sessionId,
-				cwd,
-				agentPid: null,
-				envOverrides: resolveLaunchEnv(agentType, launchCommand),
-			});
-			if (exists) {
-				const cmd = disc.resumeWithId(sessionId);
-				return applyDefaultRunConfig(agentType, cmd, launchCommand);
-			}
-			return null;
-		} catch {
-			// verify_agent_session unavailable (browser mode) — fall through
-		}
-	}
-
-	// No verified session — fall back to static resumeCommand
-	return buildResumeCommand(agentType, agentSessionId, launchCommand);
+/** The resume command plus whether the agent's own storage confirmed the session id.
+ *  `verified` is false for the static fallback (`--continue`), which resumes whatever
+ *  the agent considers latest and so must not be typed without the user's click. */
+export async function resolveAgentResume(
+	agentType: AgentType,
+	cwd: string | null,
+	tuicSession?: string | null,
+	agentSessionId?: string | null,
+	launchCommand?: string | null,
+): Promise<{ cmd: string | null; verified: boolean }> {
+	return rpc("suspended_session_action", {
+		cwd,
+		request: { action: "resolve_resume", agentType, cwd, tuicSession, agentSessionId, launchCommand },
+	});
 }

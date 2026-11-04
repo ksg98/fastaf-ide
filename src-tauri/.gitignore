@@ -8,3 +8,6 @@
 
 # Claude Code session files — triggers cargo watch rebuild loop
 .claude/
+
+# cargo-mutants output (make mutants)
+/mutants.out*/

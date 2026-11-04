@@ -817,7 +817,7 @@ t=5       API error while question is pending
 | File | Responsibility |
 |------|---------------|
 | `src-tauri/src/pty.rs` | `SilenceState`, `spawn_silence_timer`, shellState derivation, `extract_question_line`, `verify_question_on_screen`, `extract_last_chat_line`, `spawn_reader_thread` |
-| `src-tauri/src/output_parser.rs` | `parse_question` (INK_FOOTER_RE), `parse_active_subtasks`, `ParsedEvent` enum |
+| `src-tauri/crates/tuic-terminal/src/output_parser.rs` | `parse_question` (INK_FOOTER_RE), `parse_active_subtasks`, `ParsedEvent` enum |
 | `src-tauri/src/state.rs` | `AppState` (includes `shell_state`, `active_sub_tasks` maps) |
 | `src/stores/terminals.ts` | `shellState`, `awaitingInput`, `debouncedBusy`, `handleShellStateChange`, `onBusyToIdle` |
 | `src/components/Terminal/Terminal.tsx` | `handlePtyData` (grid frame render), `pty-parsed` event handler, process-exit completion fallback |

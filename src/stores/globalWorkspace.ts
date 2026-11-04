@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { allLeafIds, type PaneGroup, type PaneLayoutState, paneLayoutStore, removeLeaf } from "./paneLayout";
 import { savedPaneLayouts } from "./savedPaneLayouts";
+import { activateRegisteredPaneTab } from "./tabManager";
 import { terminalsStore } from "./terminals";
 
 /** Scope key for the hand-promoted workspace — the one this store has always
@@ -64,8 +65,7 @@ function removeTerminalFromLayout(current: PaneLayoutState, termId: string): Pan
 
 	// Group still has tabs — just remove the tab
 	if (remainingTabs.length > 0) {
-		const newActiveTabId =
-			group.activeTabId === termId ? remainingTabs[remainingTabs.length - 1].id : group.activeTabId;
+		const newActiveTabId = group.activeTabId === termId ? remainingTabs.at(-1)!.id : group.activeTabId;
 		return {
 			...current,
 			groups: {
@@ -96,6 +96,24 @@ function removeTerminalFromLayout(current: PaneLayoutState, termId: string): Pan
 					: (allLeafIds(newRoot)[0] ?? null)
 				: current.activeGroupId,
 	};
+}
+
+/**
+ * Point terminalsStore.activeId at the terminal a workspace layout shows, after
+ * the layout was pushed live. A docked NON-terminal active tab (markdown/diff/
+ * editor in a workspace pane) owns the selection and must be reactivated in its
+ * real store. Selecting a terminal would deactivate that pane.
+ * Otherwise the active tab if it is a promoted terminal, else the first member.
+ */
+function reconcileTerminalFocus(layout: PaneLayoutState | null, members: Set<string>): void {
+	const activeGroup = layout?.activeGroupId ? layout.groups[layout.activeGroupId] : undefined;
+	const activeTab = activeGroup?.activeTabId;
+	if (activeTab && !members.has(activeTab)) {
+		const entry = activeGroup?.tabs.find((t) => t.id === activeTab);
+		if (entry && entry.type !== "terminal" && activateRegisteredPaneTab(entry.type, entry.id)) return;
+	}
+	const target = activeTab && members.has(activeTab) ? activeTab : [...members][0];
+	if (target) terminalsStore.setActive(target);
 }
 
 function createGlobalWorkspaceStore() {
@@ -194,11 +212,7 @@ function createGlobalWorkspaceStore() {
 				// shows no terminal until the user clicks a tab — e.g. after a repo
 				// round-trip, which reset activeId to a repo terminal. Mirrors
 				// handleBranchSelect, which setActive()s after restoring a layout.
-				const activeGroup = current.activeGroupId ? current.groups[current.activeGroupId] : undefined;
-				const activeTab = activeGroup?.activeTabId;
-				const members = workspace().promoted;
-				const target = activeTab && members.has(activeTab) ? activeTab : [...members][0];
-				if (target) terminalsStore.setActive(target);
+				reconcileTerminalFocus(current, workspace().promoted);
 			} else {
 				paneLayoutStore.reset();
 			}
@@ -227,9 +241,18 @@ function createGlobalWorkspaceStore() {
 		/**
 		 * Promote a terminal to the global workspace.
 		 * Adds it as a tab to the active group (no auto-split).
+		 *
+		 * `scopeKey` defaults to whatever scope is current, which is right for a
+		 * user clicking promote — they mean the workspace in front of them. A
+		 * caller promoting on the user's behalf must name the scope instead:
+		 * `useWorktreeConsolidation` swaps the current scope to a repo path when
+		 * consolidation is on, so an unnamed promote would land a tab in a
+		 * different bucket depending on which repo was active — the exact
+		 * ambient-state dependency that parking an unowned tab here exists to
+		 * remove. `assignSessionToRepoBranch` passes MANUAL_SCOPE for that reason.
 		 */
-		promote(termId: string): boolean {
-			const ws = workspace();
+		promote(termId: string, scopeKey: string = scope): boolean {
+			const ws = workspace(scopeKey);
 			if (ws.promoted.has(termId)) return true;
 
 			const updated = addTerminalToLayout(ws.layout, termId);
@@ -287,6 +310,51 @@ function createGlobalWorkspaceStore() {
 			return workspace().promoted.size > 0;
 		},
 
+		/**
+		 * Rebuild the active workspace's cached layout as a single flat pane
+		 * holding every currently-promoted terminal, discarding whatever split
+		 * arrangement was cached — membership (`promoted`) is untouched, only
+		 * the geometry resets. Immediately pushes the result live.
+		 *
+		 * A plain `paneLayoutStore.reset()` alone doesn't stick while this
+		 * workspace is active: `syncToPaneStore()` re-applies `workspace().layout`
+		 * on the very next promote/unpromote (e.g. opening a new terminal that
+		 * gets auto-consolidated), so a stuck split (a leftover Agent Teams
+		 * arrangement whose panes never got individually unpromoted, or any
+		 * split the user just wanted to collapse) reappears right after. Called
+		 * by the "Reset Panel Sizes" action alongside `paneLayoutStore.reset()`.
+		 */
+		resetActiveLayout(): void {
+			const ws = workspace();
+			let rebuilt: PaneLayoutState | null = null;
+			for (const id of ws.promoted) {
+				rebuilt = addTerminalToLayout(rebuilt, id);
+			}
+			// Keep the terminal the user already had focused when it is still a
+			// member: addTerminalToLayout leaves the LAST folded id active, which
+			// would otherwise move focus on every reset.
+			const focused = terminalsStore.state.activeId;
+			if (rebuilt?.activeGroupId && focused && ws.promoted.has(focused)) {
+				const g = rebuilt.groups[rebuilt.activeGroupId];
+				if (g) rebuilt.groups[rebuilt.activeGroupId] = { ...g, activeTabId: focused };
+			}
+			ws.layout = rebuilt;
+			syncToPaneStore();
+
+			// Keep focus/keyboard-routing (terminalsStore.state.activeId) in sync with
+			// whichever tab the rebuilt layout now actually shows — addTerminalToLayout
+			// sets a group's activeTabId to the LAST id it folded in (Set-iteration
+			// order), which won't generally match whatever was focused before the
+			// reset. Mirrors activate()'s own reconciliation above, for the identical
+			// reason; only called while this workspace is active (useSplitPanes.ts's
+			// resetLayout gates the call on isActive()), so the user is guaranteed to
+			// actually be looking at this workspace right now.
+			const activeGroup = rebuilt?.activeGroupId ? rebuilt.groups[rebuilt.activeGroupId] : undefined;
+			if (activeGroup?.activeTabId) {
+				terminalsStore.setActive(activeGroup.activeTabId);
+			}
+		},
+
 		/** Handle terminal removal — auto-unpromote and auto-deactivate if needed */
 		onTerminalRemoved(termId: string): void {
 			// A closed terminal has to leave EVERY workspace that holds it: an
@@ -339,6 +407,23 @@ function createGlobalWorkspaceStore() {
 			scope = key;
 			bumpPromoted();
 			syncToPaneStore();
+
+			// Reconcile focus/keyboard-routing (terminalsStore.state.activeId) to the
+			// newly-current scope's own layout when a DIFFERENT scope was already on
+			// screen (e.g. clicking the Global Workspace pill while a repo's
+			// auto-consolidated view is showing) — syncToPaneStore() only restores
+			// paneLayoutStore, so without this activeId keeps pointing at whatever
+			// terminal had focus in the PREVIOUS scope, and TerminalArea's flat
+			// (single-pane) rendering path gates content visibility on activeId, not
+			// on the pane layout's own activeTabId. Mirrors activate()'s identical
+			// reconciliation above. Only meaningful when isActive() is already true —
+			// a setScope() call made while inactive is either followed by activate()
+			// (which does this same reconciliation itself) or leaves the workspace
+			// inactive on purpose.
+			if (isActive()) {
+				const current = workspace().layout;
+				reconcileTerminalFocus(current, workspace().promoted);
+			}
 		},
 
 		/** Members of a scope without switching to it. */

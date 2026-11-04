@@ -14,12 +14,11 @@ import {
 import { useFileBrowser } from "../../hooks/useFileBrowser";
 import { useRepository } from "../../hooks/useRepository";
 import { t } from "../../i18n";
-import { shortenHomePath } from "../../platform";
 import { appLogger } from "../../stores/appLogger";
 import { mdTabsStore } from "../../stores/mdTabs";
 import { repositoriesStore } from "../../stores/repositories";
 import { cx, globToRegex } from "../../utils";
-import { writeClipboard } from "../../utils/clipboard";
+import { copyPathToClipboard } from "../../utils/clipboard";
 import { pathBasename, pathDirname } from "../../utils/pathUtils";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
 import g from "../shared/git-status.module.css";
@@ -254,7 +253,7 @@ export const MarkdownPanel: Component<MarkdownPanelProps> = (props) => {
 
 		if (sortBy() === "date") {
 			// Flat list sorted by modification time (newest first), single group with empty key
-			const sorted = [...allFiles].sort((a, b) => b.modified_at - a.modified_at);
+			const sorted = allFiles.toSorted((a, b) => b.modified_at - a.modified_at);
 			return [["", sorted]] as [string, MdFileEntry[]][];
 		}
 
@@ -306,11 +305,7 @@ export const MarkdownPanel: Component<MarkdownPanelProps> = (props) => {
 		return [
 			{
 				label: t("markdownPanel.copyPath", "Copy Path"),
-				action: () => {
-					writeClipboard(shortenHomePath(`${root}/${entry.path}`)).catch((err) =>
-						appLogger.error("app", "Failed to copy path", err),
-					);
-				},
+				action: () => copyPathToClipboard(`${root}/${entry.path}`),
 			},
 		];
 	};
@@ -345,7 +340,14 @@ export const MarkdownPanel: Component<MarkdownPanelProps> = (props) => {
 			{/* Search filter (filename glob / full-text content) + sort control */}
 			<div class={p.search}>
 				<button
+					type="button"
 					class={cx(s.modeToggle, searchMode() === "content" && s.modeToggleActive)}
+					aria-pressed={searchMode() === "content"}
+					aria-label={
+						searchMode() === "filename"
+							? t("markdownPanel.switchToContent", "Switch to content search")
+							: t("markdownPanel.switchToFilename", "Switch to filename search")
+					}
 					onClick={() => {
 						const next = searchMode() === "filename" ? "content" : "filename";
 						setSearchMode(next);
@@ -378,13 +380,20 @@ export const MarkdownPanel: Component<MarkdownPanelProps> = (props) => {
 					spellcheck={false}
 				/>
 				<Show when={searchQuery()}>
-					<button class={p.searchClear} onClick={() => setSearchQuery("")}>
+					<button
+						type="button"
+						class={p.searchClear}
+						aria-label={t("markdownPanel.clearSearch", "Clear search")}
+						onClick={() => setSearchQuery("")}
+					>
 						&times;
 					</button>
 				</Show>
 				<div class={s.sortControl}>
 					<button
+						type="button"
 						class={s.sortTrigger}
+						aria-label={`${t("markdownPanel.sortBy", "Sort by")} ${sortBy()}`}
 						onClick={() => setSortDropdownOpen((v) => !v)}
 						title={`${t("markdownPanel.sortBy", "Sort by")} ${sortBy()}`}
 					>

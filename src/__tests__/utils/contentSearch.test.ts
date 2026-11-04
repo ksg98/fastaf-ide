@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../mocks/tauri";
 import { emitLocalEvent, listen } from "../../invoke";
 import type { ContentSearchBatch } from "../../types/fs";
-import { listenContentSearch, newContentSearchId, startContentSearch } from "../../utils/contentSearch";
+import {
+	contentSearchEmptyMessage,
+	listenContentSearch,
+	newContentSearchId,
+	startContentSearch,
+} from "../../utils/contentSearch";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -28,6 +33,7 @@ const RESULT = {
 	files_skipped: 2,
 	truncated: false,
 	repos_pending: 0,
+	repos_indexing: 0,
 	repos_searched: 0,
 };
 
@@ -165,5 +171,47 @@ describe("listenContentSearch", () => {
 
 	it("hands out a fresh id per search", () => {
 		expect(newContentSearchId()).not.toBe(newContentSearchId());
+	});
+});
+
+/**
+ * A cross-repo search covers only repos whose index is already built. Under the
+ * default `active_and_switch` strategy nothing schedules the rest, so telling
+ * the user to "retry shortly" was a promise the scheduler never keeps — measured
+ * at 40 pending repos unchanged across four polls over 80s.
+ *
+ * `repos_indexing` is the backend's answer to "is a build actually running", and
+ * this message is the only place the answer is spent. Pinning them together here
+ * is what stops the wording and the scheduling drifting apart again.
+ */
+describe("contentSearchEmptyMessage", () => {
+	it("is a plain miss when every repo was searched", () => {
+		expect(contentSearchEmptyMessage({ reposSearched: 3, reposPending: 0, reposIndexing: 0 })).toBe("No results");
+	});
+
+	it("promises a retry only for repos with a build actually in flight", () => {
+		expect(contentSearchEmptyMessage({ reposSearched: 3, reposPending: 2, reposIndexing: 2 })).toBe(
+			"No results in 3 repos — 2 still indexing (retry shortly)",
+		);
+	});
+
+	it("never promises a retry for repos nothing has scheduled", () => {
+		const message = contentSearchEmptyMessage({ reposSearched: 1, reposPending: 40, reposIndexing: 0 });
+		expect(message).toBe("No results in 1 repo — 40 not indexed");
+		expect(message).not.toMatch(/retry|indexing/);
+	});
+
+	it("separates the repos that are building from the ones that are not", () => {
+		expect(contentSearchEmptyMessage({ reposSearched: 2, reposPending: 5, reposIndexing: 1 })).toBe(
+			"No results in 2 repos — 1 still indexing (retry shortly), 4 not indexed",
+		);
+	});
+
+	// A backend that predates `repos_indexing` sends 0, and a mismatched one could
+	// send more than are pending. Neither may render a negative count.
+	it("never reports more indexing repos than are pending", () => {
+		expect(contentSearchEmptyMessage({ reposSearched: 1, reposPending: 2, reposIndexing: 9 })).toBe(
+			"No results in 1 repo — 2 still indexing (retry shortly)",
+		);
 	});
 });

@@ -1,0 +1,50 @@
+{
+  "awaiting_input": true,
+  "question_text": "Pick a colour?",
+  "question_confident": true,
+  "rate_limited": false,
+  "shell_state": "busy",
+  "agent_state": "awaiting_input",
+  "last_activity_ms": 1792436698786,
+  "agent_type": "claude",
+  "agent_intent": "Asking the user to pick a colour",
+  "current_task": "Flowing",
+  "last_prompt": "Immediately call AskUserQuestion with question Pick a colour? and options Red, Green, Blue. Do not use any other tool. After the answer print the selected colour and stop.",
+  "choice_prompt": {
+    "title": "Pick a colour?",
+    "options": [
+      {
+        "key": "1",
+        "label": "Red",
+        "highlighted": true,
+        "destructive": false
+      },
+      {
+        "key": "2",
+        "label": "Green",
+        "highlighted": false,
+        "destructive": false
+      },
+      {
+        "key": "3",
+        "label": "Blue",
+        "highlighted": false,
+        "destructive": false
+      },
+      {
+        "key": "4",
+        "label": "Type something.",
+        "highlighted": false,
+        "destructive": false
+      },
+      {
+        "key": "5",
+        "label": "Chat about this",
+        "highlighted": false,
+        "destructive": false
+      }
+    ],
+    "selection_mode": "navigate-enter",
+    "dismiss_key": "cancel"
+  }
+}

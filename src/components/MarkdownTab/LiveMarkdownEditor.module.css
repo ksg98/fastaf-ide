@@ -1,0 +1,67 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  cursor: text;
+}
+
+/* The open block: source, in a frame, where the rendered block stood. */
+.block {
+  margin-bottom: 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+}
+
+.block :global(.cm-scroller) {
+  overflow: visible;
+}
+
+.block :global(.cm-content) {
+  padding: 8px 12px;
+}
+
+.toolbar {
+  composes: toolbar from "../ui/FormControls.module.css";
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-height: 0;
+  padding: 0 24px;
+}
+
+.toolbar:not(:empty) {
+  padding: 4px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+}
+
+.conflict {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 24px;
+  color: var(--fg-primary);
+  background: color-mix(in srgb, var(--tweak-highlight) 20%, var(--bg-tertiary));
+  border-bottom: 1px solid var(--border);
+}
+
+.conflict span {
+  flex: 1;
+}

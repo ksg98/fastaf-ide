@@ -58,7 +58,7 @@ describe("ColorPickerDialog", () => {
 		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const swatches = baseElement.querySelectorAll(".colorSwatch");
+		const swatches = baseElement.querySelectorAll('[data-form-control="swatch"], [data-form-control="color"]');
 		expect(swatches.length).toBe(10);
 	});
 
@@ -66,7 +66,7 @@ describe("ColorPickerDialog", () => {
 		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const firstSwatch = baseElement.querySelector(".colorSwatch")!;
+		const firstSwatch = baseElement.querySelector('[data-form-control="swatch"]:not([data-clear])')!;
 		fireEvent.click(firstSwatch);
 		expect(onConfirm).toHaveBeenCalledWith(PRESET_COLORS[0].hex);
 		expect(onClose).toHaveBeenCalled();
@@ -82,7 +82,7 @@ describe("ColorPickerDialog", () => {
 				onConfirm={onConfirm}
 			/>
 		));
-		const clearBtn = baseElement.querySelector(".colorSwatchClear")!;
+		const clearBtn = baseElement.querySelector('button[aria-label="No color"]')!;
 		fireEvent.click(clearBtn);
 		expect(onConfirm).toHaveBeenCalledWith("");
 		expect(onClose).toHaveBeenCalled();

@@ -77,7 +77,7 @@ describe("activitySnapshot", () => {
 			cwd: null,
 			fontSize: 14,
 			awaitingInput: null,
-			agentType: "aider",
+			agentType: "opencode",
 		});
 		terminalsStore.update(id, { currentTask: "Running migration" });
 
@@ -121,6 +121,7 @@ describe("activitySnapshot", () => {
 				{
 					id: "omitted-session",
 					name: "Terminal 5",
+					project: null,
 					shellState: "exited",
 					awaitingInput: null,
 					sessionId: null,
@@ -138,6 +139,7 @@ describe("activitySnapshot", () => {
 					backgroundWork: false,
 					isBusy: true,
 					isPromoted: false,
+					subAgentTag: null,
 				},
 			],
 		})[0];
@@ -274,11 +276,11 @@ describe("reconcileActivityOrder", () => {
 });
 
 describe("displayTask", () => {
-	let displayTask: typeof import("../../utils/activitySnapshot").displayTask;
+	let displayTask: typeof import("../../utils/displayTask").displayTask;
 
 	beforeEach(async () => {
 		vi.resetModules();
-		displayTask = (await import("../../utils/activitySnapshot")).displayTask;
+		displayTask = (await import("../../utils/displayTask")).displayTask;
 	});
 
 	it("drops a task that only restates the status badge next to it", () => {

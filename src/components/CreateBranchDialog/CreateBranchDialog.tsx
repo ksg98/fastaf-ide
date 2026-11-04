@@ -109,10 +109,10 @@ export const CreateBranchDialog: Component<CreateBranchDialogProps> = (props) =>
 						{error() && <p class={d.error}>{error()}</p>}
 					</div>
 					<div class={d.actions}>
-						<button class={d.cancelBtn} onClick={props.onClose} disabled={isCreating()}>
+						<button type="button" class={d.cancelBtn} onClick={props.onClose} disabled={isCreating()}>
 							Cancel
 						</button>
-						<button class={d.primaryBtn} onClick={handleCreate} disabled={isCreating() || !name().trim()}>
+						<button type="button" class={d.primaryBtn} onClick={handleCreate} disabled={isCreating() || !name().trim()}>
 							{isCreating() ? "Creating…" : "Create"}
 						</button>
 					</div>

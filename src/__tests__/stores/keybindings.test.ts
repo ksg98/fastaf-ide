@@ -60,6 +60,24 @@ describe("keybindingDefaults", () => {
 			}
 		});
 
+		it("binds answers-only to Cmd+Alt+R", () => {
+			expect(DEFAULT_BINDINGS["answers-only"]).toBe("Cmd+Alt+R");
+		});
+
+		it("binds run-command to Cmd+Shift+R so Cmd+R stays a reload", () => {
+			expect(DEFAULT_BINDINGS["run-command"]).toBe("Cmd+Shift+R");
+			expect(DEFAULT_BINDINGS["reload-tab"]).toBe("Cmd+R");
+		});
+
+		it("leaves edit-command unbound: Cmd+Alt+R belongs to answers-only", () => {
+			expect(DEFAULT_BINDINGS["edit-command"]).toBe("");
+		});
+
+		it("binds the hands-free toggle to Cmd+Alt+V", () => {
+			// TEST-CHANGE: Boss approved the formerly unbound action default on 2026-10-16.
+			expect(DEFAULT_BINDINGS["toggle-hands-free"]).toBe("Cmd+Alt+V");
+		});
+
 		it("has no duplicate key combos", () => {
 			// Find duplicates for a better error message
 			const seen = new Map<string, string[]>();
@@ -241,7 +259,6 @@ describe("keybindingsStore", () => {
 			expect(errorSpy).toHaveBeenCalledWith(
 				"[config]",
 				"Failed to load keybindings overrides — persistence disabled for this session",
-				expect.any(Error),
 			);
 			errorSpy.mockRestore();
 		});
@@ -287,6 +304,7 @@ describe("keybindingsStore", () => {
 			await store.setOverride("toggle-git-ops", "Cmd+Y");
 
 			expect(mockInvoke).toHaveBeenCalledWith("save_keybindings", {
+				base: expect.anything(),
 				config: [{ action: "toggle-git-ops", key: "Cmd+Y" }],
 			});
 		});
@@ -340,9 +358,7 @@ describe("keybindingsStore", () => {
 			await store.setOverride("toggle-git-ops", "Cmd+Y");
 			await store.resetAll();
 
-			expect(mockInvoke).toHaveBeenLastCalledWith("save_keybindings", {
-				config: [],
-			});
+			expect(mockInvoke).toHaveBeenLastCalledWith("save_keybindings", { base: expect.anything(), config: [] });
 		});
 	});
 
@@ -357,6 +373,7 @@ describe("keybindingsStore", () => {
 			expect(store.getActionForCombo("cmd+shift+d")).toBeUndefined();
 			// Persisted as an explicit null override so hydrate restores it as unbound
 			expect(mockInvoke).toHaveBeenLastCalledWith("save_keybindings", {
+				base: expect.anything(),
 				config: [{ action: "toggle-git-ops", key: null }],
 			});
 		});

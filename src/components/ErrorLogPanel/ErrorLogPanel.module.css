@@ -37,6 +37,7 @@
 
 /* Header */
 .header {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -62,6 +63,7 @@
 
 /* Filters bar */
 .filters {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   gap: 8px;
@@ -73,6 +75,7 @@
 
 .levelFilters {
   display: flex;
+  flex-wrap: wrap;
   gap: 2px;
 }
 
@@ -228,7 +231,8 @@
   opacity: 0;
 }
 
-.row:hover .copyBtn {
+.row:hover .copyBtn,
+.copyBtn:focus-visible {
   opacity: 1;
 }
 

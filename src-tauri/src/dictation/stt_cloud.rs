@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn parse_non_list_response_yields_empty() {
-        assert!(parse_stt_models(&serde_json::json!({ "error": "unauthorized" })).is_empty());
-        assert!(parse_stt_models(&serde_json::json!("nope")).is_empty());
+        assert_eq!(parse_stt_models(&serde_json::json!({ "error": "unauthorized" })).len(), 0);
+        assert_eq!(parse_stt_models(&serde_json::json!("nope")).len(), 0);
     }
 }

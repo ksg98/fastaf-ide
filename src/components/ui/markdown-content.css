@@ -1,6 +1,10 @@
 /* Styles for #markdown-content (ContentRenderer innerHTML output).
    Global selectors required — CSS modules don't apply to innerHTML. */
 
+:root {
+  --tweak-highlight: #f5a623;
+}
+
 #markdown-content {
   /* Prose is read, not scanned, so it keeps proper kerning. This is measured,
      not assumed: on a 400-message chat shape with this rule's own
@@ -201,3 +205,56 @@
   background-color: var(--border);
   border: 0;
 }
+
+/* Tweak comments: shared by the viewer and the Live editor's rendered blocks. */
+#markdown-content .tweak-highlight {
+  background: color-mix(in srgb, var(--tweak-highlight) 25%, transparent);
+  border-bottom: 1.5px solid color-mix(in srgb, var(--tweak-highlight) 70%, transparent);
+  border-radius: 2px;
+  cursor: pointer;
+  padding: 0 1px;
+  transition: background 0.15s ease;
+}
+
+#markdown-content .tweak-highlight:hover {
+  background: color-mix(in srgb, var(--tweak-highlight) 40%, transparent);
+}
+
+#markdown-content .tweak-block-highlight {
+  position: relative;
+  background: color-mix(in srgb, var(--tweak-highlight) 16%, transparent);
+  cursor: pointer;
+}
+
+#markdown-content .tweak-block-highlight::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -10px;
+  width: 2px;
+  background: color-mix(in srgb, var(--tweak-highlight) 75%, transparent);
+  pointer-events: none;
+}
+
+/* AI Chat opts in; document, editor and terminal renderers keep their own tables. */
+#markdown-content .chat-table { max-width: 100%; margin: 8px 0 12px; }
+#markdown-content .chat-table-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+#markdown-content .chat-table-actions button { font: inherit; font-size: 11px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-secondary); color: var(--fg-secondary); cursor: pointer; }
+#markdown-content .chat-table-actions button:hover { background: var(--bg-highlight); color: var(--fg-primary); }
+#markdown-content .chat-table-actions button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+#markdown-content .chat-table-scroll { overflow-x: auto; max-width: 100%; }
+#markdown-content .chat-table table { margin: 0; width: 100%; font-size: 12px; line-height: 1.45; table-layout: auto; }
+#markdown-content .chat-table th, #markdown-content .chat-table td { padding: 5px 8px; vertical-align: top; word-break: normal; overflow-wrap: normal; text-align: left; }
+#markdown-content .chat-table th { white-space: nowrap; }
+#markdown-content .chat-table .chat-table-short { white-space: nowrap; width: 1%; }
+#markdown-content .chat-table .chat-table-long { min-width: 160px; overflow-wrap: normal; }
+#markdown-content .chat-table td:first-child:not(.chat-table-short), #markdown-content .chat-table th:first-child:not(.chat-table-short) { width: 150px; min-width: 150px; }
+#markdown-content .chat-table th:first-child, #markdown-content .chat-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--bg-primary); }
+#markdown-content .chat-table th:first-child, #markdown-content .chat-table tr:nth-child(2n) td:first-child { background: var(--bg-secondary); }
+#markdown-content .chat-table-priority { display: inline-block; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 4px; font-size: 11px; color: var(--fg-secondary); background: var(--bg-tertiary); }
+#markdown-content .chat-table-hint { color: var(--fg-secondary); font-size: 11px; margin-top: 4px; }
+#markdown-content .chat-table-source { white-space: pre; overflow: auto; }
+#markdown-content .chat-table [hidden] { display: none; }
+
+#markdown-content .chat-table table.chat-table-wide { min-width: 520px; }

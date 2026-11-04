@@ -9,7 +9,7 @@ The reference implementation is the built-in **Claude Usage** dashboard (`src/co
 1. **Use the shared classes.** Do not hand-roll CSS for layout, cards, tables, stats, or typography. The classes below are injected into every plugin panel iframe via `PLUGIN_BASE_CSS` (`src/components/PluginPanel/pluginBaseStyles.ts`).
 2. **Never hardcode colors.** Use CSS variables (`var(--accent)`, `var(--fg-primary)`, `var(--bg-secondary)`, …). These follow the active theme.
 3. **Never hardcode pixel fonts for common text.** Headings/body are sized by the base stylesheet.
-4. **Register via `host.registerDashboard(...)`** so the Settings → Plugins row shows a one-click Dashboard button. Do not rely on context menus as the only entry point.
+4. **Register via `host.registerDashboard(...)`** so the Settings → Manage plugins row shows a one-click Dashboard button. Do not rely on context menus as the only entry point.
 
 ## Layout skeleton
 
@@ -98,7 +98,7 @@ export default {
 };
 ```
 
-The registered entry powers the **Dashboard** button in *Settings → Plugins* next to the plugin's enable toggle. The host also closes the Settings panel automatically on click so the dashboard becomes visible.
+The registered entry powers the **Dashboard** button in *Settings → Manage plugins* next to the plugin's enable toggle. The host also closes the Settings panel automatically on click so the dashboard becomes visible.
 
 ## Checklist before shipping
 

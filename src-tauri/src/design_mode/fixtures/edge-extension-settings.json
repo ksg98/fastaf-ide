@@ -1,0 +1,40 @@
+{
+  "extensions": {
+    "settings": {
+      "eefbgjmmpaimpeaflioojmdipmfchefo": {
+        "account_extension_type": 0,
+        "commands": {
+          "_execute_action": {
+            "suggested_key": "Alt+Shift+D",
+            "was_assigned": true
+          }
+        },
+        "content_settings": [],
+        "creation_flags": 38,
+        "first_install_time": "13436195264595197",
+        "from_webstore": false,
+        "has_started_service_worker": true,
+        "incognito_content_settings": [],
+        "incognito_preferences": {},
+        "last_update_time": "13436199627341487",
+        "location": 4,
+        "newAllowFileAccess": true,
+        "open_side_panel_on_icon_click": true,
+        "path": "/Users/stefano.straus/Library/Application Support/com.tuic.commander/design-mode/54a9d98ced20ef3b/edge/tuic-design-extension",
+        "preferences": {},
+        "regular_only_preferences": {},
+        "service_worker_registration_info": {
+          "version": "2.0.0"
+        },
+        "serviceworkerevents": [
+          "tabs.onActivated",
+          "tabs.onRemoved",
+          "tabs.onUpdated"
+        ],
+        "was_installed_by_default": false,
+        "was_installed_by_oem": false,
+        "withholding_permissions": false
+      }
+    }
+  }
+}

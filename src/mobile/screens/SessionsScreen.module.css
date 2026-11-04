@@ -1,7 +1,74 @@
 .list {
   height: 100%;
   overflow-y: auto;
+  padding-bottom: calc(64px + 12px + 44px + 12px);
   -webkit-overflow-scrolling: touch;
+}
+
+.searchHeader {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.searchRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: 6px 12px 6px 16px;
+}
+
+.sectionTitle {
+  margin-right: auto;
+  color: var(--fg-primary);
+  font-size: var(--mobile-heading-size);
+  line-height: 26px;
+  font-weight: 600;
+}
+
+.sortMenu {
+  position: relative;
+}
+
+.sortList {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+.sortOption { text-align: left; }
+
+.sortOptionActive {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.searchField {
+  padding: 0 16px 12px;
+}
+
+.searchField input { width: 100%; }
+
+.noMatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 16px;
+  color: var(--fg-secondary);
+  text-align: center;
 }
 
 .pullIndicator {
@@ -10,7 +77,7 @@
   justify-content: center;
   padding-bottom: 8px;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   overflow: hidden;
   transition: height 0.15s ease;
 }
@@ -35,7 +102,7 @@
   justify-content: center;
   height: 100%;
   gap: 8px;
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   padding: 32px 16px;
 }
 
@@ -114,24 +181,7 @@
   position: fixed;
   bottom: calc(64px + 12px);
   right: 16px;
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  border: none;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  -webkit-tap-highlight-color: transparent;
   z-index: 10;
-}
-
-.fab:active {
-  opacity: 0.8;
-  transform: scale(0.95);
 }
 
 @media (prefers-reduced-motion: reduce) {

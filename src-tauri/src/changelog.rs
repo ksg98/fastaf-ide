@@ -1,63 +1,34 @@
-//! AI changelog generation from merged pull requests.
+//! A changelog written from merged pull requests, by FastAF's built-in engine
+//! (`llm_api::ask` on the Headless slot; upstream asks ego instead).
 //!
-//! Fetches merged PRs for a repo (GraphQL, via `github::get_merged_prs_impl`),
-//! assembles a prompt, and runs a single genai completion on the **Headless**
-//! slot to produce both a human-readable markdown changelog and a structured
-//! JSON breakdown. This is distinct from `scripts/generate-release-notes.sh`,
-//! which rewrites an existing `CHANGELOG.md` section — here the source of truth
-//! is the merged-PR history, not a hand-written changelog.
+//! The merged-PR history is the source of truth here, not a hand-written
+//! `CHANGELOG.md` — that is `scripts/generate-release-notes.sh`, which rewrites
+//! a section that already exists. This assembles the PR list itself (GraphQL,
+//! via `github::get_merged_prs_impl`) and asks the model for one turn.
+//!
+//! Two kinds of leniency, and they are deliberately not the same:
+//!
+//! * **About the format, lenient.** A model that answers with the markdown and
+//!   no envelope has still answered; `split_changelog_output` keeps it and
+//!   leaves the structured split null rather than throwing the release notes
+//!   away over a missing brace. That was the shipped behaviour and it stays.
+//! * **About whether the model ran at all, strict.** No provider configured, a
+//!   timeout, an empty answer — each comes back as its own sentence from
+//!   `llm_api::execute_api_prompt`, never as an empty changelog.
 
-use serde::Serialize;
-
+#[cfg(test)]
 use crate::github::MergedPr;
 
-/// The two changelog artifacts: rendered markdown and a structured breakdown.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ChangelogResult {
-    pub markdown: String,
-    pub json: serde_json::Value,
-}
+pub(crate) use tuic_git::changelog::*;
 
-const CHANGELOG_SYSTEM_PROMPT: &str = "\
-You are a release-notes writer. Given a list of merged pull requests, produce a \
-concise, user-facing changelog. Group related changes under headings (Features, \
-Fixes, Improvements, Other). Write for end users, not developers: describe the \
-impact, not the implementation. Omit noise (dependency bumps, CI, formatting) \
-unless user-visible.
-
-Respond with ONLY a single JSON object, no prose and no code fences, of the form:
-{\"markdown\": \"<the changelog as markdown>\", \"json\": {\"features\": [\"...\"], \
-\"fixes\": [\"...\"], \"improvements\": [\"...\"], \"other\": [\"...\"]}}
-Each array holds short one-line summaries. Include a PR reference like (#123) at \
-the end of a line when it helps.";
-
-const CHANGELOG_TIMEOUT_MS: u64 = 90_000;
-
-/// Assemble the user prompt from the merged-PR list. Pure and unit-tested.
-/// Each PR contributes one line: number, title, author, and labels (labels help
-/// the model categorize). Empty input yields a prompt that still parses, but the
-/// caller short-circuits before reaching here when there are no PRs.
-pub(crate) fn build_changelog_prompt(prs: &[MergedPr]) -> String {
-    let mut out = String::from("Merged pull requests:\n");
-    for pr in prs {
-        out.push_str(&format!("- #{} {}", pr.number, pr.title.trim()));
-        if !pr.author.is_empty() {
-            out.push_str(&format!(" (by {})", pr.author));
-        }
-        if !pr.labels.is_empty() {
-            out.push_str(&format!(" [labels: {}]", pr.labels.join(", ")));
-        }
-        out.push('\n');
-    }
-    out
-}
-
-/// Split the model's raw response into `{markdown, json}`. Robust to the model
-/// wrapping the object in ```json code fences or emitting stray prose around it.
-/// If the response can't be parsed as the expected object, the whole response is
-/// treated as the markdown body with an empty JSON breakdown — never errors.
+/// Split the model's answer into `{markdown, json}`.
+///
+/// Robust to a ```json fence and to stray prose on either side. An answer that
+/// is not the expected object becomes the markdown body with a null breakdown:
+/// a person asked for release notes, and prose that reads as release notes is
+/// closer to that than an error is. Never fails.
 pub(crate) fn split_changelog_output(raw: &str) -> ChangelogResult {
-    let candidate = crate::diff_triage::extract_json(raw);
+    let candidate = crate::llm_api::extract_json(raw);
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate)
         && let Some(markdown) = value.get("markdown").and_then(|m| m.as_str())
     {
@@ -76,12 +47,14 @@ pub(crate) fn split_changelog_output(raw: &str) -> ChangelogResult {
     }
 }
 
-/// Generate a changelog for a repo. Returns an empty changelog (no LLM call)
-/// when there are no merged PRs to summarize.
+/// Generate a changelog for a repo.
+///
+/// No merged PRs means no model turn: there is nothing to summarise, and starting
+/// a process to be told so is a slow way to print one sentence.
 pub(crate) async fn generate_changelog_impl(
     repo_path: &str,
     since_tag: Option<&str>,
-    state: &crate::AppState,
+    state: &std::sync::Arc<crate::AppState>,
 ) -> Result<ChangelogResult, String> {
     let prs = crate::github::get_merged_prs_impl(repo_path, since_tag, state).await?;
     if prs.is_empty() {
@@ -91,13 +64,9 @@ pub(crate) async fn generate_changelog_impl(
         });
     }
     let content = build_changelog_prompt(&prs);
-    let raw = crate::llm_api::execute_api_prompt(
-        Some(CHANGELOG_SYSTEM_PROMPT.to_string()),
-        content,
-        CHANGELOG_TIMEOUT_MS,
-    )
-    .await?;
-    Ok(split_changelog_output(&raw))
+    let answer = crate::llm_api::ask(CHANGELOG_SYSTEM_PROMPT, content).await?;
+
+    Ok(split_changelog_output(&answer))
 }
 
 #[cfg(feature = "desktop")]

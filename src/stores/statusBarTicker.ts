@@ -11,8 +11,12 @@ export interface TickerMessage {
 	pluginId: string;
 	/** Display text (short, ~40 chars max for status bar) */
 	text: string;
+	/** Optional observation provenance; defaults to the display text. */
+	tooltip?: string;
 	/** Human-readable source label shown before the text (e.g. "Usage") */
 	label?: string;
+	/** Terminal binding for session-specific usage; absent for provider-wide tickers. */
+	sessionId?: string;
 	/** Optional inline SVG icon */
 	icon?: string;
 	/** Higher = more visible. Default 0. Messages >=80 get warning styling. */
@@ -182,7 +186,7 @@ function createStatusBarTicker() {
 
 		/** Get all active (non-expired) messages sorted by priority desc (for popover) */
 		getActiveMessages(): TickerMessage[] {
-			return [...activeMessages()].sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt);
+			return activeMessages().toSorted((a, b) => b.priority - a.priority || a.createdAt - b.createdAt);
 		},
 
 		/** Get all active (non-expired) messages */

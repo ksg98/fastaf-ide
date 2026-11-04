@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>Orchestrate agents — FastAF</title>
+  <meta name="description" content="See every agent's state in one sidebar, start any agent with one gesture, read sessions as a chat, and let agents spawn and message each other." />
+  <meta property="og:title" content="Orchestrate agents — FastAF" />
+  <meta property="og:description" content="One window for every agent: state, questions, rate limits, delegation and messages." />
+  <meta property="og:url" content="https://tuicommander.com/features/orchestration.html" />
+  <meta name="twitter:title" content="Orchestrate agents — FastAF" />
+  <meta name="twitter:description" content="One window for every agent: state, questions, rate limits, delegation and messages." />
+  <link rel="canonical" href="https://tuicommander.com/features/orchestration.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Orchestrate agents</p>
+      <h1>Ten projects. <em>One window.</em></h1>
+      <p>FastAF knows what each agent is doing. You follow one orchestrator, and the rest come to you when they need you.</p>
+    </div>
+  </header>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>The sidebar tells you <em>everything</em>.</h2>
+        <p>The rich layout adds facts to every row without losing density.</p>
+        <ul class="points">
+          <li><strong>Branches</strong> show the pull request state and title, ahead and behind, diff stats, dirty files, and merged or stale status.</li>
+          <li><strong>Agents</strong> show Working, Idle, Needs input or Error and what they are doing now; their subagents and child sessions nest below them.</li>
+          <li><strong>Repositories</strong> show open PRs, worktrees and the last remote poll. Groups, colours and parking keep ten projects in order.</li>
+        </ul>
+        <a class="more" href="/docs/user-guide/sidebar.html">Read the Sidebar guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/o-sidebar.webp" alt="Sidebar in rich layout with repositories, branches and agents" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Any agent. <em>One gesture.</em></h2>
+        <p>Open the agent menu and pick Claude Code, Codex, Gemini, Grok, ego or any other supported agent. The launch uses the run configuration you saved for it, with its own flags and environment, in the branch or worktree you are on.</p>
+        <a class="more" href="/docs/user-guide/ai-agents.html">Read the Agent Support guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/o-agent-menu.webp" alt="Agent menu listing the supported agents" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Read it like a <em>chat</em>.</h2>
+        <p>Terminals that run Claude Code, Codex, Grok or ego have a <strong>CLI | Chat</strong> switch. Chat shows the session as a conversation: your prompts, the agent's answers, and each tool call folded into one card. The terminal keeps running underneath, and you reply or queue the next task from the composer.</p>
+        <a class="more" href="/docs/user-guide/terminals.html">Read the Terminals guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/o-chat.webp" alt="Terminal in Chat view with prompts, answers and the composer" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>It knows <em>which</em> agent.</h2>
+        <p>Questions, approvals and rate limits are detected as they appear, and the tab, the sidebar and the notifications tell you which agent is waiting. The Activity Dashboard (<code>Cmd+Shift+A</code>) lists every session's state in one view.</p>
+        <a class="more" href="/docs/user-guide/command-palette.html">Read the Activity Dashboard guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/o-activity.webp" alt="Activity Dashboard listing sessions and their states" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Agents spawn <em>agents</em>. And talk to <em>each other</em>.</h2>
+        <p>Through FastAF's MCP tools an orchestrator creates worktrees, starts child agents with a prompt, and sends them messages. Children report back with <code>done</code> or <code>blocked</code>.</p>
+        <ul class="points">
+          <li><strong>Progress</strong> keeps an append-only journal per project, with a toolbar bell for what arrived since your last look.</li>
+          <li><strong>Flow</strong> draws the same journal as a sequence diagram: one column per agent, arrows for delegations, messages and results. See who said what.</li>
+        </ul>
+        <a class="more" href="/docs/user-guide/project-progress.html">Read the Project Progress guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/o-flow.webp" alt="Progress Flow view with agent columns and delegation arrows" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>AI Chat, <em>built in</em></h2>
+        <p>AI Chat runs on FastAF's built-in engine. Sign in with ChatGPT or pick a provider, and the chat sees your terminals, repositories and MCP tools. No external agent to install.</p>
+        <a class="more" href="/docs/user-guide/ai-chat.html">Read the AI Chat guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/o-ai-chat.webp" alt="AI Chat panel beside a terminal" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

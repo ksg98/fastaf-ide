@@ -1,8 +1,10 @@
 # Smart Prompts Library
 
-The Smart Prompts Library stores and manages all your prompt templates — both the 24 built-in AI automation prompts and your custom templates. Prompts are injected directly into the active agent terminal or run headless for quick one-shot operations.
+The Smart Prompts Library stores and manages all your prompt templates — both built-in AI automation prompts and your custom templates. Prompts are injected directly into the active agent terminal or run headless for quick one-shot operations.
 
 > **Looking for one-click AI automation?** See [Smart Prompts](smart-prompts.md) for the full guide on built-in automation prompts, context variables, and headless execution.
+
+Search for **Configure** to find the three [guided event configuration prompts](event-driven-templates.md): issue to draft PR, incoming PR review and authorized bounded fix. They start in the composer for review; they are not scheduled Automation templates or event subscriptions.
 
 ## Opening the Drawer
 
@@ -46,6 +48,10 @@ Use the category tabs to narrow the list:
 3. Click **Save**
 
 ## Editing and Deleting
+
+The drawer and **Settings > Smart Prompts** use the same aligned editor. Placement choices have readable names and include **File menu**. Execution mode controls which target, agent and output fields appear. **Send immediately** appears only for injection directly into the terminal.
+
+In the drawer, **Save** applies your draft and **Cancel** discards it. Settings applies each edit immediately. Changing the execution mode does not convert prompt content: use **Shell script (direct run)** only for shell commands, not natural-language instructions.
 
 - Click the **pencil icon** on any prompt row, or select it and press `Ctrl+E`/`Cmd+E`
 - Click the **trash icon** to delete — a confirmation dialog appears before deletion
@@ -103,7 +109,7 @@ The drawer closes automatically after a successful injection and focus returns t
 
 A lighter-weight alternative for per-branch one-off commands:
 
-- **Cmd+R** — Run the saved command for the active branch
-- **Cmd+Shift+R** — Edit the command before running
+- **Cmd+Shift+R** — Run the saved command for the active branch
+- **Cmd+R** — Reload the active web/preview tab
 
 Configure run commands in **Settings → Repository → Scripts** tab.

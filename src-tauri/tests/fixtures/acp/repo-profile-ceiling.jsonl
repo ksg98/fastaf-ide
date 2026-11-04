@@ -1,0 +1,5 @@
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","params":{"mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}],"_meta":{"ego":{"profile":"wide","ceilingProfile":"machine"}}},"capture":"new"}
+{"step":"respond","to":"new","result_file":"ego-profile-ceiling.json"}
+{"step":"await_stdin_eof"}

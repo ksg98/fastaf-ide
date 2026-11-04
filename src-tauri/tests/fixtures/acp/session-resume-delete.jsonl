@@ -1,0 +1,8 @@
+// Resuming attaches without replay; deleting removes the session for good.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/resume","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"resume"}
+{"step":"respond","to":"resume","result":{"configOptions":[]}}
+{"step":"expect","method":"session/delete","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"delete"}
+{"step":"respond","to":"delete","result":{}}
+{"step":"await_stdin_eof"}

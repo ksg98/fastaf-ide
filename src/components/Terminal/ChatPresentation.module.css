@@ -1,0 +1,25 @@
+.paste {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  white-space: normal;
+}
+
+.paste pre {
+  margin: 0;
+  font: var(--font-sm) / 1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+
+.command {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}

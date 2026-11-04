@@ -7,7 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::dictation::model::{self, models_dir};
+use crate::dictation::model::models_dir;
+use crate::dictation::model_download::download_file;
 
 const KOKORO_REPO: &str = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main";
 
@@ -131,7 +132,7 @@ pub async fn download_model(
     model: KokoroModel,
     on_progress: impl Fn(u64, u64) + Send + 'static,
 ) -> Result<PathBuf, String> {
-    model::download_file(&model.download_url(), model.path(), on_progress).await
+    download_file(&model.download_url(), model.path(), on_progress).await
 }
 
 pub async fn download_voice(
@@ -141,7 +142,7 @@ pub async fn download_voice(
     if !is_known_voice(id) {
         return Err(format!("Unknown voice: {id}"));
     }
-    model::download_file(&voice_url(id), voice_path(id), on_progress).await
+    download_file(&voice_url(id), voice_path(id), on_progress).await
 }
 
 pub fn delete_model(model: KokoroModel) -> Result<(), String> {

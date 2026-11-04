@@ -1,0 +1,1 @@
+query($owner:String!,$name:String!,$oid:GitObjectID!,$endCursor:String){repository(owner:$owner,name:$name){object(oid:$oid){...on Commit{statusCheckRollup{contexts(first:100,after:$endCursor){nodes{__typename ...on CheckRun{name status conclusion startedAt detailsUrl} ...on StatusContext{context state targetUrl createdAt}} pageInfo{hasNextPage endCursor}}}}}}}

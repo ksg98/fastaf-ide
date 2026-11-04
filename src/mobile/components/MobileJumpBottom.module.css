@@ -1,0 +1,10 @@
+.jumpBottom {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  color: var(--accent);
+}
+
+.jumpBottom:active {
+  opacity: 0.6;
+}

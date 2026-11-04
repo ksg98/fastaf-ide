@@ -1,0 +1,78 @@
+{
+  "manifest_version": 3,
+  "name": "FastAF Design Mode",
+  "version": "2.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArMOBX7wu50QbzlNIGLLUSWjOPLamKbu1YLdoU2tDCwYZUH+vYNyLGeMJoFY1+RgDKtF8YOttEkp1PEaiSkPlBgsOr3j/ppOBrF1g2S/MA9oHlirClij5uj18VHbjb6htLly2rdbCb1DWJc03Dlopc+2EfJ4NFbacZqB/lshfLnT5EfZMiseabr4SjS/xJpdsJKHGLETuxcJQIJO/37h0PI0nXH+qan79AbqxD7h4s2TOcLJlBf2biXBfVuCFgdCqRSbEVVyLfsRV+1pFVgf6vJrxLMQq5Mo/ZTjiOhqYOaQ4ayVq9Q4gnPJNSJn12Ayuq25vOFbtR4yWZm9hP5K9vwIDAQAB",
+  "permissions": [
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://[::1]/*",
+    "https://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Design Mode"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
+      "description": "Open Design Mode"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "http://[::1]/*",
+        "https://localhost/*"
+      ],
+      "js": [
+        "errors.js",
+        "main.js"
+      ],
+      "world": "MAIN",
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "http://[::1]/*",
+        "https://localhost/*"
+      ],
+      "js": [
+        "extract.js",
+        "picker.js",
+        "errorsBridge.js"
+      ],
+      "world": "ISOLATED",
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start"
+    }
+  ]
+}

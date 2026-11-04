@@ -8,6 +8,7 @@ import { repositoriesStore } from "../stores/repositories";
 import { terminalsStore } from "../stores/terminals";
 import { writeClipboard } from "../utils/clipboard";
 import { prContextVariables } from "../utils/promptContext";
+import { promptError } from "../utils/promptError";
 import { usePty } from "./usePty";
 
 export interface SmartPromptResult {
@@ -15,6 +16,11 @@ export interface SmartPromptResult {
 	reason?: string;
 	/** For headless mode: command output. For unresolved_variables: JSON array of variable names. */
 	output?: string;
+}
+
+export interface CanExecuteResult {
+	ok: boolean;
+	reason?: string;
 }
 
 /**
@@ -83,7 +89,21 @@ export function shellSplit(input: string): string[] {
 
 interface ResolvedAgent {
 	agent: string | null;
-	isApi: boolean;
+}
+
+/** Whether api mode has a model to run on.
+ *
+ * FastAF keeps its built-in engine: api mode is one call to the provider
+ * assigned to the Headless slot (`execute_api_prompt`), so the check is
+ * whether that slot resolves to a provider and model. */
+function canExecuteApi(): CanExecuteResult {
+	if (!providerRegistryStore.resolveSlot("headless")) {
+		return {
+			ok: false,
+			reason: "Headless provider not configured — add a provider and assign the Headless slot in Settings → Providers",
+		};
+	}
+	return { ok: true };
 }
 
 /** Resolve whether an inject-mode prompt submits after insertion.
@@ -101,21 +121,20 @@ function resolveHeadlessAgent(prompt: SavedPrompt): ResolvedAgent {
 	const global = agentConfigsStore.getHeadlessAgent();
 
 	if (preferred) {
-		if (preferred === "api") return { agent: "api", isApi: true };
+		if (preferred === "api") return { agent: "api" };
 		const template = agentConfigsStore.getHeadlessTemplate(preferred);
-		if (template) return { agent: preferred, isApi: false };
+		if (template) return { agent: preferred };
 		appLogger.warn("prompts", `Preferred agent "${preferred}" has no template, falling back to global`);
 	}
 
-	if (!global) return { agent: null, isApi: false };
-	return { agent: global, isApi: global === "api" };
+	return { agent: global ?? null };
 }
 
 export function useSmartPrompts() {
 	const pty = usePty();
 
 	/** Check if a smart prompt can be executed right now */
-	function canExecute(prompt: SavedPrompt): { ok: boolean; reason?: string } {
+	function canExecute(prompt: SavedPrompt): CanExecuteResult {
 		if (prompt.enabled === false) return { ok: false, reason: "Prompt is disabled" };
 
 		if (prompt.executionMode === "shell") {
@@ -123,34 +142,23 @@ export function useSmartPrompts() {
 		}
 
 		if (prompt.executionMode === "api") {
-			if (!providerRegistryStore.resolveSlot("headless"))
-				return {
-					ok: false,
-					reason:
-						"Headless provider not configured — add a provider and assign the Headless slot in Settings → Providers",
-				};
-			return { ok: true };
+			return canExecuteApi();
 		}
 
 		if (prompt.executionMode === "headless") {
 			const resolved = resolveHeadlessAgent(prompt);
-			if (resolved.isApi) {
-				if (!providerRegistryStore.resolveSlot("headless"))
-					return {
-						ok: false,
-						reason:
-							"Headless provider not configured — add a provider and assign the Headless slot in Settings → Providers",
-					};
-				return { ok: true };
-			}
-			if (!resolved.agent) return { ok: false, reason: "No headless agent configured — set one in Settings → Agents" };
+			// "api" is a headless agent the same way it is a mode: the work is one
+			// provider call either way, so it answers to the same check.
+			if (resolved.agent === "api") return canExecuteApi();
+			if (!resolved.agent)
+				return { ok: false, reason: "No headless agent configured — set one in Settings → Smart Prompts" };
 			return { ok: true };
 		}
 
 		return canExecuteInject(prompt);
 	}
 
-	function canExecuteInject(prompt: SavedPrompt): { ok: boolean; reason?: string } {
+	function canExecuteInject(prompt: SavedPrompt): CanExecuteResult {
 		const active = terminalsStore.getActive();
 		if (!active?.sessionId) return { ok: false, reason: "No active terminal" };
 		if (!active.agentType) return { ok: false, reason: "No agent detected in terminal" };
@@ -167,7 +175,7 @@ export function useSmartPrompts() {
 	function resolveFrontendVars(repoPath: string): Record<string, string> {
 		const vars: Record<string, string> = {};
 		const repo = repositoriesStore.get(repoPath);
-		const branch = repo?.activeBranch ?? "";
+		const branch = repo?.activeWorkspaceId ?? "";
 		if (branch) {
 			const pr = githubStore.getBranchPrData(repoPath, branch);
 			if (pr) Object.assign(vars, prContextVariables(pr));
@@ -199,9 +207,7 @@ export function useSmartPrompts() {
 			return check;
 		}
 
-		// If prompt is headless but the resolved agent is "api", upgrade to API mode
-		const rawMode = prompt.executionMode ?? "inject";
-		const effectiveMode = rawMode === "headless" && resolveHeadlessAgent(prompt).isApi ? "api" : rawMode;
+		const effectiveMode = prompt.executionMode ?? "inject";
 
 		// Single IPC: extract needed variable names + resolve only those from git.
 		const activeRepo = repositoriesStore.getActive();
@@ -210,7 +216,19 @@ export function useSmartPrompts() {
 			"resolve_prompt_variables",
 			{ content: prompt.content, repoPath: repoPath || null },
 		);
-		const allVars = { ...gitVars, ...resolveFrontendVars(repoPath), ...manualVariables };
+		const allVars: Record<string, string> = { ...gitVars, ...resolveFrontendVars(repoPath), ...manualVariables };
+		// The open review threads are read from GitHub only when the prompt asks for them.
+		if (varNames.includes("pr_open_threads") && !("pr_open_threads" in allVars) && allVars.pr_number && repoPath) {
+			try {
+				allVars.pr_open_threads = await invoke<string>("get_pr_open_threads", {
+					repoPath,
+					prNumber: Number(allVars.pr_number),
+				});
+			} catch (err) {
+				appLogger.warn("prompts", `Cannot read the open review threads for "${prompt.name}"`, err);
+				return { ok: false, reason: promptError(err) };
+			}
+		}
 		const unresolved = varNames.filter((v) => !(v in allVars));
 		if (unresolved.length > 0) {
 			return { ok: false, reason: "unresolved_variables", output: JSON.stringify(unresolved) };
@@ -259,15 +277,37 @@ export function useSmartPrompts() {
 			return { ok: true };
 		} catch (err) {
 			appLogger.error("prompts", `Failed to inject prompt "${prompt.name}"`, err);
-			return { ok: false, reason: String(err) };
+			return { ok: false, reason: promptError(err) };
+		}
+	}
+
+	/** One call to the Headless-slot provider, the api-mode counterpart of
+	 * `executeHeadless`: one call that returns the whole answer, then
+	 * `routeHeadlessOutput`. */
+	async function executeApi(prompt: SavedPrompt, content: string): Promise<SmartPromptResult> {
+		try {
+			const output = await invoke<string>("execute_api_prompt", {
+				systemPrompt: prompt.systemPrompt || null,
+				content,
+				timeoutMs: 120000,
+			});
+			promptLibraryStore.markAsUsed(prompt.id);
+			routeHeadlessOutput(prompt, output);
+			return { ok: true, output };
+		} catch (err) {
+			appLogger.error("prompts", `API execution failed for "${prompt.name}"`, err);
+			return { ok: false, reason: promptError(err) };
 		}
 	}
 
 	async function executeHeadless(prompt: SavedPrompt, content: string): Promise<SmartPromptResult> {
 		const resolved = resolveHeadlessAgent(prompt);
 		const headlessVal = resolved.agent;
+		// The "api" headless agent is the same provider call as api mode.
+		// Two paths to one behaviour would be two places to fix it.
+		if (headlessVal === "api") return executeApi(prompt, content);
 		if (!headlessVal) {
-			return { ok: false, reason: "No headless agent configured — set one in Settings → Agents" };
+			return { ok: false, reason: "No headless agent configured — set one in Settings → Smart Prompts" };
 		}
 
 		// Resolve headless_agent: "type:configName" format from grouped dropdown, or plain agent type.
@@ -323,7 +363,7 @@ export function useSmartPrompts() {
 			return { ok: true, output };
 		} catch (err) {
 			appLogger.error("prompts", `Headless execution failed for "${prompt.name}"`, err);
-			return { ok: false, reason: String(err) };
+			return { ok: false, reason: promptError(err) };
 		}
 	}
 
@@ -341,23 +381,7 @@ export function useSmartPrompts() {
 			return { ok: true, output };
 		} catch (err) {
 			appLogger.error("prompts", `Shell execution failed for "${prompt.name}"`, err);
-			return { ok: false, reason: String(err) };
-		}
-	}
-
-	async function executeApi(prompt: SavedPrompt, content: string): Promise<SmartPromptResult> {
-		try {
-			const output = await invoke<string>("execute_api_prompt", {
-				systemPrompt: prompt.systemPrompt || null,
-				content,
-				timeoutMs: 120000,
-			});
-			promptLibraryStore.markAsUsed(prompt.id);
-			routeHeadlessOutput(prompt, output);
-			return { ok: true, output };
-		} catch (err) {
-			appLogger.error("prompts", `API execution failed for "${prompt.name}"`, err);
-			return { ok: false, reason: String(err) };
+			return { ok: false, reason: promptError(err) };
 		}
 	}
 

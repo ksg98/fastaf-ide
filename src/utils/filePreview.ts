@@ -2,6 +2,7 @@ import { filePreviewRegistry } from "../plugins/filePreviewRegistry";
 import { editorTabsStore } from "../stores/editorTabs";
 import { mdTabsStore } from "../stores/mdTabs";
 import { type PaneTabType, paneLayoutStore } from "../stores/paneLayout";
+import { locateFile } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
 import { terminalsStore } from "../stores/terminals";
 
@@ -9,21 +10,13 @@ import { terminalsStore } from "../stores/terminals";
 export type FileOpenTarget = "markdown" | "preview" | "editor";
 
 const MD_EXTS = new Set(["md", "mdx"]);
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "ico", "bmp"]);
 const PREVIEW_EXTS = new Set([
+	...IMAGE_EXTS,
 	// Documents
 	"pdf",
 	"html",
 	"htm",
-	// Images
-	"png",
-	"jpg",
-	"jpeg",
-	"gif",
-	"webp",
-	"svg",
-	"avif",
-	"ico",
-	"bmp",
 	// Video
 	"mp4",
 	"webm",
@@ -41,6 +34,11 @@ const PREVIEW_EXTS = new Set([
 function extOf(filePath: string): string {
 	const dot = filePath.lastIndexOf(".");
 	return dot === -1 ? "" : filePath.slice(dot + 1).toLowerCase();
+}
+
+/** True for image files, which the preview tab serves through the asset protocol. */
+export function isImageFile(filePath: string): boolean {
+	return IMAGE_EXTS.has(extOf(filePath));
 }
 
 /** Classify how a file should be opened based on its extension. */
@@ -62,10 +60,13 @@ export function openFileAction(
 	filePath: string,
 	repoPath: string,
 	fsRoot?: string,
-	line?: number,
+	// The backend serialises an absent line as JSON null; treat it like undefined.
+	line?: number | null,
 	onEditorTab?: (tabId: string) => void,
+	col?: number,
 ): void {
-	if (line === undefined) {
+	const hasLine = line != null;
+	if (!hasLine) {
 		const handler = filePreviewRegistry.getHandler(filePath);
 		if (handler) {
 			handler.onOpen({ filePath, repoPath, fsRoot: fsRoot || repoPath });
@@ -76,12 +77,15 @@ export function openFileAction(
 	// Each store deactivates the other panes when it activates a tab
 	// (tabManager.activatePaneExclusively), so no hand-rolled setActive(null) here.
 	const target = classifyFile(filePath);
-	if (target === "markdown" && line === undefined) {
+	if (target === "markdown" && !hasLine) {
 		mdTabsStore.add(repoPath, filePath, fsRoot);
-	} else if (target === "preview" && line === undefined) {
+	} else if (target === "preview" && !hasLine) {
 		mdTabsStore.addHtmlPreview(repoPath, filePath, fsRoot);
 	} else {
-		const tabId = editorTabsStore.add(repoPath, filePath, line, { fsRoot: fsRoot || repoPath });
+		const tabId = editorTabsStore.add(repoPath, filePath, line ?? undefined, {
+			fsRoot: fsRoot || repoPath,
+			initialCol: col,
+		});
 		onEditorTab?.(tabId);
 	}
 }
@@ -97,12 +101,15 @@ export function openFileBesideTerminal(
 	filePath: string,
 	repoPath: string,
 	fsRoot?: string,
-	line?: number,
+	// The backend serialises an absent line as JSON null; treat it like undefined.
+	line?: number | null,
 	onEditorTab?: (tabId: string) => void,
+	col?: number,
 ): void {
-	const openFullView = () => openFileAction(filePath, repoPath, fsRoot, line, onEditorTab);
+	const openFullView = () => openFileAction(filePath, repoPath, fsRoot, line, onEditorTab, col);
+	const hasLine = line != null;
 
-	const pluginHandled = line === undefined && filePreviewRegistry.getHandler(filePath) !== undefined;
+	const pluginHandled = !hasLine && filePreviewRegistry.getHandler(filePath) !== undefined;
 	if (!settingsStore.state.openFilesToSide || pluginHandled) {
 		openFullView();
 		return;
@@ -164,16 +171,27 @@ export function openFileBesideTerminal(
 	const target = classifyFile(filePath);
 	let tabId: string;
 	let type: PaneTabType;
-	if (target === "markdown" && line === undefined) {
+	if (target === "markdown" && !hasLine) {
 		tabId = mdTabsStore.add(repoPath, filePath, fsRoot);
 		type = "markdown";
-	} else if (target === "preview" && line === undefined) {
+	} else if (target === "preview" && !hasLine) {
 		tabId = mdTabsStore.addHtmlPreview(repoPath, filePath, fsRoot);
 		type = "markdown";
 	} else {
-		tabId = editorTabsStore.add(repoPath, filePath, line, { fsRoot: fsRoot || repoPath });
+		tabId = editorTabsStore.add(repoPath, filePath, line ?? undefined, { fsRoot: fsRoot || repoPath, initialCol: col });
 		type = "editor";
 	}
 	paneLayoutStore.addTab(targetGroupId, { id: tabId, type });
 	paneLayoutStore.setActiveGroup(targetGroupId);
+}
+
+/** Open a resolved absolute file path clicked in terminal output. */
+export function openTerminalFilePath(
+	absolutePath: string,
+	onEditorTab?: (tabId: string) => void,
+	line?: number,
+	col?: number,
+): void {
+	const { repoPath, fsRoot, filePath } = locateFile(absolutePath);
+	openFileAction(filePath, repoPath, fsRoot, line, onEditorTab, col);
 }

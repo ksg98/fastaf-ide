@@ -14,6 +14,7 @@
   <a class="docs-card" href="user-guide/worktrees.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>Worktrees</span></a>
   <a class="docs-card" href="user-guide/github-integration.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>GitHub Integration</span></a>
   <a class="docs-card" href="user-guide/plugins.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>Plugins</span></a>
+  <a class="docs-card" href="user-guide/project-progress.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>Project Progress</span></a>
   <a class="docs-card" href="user-guide/remote-access.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>Remote Access</span></a>
   <a class="docs-card" href="user-guide/troubleshooting.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>Troubleshooting</span></a>
   <a class="docs-card" href="api/http-api.html"><svg viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M320 464c8.8 0 16-7.2 16-16V160H256c-17.7 0-32-14.3-32-32V48H64c-8.8 0-16 7.2-16 16V448c0 8.8 7.2 16 16 16H320zM0 64C0 28.7 28.7 0 64 0H229.5c17 0 33.3 6.7 45.3 18.7l90.5 90.5c12 12 18.7 28.3 18.7 45.3V448c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V64z"/></svg><span>HTTP API</span></a>
@@ -31,10 +32,17 @@
 ## Key Features
 
 - **Terminal Management** — Tabbed terminals with split panes, drag-and-drop reordering, and per-branch isolation via Git worktrees
-- **AI Agent Support** — Auto-detect Claude Code, Aider, Codex, Gemini CLI and more. Monitor progress, costs, and active subtasks in real time
+- **AI Agent Support** — Auto-detect Claude Code, Codex, Gemini CLI and more. Monitor progress, costs, and active subtasks in real time
 - **Git Worktrees** — Each branch gets its own working directory. Create, merge, archive, and batch-manage worktrees from the UI
 - **GitHub Integration** — PR badges, CI status rings, merge from the UI, post-merge cleanup, and notification bell for PR events
 - **Plugin System** — Extend FastAF with JavaScript plugins. Full API for terminals, git, notifications, and status bar widgets
 - **MCP Bridge** — Expose app capabilities to AI agents via Model Context Protocol
+- **[Project Progress](./user-guide/project-progress.md)** — Append-only journal per project: agent `done` and `blocked` reports plus the `intent:` markers FastAF captures, surfaced through the toolbar bell
+- **[Design Mode](./user-guide/design-mode.md)** — Pick an element in a dedicated Chrome window and add its context to an agent terminal's editable draft
+- **[Remote Daemon](./user-guide/remote-access.md#tuic-remote-beta)** — `tuic-remote` runs the backend headless on a server or build host: same HTTP/WebSocket API, no Tauri, no GUI
 
 The complete, always-current capability inventory lives in the [Feature Reference](./FEATURES.md).
+
+## Community & support
+
+Ask questions and share ideas in [GitHub Discussions](https://github.com/ksg98/fastaf-ide/discussions). Report reproducible bugs in [GitHub issues](https://github.com/ksg98/fastaf-ide/issues).

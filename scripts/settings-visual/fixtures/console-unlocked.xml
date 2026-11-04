@@ -1,0 +1,3 @@
+<!-- Lock property recorded from ioreg -n Root -d1 -a, 2026-10-18. Other properties omitted. -->
+<key>IOConsoleLocked</key>
+	<false/>

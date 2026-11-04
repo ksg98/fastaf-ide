@@ -14,7 +14,7 @@ use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
 use crate::event::{Event, EventListener};
-use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
+use crate::grid::{Dimensions, Grid, GridIterator, Scroll, ScrollSource};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
@@ -334,6 +334,10 @@ impl TermDamageState {
 }
 
 pub struct Term<T> {
+    // Consecutive whole-row erases, in top-to-bottom viewport order.
+    viewport_erased_rows: usize,
+    // Generation and history position of the last explicit full viewport erase.
+    viewport_clear: (usize, usize),
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
 
@@ -471,6 +475,47 @@ pub enum Osc52 {
 }
 
 impl<T> Term<T> {
+    /// Generation and total-scrolled position at the last explicit viewport wipe.
+    /// A resize or an unrelated in-place edit never advances this generation.
+    pub fn viewport_clear(&self) -> (usize, usize) {
+        self.viewport_clear
+    }
+
+    /// Erase a cell range, resetting row provenance only for a complete replacement.
+    fn erase_row_cells(&mut self, line: Line, start: Column, end: Column) {
+        let columns = self.columns();
+        if start == Column(0) && end == Column(columns) {
+            let next = line.0 as usize;
+            self.viewport_erased_rows = if next == 0 {
+                1
+            } else if next == self.viewport_erased_rows {
+                next + 1
+            } else {
+                0
+            };
+            if self.viewport_erased_rows == self.screen_lines()
+                && !self.mode.contains(TermMode::ALT_SCREEN)
+            {
+                self.viewport_clear = (
+                    self.viewport_clear.0.wrapping_add(1),
+                    self.grid.total_scrolled(),
+                );
+                self.viewport_erased_rows = 0;
+            }
+        } else {
+            self.viewport_erased_rows = 0;
+        }
+        let template: Cell = self.grid.cursor.template.bg.into();
+        let row = &mut self.grid[line];
+        if start == Column(0) && end == Column(columns) {
+            row.reset(&template);
+        } else {
+            for cell in &mut row[start..end] {
+                *cell = template.clone();
+            }
+        }
+    }
+
     #[inline]
     pub fn scroll_display(&mut self, scroll: Scroll)
     where
@@ -509,6 +554,8 @@ impl<T> Term<T> {
         let damage = TermDamageState::new(num_cols, num_lines);
 
         Term {
+            viewport_erased_rows: 0,
+            viewport_clear: (0, 0),
             inactive_grid,
             scroll_region,
             event_proxy,
@@ -804,6 +851,16 @@ impl<T> Term<T> {
         }
     }
 
+    /// Primary-screen origin, including rows evicted from bounded history.
+    #[inline]
+    pub fn primary_total_scrolled(&self) -> usize {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.inactive_grid.total_scrolled()
+        } else {
+            self.grid.total_scrolled()
+        }
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize<S: Dimensions>(&mut self, size: S) {
         self.resize_reflow(size, crate::grid::ReflowMode::All);
@@ -816,6 +873,7 @@ impl<T> Term<T> {
     /// `ReflowMode::HistoryOnly` — reflow scrollback but leave visible screen
     /// untouched, preserving cursor-addressed TUI positioning.
     pub fn resize_reflow<S: Dimensions>(&mut self, size: S, reflow: crate::grid::ReflowMode) {
+        self.viewport_erased_rows = 0;
         let old_cols = self.columns();
         let old_lines = self.screen_lines();
 
@@ -951,12 +1009,23 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
-    /// Scroll screen up
+    /// Scroll because content reached the bottom of the region — a linefeed, or
+    /// an index past the bottom margin.
     ///
-    /// Text moves up; clear at top
-    /// Expects origin to be in scroll range.
+    /// Deliberately **not** `Handler::scroll_up`. That method is the SU control
+    /// and removes lines; sharing it with this path is what made the two
+    /// indistinguishable, so a fix aimed at SU would silently stop linefeed
+    /// from feeding history too (#834-1878).
     #[inline]
-    fn scroll_up_relative(&mut self, origin: Line, mut lines: usize) {
+    fn scroll_up_overflow(&mut self, lines: usize) {
+        let origin = self.scroll_region.start;
+        self.scroll_up_relative_from(origin, lines, ScrollSource::Overflow);
+    }
+
+    /// `scroll_up_relative`, saying whether the lines left the screen or were
+    /// removed by a control. See `grid::ScrollSource`.
+    #[inline]
+    fn scroll_up_relative_from(&mut self, origin: Line, mut lines: usize, source: ScrollSource) {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
 
         lines = cmp::min(
@@ -972,7 +1041,7 @@ impl<T> Term<T> {
             .take()
             .and_then(|s| s.rotate(self, &region, lines as i32));
 
-        self.grid.scroll_up(&region, lines);
+        self.grid.scroll_up_with(&region, lines, source);
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));
@@ -1181,7 +1250,7 @@ impl<T> Term<T> {
         if next >= self.scroll_region.end {
             self.grid.cursor.point.column = Column(0);
             self.grid.cursor.input_needs_wrap = false;
-            self.scroll_up(1);
+            self.scroll_up_overflow(1);
         } else if next < self.screen_lines() {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
@@ -1201,7 +1270,7 @@ impl<T> Term<T> {
     {
         let next = self.grid.cursor.point.line + 1;
         if next >= self.scroll_region.end {
-            self.scroll_up(1);
+            self.scroll_up_overflow(1);
         } else if next < self.screen_lines() {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
@@ -1332,6 +1401,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
+        self.viewport_erased_rows = 0;
         // Number of cells the char will occupy.
         let width = match c.width() {
             Some(width) => width,
@@ -1356,6 +1426,7 @@ impl<T: EventListener> Handler for Term<T> {
             }
 
             self.grid[line][column].push_zerowidth(c);
+            self.damage.damage_line(line.0 as usize, column.0, column.0);
             return;
         }
 
@@ -1367,11 +1438,9 @@ impl<T: EventListener> Handler for Term<T> {
             && self.grid.cursor.point.line > Line(0)
         {
             let prev = self.grid.cursor.point.line - 1i32;
-            let cols = self.columns();
-            if cols > 0 {
-                self.grid[prev][Column(cols - 1)]
-                    .flags
-                    .remove(Flags::WRAPLINE);
+            // Non-reflow growth can retain the edge before the current margin.
+            for cell in &mut self.grid[prev][..] {
+                cell.flags.remove(Flags::WRAPLINE);
             }
         }
 
@@ -1449,9 +1518,11 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Decalnning");
 
         for line in (0..self.screen_lines()).map(Line::from) {
-            for column in 0..self.columns() {
-                let cell = &mut self.grid[line][Column(column)];
-                *cell = Cell::default();
+            // DECALN replaces the entire row, including its origin provenance.
+            // Its cells use the default background rather than the cursor template.
+            let row = &mut self.grid[line];
+            row.reset(&Cell::default());
+            for cell in row {
                 cell.c = 'E';
             }
         }
@@ -1497,6 +1568,10 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn insert_blank(&mut self, count: usize) {
+        // ICH acts on the cell the cursor occupies, so a pending wrap is
+        // resolved rather than carried past the edit.
+        self.grid.cursor.input_needs_wrap = false;
+
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
@@ -1511,6 +1586,10 @@ impl<T: EventListener> Handler for Term<T> {
         self.damage
             .damage_line(line.0 as usize, 0, self.columns() - 1);
 
+        if source == Column(0) && count == self.columns() {
+            self.erase_row_cells(line, Column(0), Column(self.columns()));
+            return;
+        }
         let row = &mut self.grid[line][..];
 
         for offset in (0..num_cells).rev() {
@@ -1743,11 +1822,9 @@ impl<T: EventListener> Handler for Term<T> {
 
         // CR resets to column 0 — clear any stale WRAPLINE and reflow_wrap
         // on this line. If the line later wraps again, wrapline() will re-set them.
-        let cols = self.columns();
-        if cols > 0 {
-            self.grid[line][Column(cols - 1)]
-                .flags
-                .remove(Flags::WRAPLINE);
+        // Non-reflow growth can retain the edge before the current margin.
+        for cell in &mut self.grid[line][..] {
+            cell.flags.remove(Flags::WRAPLINE);
         }
         self.grid[line].reflow_wrap = false;
 
@@ -1764,11 +1841,9 @@ impl<T: EventListener> Handler for Term<T> {
         // WRAPLINE flag and reflow_wrap so grow_columns won't merge the next
         // line into this one.
         let line = self.grid.cursor.point.line;
-        let cols = self.columns();
-        if cols > 0 {
-            self.grid[line][Column(cols - 1)]
-                .flags
-                .remove(Flags::WRAPLINE);
+        // Non-reflow growth can retain the edge before the current margin.
+        for cell in &mut self.grid[line][..] {
+            cell.flags.remove(Flags::WRAPLINE);
         }
         self.grid[line].reflow_wrap = false;
         self.grid.cursor.input_needs_wrap = false;
@@ -1828,7 +1903,11 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn scroll_up(&mut self, lines: usize) {
         let origin = self.scroll_region.start;
-        self.scroll_up_relative(origin, lines);
+        // SU (`CSI S`). Nothing is scrolled off the bottom: the control removes
+        // lines, so nothing may enter history. `linefeed`/`index` overflow does
+        // NOT come through here — it calls `scroll_up_overflow`, which is the
+        // whole point of the split (#834-1878).
+        self.scroll_up_relative_from(origin, lines, ScrollSource::Control);
     }
 
     #[inline]
@@ -1841,26 +1920,58 @@ impl<T: EventListener> Handler for Term<T> {
     fn insert_blank_lines(&mut self, lines: usize) {
         trace!("Inserting blank {lines} lines");
 
+        // A pending wrap is resolved even when the line is outside the scroll
+        // region and the insert itself does nothing.
+        self.grid.cursor.input_needs_wrap = false;
+
         let origin = self.grid.cursor.point.line;
         if self.scroll_region.contains(&origin) {
             self.scroll_down_relative(origin, lines);
+            // DEC returns the cursor to the left margin after IL.
+            self.grid.cursor.point.column = Column(0);
         }
     }
 
     #[inline]
     fn delete_lines(&mut self, lines: usize) {
+        // A pending wrap is resolved even when the line is outside the scroll
+        // region and the delete itself does nothing.
+        self.grid.cursor.input_needs_wrap = false;
+
         let origin = self.grid.cursor.point.line;
         let lines = cmp::min(self.screen_lines() - origin.0 as usize, lines);
 
         trace!("Deleting {lines} lines");
 
         if lines > 0 && self.scroll_region.contains(&origin) {
-            self.scroll_up_relative(origin, lines);
+            // DEFERRED (2026-09-22) — `scroll_up_relative` feeds `Grid::scroll_up`,
+            // which pushes the removed lines into scrollback whenever the region
+            // starts at line 0. A reference terminal grows its buffer only for an
+            // index past the bottom margin, so DL (and SU) here manufacture
+            // history rows: 279 of the retained ANSI differential failures are
+            // exactly this, each growing by the deleted line count. Not fixed
+            // with the handler contract because separating "scrolled off" from
+            // "deleted by a control" changes `Grid::scroll_up`, and TUIC's
+            // absolute row coordinate (`lines_scrolled`/`total_scrolled`) is
+            // built on its current meaning. Story #834-1878; evidence in
+            // `tests/terminal-stress/INTEGRITY_FINDINGS.md`.
+            // DL removes lines; it does not scroll them off the bottom. Routing
+            // this through the overflow path is what pushed the removed rows
+            // into scrollback, and it accounted for 279 of the retained ANSI
+            // differential failures — an agent TUI that repaints with DL grew
+            // scrollback rows it never printed (#834-1878).
+            self.scroll_up_relative_from(origin, lines, ScrollSource::Control);
+            // DEC returns the cursor to the left margin after DL.
+            self.grid.cursor.point.column = Column(0);
         }
     }
 
     #[inline]
     fn erase_chars(&mut self, count: usize) {
+        // ECH acts on the cell the cursor occupies, so a pending wrap is
+        // resolved rather than carried past the edit.
+        self.grid.cursor.input_needs_wrap = false;
+
         let cursor = &self.grid.cursor;
 
         trace!(
@@ -1871,42 +1982,44 @@ impl<T: EventListener> Handler for Term<T> {
         let start = cursor.point.column;
         let end = cmp::min(start + count, Column(self.columns()));
 
-        // Cleared cells have current background color set.
-        let bg = self.grid.cursor.template.bg;
         let line = cursor.point.line;
         self.damage.damage_line(line.0 as usize, start.0, end.0);
-        let row = &mut self.grid[line];
-        for cell in &mut row[start..end] {
-            *cell = bg.into();
-        }
+        self.erase_row_cells(line, start, end);
     }
 
     #[inline]
     fn delete_chars(&mut self, count: usize) {
+        // DCH acts on the cell the cursor occupies, so a pending wrap is
+        // resolved rather than carried past the edit.
+        self.grid.cursor.input_needs_wrap = false;
+
         let columns = self.columns();
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
-        // Ensure deleting within terminal bounds.
-        let count = cmp::min(count, columns);
-
         let start = cursor.point.column.0;
-        let end = cmp::min(start + count, columns - 1);
-        let num_cells = columns - end;
+
+        // Only the cells to the right of the cursor can be deleted, so a count
+        // reaching past the right margin removes fewer cells than it asks for.
+        // Blanking `count` cells regardless eats text the delete never touched.
+        let removed = cmp::min(count, columns - start);
+        let shifted = columns - start - removed;
 
         let line = cursor.point.line;
         self.damage
             .damage_line(line.0 as usize, 0, self.columns() - 1);
+        if start == 0 && removed == columns {
+            self.erase_row_cells(line, Column(0), Column(columns));
+            return;
+        }
         let row = &mut self.grid[line][..];
 
-        for offset in 0..num_cells {
-            row.swap(start + offset, end + offset);
+        for offset in 0..shifted {
+            row.swap(start + offset, start + removed + offset);
         }
 
-        // Clear last `count` cells in the row. If deleting 1 char, need to delete
-        // 1 cell.
-        let end = columns - count;
-        for cell in &mut row[end..] {
+        // The cells vacated at the right margin are exactly the ones removed.
+        for cell in &mut row[columns - removed..] {
             *cell = bg.into();
         }
     }
@@ -1986,7 +2099,6 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Clearing line: {mode:?}");
 
         let cursor = &self.grid.cursor;
-        let bg = cursor.template.bg;
         let point = cursor.point;
 
         let (left, right) = match mode {
@@ -1999,10 +2111,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.damage
             .damage_line(point.line.0 as usize, left.0, right.0 - 1);
 
-        let row = &mut self.grid[point.line];
-        for cell in &mut row[left..right] {
-            *cell = bg.into();
-        }
+        self.erase_row_cells(point.line, left, right);
 
         let range = self.grid.cursor.point.line..=self.grid.cursor.point.line;
         self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
@@ -2101,33 +2210,32 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
         trace!("Clearing screen: {mode:?}");
-        let bg = self.grid.cursor.template.bg;
-
         let screen_lines = self.screen_lines();
 
         match mode {
             ansi::ClearMode::Above => {
                 let cursor = self.grid.cursor.point;
 
-                // If clearing more than one line.
-                if cursor.line > 1 {
+                // Upstream's > 1 guard skips row zero when the cursor is on row one.
+                if cursor.line > 0 {
                     // Fully clear all lines before the current line.
                     self.grid.reset_region(..cursor.line);
                 }
 
                 // Clear up to the current column in the current line.
                 let end = cmp::min(cursor.column + 1, Column(self.columns()));
-                for cell in &mut self.grid[cursor.line][..end] {
-                    *cell = bg.into();
-                }
+                self.erase_row_cells(cursor.line, Column(0), end);
 
                 let range = Line(0)..=cursor.line;
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
             }
             ansi::ClearMode::Below => {
                 let cursor = self.grid.cursor.point;
-                for cell in &mut self.grid[cursor.line][cursor.column..] {
-                    *cell = bg.into();
+                // A pending wrap puts the erase origin past the right margin,
+                // so the last cell of the current line is not in range. Same
+                // reasoning as the `LineClearMode::Right` guard in `clear_line`.
+                if !self.grid.cursor.input_needs_wrap {
+                    self.erase_row_cells(cursor.line, cursor.column, Column(self.columns()));
                 }
 
                 if (cursor.line.0 as usize) < screen_lines - 1 {
@@ -2651,8 +2759,8 @@ impl<T: EventListener> Handler for Term<T> {
             _ => return,
         };
         self.grid.cursor.template.cell_type = cell_type;
-        let line =
-            self.grid.history_size() + usize::try_from(self.grid.cursor.point.line.0).unwrap_or(0);
+        let line = self.grid.total_scrolled()
+            + usize::try_from(self.grid.cursor.point.line.0).unwrap_or(0);
         self.event_proxy.send_event(Event::Osc133 {
             command,
             params: params.to_owned(),
@@ -2667,8 +2775,8 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn osc7770(&mut self, verb: &str, payload: &str) {
-        let line =
-            self.grid.history_size() + usize::try_from(self.grid.cursor.point.line.0).unwrap_or(0);
+        let line = self.grid.total_scrolled()
+            + usize::try_from(self.grid.cursor.point.line.0).unwrap_or(0);
         self.event_proxy.send_event(Event::Tuic {
             verb: verb.to_owned(),
             payload: payload.to_owned(),
@@ -3633,6 +3741,31 @@ mod tests {
     }
 
     #[test]
+    fn combining_input_damages_the_base_cell() {
+        let size = TermSize::new(10, 2);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        term.input('e');
+        term.reset_damage();
+        term.reset_parse_damage();
+
+        term.input('\u{0301}');
+
+        assert_eq!(
+            term.damage.lines[0],
+            LineDamageBounds {
+                line: 0,
+                left: 0,
+                right: 0,
+            },
+            "the stored base cell, not the unchanged cursor column, must be damaged"
+        );
+        match term.parse_damage() {
+            TermParseDamage::Partial(lines) => assert_eq!(lines, vec![0]),
+            TermParseDamage::Full => panic!("expected partial parse damage for a combining mark"),
+        }
+    }
+
+    #[test]
     fn damage_cursor_movements() {
         let size = TermSize::new(10, 10);
         let mut term = Term::new(Config::default(), &size, VoidListener);
@@ -3937,7 +4070,7 @@ mod tests {
         assert!(term.damage.full);
         term.reset_damage();
 
-        term.scroll_up_relative(Line(3), 2);
+        term.scroll_up_relative_from(Line(3), 2, ScrollSource::Overflow);
         assert!(term.damage.full);
         term.reset_damage();
 
@@ -4037,6 +4170,355 @@ mod tests {
         term.title = Some("Test".into());
         term.set_title(None);
         assert_eq!(term.title, None);
+    }
+
+    /// Fill `line` to the right margin, which arms the pending wrap without
+    /// moving the cursor off the last column.
+    fn arm_pending_wrap(term: &mut Term<VoidListener>, line: i32) {
+        term.goto(line, 0);
+        for _ in 0..term.columns() {
+            term.input('B');
+        }
+        assert!(
+            term.grid.cursor.input_needs_wrap,
+            "the fixture must arm the pending wrap it exists to test"
+        );
+    }
+
+    /// The character written after an edit reveals where the cursor really is,
+    /// which a cursor field cannot: a pending wrap moves the next character
+    /// without moving the cursor.
+    fn next_char_lands_at(term: &mut Term<VoidListener>) -> Point {
+        term.input('X');
+        for line in 0..term.screen_lines() as i32 {
+            for column in 0..term.columns() {
+                if term.grid[Line(line)][Column(column)].c == 'X' {
+                    return Point::new(Line(line), Column(column));
+                }
+            }
+        }
+        panic!("the written character reached no cell");
+    }
+
+    #[test]
+    fn insert_lines_returns_the_cursor_to_the_left_margin() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        term.goto(1, 3);
+        term.insert_blank_lines(1);
+
+        // DEC resets the column after IL; leaving it stranded mid-row puts the
+        // next paint at the wrong offset for the rest of the line.
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(1), Column(0))
+        );
+    }
+
+    #[test]
+    fn delete_lines_returns_the_cursor_to_the_left_margin() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        term.goto(1, 3);
+        term.delete_lines(1);
+
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(1), Column(0))
+        );
+    }
+
+    #[test]
+    fn insert_lines_outside_the_scroll_region_keeps_the_column() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        term.set_scrolling_region(1, Some(2));
+        term.goto(3, 3);
+        term.insert_blank_lines(1);
+
+        // The insert does nothing outside the region, so it may not move the
+        // cursor either.
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(3), Column(3))
+        );
+    }
+
+    #[test]
+    fn insert_lines_outside_the_scroll_region_still_resolves_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        term.set_scrolling_region(1, Some(2));
+        arm_pending_wrap(&mut term, 3);
+        term.insert_blank_lines(1);
+
+        // Clearing the pending wrap is not conditional on the insert applying.
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(3), Column(4))
+        );
+    }
+
+    #[test]
+    fn insert_blank_resolves_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        arm_pending_wrap(&mut term, 1);
+        term.insert_blank(2);
+
+        // ICH edited the cell under the cursor, so the next character belongs
+        // on that same cell rather than on the following row.
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(1), Column(4))
+        );
+    }
+
+    /// Read a whole line as text, so a test can state the expected row instead
+    /// of asserting cell by cell.
+    fn line_text(term: &Term<VoidListener>, line: i32) -> String {
+        (0..term.columns())
+            .map(|column| term.grid[Line(line)][Column(column)].c)
+            .collect()
+    }
+
+    #[test]
+    fn delete_chars_past_the_right_margin_only_blanks_what_it_removed() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 2), VoidListener);
+
+        term.goto(0, 0);
+        for c in "abcdefghij".chars() {
+            term.input(c);
+        }
+        term.goto(0, 7);
+        term.delete_chars(5);
+
+        // Three cells sit right of the cursor, so three are removed. Blanking a
+        // full five would eat "ef", which the delete never reached.
+        assert_eq!(line_text(&term, 0), "abcdefg   ");
+    }
+
+    #[test]
+    fn delete_chars_within_the_row_shifts_the_tail_left() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 2), VoidListener);
+
+        term.goto(0, 0);
+        for c in "abcdefghij".chars() {
+            term.input(c);
+        }
+        term.goto(0, 5);
+        term.delete_chars(3);
+
+        assert_eq!(line_text(&term, 0), "abcdeij   ");
+    }
+
+    #[test]
+    fn delete_chars_resolves_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        arm_pending_wrap(&mut term, 1);
+        term.delete_chars(2);
+
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(1), Column(4))
+        );
+    }
+
+    #[test]
+    fn erase_chars_resolves_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        arm_pending_wrap(&mut term, 1);
+        term.erase_chars(2);
+
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(1), Column(4))
+        );
+    }
+
+    #[test]
+    fn erase_in_display_below_spares_the_cell_behind_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        term.goto(2, 0);
+        term.input('C');
+        arm_pending_wrap(&mut term, 1);
+        term.clear_screen(ansi::ClearMode::Below);
+
+        // The pending wrap puts the erase origin past the right margin, so the
+        // last written cell is not in range — erasing it drops a character the
+        // user already saw.
+        assert_eq!(term.grid[Line(1)][Column(4)].c, 'B');
+        // Lines below are still cleared.
+        assert_eq!(term.grid[Line(2)][Column(0)].c, ' ');
+    }
+
+    #[test]
+    fn erase_in_display_keeps_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        arm_pending_wrap(&mut term, 1);
+        term.clear_screen(ansi::ClearMode::Below);
+
+        // ED erases without editing the cell under the cursor, so the pending
+        // wrap survives. xterm agrees; do not "fix" this alongside ICH/DCH/ECH.
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(2), Column(0))
+        );
+    }
+
+    #[test]
+    fn erase_in_display_above_clears_the_whole_line_behind_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        arm_pending_wrap(&mut term, 1);
+        term.clear_screen(ansi::ClearMode::Above);
+
+        // ED1 is inclusive of the cursor cell, and a pending wrap sits past it,
+        // so the whole line goes — the opposite of the ED0 case above.
+        assert_eq!(term.grid[Line(1)][Column(4)].c, ' ');
+    }
+
+    #[test]
+    fn erase_in_line_keeps_a_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+
+        arm_pending_wrap(&mut term, 1);
+        term.clear_line(ansi::LineClearMode::Right);
+
+        assert_eq!(
+            next_char_lands_at(&mut term),
+            Point::new(Line(2), Column(0))
+        );
+    }
+
+    /// Fill every row with a distinct letter, so a row that moved is
+    /// identifiable rather than merely present.
+    fn fill_rows(term: &mut Term<VoidListener>, rows: usize) {
+        for row in 0..rows {
+            term.goto(row as i32, 0);
+            term.input(char::from(b'a' + row as u8));
+        }
+    }
+
+    #[test]
+    fn delete_lines_at_the_top_row_does_not_manufacture_history() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+        fill_rows(&mut term, 4);
+        let before = term.grid.total_scrolled();
+
+        term.goto(0, 0);
+        term.delete_lines(2);
+
+        // DL removes rows from the screen; it does not scroll them off the
+        // bottom. A reference terminal grows its buffer only for an index past
+        // the bottom margin, so history must not move — every row DL removes
+        // here would otherwise be a scrollback row the agent never printed.
+        assert_eq!(term.grid.history_size(), 0, "DL created scrollback");
+        assert_eq!(
+            term.grid.total_scrolled(),
+            before,
+            "DL moved the absolute row coordinate"
+        );
+    }
+
+    #[test]
+    fn scroll_up_control_does_not_manufacture_history() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+        fill_rows(&mut term, 4);
+        let before = term.grid.total_scrolled();
+
+        term.goto(0, 0);
+        <Term<VoidListener> as Handler>::scroll_up(&mut term, 2);
+
+        assert_eq!(term.grid.history_size(), 0, "SU created scrollback");
+        assert_eq!(
+            term.grid.total_scrolled(),
+            before,
+            "SU moved total_scrolled"
+        );
+    }
+
+    /// The negative control, and the whole reason the two paths are separated
+    /// rather than both disabled: a linefeed past the bottom margin is content
+    /// leaving the screen, and it must still become history.
+    #[test]
+    fn a_linefeed_past_the_bottom_margin_still_feeds_history() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+        fill_rows(&mut term, 4);
+        let before = term.grid.total_scrolled();
+
+        term.goto(3, 0);
+        term.linefeed();
+
+        assert_eq!(
+            term.grid.history_size(),
+            1,
+            "a linefeed lost its history row"
+        );
+        assert_eq!(
+            term.grid.total_scrolled(),
+            before + 1,
+            "a linefeed must advance the absolute row coordinate"
+        );
+    }
+
+    /// The same criterion read the way its consumers read it. TUIC resolves a
+    /// selection snapshot, a search offset and an eviction rebase against
+    /// `total_scrolled() - history_size()` — the count of rows already dropped
+    /// off the top. Both terms moving together hides a DL that moved neither
+    /// individually, so the base is asserted directly, and the retained rows
+    /// are compared as text: a base that survives while the rows underneath it
+    /// change is the same bug wearing the invariant as a disguise.
+    #[test]
+    fn delete_lines_leaves_a_scrollback_snapshot_resolving_to_the_same_text() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+        fill_rows(&mut term, 4);
+
+        // Earn the history the legitimate way first, so there is a snapshot to
+        // invalidate at all.
+        term.goto(3, 0);
+        term.linefeed();
+        term.linefeed();
+        assert_eq!(term.grid.history_size(), 2, "the snapshot would be empty");
+
+        let retained = |term: &Term<VoidListener>| -> Vec<char> {
+            (1..=term.grid.history_size())
+                .map(|back| term.grid[Line(-(back as i32))][Column(0)].c)
+                .collect()
+        };
+        let base_before = term.grid.total_scrolled() - term.grid.history_size();
+        let snapshot = retained(&term);
+
+        term.goto(0, 0);
+        term.delete_lines(2);
+
+        assert_eq!(
+            term.grid.total_scrolled() - term.grid.history_size(),
+            base_before,
+            "DL moved the base a snapshot resolves against"
+        );
+        assert_eq!(retained(&term), snapshot, "DL rewrote retained scrollback");
+    }
+
+    #[test]
+    fn delete_lines_keeps_the_rows_it_did_not_remove() {
+        let mut term = Term::new(Config::default(), &TermSize::new(5, 4), VoidListener);
+        fill_rows(&mut term, 4);
+
+        term.goto(0, 0);
+        term.delete_lines(2);
+
+        // Rows below the deleted ones move up; the vacated rows at the bottom
+        // are blank. Without this, "no new history" could be satisfied by a
+        // DL that simply did nothing.
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'c');
+        assert_eq!(term.grid[Line(1)][Column(0)].c, 'd');
+        assert_eq!(term.grid[Line(2)][Column(0)].c, ' ');
+        assert_eq!(term.grid[Line(3)][Column(0)].c, ' ');
     }
 
     #[test]

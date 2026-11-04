@@ -1,0 +1,29 @@
+ego 0.1.0 — an agent you run from a terminal.
+
+Usage:
+  ego [OPTIONS] [PROMPT]
+  ego <COMMAND> [OPTIONS]
+
+Interactive:
+  ego -m ollama/qwen3
+
+Commands:
+  run     Run an agent from a prompt, headless
+  resume  Continue a session; no ID = latest in this workspace
+  fork    Fork a session at its latest durable idle boundary
+  compact Compact a session into its deterministic successor
+  export  Export a session or sanitized bundle
+  ls      List sessions (this workspace; --all for every one)
+  usage   Report usage, context and cost for this workspace
+  models  List the shared model catalogue
+  hooks   Inspect the admitted hook catalogue
+  doctor  doctor
+  acp     Serve the Agent Client Protocol on stdio
+  a2a     a2a
+  auth    Manage subscription credentials
+  mcp     Manage configured MCP servers
+  config  Manage stored user configuration
+  rules   Inspect and manage permission rules
+  mcp-serverServe scoped ego runs over MCP on stdio
+
+`ego <COMMAND> --help` describes one of them. CLI.md §2 documents the remaining commands; each is refused by name, with the subsystem it waits on. Start Ollama and run `ollama pull qwen3` before the local example above.

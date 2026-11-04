@@ -1,0 +1,10 @@
+[package]
+name = "tuic-ansi"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+vte = { path = "../../patches/vte" }
+
+[lints]
+workspace = true

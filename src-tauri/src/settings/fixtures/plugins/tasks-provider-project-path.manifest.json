@@ -1,0 +1,40 @@
+{
+  "id": "tasks-provider-project-path",
+  "name": "Tasks provider with a project path",
+  "version": "0.1.0",
+  "minAppVersion": "0.0.0",
+  "main": "main.js",
+  "description": "FastAF test fixture: a work-item provider whose default project is a path setting.",
+  "capabilities": ["net:http"],
+  "allowedUrls": ["https://tracker-b.example.invalid/*"],
+  "providers": [
+    {
+      "id": "fixture-tracker-b",
+      "label": "Fixture tracker B",
+      "kinds": ["bearer"],
+      "verify": { "path": "/api/user", "loginPointer": "/login" }
+    }
+  ],
+  "settings": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project": {
+          "type": "string",
+          "title": "Project path",
+          "description": "Project used when a Tasks account names none.",
+          "maxLength": 128,
+          "x-setting": {
+            "sensitivity": "public",
+            "apply": "service_restart",
+            "effect": "Reloads the provider with the new project.",
+            "operations": ["get", "set", "reset"],
+            "confirmationClass": "ordinary"
+          }
+        }
+      }
+    },
+    "defaults": { "project": "" }
+  }
+}

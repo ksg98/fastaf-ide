@@ -100,7 +100,9 @@ async fn push_sub_insert_and_list() {
     let token_hash = "test_hash_push";
 
     // No subscriptions initially
-    let subs = tuic_relay::db::list_push_subs(&conn, token_hash).await.unwrap();
+    let subs = tuic_relay::db::list_push_subs(&conn, token_hash)
+        .await
+        .unwrap();
     assert!(subs.is_empty());
 
     // Insert a subscription
@@ -114,9 +116,14 @@ async fn push_sub_insert_and_list() {
     .await
     .unwrap();
 
-    let subs = tuic_relay::db::list_push_subs(&conn, token_hash).await.unwrap();
+    let subs = tuic_relay::db::list_push_subs(&conn, token_hash)
+        .await
+        .unwrap();
     assert_eq!(subs.len(), 1);
-    assert_eq!(subs[0].endpoint, "https://fcm.googleapis.com/fcm/send/abc123");
+    assert_eq!(
+        subs[0].endpoint,
+        "https://fcm.googleapis.com/fcm/send/abc123"
+    );
     assert_eq!(subs[0].keys.p256dh, "BPk1cGB...");
     assert_eq!(subs[0].keys.auth, "authsecret1");
 }
@@ -137,7 +144,9 @@ async fn push_sub_upsert_replaces_keys() {
         .await
         .unwrap();
 
-    let subs = tuic_relay::db::list_push_subs(&conn, token_hash).await.unwrap();
+    let subs = tuic_relay::db::list_push_subs(&conn, token_hash)
+        .await
+        .unwrap();
     assert_eq!(subs.len(), 1);
     assert_eq!(subs[0].keys.p256dh, "new_p256dh");
     assert_eq!(subs[0].keys.auth, "new_auth");
@@ -160,7 +169,9 @@ async fn push_sub_delete() {
     assert!(deleted);
 
     // Gone
-    let subs = tuic_relay::db::list_push_subs(&conn, token_hash).await.unwrap();
+    let subs = tuic_relay::db::list_push_subs(&conn, token_hash)
+        .await
+        .unwrap();
     assert!(subs.is_empty());
 
     // Delete again — returns false
@@ -181,11 +192,15 @@ async fn push_sub_isolation_between_tokens() {
         .await
         .unwrap();
 
-    let subs_a = tuic_relay::db::list_push_subs(&conn, "hash_a").await.unwrap();
+    let subs_a = tuic_relay::db::list_push_subs(&conn, "hash_a")
+        .await
+        .unwrap();
     assert_eq!(subs_a.len(), 1);
     assert_eq!(subs_a[0].endpoint, "https://push/a");
 
-    let subs_b = tuic_relay::db::list_push_subs(&conn, "hash_b").await.unwrap();
+    let subs_b = tuic_relay::db::list_push_subs(&conn, "hash_b")
+        .await
+        .unwrap();
     assert_eq!(subs_b.len(), 1);
     assert_eq!(subs_b[0].endpoint, "https://push/b");
 }
@@ -269,6 +284,7 @@ async fn start_relay_with_rate_limit(limit: u32) -> SocketAddr {
     let conn = tuic_relay::db::init(":memory:").await.unwrap();
     let state = Arc::new(tuic_relay::relay::AppState {
         sessions: dashmap::DashMap::new(),
+        admission: std::sync::Mutex::new(()),
         db: Some(conn),
         token_cache: dashmap::DashMap::new(),
         vapid: None,
@@ -276,6 +292,7 @@ async fn start_relay_with_rate_limit(limit: u32) -> SocketAddr {
         rate_limits: dashmap::DashMap::new(),
         rate_limit_per_hour: limit,
         max_sessions_per_token: 0,
+        timing: tuic_relay::relay::RelayTiming::default(),
     });
     let router = tuic_relay::routes::build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -316,4 +333,35 @@ async fn register_rate_limited_after_threshold() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 429, "registration after limit should be 429");
+}
+
+// Catches test-only cache seeding hiding failure of real registered-owner admission.
+#[tokio::test]
+async fn registered_token_pairs_peers_and_forwards_binary_data() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let addr = start_relay_with_db().await;
+    let token = register_token(&reqwest::Client::new(), addr).await;
+    let url = format!("ws://{addr}/ws/registered-room");
+    let (mut desktop, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    desktop
+        .send(Message::Text(format!("Bearer {token}").into()))
+        .await
+        .unwrap();
+    assert!(matches!(desktop.next().await, Some(Ok(Message::Text(_)))));
+    let (mut phone, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    phone
+        .send(Message::Text(format!("Bearer {token}").into()))
+        .await
+        .unwrap();
+    assert!(matches!(phone.next().await, Some(Ok(Message::Text(_)))));
+    assert!(matches!(desktop.next().await, Some(Ok(Message::Text(_)))));
+    desktop
+        .send(Message::Binary(vec![4, 2].into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        phone.next().await.unwrap().unwrap(),
+        Message::Binary(vec![4, 2].into())
+    );
 }

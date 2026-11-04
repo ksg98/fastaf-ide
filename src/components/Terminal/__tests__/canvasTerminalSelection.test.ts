@@ -1,11 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+	commitSelectionCopy,
 	createCanvasSearchController,
 	createCanvasSelectionController,
 	edgeScrollDistance,
 	edgeScrollLines,
 	edgeSelectionPoint,
+	isSelectionRowsExpiredError,
+	selectionRowToGridRow,
+	selectionRowToViewport,
+	shouldValidateSelectionSnapshot,
+	viewportRowToSelectionRow,
 } from "../canvasTerminalSelection";
+import { readProjectedSelectionText } from "../canvasTerminalText";
 import type { DecodedRow } from "../canvasTerminalUtils";
 
 function row(text: string): DecodedRow {
@@ -22,6 +29,112 @@ function row(text: string): DecodedRow {
 }
 
 describe("canvas terminal selection controller", () => {
+	// catches: backend reads trim trailing newlines per retained run, deleting the
+	// one visible separator before a removed suggestion paragraph when runs join.
+	it("preserves the visible paragraph separator when backend retained reads trim trailing newlines", async () => {
+		const texts = ["answer", "", "suggest: [ A | B | C ]", "", "footer"];
+		const rows = new Map(texts.map((text, index) => [index, row(text.padEnd(24, " "))]));
+		const text = await readProjectedSelectionText({ row: 0, col: 0 }, { row: 4, col: 5 }, rows, async (start, end) =>
+			texts
+				.slice(start.row, end.row + 1)
+				.join("\n")
+				.replace(/\n+$/, ""),
+		);
+		expect(text).toBe("answer\n\nfooter");
+	});
+
+	it("keeps a selected row stable while parked history grows", () => {
+		const before = { historyBase: 40, historySize: 100, displayOffset: 50, screenRows: 24 };
+		const selectedRow = viewportRowToSelectionRow(before, 7);
+		expect(selectedRow).toBe(97);
+
+		const afterOutput = { historyBase: 40, historySize: 101, displayOffset: 51, screenRows: 24 };
+		expect(selectionRowToViewport(afterOutput, selectedRow)).toBe(7);
+	});
+
+	it("does not alias an evicted selection onto the replacement grid row", () => {
+		const selectedRow = viewportRowToSelectionRow(
+			{ historyBase: 40, historySize: 100, displayOffset: 100, screenRows: 24 },
+			0,
+		);
+		expect(selectedRow).toBe(40);
+
+		const afterEviction = { historyBase: 41, historySize: 100, displayOffset: 100, screenRows: 24 };
+		expect(selectionRowToViewport(afterEviction, selectedRow)).toBeNull();
+		expect(selectionRowToGridRow(afterEviction, selectedRow)).toBeNull();
+	});
+
+	it("keeps a retained selected row fixed when eviction and parked offset advance together", () => {
+		const before = { historyBase: 40, historySize: 100, displayOffset: 50, screenRows: 24 };
+		const selectedRow = viewportRowToSelectionRow(before, 7);
+		const afterEviction = { historyBase: 41, historySize: 100, displayOffset: 51, screenRows: 24 };
+
+		expect(selectionRowToViewport(afterEviction, selectedRow)).toBe(7);
+		expect(selectionRowToGridRow(afterEviction, selectedRow)).toBe(56);
+	});
+
+	it("converts a retained stable selection row back to the backend grid coordinate", () => {
+		const viewport = { historyBase: 40, historySize: 100, displayOffset: 50, screenRows: 24 };
+		expect(selectionRowToGridRow(viewport, 97)).toBe(57);
+	});
+
+	it("recognizes the backend rejection for selection rows evicted before the read lock", () => {
+		expect(isSelectionRowsExpiredError(new Error("selection rows are no longer retained"))).toBe(true);
+		expect(isSelectionRowsExpiredError(new Error("clipboard unavailable"))).toBe(false);
+	});
+
+	it("does not write the clipboard when eviction wins the backend selection-read race", async () => {
+		const write = vi.fn(async () => {});
+		await expect(
+			commitSelectionCopy(async () => {
+				throw new Error("selection rows are no longer retained");
+			}, write),
+		).resolves.toEqual({ kind: "expired" });
+		expect(write).not.toHaveBeenCalled();
+	});
+
+	it("invalidates copied text when a new selection gesture starts", () => {
+		const selection = createCanvasSelectionController();
+		selection.start = { row: 7, col: 1 };
+		selection.end = { row: 7, col: 4 };
+		selection.cachedText = "previous range";
+
+		selection.invalidateSnapshot();
+
+		expect(selection.cachedText).toBe("");
+		expect(selection.start).toEqual({ row: 7, col: 1 });
+		expect(selection.end).toEqual({ row: 7, col: 4 });
+	});
+
+	it("validates replacement text only after the selection gesture is complete", () => {
+		const selection = createCanvasSelectionController();
+		selection.start = { row: 7, col: 1 };
+		selection.end = { row: 7, col: 4 };
+		selection.localSnapshot = "selected";
+		selection.selecting = true;
+
+		expect(shouldValidateSelectionSnapshot(selection, true, () => 0)).toBe(false);
+		selection.selecting = false;
+		expect(shouldValidateSelectionSnapshot(selection, true, () => 0)).toBe(true);
+		expect(shouldValidateSelectionSnapshot(selection, false, () => 0)).toBe(false);
+	});
+
+	// Bug: the copy stored the Rust text (soft wraps unwrapped, so it differs from the
+	// row-joined local text) and the next full-replace frame compared against it, clearing
+	// the highlight right after copy-on-select.
+	it("keeps the highlight when the clipboard text differs from the local row text", () => {
+		const selection = createCanvasSelectionController();
+		selection.start = { row: 7, col: 0 };
+		selection.end = { row: 8, col: 3 };
+		selection.localSnapshot = "line one\nwrap";
+		selection.cachedText = "line onewrap";
+
+		expect(shouldValidateSelectionSnapshot(selection, true, () => 0)).toBe(true);
+		expect(selection.cachedText).not.toBe(selection.localSnapshot);
+		selection.invalidateSnapshot();
+		expect(selection.localSnapshot).toBe("");
+	});
+
 	it("extracts forward and reverse multi-row selections and trims trailing space", () => {
 		const rows = new Map([
 			[3, row("alpha  ")],
@@ -36,6 +149,15 @@ describe("canvas terminal selection controller", () => {
 		selection.start = { row: 5, col: 3 };
 		selection.end = { row: 3, col: 2 };
 		expect(selection.getLocalText((index) => rows.get(index) ?? null)).toBe("pha\nbravo\nchar");
+	});
+
+	it("copies every codepoint attached to a selected cell", () => {
+		const selected = row("cafe");
+		selected.cellExtras = new Map([[3, "\u0301\uFE0F"]]);
+		const selection = createCanvasSelectionController();
+		selection.start = { row: 0, col: 0 };
+		selection.end = { row: 0, col: 3 };
+		expect(selection.getLocalText(() => selected)).toBe("cafe\u0301\uFE0F");
 	});
 
 	it("tracks ranges, offscreen rows, cached text, and complete reset", () => {

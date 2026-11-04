@@ -94,12 +94,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         D: PartialEq,
     {
         // Scroll up to keep content inside the window.
-        let required_scrolling = (self.cursor.point.line.0 as usize + 1).saturating_sub(target);
+        let required_scrolling = self.lines.saturating_sub(target);
         if required_scrolling > 0 {
             self.scroll_up(&(Line(0)..Line(self.lines as i32)), required_scrolling);
 
-            // Clamp cursors to the new viewport size.
-            self.cursor.point.line = min(self.cursor.point.line, Line(target as i32 - 1));
+            // Rows moved up with the content; keep the cursor on its text.
+            let moved = self.cursor.point.line.0 - required_scrolling as i32;
+            self.cursor.point.line = Line(moved.clamp(0, target as i32 - 1));
         }
 
         // Clamp saved cursor, since only primary cursor is scrolled into viewport.
@@ -462,7 +463,15 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Reverse iterator and use it as the new grid storage.
         let mut reversed: Vec<Row<T>> = new_raw.drain(..).rev().collect();
-        reversed.truncate(self.max_scroll_limit + self.lines);
+        let retained = self.max_scroll_limit + self.lines;
+        // Blank-only truncation does not lose a content-bearing predecessor.
+        let evicts_predecessor = reversed.iter().skip(retained).any(|row| !row.is_clear());
+        reversed.truncate(retained);
+        if evicts_predecessor {
+            if let Some(oldest) = reversed.last_mut() {
+                oldest.copy_origin_unknown = true;
+            }
+        }
         self.raw.replace_inner(reversed);
 
         // Clamp display offset in case some lines went off.

@@ -15,30 +15,12 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="stylesheet" href="/style.css" />
 
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-    gtag('config', 'G-PCXPSMR9JZ');
-  </script>
+  <script src="/analytics.js"></script>
+  <link rel="canonical" href="https://tuicommander.com/blog/beta-features.html" />
 </head>
 <body>
 
-  <nav class="nav">
-    <div class="container nav-inner">
-      <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
-      </a>
-      <div class="nav-links">
-        <a href="/#features">Features</a>
-        <a href="/blog.html" class="nav-active">Blog</a>
-        <a href="/#faq">FAQ</a>
-        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
-      </div>
-    </div>
-  </nav>
+  <!-- @include nav -->
 
   <article class="blog-post">
     <header class="blog-post-header">
@@ -51,7 +33,7 @@
     <div class="blog-section">
       <h2>How to enable experimental features</h2>
       <p>Everything described in this post lives behind a single toggle: <strong>Settings &gt; General &gt; Experimental Features</strong>. Flip it on and the sub-features appear. Each one has its own toggle so you can pick what you want.</p>
-      <p>These features are functional and tested, but the interfaces are still evolving and edge cases are still being discovered. That's why they're behind a flag — not because they're unstable, but because we're not ready to lock in the UX. <strong>If something feels wrong, confusing, or broken, we genuinely want to hear about it.</strong> Open an issue on <a href="https://github.com/sstraus/tuicommander/issues" rel="noopener noreferrer">GitHub</a> or reach out directly.</p>
+      <p>These features are functional and tested, but the interfaces are still evolving and edge cases are still being discovered. That's why they're behind a flag — not because they're unstable, but because we're not ready to lock in the UX. <strong>If something feels wrong, confusing, or broken, we genuinely want to hear about it.</strong> Open an issue on <a href="https://github.com/ksg98/fastaf-ide/issues" rel="noopener noreferrer">GitHub</a> or reach out directly.</p>
     </div>
 
     <div class="blog-section">
@@ -102,7 +84,7 @@
       <h2>Your feedback shapes what ships</h2>
       <p>Every feature behind the experimental flag is there because it works but isn't finished. The best way to help us finish it is to use it and tell us what's wrong.</p>
       <ul>
-        <li><strong>Something crashed or behaved unexpectedly?</strong> Open an issue on <a href="https://github.com/sstraus/tuicommander/issues" rel="noopener noreferrer">GitHub</a> with the steps to reproduce.</li>
+        <li><strong>Something crashed or behaved unexpectedly?</strong> Open an issue on <a href="https://github.com/ksg98/fastaf-ide/issues" rel="noopener noreferrer">GitHub</a> with the steps to reproduce.</li>
         <li><strong>The UX is confusing or friction-heavy?</strong> Tell us what you expected vs. what happened.</li>
         <li><strong>A feature is close but missing one thing?</strong> That's the most valuable kind of feedback — it tells us what to prioritize.</li>
       </ul>
@@ -110,18 +92,7 @@
     </div>
   </article>
 
-  <footer class="footer">
-    <div class="container">
-      <div class="footer-links">
-        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
-        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
-        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
-        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
-      </div>
-      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
-      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
-    </div>
-  </footer>
+  <!-- @include footer -->
 
   <script type="module" src="/main.js"></script>
 </body>

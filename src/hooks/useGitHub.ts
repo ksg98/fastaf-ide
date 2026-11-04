@@ -1,4 +1,4 @@
-import { createMemo } from "solid-js";
+import { createEffect, createMemo, on, untrack } from "solid-js";
 import { githubStore } from "../stores/github";
 import type { GitHubStatus } from "../types";
 
@@ -14,6 +14,14 @@ export function useGitHub(getRepoPath: () => string | undefined) {
 		if (!path) return null;
 		return githubStore.getRemoteStatus(path);
 	});
+
+	// Repo roots are filled by the Rust poller; a worktree checkout is not, so fetch it once
+	// when it is first asked for (later refreshes ride the poller's update events).
+	createEffect(
+		on(getRepoPath, (path) => {
+			if (path && !untrack(() => githubStore.getRemoteStatus(path))) githubStore.pollRemoteStatus(path);
+		}),
+	);
 
 	const loading = () => false;
 	const error = () => null;

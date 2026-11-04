@@ -1,7 +1,9 @@
 import { emitTo } from "@tauri-apps/api/event";
 import type { Component, JSX } from "solid-js";
 import { invoke } from "./invoke";
+import { createMarkdownDocumentPanelAdapter } from "./panelAdapters/markdownDocument";
 import { uiStore } from "./stores/ui";
+import { markdownDocumentTabId } from "./utils/markdownDocumentPanelId";
 
 export interface PanelAdapter {
 	id: string;
@@ -48,7 +50,16 @@ export function renderPanelMode(): JSX.Element | null {
 	const { isPanelMode, panelId, params } = getPanelParams();
 	if (!isPanelMode || !panelId) return null;
 
-	const adapter = panelRegistry[panelId];
+	const markdownTabId = markdownDocumentTabId(panelId);
+	if (markdownTabId && (params.get("tabId") !== markdownTabId || !params.get("filePath"))) {
+		return (
+			<div id="app" class="panel-mode">
+				Invalid Markdown document
+			</div>
+		);
+	}
+	const adapter =
+		panelRegistry[panelId] ?? (markdownTabId ? createMarkdownDocumentPanelAdapter(markdownTabId) : undefined);
 	if (!adapter) return null;
 
 	return (

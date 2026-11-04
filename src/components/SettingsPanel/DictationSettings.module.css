@@ -1,4 +1,12 @@
-/* Dictation Settings */
+/* Asset catalogues share ListRow; containers own only placement. */
+.assetList {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
+}
+
 .modelList {
   display: flex;
   flex-direction: column;
@@ -100,6 +108,8 @@
   color: var(--accent);
   font-weight: 500;
 }
+
+.assetRow { min-width: 0; }
 
 .downloadProgress {
   display: flex;
@@ -221,20 +231,9 @@
   align-items: center;
 }
 
-.correctionAdd input {
-  flex: 1;
-  padding: 6px 8px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-}
+.correctionAdd input { flex: 1; }
 
-.correctionAdd input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
+
 
 .correctionArrow {
   color: var(--fg-muted);
@@ -250,3 +249,214 @@
 .correctionAddBtn:hover:not(:disabled) {
   border-color: var(--accent);
 }
+
+/* Voice tuning: a linear meter the level gate can be read against. The toast's
+   spectrum meter answers "is the mic live?"; this one answers "where does my
+   voice sit relative to the threshold?", so it is linear and carries a marker. */
+.tuningMeter {
+  position: relative;
+  height: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.tuningLevel {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform-origin: left center;
+  transition: transform 0.075s linear;
+}
+
+.tuningThreshold {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--warning);
+}
+
+.tuningReadout {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.tuningPartial,
+.tuningResult,
+.tuningSkip {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  word-break: break-word;
+}
+
+.tuningPartial {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.tuningResult {
+  color: var(--fg-primary);
+  border-color: var(--success);
+}
+
+.tuningSkip {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+/* Hands-free conversation (818-2a29) */
+
+.conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+}
+
+.conversationRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.conversationValue {
+  font-family: var(--font-mono);
+  color: var(--fg-primary);
+  word-break: break-all;
+  text-align: right;
+}
+
+/* The phase badge. Neutral by default so only the two states that need the
+   user's attention — speech in flight, and an error — carry a colour. */
+.phase {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+.phase.live {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.phase.failed {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.conversationPending,
+.conversationError {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  word-break: break-word;
+}
+
+.conversationPending {
+  color: var(--fg-primary);
+  border-color: var(--warning);
+}
+
+.conversationError {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+/* Layout shared by the sections */
+
+/* A row of buttons, or a picker and the button that acts on it. */
+.controlRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spacedControlRow { margin-top: 8px; }
+
+.controlRow select {
+  flex: 1;
+  min-width: 0;
+}
+
+.controlRow button {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The voice list: its label, then Installed, Downloadable and Yours. The
+   container spaces them, so no child carries a margin. */
+.voiceLibrary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* One group of the voice list: Installed, Downloadable or Yours. */
+.voiceGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Downloadable is a <details>; its <summary> is the title and the toggle. */
+.voiceGroupToggle {
+  cursor: pointer;
+}
+
+.voiceGroupToggle:hover {
+  color: var(--fg-secondary);
+}
+
+.voiceGroupToggle:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.voiceGroupTitle {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.conversationState .phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stateIndicator {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.hotkeyRow { width: 100%; }
+
+.tuningDisplay { flex: 1; min-width: 100px; }

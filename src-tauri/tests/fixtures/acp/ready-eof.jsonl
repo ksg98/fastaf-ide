@@ -1,0 +1,4 @@
+// Answers initialize and then reaches clean EOF while the client still holds it.
+{"step":"expect","method":"initialize","capture":"init"}
+{"step":"respond","to":"init","result":{"protocolVersion":1,"agentInfo":{"name":"ego","version":"fixture"},"agentCapabilities":{}}}
+{"step":"exit","code":0}

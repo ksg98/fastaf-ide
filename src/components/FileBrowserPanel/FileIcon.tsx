@@ -9,9 +9,13 @@ import { getFileIconColor } from "./fileColors";
  *  tone (see fileColors). */
 const DEFAULT_FILE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3.5 1A1.5 1.5 0 0 0 2 2.5v11A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V5.621a1.5 1.5 0 0 0-.44-1.06l-3.12-3.122A1.5 1.5 0 0 0 9.378 1H3.5zM10 4.5V2l3.5 3.5H11a1 1 0 0 1-1-1z"/></svg>`;
 
+/** Symbolic link (file or directory): a chain link. */
+const LINK_ICON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.5 3a3.5 3.5 0 0 1 5-0.1l1.6 1.6a3.5 3.5 0 0 1 0 5l-2 2-1-1 2-2a2 2 0 0 0 0-3L10.5 4a2 2 0 0 0-3 0l-2 2-1-1 2-2zm3 10a3.5 3.5 0 0 1-5 0.1l-1.6-1.6a3.5 3.5 0 0 1 0-5l2-2 1 1-2 2a2 2 0 0 0 0 3L5.5 12a2 2 0 0 0 3 0l2-2 1 1-2 2zM5 10l5-5 1 1-5 5z"/></svg>`;
+
 export interface FileIconProps {
 	name: string;
 	isDir: boolean;
+	isLink?: boolean;
 	class?: string;
 }
 
@@ -53,6 +57,8 @@ export const FileIcon: Component<FileIconProps> = (props) => {
 	});
 
 	const glyph = () => {
+		// A symbolic link reads as a link whatever it points at (a content glyph).
+		if (props.isLink) return iconNode(LINK_ICON);
 		const svg = icon();
 		if (svg) return iconNode(svg);
 		return props.isDir ? <IconFolder size={16} /> : iconNode(DEFAULT_FILE);
@@ -60,7 +66,9 @@ export const FileIcon: Component<FileIconProps> = (props) => {
 
 	// File type tint for the default icons; plugin-provided icons style themselves
 	const color = () =>
-		!icon() && settingsStore.state.fileTreeColorsEnabled ? getFileIconColor(props.name, props.isDir) : undefined;
+		!props.isLink && !icon() && settingsStore.state.fileTreeColorsEnabled
+			? getFileIconColor(props.name, props.isDir)
+			: undefined;
 
 	return (
 		<span class={props.class} style={{ color: color() }}>

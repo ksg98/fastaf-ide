@@ -5,205 +5,35 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 #[cfg(feature = "desktop")]
-use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
+use tauri::Emitter;
+use tokio::sync::{Notify, mpsc};
 
 use crate::github::BranchPrStatus;
 use crate::state::{AppEvent, AppState};
 
-// ---------------------------------------------------------------------------
-// Transition detection
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+#[path = "github_volume_measurement_1995.rs"]
+mod volume_measurement_1995;
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum PrTransition {
-    Merged {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    Closed {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    Blocked {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    CiFailed {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    CiRecovered {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    ChangesRequested {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    Ready {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-    },
-    Pushed {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-        head_ref_oid: String,
-        /// PR author login — used by the watcher's authored_by_others filter.
-        author: String,
-    },
-    /// A brand-new PR appeared on an open branch. Detected in `process_repo_update`
-    /// (no prior state to diff), not in `detect_transitions`. Carries `author` for
-    /// the watcher's authored_by_others filter and `head_ref_oid` for worktree review.
-    Opened {
-        repo_path: String,
-        branch: String,
-        pr_number: i32,
-        title: String,
-        head_ref_oid: String,
-        author: String,
-    },
-}
+#[cfg(test)]
+#[path = "github_live_measurement_1995.rs"]
+mod live_measurement_1995;
 
-fn is_ready(pr: &BranchPrStatus) -> bool {
-    pr.mergeable == "MERGEABLE" && pr.review_decision == "APPROVED" && pr.checks.failed == 0
-}
-
-pub(crate) fn detect_transitions(
-    repo_path: &str,
-    old: &BranchPrStatus,
-    new: &BranchPrStatus,
-) -> Vec<PrTransition> {
-    let mut out = Vec::new();
-    let old_state = old.state.to_uppercase();
-    let new_state = new.state.to_uppercase();
-
-    let rp = repo_path.to_string();
-    let branch = new.branch.clone();
-    let pr_number = new.number;
-    let title = new.title.clone();
-
-    let mut primary_type: Option<&str> = None;
-
-    // A push replaces the head SHA. Its failing checks are a *fresh* failure even
-    // when the previous head was also failing — so `ci_failed` must re-fire on a
-    // new commit, not only on the failed==0 → failed>0 edge. Otherwise an agent's
-    // fix-push whose CI fails again before the poller observes an intermediate
-    // all-pending (failed==0) poll never re-triggers auto-heal, stalling the loop.
-    let new_commit = old.head_ref_oid != new.head_ref_oid && !new.head_ref_oid.is_empty();
-
-    // Terminal transitions
-    if old_state != "MERGED" && new_state == "MERGED" {
-        primary_type = Some("merged");
-        out.push(PrTransition::Merged {
-            repo_path: rp.clone(),
-            branch: branch.clone(),
-            pr_number,
-            title: title.clone(),
-        });
-    } else if old_state != "CLOSED" && new_state == "CLOSED" {
-        primary_type = Some("closed");
-        out.push(PrTransition::Closed {
-            repo_path: rp.clone(),
-            branch: branch.clone(),
-            pr_number,
-            title: title.clone(),
-        });
+/// Desktop delivery is optional; the event bus is authoritative on headless daemons.
+fn emit_window<T: Serialize + Clone>(state: &AppState, event: &str, payload: T) {
+    #[cfg(feature = "desktop")]
+    if let Some(handle) = state.app_handle.read().as_ref()
+        && let Err(error) = handle.emit(event, payload)
+    {
+        tracing::warn!(source = "github", event, %error, "GitHub window emission failed");
     }
-    // Actionable transitions (only for OPEN PRs)
-    else if new_state == "OPEN" {
-        // Same rule as the badge and the popover (#8537): a notification is an
-        // accusation too, and GitHub's last known `mergeable` is not evidence
-        // while it recomputes.
-        use crate::github::ConflictState;
-        if old.conflict_state != ConflictState::Conflicting
-            && new.conflict_state == ConflictState::Conflicting
-        {
-            primary_type = Some("blocked");
-            out.push(PrTransition::Blocked {
-                repo_path: rp.clone(),
-                branch: branch.clone(),
-                pr_number,
-                title: title.clone(),
-            });
-        } else if new.checks.failed > 0 && (old.checks.failed == 0 || new_commit) {
-            primary_type = Some("ci_failed");
-            out.push(PrTransition::CiFailed {
-                repo_path: rp.clone(),
-                branch: branch.clone(),
-                pr_number,
-                title: title.clone(),
-            });
-        } else if old.review_decision != "CHANGES_REQUESTED"
-            && new.review_decision == "CHANGES_REQUESTED"
-        {
-            primary_type = Some("changes_requested");
-            out.push(PrTransition::ChangesRequested {
-                repo_path: rp.clone(),
-                branch: branch.clone(),
-                pr_number,
-                title: title.clone(),
-            });
-        } else if !is_ready(old) && is_ready(new) {
-            primary_type = Some("ready");
-            out.push(PrTransition::Ready {
-                repo_path: rp.clone(),
-                branch: branch.clone(),
-                pr_number,
-                title: title.clone(),
-            });
-        }
-    }
-
-    // New commit pushed to an open PR: head_ref_oid changed. Independent signal
-    // (a push can coincide with ci_failed etc.), carries the new oid for dedup.
-    if new_state == "OPEN" && new_commit {
-        out.push(PrTransition::Pushed {
-            repo_path: rp.clone(),
-            branch: branch.clone(),
-            pr_number,
-            title: title.clone(),
-            head_ref_oid: new.head_ref_oid.clone(),
-            author: new.author.clone(),
-        });
-    }
-
-    // CI recovery: failed → all passing, suppressed when "ready" already fired
-    if primary_type != Some("ready") && new_state == "OPEN" {
-        let old_failed = old.checks.failed;
-        let new_failed = new.checks.failed;
-        let new_pending = new.checks.pending;
-        if old_failed > 0 && new_failed == 0 && new_pending == 0 {
-            out.push(PrTransition::CiRecovered {
-                repo_path: rp,
-                branch,
-                pr_number,
-                title,
-            });
-        }
-    }
-
-    out
+    #[cfg(not(feature = "desktop"))]
+    let _ = (state, event, payload);
 }
 
 // ---------------------------------------------------------------------------
+pub(crate) use tuic_git::github_poller::{PrTransition, detect_transitions};
+
 // Poller
 // ---------------------------------------------------------------------------
 
@@ -228,6 +58,8 @@ pub(crate) enum PollerCmd {
     SetVisibility(bool),
     PollRepo(String),
     UpdatePaths(Vec<String>),
+    /// Machine-owned intake paths cannot be removed or filtered by a UI client.
+    SetIntakePaths(Vec<String>),
     SetIssueFilter(String),
     SetPrHideDrafts(bool),
     /// Re-emit current PR + issue state for all repos on the next poll, even when
@@ -235,29 +67,54 @@ pub(crate) enum PollerCmd {
     /// standby): the frontend store reset to empty, but the poller's change-detection
     /// would otherwise suppress re-sending unchanged data, leaving the UI blank.
     ForceResync,
-    Stop,
 }
 
 pub(crate) struct GitHubPoller {
     pub(crate) cmd_tx: mpsc::Sender<PollerCmd>,
+    pub(crate) intake_paths: Vec<String>,
+    /// Successful PR snapshots also identify monitored repositories. Unlike the
+    /// query cache, this state lives until a path is removed or this poller stops.
+    pub(crate) previous_prs: Arc<parking_lot::RwLock<PrevState>>,
+    /// Stop signal, raised by [`stop_poller`].
+    ///
+    /// Stop does not travel on `cmd_tx`: the loop only drains that channel
+    /// between polls, so a Stop sent while a request is in flight waits for the
+    /// request — and a request against a half-open socket may never return.
+    /// The notify is awaited *alongside* the poll instead, so it lands whatever
+    /// the loop is doing.
+    pub(crate) stop: Arc<Notify>,
 }
 
 impl GitHubPoller {
-    #[cfg(feature = "desktop")]
-    pub(crate) fn start(state: Arc<AppState>, handle: AppHandle) -> Self {
+    pub(crate) fn start(state: Arc<AppState>) -> Self {
         let (tx, rx) = mpsc::channel(32);
-        tokio::spawn(poll_loop(state, handle, rx));
-        Self { cmd_tx: tx }
+        let stop = Arc::new(Notify::new());
+        let previous_prs = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+        tokio::spawn(poll_loop(
+            state,
+            rx,
+            Arc::clone(&stop),
+            Arc::clone(&previous_prs),
+        ));
+        Self {
+            cmd_tx: tx,
+            intake_paths: Vec::new(),
+            stop,
+            previous_prs,
+        }
+    }
+
+    pub(crate) fn monitored_repo_count(&self) -> usize {
+        self.previous_prs.read().len()
     }
 }
 
-#[cfg(feature = "desktop")]
 /// Per-repo previous PR state for transition comparison.
 type PrevState = HashMap<String, HashMap<String, BranchPrStatus>>;
 
-#[cfg(feature = "desktop")]
+#[derive(Default)]
 struct PollMutableState {
-    prev: PrevState,
+    prev: Arc<parking_lot::RwLock<PrevState>>,
     fail_count: u32,
     last_changed: HashMap<String, Instant>,
     /// Per-repo max PR updated_at — `None` means known-empty PR set.
@@ -267,21 +124,51 @@ struct PollMutableState {
     /// When set, the next poll re-emits PR + issue state regardless of change
     /// detection, then clears. Set by `PollerCmd::ForceResync`.
     force_resync: bool,
+    intake_paths: Vec<String>,
 }
 
-#[cfg(feature = "desktop")]
-async fn poll_loop(state: Arc<AppState>, handle: AppHandle, mut rx: mpsc::Receiver<PollerCmd>) {
+impl PollMutableState {
+    fn retain_paths(&mut self, paths: &[String]) {
+        let retained: HashSet<&str> = paths.iter().map(String::as_str).collect();
+        self.prev
+            .write()
+            .retain(|path, _| retained.contains(path.as_str()));
+        self.last_changed
+            .retain(|path, _| retained.contains(path.as_str()));
+        self.last_pr_updated_at
+            .retain(|path, _| retained.contains(path.as_str()));
+        self.last_issue_updated_at
+            .retain(|path, _| retained.contains(path.as_str()));
+    }
+}
+
+/// Await a poll batch, giving up as soon as `stop` is raised.
+///
+/// Returns `false` when Stop cut the poll short. `biased` makes a Stop that is
+/// already pending win over a poll that happens to be ready in the same tick —
+/// a shutdown must not be delayed by one more round of event emission.
+async fn poll_batch_or_stop(stop: &Notify, batch: impl std::future::Future<Output = ()>) -> bool {
+    tokio::select! {
+        biased;
+        _ = stop.notified() => false,
+        _ = batch => true,
+    }
+}
+
+async fn poll_loop(
+    state: Arc<AppState>,
+    mut rx: mpsc::Receiver<PollerCmd>,
+    stop: Arc<Notify>,
+    previous_prs: Arc<parking_lot::RwLock<PrevState>>,
+) {
     let mut visible = true;
     let mut paths: Vec<String> = Vec::new();
+    let mut client_paths: Vec<String> = Vec::new();
     let mut issue_filter = String::new();
     let mut pr_hide_drafts = false;
     let mut ps = PollMutableState {
-        prev: HashMap::new(),
-        fail_count: 0,
-        last_changed: HashMap::new(),
-        last_pr_updated_at: HashMap::new(),
-        last_issue_updated_at: HashMap::new(),
-        force_resync: false,
+        prev: previous_prs,
+        ..Default::default()
     };
     let mut startup = true;
     let mut poll_cycle: u32 = 0;
@@ -308,7 +195,14 @@ async fn poll_loop(state: Arc<AppState>, handle: AppHandle, mut rx: mpsc::Receiv
                 pending_poll_at = None;
                 let rate_budget = crate::github::min_rate_budget(&state);
                 let batch = if pending_poll_paths.is_empty() { &paths } else { &pending_poll_paths };
-                poll_batch(&state, &handle, batch, false, &issue_filter, pr_hide_drafts, &mut ps).await;
+                let finished = poll_batch_or_stop(
+                    &stop,
+                    poll_batch(&state, batch, false, &issue_filter, pr_hide_drafts, &mut ps),
+                )
+                .await;
+                if !finished {
+                    break;
+                }
                 pending_poll_paths.clear();
                 let dur = current_interval(visible, ps.fail_count, rate_budget);
                 interval = tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
@@ -322,7 +216,14 @@ async fn poll_loop(state: Arc<AppState>, handle: AppHandle, mut rx: mpsc::Receiv
                     let hot = state.hot_repo_paths.read();
                     tiered_paths(&paths, &ps.last_changed, poll_cycle, &hot)
                 };
-                poll_batch(&state, &handle, &batch_paths, startup, &issue_filter, pr_hide_drafts, &mut ps).await;
+                let finished = poll_batch_or_stop(
+                    &stop,
+                    poll_batch(&state, &batch_paths, startup, &issue_filter, pr_hide_drafts, &mut ps),
+                )
+                .await;
+                if !finished {
+                    break;
+                }
                 startup = false;
                 poll_cycle = poll_cycle.wrapping_add(1);
                 pending_poll_at = None;
@@ -342,6 +243,10 @@ async fn poll_loop(state: Arc<AppState>, handle: AppHandle, mut rx: mpsc::Receiv
                         }
                     }
                     Some(PollerCmd::PollRepo(path)) => {
+                        // An asynchronous action may finish after its repo was removed.
+                        if !paths.contains(&path) {
+                            continue;
+                        }
                         if !pending_poll_paths.contains(&path) {
                             pending_poll_paths.push(path);
                         }
@@ -351,7 +256,18 @@ async fn poll_loop(state: Arc<AppState>, handle: AppHandle, mut rx: mpsc::Receiv
                         }
                     }
                     Some(PollerCmd::UpdatePaths(new_paths)) => {
-                        paths = new_paths;
+                        client_paths = new_paths;
+                        paths = merged_paths(&client_paths, &ps.intake_paths);
+                        ps.retain_paths(&paths);
+                        pending_poll_paths.retain(|path| paths.contains(path));
+                    }
+                    Some(PollerCmd::SetIntakePaths(new_paths)) => {
+                        ps.intake_paths = new_paths;
+                        paths = merged_paths(&client_paths, &ps.intake_paths);
+                        ps.retain_paths(&paths);
+                        pending_poll_paths.clear();
+                        ps.force_resync = true;
+                        pending_poll_at = Some(tokio::time::Instant::now());
                     }
                     Some(PollerCmd::SetIssueFilter(filter)) => {
                         if filter != issue_filter {
@@ -372,7 +288,9 @@ async fn poll_loop(state: Arc<AppState>, handle: AppHandle, mut rx: mpsc::Receiv
                         pending_poll_paths.clear();
                         pending_poll_at = Some(tokio::time::Instant::now());
                     }
-                    Some(PollerCmd::Stop) | None => break,
+                    // The sender lives in the `GitHubPoller` that `stop_poller`
+                    // takes out of state, so a closed channel also means stop.
+                    None => break,
                 }
             }
         }
@@ -450,7 +368,6 @@ fn current_interval(visible: bool, fail_count: u32, rate_budget: u32) -> Duratio
 /// its store reset to empty, so unchanged data must be re-sent or the UI stays
 /// blank until the next real change. `prev_ts == None` means this repo was never
 /// polled before, which always counts as changed.
-#[cfg(any(feature = "desktop", test))]
 fn should_emit(prev_ts: Option<&Option<String>>, cur_ts: &Option<String>, force: bool) -> bool {
     force || prev_ts.is_none_or(|p| p != cur_ts)
 }
@@ -459,15 +376,82 @@ fn should_emit(prev_ts: Option<&Option<String>>, cur_ts: &Option<String>, force:
 /// The count is essential — an item that drops out of the open set (merged/closed
 /// PR, closed issue) shrinks the list without necessarily moving the max
 /// timestamp, so a max-only key would miss the removal and leave the badge stale.
-#[cfg(any(feature = "desktop", test))]
 fn snapshot_key(count: usize, max_updated_at: &str) -> String {
     format!("{count}|{max_updated_at}")
 }
 
-#[cfg(feature = "desktop")]
+fn merged_paths(client: &[String], intake: &[String]) -> Vec<String> {
+    let mut paths = client.to_vec();
+    for path in intake {
+        if !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+    paths
+}
+
+/// Intake needs every labelled open issue, independent of the client's sidebar filter.
 async fn poll_batch(
     state: &AppState,
-    handle: &AppHandle,
+    paths: &[String],
+    include_merged: bool,
+    issue_filter: &str,
+    pr_hide_drafts: bool,
+    ps: &mut PollMutableState,
+) {
+    let (intake, client): (Vec<_>, Vec<_>) = paths
+        .iter()
+        .cloned()
+        .partition(|path| ps.intake_paths.contains(path));
+    if intake.is_empty() {
+        poll_filtered_batch(
+            state,
+            &client,
+            include_merged,
+            issue_filter,
+            pr_hide_drafts,
+            ps,
+        )
+        .await;
+        return;
+    }
+    if client.is_empty() {
+        poll_filtered_batch(
+            state,
+            &intake,
+            include_merged,
+            issue_filter,
+            pr_hide_drafts,
+            ps,
+        )
+        .await;
+        return;
+    }
+    // Keep the resync request for both halves of this logical batch.
+    let force = ps.force_resync;
+    poll_filtered_batch(
+        state,
+        &client,
+        include_merged,
+        issue_filter,
+        pr_hide_drafts,
+        ps,
+    )
+    .await;
+    ps.force_resync |= force;
+    poll_filtered_batch(
+        state,
+        &intake,
+        include_merged,
+        issue_filter,
+        pr_hide_drafts,
+        ps,
+    )
+    .await;
+}
+
+async fn poll_filtered_batch(
+    state: &AppState,
     paths: &[String],
     include_merged: bool,
     issue_filter: &str,
@@ -480,12 +464,13 @@ async fn poll_batch(
     // Per-account circuit breakers are checked inside get_all_batch_impl so a
     // single failing account no longer blocks polling of the others.
 
-    match crate::github::get_all_batch_impl(
+    match crate::github::get_all_batch_with_intake_impl(
         paths,
         include_merged,
         issue_filter,
         pr_hide_drafts,
         state,
+        paths.iter().any(|path| ps.intake_paths.contains(path)),
     )
     .await
     {
@@ -497,9 +482,15 @@ async fn poll_batch(
             let force = ps.force_resync;
             ps.force_resync = false;
 
+            for (repo_path, issues) in result.intake_issues {
+                let _ = state
+                    .event_bus
+                    .send(AppEvent::GitHubIntakeIssuesUpdate { repo_path, issues });
+            }
+
             for (repo_path, statuses) in result.prs {
                 let changed =
-                    process_repo_update(state, handle, &repo_path, &statuses, &mut ps.prev);
+                    process_repo_update(state, &repo_path, &statuses, &mut ps.prev.write());
                 if changed {
                     ps.last_changed.insert(repo_path.clone(), now);
                 } else {
@@ -521,7 +512,8 @@ async fn poll_batch(
                 ps.last_pr_updated_at.insert(repo_path.clone(), cur_ts);
 
                 if emit {
-                    let _ = handle.emit(
+                    emit_window(
+                        state,
                         "github-pr-update",
                         PrUpdatePayload {
                             repo_path: repo_path.clone(),
@@ -552,7 +544,8 @@ async fn poll_batch(
                 ps.last_issue_updated_at.insert(repo_path.clone(), cur_ts);
 
                 if emit {
-                    let _ = handle.emit(
+                    emit_window(
+                        state,
                         "github-issues-update",
                         IssuesUpdatePayload {
                             repo_path: repo_path.clone(),
@@ -575,11 +568,9 @@ async fn poll_batch(
     }
 }
 
-#[cfg(feature = "desktop")]
 /// Process PR updates for a single repo. Returns `true` if any PR data changed.
 fn process_repo_update(
     state: &AppState,
-    handle: &AppHandle,
     repo_path: &str,
     statuses: &[BranchPrStatus],
     prev: &mut PrevState,
@@ -596,7 +587,7 @@ fn process_repo_update(
                 changed = true;
             }
             for t in transitions {
-                let _ = handle.emit("github-transition", &t);
+                emit_window(state, "github-transition", &t);
                 let _ = state
                     .event_bus
                     .send(AppEvent::GitHubTransition { transition: t });
@@ -617,7 +608,7 @@ fn process_repo_update(
                     head_ref_oid: new_pr.head_ref_oid.clone(),
                     author: new_pr.author.clone(),
                 };
-                let _ = handle.emit("github-transition", &t);
+                emit_window(state, "github-transition", &t);
                 let _ = state
                     .event_bus
                     .send(AppEvent::GitHubTransition { transition: t });
@@ -700,22 +691,40 @@ pub(crate) fn send_poller_config(
 /// Already running: forwards the new config and forces a resync for the
 /// (re)subscribing client. This is the single implementation behind both the
 /// Tauri `github_start_polling` command and the HTTP `poller_start` route.
-#[cfg(feature = "desktop")]
 pub(crate) fn ensure_polling(
     state: &Arc<AppState>,
-    app: AppHandle,
     paths: Vec<String>,
     issue_filter: String,
     pr_hide_drafts: bool,
 ) {
-    let mut guard = state.github_poller.lock();
+    let mut guard = state.github.poller.lock();
     if let Some(poller) = guard.as_ref() {
         send_poller_config(poller, paths, issue_filter, pr_hide_drafts, true);
         return;
     }
-    let poller = GitHubPoller::start(Arc::clone(state), app);
+    let poller = GitHubPoller::start(Arc::clone(state));
     send_poller_config(&poller, paths, issue_filter, pr_hide_drafts, false);
     *guard = Some(poller);
+}
+
+/// Reconcile the executor's subscription without replacing any client configuration.
+/// Only enqueue changes, so the scheduler's periodic read cannot flood the channel.
+pub(crate) fn set_intake_paths(state: &Arc<AppState>, paths: Vec<String>) -> Result<(), String> {
+    let mut guard = state.github.poller.lock();
+    if guard.is_none() && paths.is_empty() {
+        return Ok(());
+    }
+    let poller = guard.get_or_insert_with(|| GitHubPoller::start(Arc::clone(state)));
+    if poller.intake_paths != paths {
+        poller
+            .cmd_tx
+            .try_send(PollerCmd::SetIntakePaths(paths.clone()))
+            .map_err(|error| {
+                format!("GitHub intake polling configuration not delivered: {error}")
+            })?;
+        poller.intake_paths = paths;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -726,12 +735,11 @@ pub(crate) fn ensure_polling(
 #[tauri::command]
 pub(crate) async fn github_start_polling(
     state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
     paths: Vec<String>,
     issue_filter: String,
     pr_hide_drafts: bool,
 ) -> Result<(), String> {
-    ensure_polling(state.inner(), app, paths, issue_filter, pr_hide_drafts);
+    ensure_polling(state.inner(), paths, issue_filter, pr_hide_drafts);
     Ok(())
 }
 
@@ -749,7 +757,8 @@ pub(crate) async fn github_start_polling(
 /// never held across the send.
 pub(crate) fn send_poller_cmd(state: &AppState, cmd: PollerCmd) -> Result<(), String> {
     let tx = state
-        .github_poller
+        .github
+        .poller
         .lock()
         .as_ref()
         .map(|poller| poller.cmd_tx.clone())
@@ -760,20 +769,28 @@ pub(crate) fn send_poller_cmd(state: &AppState, cmd: PollerCmd) -> Result<(), St
 
 /// Stop the poller and clear it from state.
 ///
-/// Separate from [`send_poller_cmd`] because it takes ownership of the poller and
-/// uses the awaiting `send` — a Stop must not be dropped just because the command
-/// channel is momentarily full.
+/// Separate from [`send_poller_cmd`] because Stop does not travel on the command
+/// channel at all. It used to, and that made stopping only as reliable as the
+/// loop's willingness to read the channel: a poll awaited inline in the loop's
+/// `select!` blocks the read, and against a half-open socket that poll never
+/// returns, so the Stop was stranded for good. Raising the notify instead lands
+/// on the poll itself — see [`GitHubPoller::stop`].
 pub(crate) async fn stop_poller(state: &AppState) -> Result<(), String> {
-    let poller = state
-        .github_poller
-        .lock()
+    // A client releases its subscription, not the executor's machine-owned one.
+    let mut guard = state.github.poller.lock();
+    if let Some(poller) = guard.as_ref()
+        && !poller.intake_paths.is_empty()
+    {
+        return poller
+            .cmd_tx
+            .try_send(PollerCmd::UpdatePaths(Vec::new()))
+            .map_err(|error| format!("GitHub poller command not delivered: {error}"));
+    }
+    let poller = guard
         .take()
         .ok_or_else(|| "GitHub poller is not running".to_string())?;
-    poller
-        .cmd_tx
-        .send(PollerCmd::Stop)
-        .await
-        .map_err(|e| format!("GitHub poller stop not delivered: {e}"))
+    poller.stop.notify_one();
+    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -833,7 +850,7 @@ pub(crate) fn github_set_pr_hide_drafts_impl(
     state: &Arc<AppState>,
     hide: bool,
 ) -> Result<(), String> {
-    if let Some(poller) = state.github_poller.lock().as_ref()
+    if let Some(poller) = state.github.poller.lock().as_ref()
         && let Err(e) = poller.cmd_tx.try_send(PollerCmd::SetPrHideDrafts(hide))
     {
         tracing::warn!(source = "github", "Failed to send SetPrHideDrafts: {e}");
@@ -864,7 +881,323 @@ struct IssuesUpdatePayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::CheckSummary;
+
+    // Catches: expiring query payloads falsely reporting that a successfully polled repo is unmonitored.
+    #[tokio::test]
+    async fn monitored_repository_survives_query_cache_eviction() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        ensure_polling(&state, vec![], String::new(), false);
+        let previous = Arc::clone(&state.github.poller.lock().as_ref().unwrap().previous_prs);
+        state
+            .git_cache
+            .github_status
+            .insert("/monitored".into(), Arc::new(vec![]));
+        process_repo_update(&state, "/monitored", &[], &mut previous.write());
+        state.git_cache.github_status.run_pending_tasks();
+        assert_eq!(
+            crate::github_auth::compute_diagnostics(&state).repos_monitored,
+            1
+        );
+
+        state.git_cache.github_status.invalidate_all();
+        state.git_cache.github_status.run_pending_tasks();
+        assert!(state.git_cache.github_status.get("/monitored").is_none());
+        assert_eq!(
+            crate::github_auth::compute_diagnostics(&state).repos_monitored,
+            1,
+            "query payload eviction must not erase successful monitoring identity"
+        );
+        stop_poller(&state).await.unwrap();
+    }
+
+    // Catches: an intake overlap leaking all issues into a disabled client view.
+    #[tokio::test]
+    async fn overlapping_intake_preserves_disabled_client_delivery() {
+        assert_overlap_delivery("disabled", None, 0).await;
+    }
+
+    // Catches: intake overriding viewer-scoped filters, including GitHub-only mention semantics.
+    #[tokio::test]
+    async fn overlapping_intake_preserves_viewer_filtered_client_delivery() {
+        for (filter, clause) in [
+            ("assigned", "assignee"),
+            ("created", "createdBy"),
+            ("mentioned", "mentioned"),
+        ] {
+            assert_overlap_delivery(filter, Some(clause), 0).await;
+        }
+        assert_overlap_delivery("all", None, 1).await;
+    }
+
+    async fn assert_overlap_delivery(filter: &str, clause: Option<&str>, expected: usize) {
+        let scratch = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _config = crate::config::set_config_dir_override(scratch.path().join("config"));
+        std::fs::create_dir_all(scratch.path().join("config")).unwrap();
+        std::fs::write(scratch.path().join("config/automations.json"), serde_json::to_vec(&serde_json::json!({
+            "event_intake": {"repositories": ["sstraus/tuicommander"], "label": "tuic-run", "definition_id": "pilot"}
+        })).unwrap()).unwrap();
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/sstraus/tuicommander.git",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        let path = repo.to_string_lossy().into_owned();
+        let mut fixture = crate::github::partial_tests::PollHttpFixture::start(true).await;
+        let mut events = fixture.state.event_bus.subscribe();
+        let mut ps = PollMutableState {
+            intake_paths: vec![path.clone()],
+            ..Default::default()
+        };
+        poll_batch(&fixture.state, &[path], false, filter, false, &mut ps).await;
+        let request = fixture.requests.try_recv().expect("one shared request");
+        let query = request["query"].as_str().unwrap();
+        assert!(
+            query.contains("intakeIssues: ") && query.contains("issues("),
+            "{query}"
+        );
+        let intake_selection = query
+            .split("intakeIssues:")
+            .nth(1)
+            .unwrap()
+            .split("viewerPrs:")
+            .next()
+            .unwrap();
+        assert!(
+            !intake_selection.contains("filterBy:"),
+            "intake selection was filtered: {query}"
+        );
+        if let Some(clause) = clause {
+            assert!(
+                query.contains(&format!(r#"{clause}: "sstraus""#)),
+                "{query}"
+            );
+        }
+        assert!(
+            fixture.requests.try_recv().is_err(),
+            "overlap must not trigger a second fetch"
+        );
+        let mut intake_count = None;
+        let delivered = loop {
+            match events.try_recv().expect("client snapshot") {
+                AppEvent::GitHubIntakeIssuesUpdate { issues, .. } => {
+                    intake_count = Some(issues.len())
+                }
+                AppEvent::GitHubIssuesUpdate { issues, .. } => break issues,
+                _ => {}
+            }
+        };
+        assert_eq!(intake_count, Some(1), "intake lost its labelled snapshot");
+        assert_eq!(
+            delivered.len(),
+            expected,
+            "client filter {filter} was overridden"
+        );
+        let payload =
+            crate::mcp_http::sse_routes::event_payload_for_test(&AppEvent::GitHubIssuesUpdate {
+                repo_path: "repo".into(),
+                issues: delivered,
+            });
+        assert_eq!(payload["issues"].as_array().unwrap().len(), expected);
+        fixture.close().await;
+    }
+
+    // Catches: duplicate snapshots inflating the gauge, or retired paths/pollers keeping ghost monitors.
+    #[tokio::test]
+    async fn monitoring_count_follows_paths_and_poller_lifetime() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        ensure_polling(
+            &state,
+            vec!["/kept".into(), "/removed".into()],
+            String::new(),
+            false,
+        );
+        let previous = Arc::clone(&state.github.poller.lock().as_ref().unwrap().previous_prs);
+        for path in ["/kept", "/removed", "/kept"] {
+            process_repo_update(&state, path, &[], &mut previous.write());
+        }
+        assert_eq!(
+            crate::github_auth::compute_diagnostics(&state).repos_monitored,
+            2
+        );
+        send_poller_cmd(&state, PollerCmd::UpdatePaths(vec!["/kept".into()])).unwrap();
+        // No setup-speed bound: nextest owns the outer hang limit.
+        while crate::github_auth::compute_diagnostics(&state).repos_monitored != 1 {
+            tokio::task::yield_now().await;
+        }
+        stop_poller(&state).await.unwrap();
+        assert_eq!(
+            crate::github_auth::compute_diagnostics(&state).repos_monitored,
+            0
+        );
+    }
+
+    // Catches: queued or late PollRepo resurrecting a retired monitor after UpdatePaths.
+    #[tokio::test]
+    async fn removed_paths_cannot_return_through_on_demand_polls() {
+        let mut fixture = crate::github::partial_tests::PollHttpFixture::start(true).await;
+        let scratch = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _config = crate::config::set_config_dir_override(scratch.path().join("config"));
+        let mut paths = Vec::new();
+        for name in ["removed", "kept"] {
+            let repo = scratch.path().join(name);
+            std::fs::create_dir(&repo).unwrap();
+            for args in [
+                vec!["init", "--quiet"],
+                vec![
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/sstraus/tuicommander.git",
+                ],
+            ] {
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            paths.push(repo.to_string_lossy().into_owned());
+        }
+        let mut events = fixture.state.event_bus.subscribe();
+        ensure_polling(&fixture.state, paths.clone(), "all".into(), false);
+        // Wait for a real successful snapshot, not a hand-populated history.
+        loop {
+            if matches!(
+                events.recv().await.unwrap(),
+                AppEvent::GitHubPrUpdate { .. }
+            ) && crate::github_auth::compute_diagnostics(&fixture.state).repos_monitored == 2
+            {
+                break;
+            }
+        }
+        fixture.requests.recv().await.unwrap();
+        while events.try_recv().is_ok() {}
+        for late in [false, true] {
+            if !late {
+                send_poller_cmd(&fixture.state, PollerCmd::PollRepo(paths[0].clone())).unwrap();
+                send_poller_cmd(
+                    &fixture.state,
+                    PollerCmd::UpdatePaths(vec![paths[1].clone()]),
+                )
+                .unwrap();
+            } else {
+                send_poller_cmd(&fixture.state, PollerCmd::PollRepo(paths[0].clone())).unwrap();
+            }
+            // A configured-path request gives an observable completion barrier
+            // for the same debounce batch, without sleeping or racing the network.
+            send_poller_cmd(&fixture.state, PollerCmd::PollRepo(paths[1].clone())).unwrap();
+            send_poller_cmd(
+                &fixture.state,
+                PollerCmd::SetIssueFilter(if late { "assigned" } else { "created" }.into()),
+            )
+            .unwrap();
+            loop {
+                if let AppEvent::GitHubIssuesUpdate { repo_path, .. } = events.recv().await.unwrap()
+                    && repo_path == paths[1]
+                {
+                    break;
+                }
+            }
+            let request = fixture.requests.recv().await.unwrap();
+            assert_eq!(
+                crate::github_auth::compute_diagnostics(&fixture.state).repos_monitored,
+                1,
+                "retired monitor returned (late={late}); request={request}"
+            );
+        }
+        stop_poller(&fixture.state).await.unwrap();
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn headless_poller_cold_starts_without_an_app_handle() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        ensure_polling(&state, vec![], String::new(), false);
+        assert!(state.github.poller.lock().is_some());
+        stop_poller(&state).await.expect("empty-path poller stops");
+    }
+
+    #[test]
+    fn headless_transitions_reach_the_bus_once_without_a_window() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let mut events = state.event_bus.subscribe();
+        let mut prev = HashMap::new();
+        let mut pr = BranchPrStatus {
+            branch: "feature".into(),
+            number: 42,
+            title: "Feature".into(),
+            state: "OPEN".into(),
+            url: "https://github.com/example/repo/pull/42".into(),
+            additions: 0,
+            deletions: 0,
+            checks: crate::github::CheckSummary {
+                passed: 0,
+                failed: 0,
+                pending: 0,
+                total: 0,
+            },
+            author: "author".into(),
+            commits: 1,
+            mergeable: "MERGEABLE".into(),
+            merge_state_status: "CLEAN".into(),
+            review_decision: String::new(),
+            viewer_did_approve: false,
+            labels: vec![],
+            is_draft: false,
+            base_ref_name: "main".into(),
+            head_ref_oid: "head".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            merge_state_label: None,
+            conflict_state: crate::github::ConflictState::Clear,
+            review_state_label: None,
+            merge_commit_allowed: true,
+            squash_merge_allowed: true,
+            rebase_merge_allowed: true,
+            unresolved_threads: 0,
+            unresolved_threads_truncated: false,
+        };
+        process_repo_update(&state, "/repo", &[pr.clone()], &mut prev);
+        assert!(
+            events.try_recv().is_err(),
+            "initial snapshot must not report opened"
+        );
+        pr.state = "MERGED".into();
+        process_repo_update(&state, "/repo", &[pr.clone()], &mut prev);
+        assert!(matches!(
+            events.try_recv().expect("headless transition"),
+            AppEvent::GitHubTransition {
+                transition: PrTransition::Merged { .. }
+            }
+        ));
+        process_repo_update(&state, "/repo", &[pr], &mut prev);
+        assert!(
+            events.try_recv().is_err(),
+            "unchanged snapshot must not repeat a notice"
+        );
+    }
 
     /// The five control routes used to answer `{"ok": true}` no matter what,
     /// including when no poller was running at all — so a client that changed the
@@ -873,7 +1206,7 @@ mod tests {
     #[test]
     fn a_command_for_a_stopped_poller_is_an_error() {
         let state = crate::state::tests_support::make_test_app_state();
-        assert!(state.github_poller.lock().is_none(), "fixture: no poller");
+        assert!(state.github.poller.lock().is_none(), "fixture: no poller");
 
         let err = send_poller_cmd(&state, PollerCmd::SetVisibility(false))
             .expect_err("no poller must not report success");
@@ -889,6 +1222,66 @@ mod tests {
         assert!(err.contains("not running"), "unexpected error: {err}");
     }
 
+    /// A poll request that never resolves is exactly what a half-open socket
+    /// produces after a VPN drop. `poll_batch` is awaited inline in the poller's
+    /// `select!`, so without an abort path the loop never reaches `rx.recv()`
+    /// again and the Stop is stranded behind a request that will never land.
+    #[tokio::test]
+    async fn stop_aborts_a_poll_that_never_resolves() {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&stop);
+        let task =
+            tokio::spawn(
+                async move { poll_batch_or_stop(&signal, std::future::pending::<()>()).await },
+            );
+
+        // Give the task a chance to park on the never-resolving poll.
+        tokio::task::yield_now().await;
+        stop.notify_one();
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("stop must abort the in-flight poll")
+            .expect("poll task panicked");
+        assert!(
+            !completed,
+            "a poll cancelled by Stop must report that it did not finish"
+        );
+    }
+
+    /// The end-to-end stop path: `stop_poller` must reach a loop that is parked
+    /// inside a request, not just one sitting idle on its command channel.
+    #[tokio::test]
+    async fn stop_poller_reaches_a_loop_parked_inside_a_request() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(8);
+        let stop = Arc::new(tokio::sync::Notify::new());
+        *state.github.poller.lock() = Some(GitHubPoller {
+            intake_paths: Vec::new(),
+            cmd_tx,
+            previous_prs: Default::default(),
+            stop: Arc::clone(&stop),
+        });
+
+        let task =
+            tokio::spawn(
+                async move { poll_batch_or_stop(&stop, std::future::pending::<()>()).await },
+            );
+        tokio::task::yield_now().await;
+
+        stop_poller(&state).await.expect("stop must be delivered");
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("stop_poller must unpark the in-flight poll")
+            .expect("poll task panicked");
+        assert!(!completed, "the poll must report that Stop cut it short");
+        assert!(
+            state.github.poller.lock().is_none(),
+            "stop_poller must clear the poller from state"
+        );
+    }
+
     /// A running poller receives the command and the send is reported as
     /// delivered — the filter must narrow the failure case, not break the
     /// success case.
@@ -896,7 +1289,12 @@ mod tests {
     async fn a_command_for_a_running_poller_is_delivered() {
         let state = crate::state::tests_support::make_test_app_state();
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
-        *state.github_poller.lock() = Some(GitHubPoller { cmd_tx });
+        *state.github.poller.lock() = Some(GitHubPoller {
+            intake_paths: Vec::new(),
+            cmd_tx,
+            previous_prs: Default::default(),
+            stop: Arc::new(Notify::new()),
+        });
 
         send_poller_cmd(&state, PollerCmd::PollRepo("/repo".to_string())).expect("delivered");
 
@@ -905,86 +1303,6 @@ mod tests {
             Some(_) => panic!("a different command was delivered"),
             None => panic!("nothing was delivered"),
         }
-    }
-
-    fn make_pr(
-        state: &str,
-        mergeable: &str,
-        review: &str,
-        failed: u32,
-        pending: u32,
-    ) -> BranchPrStatus {
-        let merge_state_status = if mergeable == "CONFLICTING" {
-            "DIRTY"
-        } else {
-            "CLEAN"
-        };
-        BranchPrStatus {
-            branch: "feat/test".to_string(),
-            number: 42,
-            title: "Test PR".to_string(),
-            state: state.to_string(),
-            url: String::new(),
-            additions: 0,
-            deletions: 0,
-            checks: CheckSummary {
-                passed: 0,
-                failed,
-                pending,
-                total: failed + pending,
-            },
-            author: String::new(),
-            commits: 1,
-            mergeable: mergeable.to_string(),
-            // Realistic pairing: GitHub reports DIRTY alongside a computed
-            // CONFLICTING. An empty status would mean "still recomputing", which
-            // is a different case entirely.
-            merge_state_status: merge_state_status.to_string(),
-            conflict_state: crate::github::classify_conflict_state(
-                Some(mergeable),
-                Some(merge_state_status),
-            ),
-            review_decision: review.to_string(),
-            viewer_did_approve: false,
-            labels: vec![],
-            is_draft: false,
-            base_ref_name: "main".to_string(),
-            head_ref_oid: String::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            merge_state_label: None,
-            review_state_label: None,
-            merge_commit_allowed: true,
-            squash_merge_allowed: true,
-            rebase_merge_allowed: true,
-        }
-    }
-
-    #[test]
-    fn transition_merged() {
-        let old = make_pr("OPEN", "MERGEABLE", "APPROVED", 0, 0);
-        let new = make_pr("MERGED", "MERGEABLE", "APPROVED", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::Merged { .. }));
-    }
-
-    #[test]
-    fn transition_closed() {
-        let old = make_pr("OPEN", "UNKNOWN", "", 0, 0);
-        let new = make_pr("CLOSED", "UNKNOWN", "", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::Closed { .. }));
-    }
-
-    #[test]
-    fn transition_blocked() {
-        let old = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        let new = make_pr("OPEN", "CONFLICTING", "", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::Blocked { .. }));
     }
 
     #[test]
@@ -1012,135 +1330,6 @@ mod tests {
             !should_emit(Some(&key), &key, false),
             "an unchanged snapshot must not re-emit"
         );
-    }
-
-    #[test]
-    fn transition_ci_failed() {
-        let old = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        let new = make_pr("OPEN", "MERGEABLE", "", 2, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::CiFailed { .. }));
-    }
-
-    #[test]
-    fn transition_ci_failed_on_new_commit_while_still_failing() {
-        // Regression: an agent's fix-push whose CI fails again before the poller
-        // sees an intermediate all-pending (failed==0) poll. old and new are both
-        // failing, but the head SHA changed — ci_failed must re-fire so auto-heal
-        // continues past the first attempt instead of stalling.
-        let mut old = make_pr("OPEN", "MERGEABLE", "", 2, 0);
-        old.head_ref_oid = "aaaa".to_string();
-        let mut new = make_pr("OPEN", "MERGEABLE", "", 2, 0);
-        new.head_ref_oid = "bbbb".to_string();
-        let t = detect_transitions("/repo", &old, &new);
-        // Both ci_failed (fresh failure on the new head) and pushed (oid changed).
-        assert!(t.iter().any(|x| matches!(x, PrTransition::CiFailed { .. })));
-        assert!(t.iter().any(|x| matches!(x, PrTransition::Pushed { .. })));
-    }
-
-    #[test]
-    fn no_ci_failed_when_still_failing_same_commit() {
-        // Same head SHA, still failing: no new ci_failed (would re-heal endlessly
-        // without a real change to react to).
-        let mut old = make_pr("OPEN", "MERGEABLE", "", 2, 0);
-        old.head_ref_oid = "aaaa".to_string();
-        let mut new = make_pr("OPEN", "MERGEABLE", "", 2, 0);
-        new.head_ref_oid = "aaaa".to_string();
-        let t = detect_transitions("/repo", &old, &new);
-        assert!(!t.iter().any(|x| matches!(x, PrTransition::CiFailed { .. })));
-    }
-
-    #[test]
-    fn transition_changes_requested() {
-        let old = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        let new = make_pr("OPEN", "MERGEABLE", "CHANGES_REQUESTED", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::ChangesRequested { .. }));
-    }
-
-    #[test]
-    fn transition_ready() {
-        let old = make_pr("OPEN", "UNKNOWN", "", 1, 0);
-        let new = make_pr("OPEN", "MERGEABLE", "APPROVED", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::Ready { .. }));
-    }
-
-    #[test]
-    fn transition_ci_recovered() {
-        let old = make_pr("OPEN", "UNKNOWN", "", 3, 0);
-        let new = make_pr("OPEN", "UNKNOWN", "", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::CiRecovered { .. }));
-    }
-
-    #[test]
-    fn ci_recovered_suppressed_when_ready() {
-        // Old: failing + not ready. New: ready (all green). Only "ready" fires, not ci_recovered.
-        let old = make_pr("OPEN", "UNKNOWN", "", 2, 0);
-        let new = make_pr("OPEN", "MERGEABLE", "APPROVED", 0, 0);
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(&t[0], PrTransition::Ready { .. }));
-    }
-
-    #[test]
-    fn transition_pushed() {
-        // New commit on an open PR: head_ref_oid changed → exactly one Pushed.
-        let mut old = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        old.head_ref_oid = "aaa111".to_string();
-        let mut new = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        new.head_ref_oid = "bbb222".to_string();
-        new.author = "octocat".to_string();
-        let t = detect_transitions("/repo", &old, &new);
-        assert_eq!(t.len(), 1);
-        assert!(matches!(
-            &t[0],
-            PrTransition::Pushed { head_ref_oid, author, .. }
-                if head_ref_oid == "bbb222" && author == "octocat"
-        ));
-    }
-
-    #[test]
-    fn pushed_same_oid_none() {
-        // Unchanged head_ref_oid → no Pushed.
-        let mut old = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        old.head_ref_oid = "aaa111".to_string();
-        let mut new = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        new.head_ref_oid = "aaa111".to_string();
-        let t = detect_transitions("/repo", &old, &new);
-        assert!(!t.iter().any(|x| matches!(x, PrTransition::Pushed { .. })));
-    }
-
-    #[test]
-    fn pushed_non_open_none() {
-        // oid changed but PR is no longer OPEN → no Pushed (Closed fires instead).
-        let mut old = make_pr("OPEN", "MERGEABLE", "", 0, 0);
-        old.head_ref_oid = "aaa111".to_string();
-        let mut new = make_pr("CLOSED", "MERGEABLE", "", 0, 0);
-        new.head_ref_oid = "bbb222".to_string();
-        let t = detect_transitions("/repo", &old, &new);
-        assert!(!t.iter().any(|x| matches!(x, PrTransition::Pushed { .. })));
-    }
-
-    #[test]
-    fn no_transition_on_unchanged() {
-        let pr = make_pr("OPEN", "MERGEABLE", "APPROVED", 0, 0);
-        let t = detect_transitions("/repo", &pr, &pr);
-        assert!(t.is_empty());
-    }
-
-    #[test]
-    fn no_transition_pending_ci() {
-        // CI recovered from failed, but still has pending — no ci_recovered yet
-        let old = make_pr("OPEN", "UNKNOWN", "", 2, 0);
-        let new = make_pr("OPEN", "UNKNOWN", "", 0, 3);
-        let t = detect_transitions("/repo", &old, &new);
-        assert!(t.is_empty());
     }
 
     #[test]
@@ -1263,7 +1452,12 @@ mod tests {
     #[test]
     fn send_poller_config_resync_sends_full_sequence() {
         let (tx, mut rx) = mpsc::channel(8);
-        let poller = GitHubPoller { cmd_tx: tx };
+        let poller = GitHubPoller {
+            cmd_tx: tx,
+            intake_paths: Vec::new(),
+            previous_prs: Default::default(),
+            stop: Arc::new(Notify::new()),
+        };
         send_poller_config(
             &poller,
             vec!["/repo".to_string()],
@@ -1288,7 +1482,12 @@ mod tests {
         // A freshly started poller has no prior state to re-emit, so cold start
         // passes resync = false: hide-drafts is still forwarded, ForceResync is not.
         let (tx, mut rx) = mpsc::channel(8);
-        let poller = GitHubPoller { cmd_tx: tx };
+        let poller = GitHubPoller {
+            cmd_tx: tx,
+            intake_paths: Vec::new(),
+            previous_prs: Default::default(),
+            stop: Arc::new(Notify::new()),
+        };
         send_poller_config(&poller, vec![], String::new(), false, false);
         assert!(matches!(rx.try_recv(), Ok(PollerCmd::UpdatePaths(_))));
         assert!(matches!(rx.try_recv(), Ok(PollerCmd::SetIssueFilter(_))));

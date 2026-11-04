@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { useConfirmDialog } from "../../hooks/useConfirmDialog";
+import type { WorkspaceLifecycleStatus } from "../../stores/workspaceIdentity";
 
 describe("useConfirmDialog", () => {
 	let dialog: ReturnType<typeof useConfirmDialog>;
@@ -93,6 +94,61 @@ describe("useConfirmDialog", () => {
 		});
 	});
 
+	describe("confirmOrphanCleanup()", () => {
+		it("counts down only when every backend assessment is safe", async () => {
+			const pending = dialog.confirmOrphanCleanup("/repo", [{ path: "/wt/clean", safe: true }], 10);
+			expect(dialog.dialogState()?.autoConfirmMs).toBe(10_000);
+			expect(dialog.dialogState()?.message).toContain("/wt/clean");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+		});
+
+		it("names the dirty orphan and runs no countdown", async () => {
+			const pending = dialog.confirmOrphanCleanup(
+				"/repo",
+				[
+					{ path: "/wt/clean", safe: true },
+					{ path: "/wt/dirty", safe: false, reason: "untracked files" },
+				],
+				10,
+			);
+			expect(dialog.dialogState()?.autoConfirmMs).toBeUndefined();
+			expect(dialog.dialogState()?.message).toContain("/wt/dirty: untracked files");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+		});
+
+		// Catches: a live-session orphan shown with a countdown or without naming the session.
+		it("names the live session and runs no countdown", async () => {
+			const pending = dialog.confirmOrphanCleanup(
+				"/repo",
+				[
+					{
+						path: "/wt/busy",
+						safe: false,
+						reason: "live session: Claude: refactor",
+						live_sessions: [{ session_id: "s1", name: "Claude: refactor" }],
+					},
+				],
+				10,
+			);
+			expect(dialog.dialogState()?.autoConfirmMs).toBeUndefined();
+			expect(dialog.dialogState()?.message).toContain("/wt/busy: live session: Claude: refactor");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+		});
+
+		it("an agent answer settles the matching queued orphan prompt", async () => {
+			const unrelated = dialog.confirm({ title: "First", message: "Unrelated" });
+			const orphan = dialog.confirmOrphanCleanup("/repo", [{ path: "/wt/clean", safe: true }], 10);
+			dialog.answerOrphanCleanup("/repo", false);
+			expect(await orphan).toBe(false);
+			expect(dialog.dialogState()?.title).toBe("First");
+			dialog.handleClose();
+			expect(await unrelated).toBe(false);
+		});
+	});
+
 	describe("concurrent confirm() calls", () => {
 		it("queues a second confirm and shows dialogs sequentially (FIFO)", async () => {
 			const first = dialog.confirm({ title: "First", message: "1?" });
@@ -115,7 +171,7 @@ describe("useConfirmDialog", () => {
 		it("orphan cleanup defaults Enter to the safe button", async () => {
 			// Raised from a background refresh, so it can appear mid-typing — a stray
 			// Enter must keep the worktrees, not delete them.
-			const pending = dialog.confirmOrphanCleanup(["/wt/a"]);
+			const pending = dialog.confirmOrphanCleanup("/repo", [{ path: "/wt/a", safe: false }], 10);
 			expect(dialog.dialogState()?.defaultButton).toBe("cancel");
 			dialog.handleClose();
 			expect(await pending).toBe(false);
@@ -158,12 +214,177 @@ describe("useConfirmDialog", () => {
 	});
 
 	describe("confirmRemoveWorktree()", () => {
+		// Catches: Delete is missing for safe workspaces or remains available for dirty/live workspaces.
+		it("offers Delete only while the workspace is clean integrated and has no live users", async () => {
+			const safe = { dirtyFiles: 0, commitStatus: "in_sync", removalSafety: "safe" } as const;
+			const pending = dialog.confirmRemoveWorktree("finished", safe, true);
+			const label = dialog.dialogState()?.discardLabel;
+			dialog.handleDiscard();
+			const answer = await pending;
+			expect(label).toBe("Delete");
+			expect(answer).toBe("delete");
+			for (const hazard of [
+				{ dirtyFiles: 1, removalSafety: "requires_force" },
+				{ liveSessions: [{ sessionId: "agent", name: "Codex" }] },
+				{ commitStatus: "unmerged" },
+				{ dirtyFiles: null, removalSafety: "unknown" },
+				{ missingCheckout: true },
+				{ submoduleUnpushedCommits: [{ path: "sub", count: 1 }] },
+			] satisfies Partial<WorkspaceLifecycleStatus>[]) {
+				const blocked = dialog.confirmRemoveWorktree("finished", { ...safe, ...hazard }, true);
+				expect(dialog.dialogState()?.discardLabel, JSON.stringify(hazard)).toBeUndefined();
+				dialog.handleDiscard();
+				expect(await blocked).toBe(false);
+			}
+		});
+
+		// Catches: independent history described as ordinary retained commits or recycled merged work.
+		it("explains unrelated history before checkout removal", async () => {
+			const pending = dialog.confirmRemoveWorktree(
+				"orphan",
+				{
+					dirtyFiles: 0,
+					commitStatus: "unrelated_history",
+					removalSafety: "safe",
+				},
+				true,
+			);
+			expect(dialog.dialogState()?.message).toContain("no common ancestor");
+			expect(dialog.dialogState()?.message).toContain("archive its current tip");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+		});
+
+		it("distinguishes unstarted work from merged commits before confirmation", async () => {
+			const pending = dialog.confirmRemoveWorktree(
+				"unstarted",
+				{ dirtyFiles: 0, commitStatus: "in_sync", removalSafety: "safe" },
+				true,
+			);
+			expect(dialog.dialogState()?.message).toContain("nothing of its own, not merged work");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+
+			const merged = dialog.confirmRemoveWorktree(
+				"completed",
+				{ dirtyFiles: 0, commitStatus: "merged", removalSafety: "safe" },
+				true,
+			);
+			expect(dialog.dialogState()?.message).toContain("commits are in the default branch");
+			dialog.handleClose();
+			expect(await merged).toBe(false);
+		});
+
+		// Catches: a clean finished checkout is archived and its branch kept, yet the dialog still
+		// promises "Remove" and "safely delete the local branch" (audit B17).
+		it("says archive and branch kept when a clean finished checkout will be recycled", async () => {
+			for (const commitStatus of ["in_sync", "merged"] as const) {
+				const pending = dialog.confirmRemoveWorktree(
+					"finished",
+					{ dirtyFiles: 0, commitStatus, removalSafety: "safe" },
+					true,
+				);
+				const state = dialog.dialogState();
+				expect(state?.title).toBe("Archive workspace?");
+				expect(state?.confirmLabel).toBe("Archive");
+				expect(state?.message).toContain("archive");
+				expect(state?.message).toContain("The local branch will be kept.");
+				expect(state?.message).not.toContain("safely delete");
+				dialog.handleClose();
+				expect(await pending).toBe(false);
+			}
+		});
+
+		// Catches: the coordinator closes live terminals before the backend recycles, so a clean
+		// checkout with an open shell is archived too but the dialog still says Remove.
+		it("says archive for a clean finished checkout that has a live session", async () => {
+			const pending = dialog.confirmRemoveWorktree(
+				"finished",
+				{
+					dirtyFiles: 0,
+					commitStatus: "in_sync",
+					removalSafety: "safe",
+					liveSessions: [{ sessionId: "pty-1", name: "zsh" }],
+				},
+				true,
+			);
+			const state = dialog.dialogState();
+			expect(state?.title).toBe("Archive workspace?");
+			expect(state?.confirmLabel).toBe("Archive");
+			expect(state?.message).toContain("Live sessions in this worktree: zsh");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+		});
+
+		// Catches: the archive wording leaks onto removals that really delete (unmerged, dirty, keep-branch).
+		it("keeps the remove wording when the checkout is not recyclable", async () => {
+			for (const [status, deleteBranch] of [
+				[{ dirtyFiles: 0, commitStatus: "unmerged", removalSafety: "safe" }, true],
+				[{ dirtyFiles: 2, commitStatus: "merged", removalSafety: "requires_force" }, true],
+				[{ dirtyFiles: 0, commitStatus: "merged", removalSafety: "safe" }, false],
+				[
+					{
+						dirtyFiles: 0,
+						commitStatus: "merged",
+						removalSafety: "safe",
+						submoduleUnpushedCommits: [{ path: "sub", count: 1 }],
+					},
+					true,
+				],
+			] as const) {
+				const pending = dialog.confirmRemoveWorktree("other", status as never, deleteBranch);
+				expect(dialog.dialogState()?.confirmLabel).not.toBe("Archive");
+				expect(dialog.dialogState()?.title).not.toBe("Archive workspace?");
+				dialog.handleClose();
+				await pending;
+			}
+		});
+
+		it("names live sessions and counts untracked files before removing", async () => {
+			const pending = dialog.confirmRemoveWorktree(
+				"active",
+				{
+					dirtyFiles: 4,
+					untrackedFiles: 2,
+					liveSessions: [{ sessionId: "pty-1", name: "Codex: gate work" }],
+					commitStatus: "in_sync",
+					removalSafety: "requires_force",
+				},
+				true,
+			);
+			expect(dialog.dialogState()?.message).toContain("Codex: gate work");
+			expect(dialog.dialogState()?.message).toContain("4 uncommitted files");
+			expect(dialog.dialogState()?.message).toContain("2 untracked files");
+			dialog.handleConfirm();
+			expect(await pending).toBe(true);
+		});
+		it("identifies a missing checkout and offers cancellation before pruning its registration", async () => {
+			const promise = dialog.confirmRemoveWorktree(
+				"feature-missing",
+				{ dirtyFiles: null, missingCheckout: true, commitStatus: "in_sync", removalSafety: "requires_force" },
+				false,
+			);
+			expect(dialog.dialogState()?.message).toContain("checkout directory is missing");
+			expect(dialog.dialogState()?.message).toContain("submodule refs will be preserved");
+			expect(dialog.dialogState()?.message).not.toContain("Working tree: clean");
+			dialog.handleClose();
+			expect(await promise).toBe(false);
+		});
 		it("shows dialog with correct message and resolves true on confirm", async () => {
-			const promise = dialog.confirmRemoveWorktree("feature-x");
+			const promise = dialog.confirmRemoveWorktree(
+				"feature-x",
+				{
+					dirtyFiles: 0,
+					commitStatus: "unmerged",
+					removalSafety: "safe",
+				},
+				true,
+			);
 
 			expect(dialog.dialogState()).toEqual({
-				title: "Remove worktree?",
-				message: "Remove feature-x?\nThis deletes the worktree directory and its local branch.",
+				title: "Remove workspace?",
+				message:
+					'Remove "feature-x"?\n\nWorking tree: clean.\nCommit state: commits remain in the parent repository.\nGit will safely delete the local branch; if it is unmerged, the branch is kept.',
 				confirmLabel: "Remove",
 				cancelLabel: "Cancel",
 				kind: "warning",
@@ -175,9 +396,44 @@ describe("useConfirmDialog", () => {
 		});
 
 		it("returns false when user cancels", async () => {
-			const promise = dialog.confirmRemoveWorktree("feature-y");
+			const promise = dialog.confirmRemoveWorktree(
+				"feature-y",
+				{
+					dirtyFiles: 3,
+					submoduleUnpushedCommits: [{ path: "plugins", count: 7 }],
+					commitStatus: "unmerged",
+					removalSafety: "requires_force",
+				},
+				true,
+			);
+			expect(dialog.dialogState()?.title).toBe("Destroy workspace state?");
+			// The count, not the adjective: "dirty" never told the user what a
+			// removal costs, and this dialog is the last stop before it happens.
+			expect(dialog.dialogState()?.message).toContain("3 uncommitted files will be discarded");
+			expect(dialog.dialogState()?.message).toContain("plugins: 7 commits not on a remote-tracking branch");
 			dialog.handleClose();
 			expect(await promise).toBe(false);
+		});
+	});
+
+	describe("confirmDirtyWorktreeCleanup()", () => {
+		it("names a live agent before archiving a clean worktree", async () => {
+			const pending = dialog.confirmDirtyWorktreeCleanup("active-feature", "archive", 1, {
+				dirtyFiles: 0,
+				dirtyFingerprint: "confirmed-clean",
+				commitStatus: "unmerged",
+				removalSafety: "safe",
+				liveSessions: [{ sessionId: "pty-active", name: "Codex: gate work" }],
+				warnings: ["Live session: Codex: gate work"],
+			});
+
+			try {
+				expect(dialog.dialogState()?.message).toContain("Codex: gate work");
+				expect(dialog.dialogState()?.message).not.toContain("has uncommitted changes");
+			} finally {
+				dialog.handleClose();
+				expect(await pending).toBe(false);
+			}
 		});
 	});
 

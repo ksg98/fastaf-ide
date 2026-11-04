@@ -16,9 +16,9 @@ import { openPathsAsTabs } from "../../hooks/useFileDrop";
 import { initMouseDrag } from "../../hooks/useMouseDrag";
 import { useSmartPrompts } from "../../hooks/useSmartPrompts";
 import { t } from "../../i18n";
-import { shortenHomePath } from "../../platform";
 import { appLogger } from "../../stores/appLogger";
 import { contextMenuActionsStore } from "../../stores/contextMenuActionsStore";
+import { designModeBrowsers, designModeStore } from "../../stores/designMode";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { findPaneGroupAtPoint } from "../../stores/dragDrop";
 import { editorTabsStore } from "../../stores/editorTabs";
@@ -28,33 +28,44 @@ import { multiviewStore } from "../../stores/multiview";
 import { paneLayoutStore } from "../../stores/paneLayout";
 import { currentBranchKey, repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
-import { tabOrderingStore } from "../../stores/tabOrdering";
+import { tabOrderingStore } from "../../stores/tabManager";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
+import { uiStore } from "../../stores/ui";
 import { cx } from "../../utils";
-import { writeClipboard } from "../../utils/clipboard";
+import { copyPathToClipboard, writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
+import { markdownDocumentPanelId } from "../../utils/markdownDocumentPanelId";
 import { computeGrid } from "../../utils/multiviewGrid";
-import { handleOpenUrl } from "../../utils/openUrl";
+import { handleOpenUrl, openLocalPath } from "../../utils/openUrl";
+// Named for its first caller; it is a plain `file://` → path parser and returns
+// null for every other scheme, which is exactly the guard needed here.
+import { parseOsc7Url } from "../../utils/osc7";
+import { orderTerminalsByPaneLayout } from "../../utils/paneTabOrder";
 import { computeLeafRects } from "../../utils/paneTreeGeometry";
+import { isAbsolutePath, joinPath } from "../../utils/pathUtils";
 import { isPerfDebug } from "../../utils/perfDebug";
 import { fileContextSmartMenuItem } from "../../utils/promptContext";
 import { ptyCaptureStore } from "../../utils/ptyCapture";
 import { getRepoColor } from "../../utils/repoColor";
+import { resumeTerminal, type SuspendOutcome, suspendRefusal, suspendTerminal } from "../../utils/suspendTerminal";
 import type { ContextMenuItem } from "../ContextMenu/ContextMenu";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
+import { createAgentLaunchMenu } from "../ContextMenu/createAgentLaunchMenu";
 import { IconGrid, IconPlus } from "../icons";
 import s from "./TabBar.module.css";
 import { alignDockedTabs, DiffTabView, EditorTabView, MarkdownTabView, TerminalTabView } from "./TabViews";
 
 export interface TabBarProps {
 	quickSwitcherActive?: boolean;
+	tabHintsActive?: boolean;
 	onTabSelect: (id: string) => void;
 	onTabClose: (id: string, skipConfirm?: boolean) => void;
 	onCloseOthers: (id: string) => void;
 	onCloseToRight: (id: string) => void;
 	onNewTab: () => void;
-	onSplitVertical?: () => void;
-	onSplitHorizontal?: () => void;
+	/** Agents a long press on the + button offers; each opens a new tab running that agent. */
+	getNewAgentMenuItems?: () => ContextMenuItem[];
 	onReorder?: (fromIndex: number, toIndex: number) => void;
 	onDetachTab?: (id: string) => void;
 	onReattachTab?: (id: string) => void;
@@ -64,6 +75,8 @@ export interface TabBarProps {
 }
 
 export const TabBar: Component<TabBarProps> = (props) => {
+	onMount(() => onCleanup(designModeStore.subscribe()));
+	const designModeForTab = (id: string) => designModeStore.forSession(terminalsStore.get(id)?.sessionId);
 	const [dragOverId, setDragOverId] = createSignal<string | null>(null);
 	const [dragOverSide, setDragOverSide] = createSignal<"left" | "right" | null>(null);
 	const [draggingId, setDraggingId] = createSignal<string | null>(null);
@@ -71,6 +84,20 @@ export const TabBar: Component<TabBarProps> = (props) => {
 	const [editingId, setEditingId] = createSignal<string | null>(null);
 	const [mvPreviewPos, setMvPreviewPos] = createSignal<{ x: number; y: number } | null>(null);
 	const smartPrompts = useSmartPrompts();
+
+	/** Absolute on-disk path of a file-backed tab.
+	 *
+	 *  The tab stores keep `filePath` RELATIVE to the tab's filesystem root, which
+	 *  is held next to it (`fsRoot`, falling back to `repoPath`); a file opened
+	 *  from outside any repo is already absolute. Copy Path and the file-context
+	 *  Smart Prompts both need the joined path — handing them the bare `filePath`
+	 *  yields `src/foo.ts`, which resolves against whatever the consumer's cwd
+	 *  happens to be. */
+	const tabAbsPath = (root: string | undefined, filePath: string | undefined): string | undefined => {
+		if (!filePath) return undefined;
+		if (isAbsolutePath(filePath)) return filePath;
+		return root ? joinPath(root, filePath) : filePath;
+	};
 
 	/** Append a Smart Prompts submenu to a tab context menu if any file-context
 	 *  prompts exist. Mutates `items` in-place. */
@@ -87,9 +114,6 @@ export const TabBar: Component<TabBarProps> = (props) => {
 	const tabMenu = createContextMenu();
 	const [contextTabId, setContextTabId] = createSignal<string | null>(null);
 
-	// Context menu for new tab + button
-	const newTabMenu = createContextMenu();
-
 	// Context menu for overflow tabs (right-click on scroll arrows)
 	const overflowMenu = createContextMenu();
 
@@ -98,28 +122,17 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		const root = paneLayoutStore.getRoot();
 		return root ? computeLeafRects(root) : [];
 	});
-	const getNewTabMenuItems = (): ContextMenuItem[] => [
-		{ label: t("tabBar.newTab", "New Tab"), shortcut: keyFor("new-terminal"), action: () => props.onNewTab() },
-		{ label: "", separator: true, action: () => {} },
-		{
-			label: t("tabBar.splitVertical", "Split Vertically"),
-			shortcut: keyFor("split-vertical"),
-			action: () => props.onSplitVertical?.(),
-			disabled: !paneLayoutStore.isSplit() && !terminalsStore.state.activeId,
-		},
-		{
-			label: t("tabBar.splitHorizontal", "Split Horizontally"),
-			shortcut: keyFor("split-horizontal"),
-			action: () => props.onSplitHorizontal?.(),
-			disabled: !paneLayoutStore.isSplit() && !terminalsStore.state.activeId,
-		},
-	];
+	// Long press or right click on + lists the agents (see createAgentLaunchMenu).
+	const newAgentMenu = createAgentLaunchMenu(() => props.getNewAgentMenuItems?.() ?? []);
 
-	const openNewTabMenu = (e: MouseEvent) => {
-		e.stopPropagation();
-		const btn = e.currentTarget as HTMLElement;
-		const rect = btn.getBoundingClientRect();
-		newTabMenu.openAt(rect.left, rect.bottom + 4);
+	const handleNewTabClick = () => {
+		if (newAgentMenu.consumeClick()) return;
+		props.onNewTab();
+	};
+
+	const reportOutcome = async (pending: Promise<SuspendOutcome>) => {
+		const outcome = await pending;
+		if (!outcome.ok) toastsStore.add(t("tabBar.suspendRefused", "Tab not changed"), outcome.reason, "warn");
 	};
 
 	const getTabContextMenuItems = (): ContextMenuItem[] => {
@@ -131,14 +144,12 @@ export const TabBar: Component<TabBarProps> = (props) => {
 			const ids = visibleDiffIds();
 			const idx = ids.indexOf(id);
 			const isPinned = tab?.pinned ?? false;
+			const absPath = tabAbsPath(tab?.repoPath, tab?.filePath);
 			const diffItems: ContextMenuItem[] = [
 				{
 					label: t("tabBar.copyPath", "Copy Path"),
 					action: () => {
-						if (tab?.filePath)
-							writeClipboard(shortenHomePath(tab.filePath)).catch((err) =>
-								appLogger.error("app", "Failed to copy path", err),
-							);
+						if (absPath) copyPathToClipboard(absPath);
 					},
 				},
 				{
@@ -164,7 +175,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 					disabled: idx >= ids.length - 1,
 				},
 			];
-			pushFileContextItem(diffItems, tab?.filePath);
+			pushFileContextItem(diffItems, absPath);
 			return diffItems;
 		}
 
@@ -173,29 +184,58 @@ export const TabBar: Component<TabBarProps> = (props) => {
 			const ids = visibleMdIds();
 			const idx = ids.indexOf(id);
 			const isPinned = tab?.pinned ?? false;
-			const hasPath = tab?.type === "file" && tab.filePath;
 			const tabUrl = tab?.type === "plugin-panel" ? (tab as PluginPanelTab).url : undefined;
+			// Three md-tab shapes are backed by a real file and all three should offer
+			// Copy Path. The `file://` panel is the one that reads as memory-only and
+			// is not: `ui action=tab url=file://…` keeps the url on the tab while
+			// PluginPanel reads the file over IPC and renders it as `srcdoc`, because
+			// the iframe sandbox blocks `file://` directly. The document on screen has
+			// no src, so only the url names where it came from.
+			const absPath =
+				tab?.type === "file" || tab?.type === "html-preview"
+					? tabAbsPath(tab.fsRoot || tab.repoPath, tab.filePath)
+					: (parseOsc7Url(tabUrl ?? "") ?? undefined);
 			const mdItems: ContextMenuItem[] = [
-				...(hasPath
+				...(absPath
 					? [
 							{
 								label: t("tabBar.copyPath", "Copy Path"),
-								action: () => {
-									writeClipboard(shortenHomePath(tab.filePath)).catch((err) =>
-										appLogger.error("app", "Failed to copy path", err),
-									);
-								},
+								action: () => copyPathToClipboard(absPath),
 							},
 						]
 					: []),
+				// A `file://` panel goes to the OS default app for the file (a browser,
+				// for the HTML these tabs carry). `handleOpenUrl` rejects every scheme
+				// but http/https/mailto, so routing one through it left the menu item
+				// doing nothing but writing "Blocked URL with disallowed scheme" to
+				// the log.
 				...(tabUrl
-					? [{ label: t("tabBar.openInBrowser", "Open in Browser"), action: () => handleOpenUrl(tabUrl) }]
+					? [
+							{
+								label: t("tabBar.openInBrowser", "Open in Browser"),
+								action: () =>
+									tabUrl.startsWith("file://") && absPath ? openLocalPath(absPath) : handleOpenUrl(tabUrl),
+							},
+						]
 					: []),
 				{
 					label: isPinned ? t("tabBar.unpinTab", "Unpin Tab") : t("tabBar.pinTab", "Pin Tab"),
 					action: () => mdTabsStore.setPinned(id, !isPinned),
 				},
 				{ label: t("tabBar.print", "Print…"), action: () => window.print() },
+				...(tab?.type === "file"
+					? [
+							uiStore.isDetached(markdownDocumentPanelId(id))
+								? {
+										label: t("tabBar.reattachTab", "Reattach to Main Window"),
+										action: () => props.onReattachTab?.(id),
+									}
+								: {
+										label: t("tabBar.detachToWindow", "Detach to Window"),
+										action: () => props.onDetachTab?.(id),
+									},
+						]
+					: []),
 				{ label: "", separator: true, action: () => {} },
 				{
 					label: t("tabBar.closeTab", "Close Tab"),
@@ -215,7 +255,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 					disabled: idx >= ids.length - 1,
 				},
 			];
-			pushFileContextItem(mdItems, hasPath ? tab.filePath : undefined);
+			pushFileContextItem(mdItems, absPath);
 			return mdItems;
 		}
 
@@ -224,14 +264,12 @@ export const TabBar: Component<TabBarProps> = (props) => {
 			const ids = visibleEditIds();
 			const idx = ids.indexOf(id);
 			const isPinned = tab?.pinned ?? false;
+			const absPath = tabAbsPath(tab?.fsRoot, tab?.filePath);
 			const editItems: ContextMenuItem[] = [
 				{
 					label: t("tabBar.copyPath", "Copy Path"),
 					action: () => {
-						if (tab?.filePath)
-							writeClipboard(shortenHomePath(tab.filePath)).catch((err) =>
-								appLogger.error("app", "Failed to copy path", err),
-							);
+						if (absPath) copyPathToClipboard(absPath);
 					},
 				},
 				{
@@ -251,7 +289,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 					disabled: idx >= ids.length - 1,
 				},
 			];
-			pushFileContextItem(editItems, tab?.filePath);
+			pushFileContextItem(editItems, absPath);
 			return editItems;
 		}
 
@@ -292,6 +330,16 @@ export const TabBar: Component<TabBarProps> = (props) => {
 						action: () => props.onDetachTab?.(id),
 						disabled: !hasSession || exited,
 					},
+			term?.suspended
+				? {
+						label: t("tabBar.resumeTab", "Resume Tab"),
+						action: () => void reportOutcome(resumeTerminal(id)),
+					}
+				: {
+						label: t("tabBar.suspendTab", "Suspend Tab"),
+						action: () => void reportOutcome(suspendTerminal(id)),
+						disabled: !term || suspendRefusal(term) !== null,
+					},
 		];
 		if (worktreeTargets.length > 0) {
 			items.push(
@@ -303,6 +351,21 @@ export const TabBar: Component<TabBarProps> = (props) => {
 						label: wt.branchName,
 						action: () => props.onMoveToWorktree?.(id, wt.path),
 					})),
+				},
+			);
+		}
+		// The alias is the address another agent is told to notify, so it has to be
+		// readable and copyable from the tab that owns it — otherwise it exists only
+		// inside an MCP payload.
+		if (term?.alias) {
+			const alias = term.alias;
+			items.push(
+				{ label: "", separator: true, action: () => {} },
+				{
+					label: t("tabBar.alias", "Alias: {alias}", { alias }),
+					action: () => {
+						writeClipboard(alias).catch((err) => appLogger.error("app", "Failed to copy alias", err));
+					},
 				},
 			);
 		}
@@ -322,6 +385,28 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		// that misbehaves. Gated on the same debug flag as the rest of the
 		// instrumentation: on in dev, wakeable in a release build.
 		const sessionId = term?.sessionId;
+		if (term?.agentType && sessionId && !exited) {
+			const isArmed = designModeStore.isArmed(sessionId);
+			items.push(
+				{ label: "", separator: true, action: () => {} },
+				{
+					label: isArmed
+						? t("tabBar.stopDesignMode", "Stop Design Mode")
+						: t("tabBar.startDesignMode", "Start Design Mode"),
+					action: () => {
+						if (isArmed) designModeStore.toggle(sessionId);
+					},
+					...(!isArmed
+						? {
+								children: designModeBrowsers.map((browser) => ({
+									label: browser.label,
+									action: () => designModeStore.toggle(sessionId, browser.id),
+								})),
+							}
+						: {}),
+				},
+			);
+		}
 		if (isPerfDebug() && sessionId) {
 			const recording = ptyCaptureStore.isRecording(sessionId);
 			items.push(
@@ -373,10 +458,10 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				ids = terminalsStore.getIds();
 			} else {
 				const repo = repositoriesStore.state.repositories[activeRepoPath];
-				if (!repo?.activeBranch) {
+				if (!repo?.activeWorkspaceId) {
 					ids = terminalsStore.getIds();
 				} else {
-					const branch = repo.branches[repo.activeBranch];
+					const branch = repo.workspaces[repo.activeWorkspaceId];
 					ids = branch?.terminals || [];
 				}
 			}
@@ -394,8 +479,8 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		if (ids.length === 0 && !repositoriesStore.state.branchSwitching) {
 			const activeRepoPath = repositoriesStore.state.activeRepoPath;
 			const repo = activeRepoPath ? repositoriesStore.state.repositories[activeRepoPath] : null;
-			const activeBranch = repo?.activeBranch;
-			const branchTerminals = activeBranch ? repo!.branches[activeBranch]?.terminals : null;
+			const activeBranch = repo?.activeWorkspaceId;
+			const branchTerminals = activeBranch ? repo!.workspaces[activeBranch]?.terminals : null;
 			if (branchTerminals && branchTerminals.length > 0) {
 				appLogger.warn("app", "TabBar: activeTerminals empty but branch has terminals", {
 					branchTerminals,
@@ -407,30 +492,18 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		}
 
 		// In split mode, reorder tabs to match the spatial pane layout (DFS order)
-		if (!paneLayoutStore.isSplit()) return ids;
-		const idSet = new Set(ids);
-		const ordered: string[] = [];
-		for (const groupId of paneLayoutStore.getAllGroupIds()) {
-			const group = paneLayoutStore.state.groups[groupId];
-			if (!group) continue;
-			for (const tab of group.tabs) {
-				if (tab.type === "terminal" && idSet.has(tab.id)) {
-					ordered.push(tab.id);
-					idSet.delete(tab.id);
-				}
-			}
-		}
-		// Append any orphan terminals not assigned to a pane group
-		for (const id of ids) {
-			if (idSet.has(id)) ordered.push(id);
-		}
-		return ordered;
+		return orderTerminalsByPaneLayout(ids);
 	};
 
 	// Branch key for filtering non-terminal tabs. A legitimate use of focus: this
 	// asks "what should be on screen for the repo the user is looking at", not
 	// "which repo owns this tab".
-	const activeBranchKey = () => currentBranchKey() ?? null;
+	const activeBranchKey = () => {
+		const repoPath = repositoriesStore.state.activeRepoPath;
+		// A repo may be active before workspace discovery completes. Keep its
+		// repo-scoped, branchless tabs visible when they stop being active.
+		return currentBranchKey() ?? (repoPath ? `${repoPath}|` : null);
+	};
 
 	const visibleDiffIds = () => diffTabsStore.getVisibleIds(activeBranchKey());
 	const visibleMdIds = () => mdTabsStore.getVisibleIds(activeBranchKey());
@@ -502,15 +575,15 @@ export const TabBar: Component<TabBarProps> = (props) => {
 			activeBranchKey,
 			() => {
 				const diffActive = diffTabsStore.state.activeId;
-				if (diffActive && !visibleDiffIds().includes(diffActive)) {
+				if (diffActive && !diffTabsStore.getVisibleIds(activeBranchKey(), false).includes(diffActive)) {
 					diffTabsStore.setActive(null);
 				}
 				const mdActive = mdTabsStore.state.activeId;
-				if (mdActive && !visibleMdIds().includes(mdActive)) {
+				if (mdActive && !mdTabsStore.getVisibleIds(activeBranchKey(), false).includes(mdActive)) {
 					mdTabsStore.setActive(null);
 				}
 				const editActive = editorTabsStore.state.activeId;
-				if (editActive && !visibleEditIds().includes(editActive)) {
+				if (editActive && !editorTabsStore.getVisibleIds(activeBranchKey(), false).includes(editActive)) {
 					editorTabsStore.setActive(null);
 				}
 			},
@@ -518,11 +591,36 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		),
 	);
 
-	// Evict non-pinned plugin-panel tabs from other repos on repo switch — they
-	// would otherwise pile up forever, invisible but still holding HTML in memory.
+	// Unpinning a cross-repo MCP tab restores its opening-repo scope immediately.
+	let previousMdPin: { id: string | null; pinned: boolean | undefined } | null = null;
 	createEffect(() => {
-		const current = repositoriesStore.state.activeRepoPath;
-		mdTabsStore.evictNonPinnedPluginPanelsForOtherRepos(current);
+		const id = mdTabsStore.state.activeId;
+		const pinned = id ? mdTabsStore.get(id)?.pinned : undefined;
+		if (
+			id &&
+			previousMdPin?.id === id &&
+			previousMdPin.pinned &&
+			!pinned &&
+			!mdTabsStore.getVisibleIds(activeBranchKey(), false).includes(id)
+		) {
+			mdTabsStore.setActive(null);
+		}
+		previousMdPin = { id, pinned };
+	});
+	let previousEditPin: { id: string | null; pinned: boolean | undefined } | null = null;
+	createEffect(() => {
+		const id = editorTabsStore.state.activeId;
+		const pinned = id ? editorTabsStore.get(id)?.pinned : undefined;
+		if (
+			id &&
+			previousEditPin?.id === id &&
+			previousEditPin.pinned &&
+			!pinned &&
+			!editorTabsStore.getVisibleIds(activeBranchKey(), false).includes(id)
+		) {
+			editorTabsStore.setActive(null);
+		}
+		previousEditPin = { id, pinned };
 	});
 
 	const tabTypeOf = (tabId: string): "terminal" | "markdown" | "diff" | "editor" | null => {
@@ -797,6 +895,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 			<div class={s.scrollRegion}>
 				{/* Left scroll arrow */}
 				<button
+					type="button"
 					class={cx(s.scrollArrow, s.scrollArrowLeft, canScrollLeft() && s.visible)}
 					onClick={() => scrollBy(-200)}
 					onContextMenu={(e) => openOverflowMenu(e, "left")}
@@ -826,8 +925,10 @@ export const TabBar: Component<TabBarProps> = (props) => {
 									dragOverSide={dragOverSide()}
 									dragInvalid={dragInvalid()}
 									isEditing={editingId() === id}
+									tabHintsActive={Boolean(props.tabHintsActive)}
 									quickSwitcherActive={Boolean(props.quickSwitcherActive)}
 									showWorkspaceMetadata={true}
+									designModeStatus={designModeForTab(id)?.status}
 									onSelect={props.onTabSelect}
 									onClose={props.onTabClose}
 									onFocusDetached={props.onFocusDetachedTab}
@@ -875,6 +976,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 									onPointerDown={handleMouseDrag}
 									showPinned={true}
 									richIcon={true}
+									onFocusDetached={props.onFocusDetachedTab}
 								/>
 							)}
 						</For>
@@ -914,8 +1016,10 @@ export const TabBar: Component<TabBarProps> = (props) => {
 												dragOverSide={dragOverSide()}
 												dragInvalid={dragInvalid()}
 												isEditing={editingId() === id}
+												tabHintsActive={Boolean(props.tabHintsActive)}
 												quickSwitcherActive={Boolean(props.quickSwitcherActive)}
 												showWorkspaceMetadata={false}
+												designModeStatus={designModeForTab(id)?.status}
 												onSelect={props.onTabSelect}
 												onClose={props.onTabClose}
 												onFocusDetached={props.onFocusDetachedTab}
@@ -955,6 +1059,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 												onPointerDown={handleMouseDrag}
 												showPinned={false}
 												richIcon={false}
+												onFocusDetached={props.onFocusDetachedTab}
 											/>
 										</Match>
 										<Match when={type() === "editor"}>
@@ -985,6 +1090,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 
 				{/* Right scroll arrow */}
 				<button
+					type="button"
 					class={cx(s.scrollArrow, s.scrollArrowRight, canScrollRight() && s.visible)}
 					onClick={() => scrollBy(200)}
 					onContextMenu={(e) => openOverflowMenu(e, "right")}
@@ -997,9 +1103,10 @@ export const TabBar: Component<TabBarProps> = (props) => {
 
 			{/* New Tab button: outside scroll region so arrows don't overlap it */}
 			<button
+				type="button"
 				class={s.newBtn}
-				onClick={() => props.onNewTab()}
-				onContextMenu={openNewTabMenu}
+				onClick={handleNewTabClick}
+				{...newAgentMenu.buttonHandlers}
 				title={`${t("tabBar.newTab", "New Tab")} (${keyFor("new-terminal")})`}
 			>
 				<IconPlus size={16} />
@@ -1071,11 +1178,11 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				onClose={tabMenu.close}
 			/>
 			<ContextMenu
-				items={getNewTabMenuItems()}
-				x={newTabMenu.position().x}
-				y={newTabMenu.position().y}
-				visible={newTabMenu.visible()}
-				onClose={newTabMenu.close}
+				items={newAgentMenu.items()}
+				x={newAgentMenu.position().x}
+				y={newAgentMenu.position().y}
+				visible={newAgentMenu.visible()}
+				onClose={newAgentMenu.close}
 			/>
 			<ContextMenu
 				items={overflowItems()}

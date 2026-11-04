@@ -23,7 +23,7 @@ async function fetchRepo(repoPath: string): Promise<void> {
 	try {
 		const result = await invoke<{ success: boolean; stdout: string; stderr: string; exit_code: number }>(
 			"run_git_command",
-			{ path: repoPath, args: ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=15", "fetch", "--all"] },
+			{ path: repoPath, args: ["fetch", "--all"] },
 		);
 		if (result.success) {
 			repositoriesStore.bumpGitRevision(repoPath);

@@ -1,0 +1,558 @@
+{
+  "data": {
+    "repository": {
+      "pullRequests": {
+        "nodes": [
+          {
+            "number": 340793,
+            "headRefOid": "dc73b1a01be8002c3b3c764a1fb4840d05562094",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              },
+              "nodes": []
+            }
+          },
+          {
+            "number": 340797,
+            "headRefOid": "b8448eeb9da1aa56c3fcaf60cc316bc5099e9592",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              },
+              "nodes": []
+            }
+          },
+          {
+            "number": 340799,
+            "headRefOid": "566f668bf5483592bb6a6a9e03c3f44f502b9143",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMjoxMDoxMlrOqv_S0g=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6q8j2_",
+                  "path": "src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostSessionInputPills.ts",
+                  "line": 728,
+                  "originalLine": 729,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMTowNDo1OVrO_GX9Iw=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78Zf0j",
+                        "databaseId": 4234542371,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340799#discussion_r4234542371",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T21:04:59Z"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_kwDOAn8RLM6q8j3c",
+                  "path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatImageGenerationBatchPart.ts",
+                  "line": 392,
+                  "originalLine": 428,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMTowNDo1OVrO_GX9Ww=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78Zf1b",
+                        "databaseId": 4234542427,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340799#discussion_r4234542427",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T21:04:59Z"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_kwDOAn8RLM6q_9LS",
+                  "path": "src/vs/workbench/contrib/chat/browser/widget/chatListRenderer.ts",
+                  "line": 4818,
+                  "originalLine": 4818,
+                  "diffSide": "RIGHT",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMjoxMDoxMlrO_HvZBA=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78e9kE",
+                        "databaseId": 4235974916,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340799#discussion_r4235974916",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T02:10:12Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 340803,
+            "headRefOid": "7926288fd77e8fe9f86fb54228583c4454c66801",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMzoyOToyOVrOqvokWQ=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6q881O",
+                  "path": "src/vs/platform/agentHost/node/copilot/copilotAgentSession.ts",
+                  "line": null,
+                  "originalLine": 5464,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": true,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMTo0Mjo1MVrO_GmtNg=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78aIQ-",
+                        "databaseId": 4234708030,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4234708030",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T21:30:54Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78aa02",
+                        "databaseId": 4234784054,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4234784054",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T21:42:51Z"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_kwDOAn8RLM6q881k",
+                  "path": "src/vs/platform/agentHost/node/copilot/copilotAgentSession.ts",
+                  "line": 7147,
+                  "originalLine": 7127,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMTozNzowOVrO_Gkivg=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78aIRg",
+                        "databaseId": 4234708064,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4234708064",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T21:30:54Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78aSK-",
+                        "databaseId": 4234748606,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4234748606",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T21:37:09Z"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_kwDOAn8RLM6q-iRZ",
+                  "path": "src/vs/platform/agentHost/node/copilot/copilotAgentSession.ts",
+                  "line": 5513,
+                  "originalLine": 5513,
+                  "diffSide": "RIGHT",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMzozNDowOVrO_HMZBg=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78csjo",
+                        "databaseId": 4235380968,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4235380968",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T23:29:29Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78cvvp",
+                        "databaseId": 4235394025,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4235394025",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T23:32:40Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78cxkG",
+                        "databaseId": 4235401478,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340803#discussion_r4235401478",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T23:34:09Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 340808,
+            "headRefOid": "0859c23fff28b46137d721361b81dbe0b5df0382",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              },
+              "nodes": []
+            }
+          },
+          {
+            "number": 340820,
+            "headRefOid": "5428ec8a847a3d153fd42042101345fbf02d28fb",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMzoxNjoyNFrOqvmcyA=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6q-ZzI",
+                  "path": "src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerCard.ts",
+                  "line": 441,
+                  "originalLine": 441,
+                  "diffSide": "RIGHT",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wOVQyMzoxNjoyNFrO_HHv4w=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78ce_j",
+                        "databaseId": 4235325411,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340820#discussion_r4235325411",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-09T23:16:24Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 340824,
+            "headRefOid": "2365de89d2defabbdac11e778f839b14f5894c64",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDowNjoxOFrOqvuWLQ=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6q-5Yt",
+                  "path": "src/vs/workbench/contrib/url/browser/trustedDomainsValidator.ts",
+                  "line": null,
+                  "originalLine": 52,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": true,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDoyNDoxOVrO_HY8Dg=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dRx5",
+                        "databaseId": 4235533433,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340824#discussion_r4235533433",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:06:18Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78djwO",
+                        "databaseId": 4235607054,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340824#discussion_r4235607054",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:24:19Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 340826,
+            "headRefOid": "47193108a9a7ff2817cf780d5b9444be12a76174",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDowOTowNVrOqvuu9w=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6q-67P",
+                  "path": "extensions/github-authentication/src/extension.ts",
+                  "line": null,
+                  "originalLine": 37,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": true,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDoxNDoyMFrO_HWNfQ=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dUNc",
+                        "databaseId": 4235543388,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340826#discussion_r4235543388",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:09:05Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dY19",
+                        "databaseId": 4235562365,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340826#discussion_r4235562365",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:14:20Z"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_kwDOAn8RLM6q-673",
+                  "path": "extensions/github-authentication/src/common/notification.ts",
+                  "line": 7,
+                  "originalLine": 7,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": false,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDowOTowNVrO_HVDkQ=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dUOR",
+                        "databaseId": 4235543441,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340826#discussion_r4235543441",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:09:05Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 340827,
+            "headRefOid": "f0137cd68b42f8d75bdb28b6297ce5f911c4996e",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDozNzo1MVrOqvzEZQ=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6q-9cP",
+                  "path": "src/vs/platform/agentHost/node/copilot/copilotAgent.ts",
+                  "line": null,
+                  "originalLine": 2012,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": true,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDoyNDo0OFrO_HZFAQ=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dYQf",
+                        "databaseId": 4235559967,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340827#discussion_r4235559967",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:13:40Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dkUB",
+                        "databaseId": 4235609345,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340827#discussion_r4235609345",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:24:48Z"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_kwDOAn8RLM6q_MRl",
+                  "path": "src/vs/platform/agentHost/node/agentService.ts",
+                  "line": 5375,
+                  "originalLine": 5363,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": true,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQwMDo1MToxMlrO_HfBuw=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78dwJV",
+                        "databaseId": 4235657813,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340827#discussion_r4235657813",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:37:51Z"
+                      },
+                      {
+                        "id": "PRRC_kwDOAn8RLM78d8G7",
+                        "databaseId": 4235706811,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340827#discussion_r4235706811",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T00:51:12Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 340866,
+            "headRefOid": "cc75c0a126b361f16d244c2a2f635f324ee3a562",
+            "reviewThreads": {
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQxNToyNjoxN1rOqxTqIw=="
+              },
+              "nodes": [
+                {
+                  "id": "PRRT_kwDOAn8RLM6rFOoj",
+                  "path": "src/vs/platform/agentHost/node/copilot/copilotBuiltinAgents.ts",
+                  "line": null,
+                  "originalLine": 45,
+                  "diffSide": "RIGHT",
+                  "isResolved": true,
+                  "isOutdated": true,
+                  "comments": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMFQxNToyNjoxN1rO_JzqEg=="
+                    },
+                    "nodes": [
+                      {
+                        "id": "PRRC_kwDOAn8RLM78nOoS",
+                        "databaseId": 4238141970,
+                        "body": "Recorded public review text",
+                        "url": "https://github.com/microsoft/vscode/pull/340866#discussion_r4238141970",
+                        "author": {
+                          "login": "recorded-user"
+                        },
+                        "createdAt": "2026-10-10T15:26:17Z"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

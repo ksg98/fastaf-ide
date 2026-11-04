@@ -29,9 +29,12 @@ export function isNotificationType(type: string): type is PrNotificationType {
 
 export interface PrNotification {
 	id: string;
+	connectionId?: string;
 	repoPath: string;
 	branch: string;
 	prNumber: number;
+	/** Captured at the transition so reused head branches cannot redirect an old notice. */
+	url?: string;
 	title: string;
 	type: PrNotificationType;
 	createdAt: number;
@@ -86,7 +89,7 @@ function createPrNotificationsStore() {
 
 	/** Add a new notification (deduplicates by pr+type) */
 	function add(notification: Omit<PrNotification, "id" | "createdAt" | "focusedTimeMs" | "dismissed">): void {
-		const id = `${notification.repoPath}:${notification.prNumber}:${notification.type}`;
+		const id = `${notification.connectionId ? `${notification.connectionId}:` : ""}${notification.repoPath}:${notification.prNumber}:${notification.type}`;
 		// Don't duplicate — if same notification already active, skip
 		if (state.notifications.some((n) => n.id === id && !n.dismissed)) return;
 

@@ -29,7 +29,7 @@ export default function TipOfTheDay() {
 		const pos = dots.indexOf(i);
 		if (pos === -1) return 0;
 		if (pos === 0 && dots[0] > 0) return 0.6;
-		if (pos === dots.length - 1 && dots[dots.length - 1] < TIPS.length - 1) return 0.6;
+		if (pos === dots.length - 1 && dots.at(-1)! < TIPS.length - 1) return 0.6;
 		return 1;
 	};
 
@@ -37,7 +37,7 @@ export default function TipOfTheDay() {
 		<div class={styles.card}>
 			<div class={styles.label}>Tip of the day</div>
 			<div class={styles.body}>
-				<button class={styles.arrow} onClick={prev} aria-label="Previous tip">
+				<button type="button" class={styles.arrow} onClick={prev} aria-label="Previous tip">
 					<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
 						<path d="M10 3L5 8l5 5V3z" />
 					</svg>
@@ -47,7 +47,7 @@ export default function TipOfTheDay() {
 					<span class={styles.description}>{TIPS[index()].description}</span>
 					{TIPS[index()].shortcut && <kbd class={styles.shortcut}>{TIPS[index()].shortcut}</kbd>}
 				</div>
-				<button class={styles.arrow} onClick={next} aria-label="Next tip">
+				<button type="button" class={styles.arrow} onClick={next} aria-label="Next tip">
 					<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
 						<path d="M6 3l5 5-5 5V3z" />
 					</svg>

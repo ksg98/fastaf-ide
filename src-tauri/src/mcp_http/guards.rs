@@ -25,6 +25,10 @@ use std::net::SocketAddr;
 #[derive(Clone, Copy)]
 pub(super) struct Authenticated;
 
+/// Actual credential verification, distinct from transport admission.
+#[derive(Clone, Copy)]
+pub(super) struct UserAuthenticated;
+
 /// Reject requests that did not originate on the loopback interface.
 ///
 /// Used by strict RCE/diagnostics surfaces (e.g. `/debug/invoke_js`) that must

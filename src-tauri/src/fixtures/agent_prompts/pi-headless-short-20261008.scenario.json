@@ -1,0 +1,84 @@
+{
+  "recorded_at": "2026-10-07T23:24:55.905029+00:00",
+  "agent": "pi",
+  "binary": "/opt/homebrew/bin/pi",
+  "scenario": {
+    "agent": "pi",
+    "args": [
+      "--no-tools",
+      "--no-extensions",
+      "--no-skills",
+      "--no-session",
+      "--provider",
+      "google",
+      "--model",
+      "gemini-2.5-flash"
+    ],
+    "steps": [
+      {
+        "action": "wait",
+        "expect": {
+          "agent": "idle",
+          "awaiting": false
+        },
+        "replay_expect": {
+          "awaiting": false
+        },
+        "timeout_secs": 20
+      },
+      {
+        "action": "prompt",
+        "text": "Reply with the single uppercase English word meaning prepared. Do not use any tools."
+      },
+      {
+        "action": "wait",
+        "expect": {
+          "agent": "working"
+        },
+        "timeout_secs": 20
+      },
+      {
+        "action": "wait",
+        "text": "READY",
+        "timeout_secs": 30
+      },
+      {
+        "action": "interrupt"
+      }
+    ]
+  },
+  "expected_states": [
+    {
+      "awaiting": false
+    },
+    {
+      "agent": "working"
+    }
+  ],
+  "status": "captured",
+  "daemon_health": {
+    "ok": true,
+    "uptime_secs": 0,
+    "session_count": 0,
+    "protocol_version": 1,
+    "build": {
+      "version": "1.8.0",
+      "target": "aarch64-apple-darwin",
+      "sha256": "0fece3d5e06bb87845d765695ecef7148f87a1326f8fb033f0aaa2ee1556bbdb"
+    },
+    "socket_path": "<output>/tuic-mcp-751227f9f735b343.sock",
+    "instance_id": "54c83678-969a-42fd-b93a-75cf86fe8453"
+  },
+  "observed_states": [
+    {
+      "agent": "idle",
+      "awaiting": false
+    },
+    {
+      "agent": "working",
+      "awaiting": false
+    }
+  ],
+  "sha256": "4039e0257bc8748ac01aa68fd65974dc72fb05a6c6b54a1cec4c899e72518536",
+  "capture": "<output>/raw/61d00ed1-20e3-4f36-9f74-03da44ce0373.tcap"
+}

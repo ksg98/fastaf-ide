@@ -35,6 +35,58 @@ struct SelfNode {
     dns_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PeerStatusJson {
+    backend_state: Option<String>,
+    peer: Option<std::collections::HashMap<String, PeerNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PeerNode {
+    #[serde(default)]
+    host_name: String,
+    #[serde(default, rename = "DNSName")]
+    dns_name: String,
+}
+
+/// Match an advertised peer, never guess a tailnet suffix.
+pub(crate) fn peer_fqdn_from_status(bytes: &[u8], host: &str) -> Option<String> {
+    let status: PeerStatusJson = serde_json::from_slice(bytes).ok()?;
+    if status.backend_state.as_deref() != Some("Running") || host.contains('.') {
+        return None;
+    }
+    let peers = status.peer?;
+    let mut matches = peers.values().filter_map(|peer| {
+        let fqdn = strip_trailing_dot(&peer.dns_name);
+        ((peer.host_name.eq_ignore_ascii_case(host)
+            || fqdn
+                .split('.')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(host)))
+            && is_valid_fqdn(&fqdn)
+            && fqdn.ends_with(".ts.net"))
+        .then_some(fqdn)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+pub(crate) async fn peer_fqdn(host: &str) -> Option<String> {
+    // Bound recovery lookup: kill a hung CLI instead of holding up a connection.
+    let mut command = tokio::process::Command::from(status_command()?);
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(2), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    peer_fqdn_from_status(&output.stdout, host)
+}
+
 /// Find the Tailscale CLI binary path.
 pub(crate) fn find_binary() -> Option<PathBuf> {
     // Try PATH first (works on all platforms if installed properly)
@@ -75,27 +127,34 @@ pub(crate) fn find_binary() -> Option<PathBuf> {
 
 /// Detect Tailscale daemon state by running `tailscale status --json`.
 pub(crate) fn detect() -> TailscaleState {
-    let binary = match find_binary() {
-        Some(b) => b,
-        None => return TailscaleState::NotInstalled,
+    let Some(mut command) = status_command() else {
+        return TailscaleState::NotInstalled;
     };
-
-    let output = match std::process::Command::new(&binary)
-        .args(["status", "--json"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(source = "tailscale", "Failed to run tailscale CLI: {e}");
-            return TailscaleState::NotRunning;
+    match command.output() {
+        Ok(output) if output.status.success() => parse_status_json(&output.stdout),
+        Err(error) => {
+            tracing::warn!(source = "tailscale", "Failed to run tailscale CLI: {error}");
+            TailscaleState::NotRunning
         }
-    };
-
-    if !output.status.success() {
-        return TailscaleState::NotRunning;
+        _ => TailscaleState::NotRunning,
     }
+}
 
-    parse_status_json(&output.stdout)
+/// Build every Tailscale invocation through the same process boundary.
+fn cli_command(binary: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(binary);
+    // The macOS app executable also serves as the CLI when this mode is explicit.
+    if binary.ends_with("Tailscale.app/Contents/MacOS/Tailscale") {
+        command.env("TAILSCALE_BE_CLI", "1");
+    }
+    command
+}
+
+/// Detection and peer advice use the same CLI and status source.
+fn status_command() -> Option<std::process::Command> {
+    let mut command = cli_command(&find_binary()?);
+    command.args(["status", "--json"]);
+    Some(command)
 }
 
 /// Parse the JSON output from `tailscale status --json`.
@@ -155,7 +214,7 @@ fn is_valid_fqdn(name: &str) -> bool {
 /// Returns (cert_pem, key_pem) as byte vectors.
 /// Uses platform-specific transport:
 /// - Unix: HTTP over Unix socket at /var/run/tailscale/tailscaled.sock
-/// - Windows: `tailscale cert` CLI (writes to temp files, reads back)
+/// - Windows/macOS: `tailscale cert` CLI (PEM read from stdout)
 pub(crate) async fn provision_cert(fqdn: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     #[cfg(unix)]
     {
@@ -222,44 +281,38 @@ async fn provision_cert_unix(fqdn: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
 async fn provision_cert_cli(fqdn: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let binary = find_binary().ok_or_else(|| anyhow::anyhow!("Tailscale binary not found"))?;
 
-    let temp_dir = std::env::temp_dir().join("tuicommander-certs");
-    tokio::fs::create_dir_all(&temp_dir).await?;
-
-    let cert_path = temp_dir.join(format!("{fqdn}.crt"));
-    let key_path = temp_dir.join(format!("{fqdn}.key"));
-
-    let cert_path_str = cert_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("cert path is not valid UTF-8: {cert_path:?}"))?;
-    let key_path_str = key_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("key path is not valid UTF-8: {key_path:?}"))?;
-
-    let output = tokio::process::Command::new(&binary)
-        .args([
-            "cert",
-            "--cert-file",
-            cert_path_str,
-            "--key-file",
-            key_path_str,
-            fqdn,
-        ])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("tailscale cert failed: {stderr}");
-    }
-
-    let cert_pem = tokio::fs::read(&cert_path).await?;
-    let key_pem = tokio::fs::read(&key_path).await?;
-
-    // Clean up temp files (best effort)
-    let _ = tokio::fs::remove_file(&cert_path).await;
-    let _ = tokio::fs::remove_file(&key_path).await;
+    // The signed macOS app CLI is sandboxed and cannot write into the
+    // caller's temp directory. Read PEM from stdout instead; no private key
+    // touches disk, and the same flags work with the standalone CLI.
+    let cert_pem = cert_cli_pem(&binary, fqdn, "--cert-file=-").await?;
+    let key_pem = cert_cli_pem(&binary, fqdn, "--key-file=-").await?;
 
     Ok((cert_pem, key_pem))
+}
+
+/// Request one PEM stream. Setting just one output flag suppresses the other
+/// file entirely (the CLI defaults to files only when both flags are unset).
+async fn cert_cli_pem(
+    binary: &std::path::Path,
+    fqdn: &str,
+    output_flag: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let output = tokio::process::Command::from(cert_command(binary, fqdn, output_flag))
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tailscale cert failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output.stdout)
+}
+
+fn cert_command(binary: &std::path::Path, fqdn: &str, output_flag: &str) -> std::process::Command {
+    let mut command = cli_command(binary);
+    command.args(["cert", output_flag, fqdn]);
+    command
 }
 
 /// Background loop that re-provisions the TLS certificate every 24 hours.
@@ -348,6 +401,105 @@ mod tests {
         "Version": "1.94.1",
         "BackendState": "Stopped"
     }"#;
+
+    /// Catches the app-bundle fallback starting the GUI instead of the CLI.
+    #[test]
+    fn app_bundle_command_enables_cli_mode() {
+        for binary in [
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/Users/test/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        ] {
+            let command = cli_command(std::path::Path::new(binary));
+            assert_eq!(command.get_program(), std::ffi::OsStr::new(binary));
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == "TAILSCALE_BE_CLI")
+                    .and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new("1")),
+                "bundle CLI mode missing for {binary}"
+            );
+        }
+    }
+
+    /// Catches a bundle workaround overriding standalone CLI environments.
+    #[test]
+    fn standalone_command_keeps_environment_unchanged() {
+        for binary in [
+            "/opt/homebrew/bin/tailscale",
+            "/usr/bin/tailscale",
+            r"C:\Program Files\Tailscale\tailscale.exe",
+            "/usr/local/bin/Tailscale",
+            "/Applications/Other.app/Contents/MacOS/Tailscale",
+        ] {
+            let command = cli_command(std::path::Path::new(binary));
+            assert_eq!(command.get_program(), std::ffi::OsStr::new(binary));
+            assert_eq!(command.get_envs().count(), 0, "override for {binary}");
+        }
+    }
+
+    /// Catches loss of CLI mode or arguments when cert/peer commands become async.
+    #[test]
+    fn async_command_preserves_bundle_cli_mode_and_arguments() {
+        let mut command = cli_command(std::path::Path::new(
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        ));
+        command.args(["status", "--json"]);
+        let command = tokio::process::Command::from(command);
+        assert_eq!(
+            command.as_std().get_args().collect::<Vec<_>>(),
+            ["status", "--json"]
+        );
+        assert_eq!(
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "TAILSCALE_BE_CLI")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("1"))
+        );
+    }
+
+    /// Catches file output returning to the sandboxed app CLI, which fails EPERM.
+    #[test]
+    fn cert_commands_read_one_pem_stream_without_file_writes() {
+        let binary = std::path::Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        for output_flag in ["--cert-file=-", "--key-file=-"] {
+            let command = cert_command(binary, "host.ts.net", output_flag);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["cert", output_flag, "host.ts.net"]
+            );
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == "TAILSCALE_BE_CLI"
+                        && value == Some(std::ffi::OsStr::new("1")))
+            );
+        }
+    }
+
+    #[test]
+    fn short_name_advice_uses_recorded_peer_not_local_tailnet_guess() {
+        // Recorded from tailscale status --json on 2026-10-10; only needed fields retained.
+        let bytes = include_bytes!("fixtures/tailscale-peer-status.json");
+        assert_eq!(
+            peer_fqdn_from_status(bytes, "mac-mint").as_deref(),
+            Some("mac-mint.tail911da.ts.net")
+        );
+        assert_eq!(
+            peer_fqdn_from_status(bytes, "MAC-MINT").as_deref(),
+            Some("mac-mint.tail911da.ts.net")
+        );
+        assert_eq!(peer_fqdn_from_status(bytes, "unknown-peer"), None);
+        assert_eq!(peer_fqdn_from_status(bytes, "mac-mint.example.net"), None);
+        let mut status: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        status["BackendState"] = "Stopped".into();
+        assert_eq!(
+            peer_fqdn_from_status(&serde_json::to_vec(&status).unwrap(), "mac-mint"),
+            None
+        );
+    }
 
     #[test]
     fn parse_status_running_with_https() {

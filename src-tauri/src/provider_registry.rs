@@ -430,7 +430,12 @@ fn migrate_from_legacy() -> ProviderRegistry {
 }
 
 pub(crate) fn save_registry(registry: &ProviderRegistry) -> Result<(), String> {
-    ConfigFile::<ProviderRegistry>::new(CONFIG_FILE).save(registry)
+    // A whole-document replace under the config locks (upstream made the bare
+    // `save` test-only).
+    ConfigFile::<ProviderRegistry>::new(CONFIG_FILE).update(|current| {
+        *current = registry.clone();
+        true
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +486,9 @@ pub(crate) fn resolve_slot(
 
 /// Resolve a provider id to its endpoint + key, independent of any model.
 /// Surfaces that list a provider's models live (rather than using the models
-/// registered here) need the endpoint before a model exists.
+/// registered here) need the endpoint before a model exists. Its caller is the
+/// dictation rewrite, built only with the `dictation` feature.
+#[cfg_attr(not(feature = "dictation"), allow(dead_code))]
 pub(crate) fn resolve_provider(
     registry: &ProviderRegistry,
     provider_id: &str,

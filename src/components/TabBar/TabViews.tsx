@@ -8,11 +8,14 @@ import { paneLayoutStore } from "../../stores/paneLayout";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { terminalsStore } from "../../stores/terminals";
+import { uiStore } from "../../stores/ui";
 import { cx } from "../../utils";
 import { keyFor } from "../../utils/hotkey";
+import { markdownDocumentPanelId } from "../../utils/markdownDocumentPanelId";
 import type { LeafRect } from "../../utils/paneTreeGeometry";
 import { getRepoColor } from "../../utils/repoColor";
 import { GlobeIcon } from "../GlobeIcon";
+import { Input } from "../ui/Input";
 import s from "./TabBar.module.css";
 
 type TabKind = "diff" | "editor" | "markdown" | "terminal";
@@ -88,7 +91,9 @@ const AWAITING_CLASSES: Record<string, string> = {
 
 interface TerminalTabViewProps extends SharedTabViewProps {
 	index: number;
+	designModeStatus?: "armed" | "stopped";
 	quickSwitcherActive: boolean;
+	tabHintsActive?: boolean;
 	isEditing: boolean;
 	showWorkspaceMetadata: boolean;
 	onFocusDetached?: (id: string) => void;
@@ -129,12 +134,13 @@ export const TerminalTabView: Component<TerminalTabViewProps> = (props) => {
 					isDetached() && s.detached,
 					awaitingInput() && s.awaitingInput,
 					awaitingInput() && AWAITING_CLASSES[awaitingInput()!],
-					!awaitingInput() && isBusy() && s.shellBusy,
+					!awaitingInput() && !terminal()?.providerRecovery && isBusy() && s.shellBusy,
 					!awaitingInput() && !isBusy() && isUnseen() && s.shellUnseen,
 					!awaitingInput() && isIdle() && !isUnseen() && s.shellIdle,
 					isExited() && s.shellExited,
-					terminal()?.isRemote && s.remoteTab,
+					terminal()?.isExternallyCreated && s.remoteTab,
 					terminal()?.standby && s.standby,
+					terminal()?.suspended && s.suspended,
 					...dragClasses(props),
 				)}
 				data-tab-id={props.id}
@@ -158,20 +164,36 @@ export const TerminalTabView: Component<TerminalTabViewProps> = (props) => {
 				}}
 			>
 				<span class={s.tabIcon}>●</span>
+				<Show when={props.designModeStatus === "armed"}>
+					<span
+						class={cx(s.designModeBadge, s.designModeArmed)}
+						title={t("tabBar.designModeArmed", "Design Mode armed")}
+					>
+						D
+					</span>
+				</Show>
 				<Show
 					when={props.isEditing}
 					fallback={
 						<span class={s.tabName}>
-							<Show when={terminal()?.isRemote && terminal()?.agentType}>
+							<Show when={terminal()?.isExternallyCreated && terminal()?.agentType}>
 								<span class={s.ptyPrefix}>PTY · </span>
 							</Show>
 							{terminal()?.name}
+							<Show when={terminal()?.providerRecovery}>
+								<span> · recovering</span>
+							</Show>
 							<Show when={terminal()?.standby}>
 								<span class={s.standbyBadge} title="Standby (paused)">
 									<svg viewBox="0 0 8 10" width="8" height="10" fill="currentColor">
 										<rect x="0" y="0" width="3" height="10" />
 										<rect x="5" y="0" width="3" height="10" />
 									</svg>
+								</span>
+							</Show>
+							<Show when={terminal()?.suspended}>
+								<span class={s.suspendedBadge} title={t("tabBar.suspended", "Suspended")}>
+									zz
 								</span>
 							</Show>
 							<Show when={isDetached()}>
@@ -190,7 +212,8 @@ export const TerminalTabView: Component<TerminalTabViewProps> = (props) => {
 						</span>
 					}
 				>
-					<input
+					<Input
+						compact
 						class={s.tabNameInput}
 						type="text"
 						value={terminal()?.name || ""}
@@ -214,6 +237,7 @@ export const TerminalTabView: Component<TerminalTabViewProps> = (props) => {
 				<PanePositionIcon tabId={props.id} rects={props.paneRects} />
 				<Show when={props.showWorkspaceMetadata && isPromoted() && !globalWorkspaceStore.isActive()}>
 					<button
+						type="button"
 						class={s.globeIcon}
 						title={t("tabBar.removeFromWorkspace", "Remove from Global Workspace")}
 						onClick={(event) => {
@@ -224,13 +248,16 @@ export const TerminalTabView: Component<TerminalTabViewProps> = (props) => {
 						<GlobeIcon size={11} />
 					</button>
 				</Show>
-				<Show when={props.quickSwitcherActive && props.index < 9}>
-					<span class={s.shortcutBadge}>{keyFor(`switch-tab-${props.index + 1}`)}</span>
+				<Show when={(props.tabHintsActive || props.quickSwitcherActive) && props.index < 9}>
+					<span class={s.shortcutBadge}>
+						{keyFor(`${props.tabHintsActive ? "switch-tab" : "switch-branch"}-${props.index + 1}`)}
+					</span>
 				</Show>
 				<Show when={props.showWorkspaceMetadata && hovered() && globalWorkspaceStore.isActive() && repoName()}>
 					<span class={s.repoOverlay}>{repoName()}</span>
 				</Show>
 				<button
+					type="button"
 					class={s.tabClose}
 					title={t("tabBar.close", "Close")}
 					onClick={(event) => {
@@ -265,6 +292,7 @@ const focusDockedTab = (id: string) => {
 interface FileTabViewProps extends SharedTabViewProps {
 	showPinned: boolean;
 	richIcon: boolean;
+	onFocusDetached?: (id: string) => void;
 }
 
 export const DiffTabView: Component<FileTabViewProps> = (props) => {
@@ -319,6 +347,7 @@ export const DiffTabView: Component<FileTabViewProps> = (props) => {
 				</span>
 				<PanePositionIcon tabId={props.id} rects={props.paneRects} />
 				<button
+					type="button"
 					class={s.tabClose}
 					title={t("tabBar.close", "Close")}
 					onClick={(event) => {
@@ -336,6 +365,7 @@ export const DiffTabView: Component<FileTabViewProps> = (props) => {
 
 export const MarkdownTabView: Component<FileTabViewProps> = (props) => {
 	const tab = () => mdTabsStore.get(props.id);
+	const isDetached = () => uiStore.isDetached(markdownDocumentPanelId(props.id));
 	const title = () => {
 		const current = tab();
 		return current?.type === "file"
@@ -354,12 +384,17 @@ export const MarkdownTabView: Component<FileTabViewProps> = (props) => {
 				class={cx(
 					s.tab,
 					tab()?.type === "file" ? s.mdTab : tab()?.type === "pr-diff" ? s.diffTab : s.panelTab,
-					mdTabsStore.state.activeId === props.id && s.active,
+					mdTabsStore.state.activeId === props.id && !isDetached() && s.active,
+					isDetached() && s.detached,
 					dockedRightClass(props.id),
 					...dragClasses(props),
 				)}
 				data-tab-id={props.id}
 				onClick={() => {
+					if (isDetached()) {
+						props.onFocusDetached?.(props.id);
+						return;
+					}
 					mdTabsStore.setActive(props.id);
 					focusDockedTab(props.id);
 					props.onSelect(props.id);
@@ -398,6 +433,7 @@ export const MarkdownTabView: Component<FileTabViewProps> = (props) => {
 				<span class={s.tabName}>{label()}</span>
 				<PanePositionIcon tabId={props.id} rects={props.paneRects} />
 				<button
+					type="button"
 					class={s.tabClose}
 					title={t("tabBar.close", "Close")}
 					onClick={(event) => {
@@ -458,6 +494,7 @@ export const EditorTabView: Component<Omit<FileTabViewProps, "richIcon">> = (pro
 				<span class={s.tabName}>{tab()?.fileName}</span>
 				<PanePositionIcon tabId={props.id} rects={props.paneRects} />
 				<button
+					type="button"
 					class={s.tabClose}
 					title={t("tabBar.close", "Close")}
 					onClick={(event) => {

@@ -102,7 +102,7 @@ pub(crate) async fn execute_api_prompt(
         crate::provider_registry::SlotName::Headless,
     )
     .map_err(|_| {
-        "LLM API not configured — set provider and model in Settings > Agents".to_string()
+        "LLM API not configured — set provider and model in Settings > Providers".to_string()
     })?;
 
     let config = resolved.config;
@@ -131,6 +131,48 @@ pub(crate) async fn execute_api_prompt(
 }
 
 // ---------------------------------------------------------------------------
+// Unattended one-shot turns
+// ---------------------------------------------------------------------------
+
+/// How long an unattended turn may take. `execute_api_prompt` caps any request
+/// at 120s, so this is that cap: a PR diff or a repo snapshot is a big prompt.
+const UNATTENDED_TIMEOUT_MS: u64 = 120_000;
+
+/// One unattended turn on the Headless slot: a system prompt and content in,
+/// the model's text out.
+///
+/// Upstream 2.0 runs PR review, the changelog and the improvement scan as an
+/// ego turn (`acp::oneshot::ask`); FastAF runs them on its own engine so they
+/// work with no ego installed. The failure sentences are `execute_api_prompt`'s:
+/// no provider configured, a timeout, or an empty answer each say so.
+pub(crate) async fn ask(system: &str, content: String) -> Result<String, String> {
+    execute_api_prompt(Some(system.to_string()), content, UNATTENDED_TIMEOUT_MS).await
+}
+
+/// The JSON object inside a model answer: first `{` to last `}`. Deliberately
+/// not a parser, so an answer with no object comes back unchanged and the
+/// failure surfaces as a parse error quoting what the model said.
+pub(crate) fn extract_json(text: &str) -> &str {
+    match (text.find('{'), text.rfind('}')) {
+        (Some(start), Some(end)) if end > start => &text[start..=end],
+        _ => text.trim(),
+    }
+}
+
+/// How much of an unusable answer is quoted back in the error.
+const MAX_QUOTED: usize = 300;
+
+/// Report an answer that would not parse, with enough of it to act on and
+/// without pasting a whole transcript into a toast.
+pub(crate) fn unparseable(what: &str, err: impl std::fmt::Display, answer: &str) -> String {
+    let quoted = match answer.char_indices().nth(MAX_QUOTED) {
+        Some((cut, _)) => format!("{}…", &answer[..cut]),
+        None => answer.to_string(),
+    };
+    format!("The model did not answer with the {what} this needs ({err}). It said: {quoted}")
+}
+
+// ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
 
@@ -140,11 +182,11 @@ fn map_genai_error(err: genai::Error) -> String {
 
 fn map_genai_error_str(msg: &str) -> String {
     if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("invalid_api_key") {
-        "Authentication failed — check your API key in Settings > Agents".to_string()
+        "Authentication failed — check your API key in Settings > Providers".to_string()
     } else if msg.contains("429") || msg.contains("rate") {
         "Rate limit exceeded — wait a moment and try again".to_string()
     } else if msg.contains("404") || msg.contains("model_not_found") {
-        format!("Model not found — check the model name in Settings > Agents. Error: {msg}")
+        format!("Model not found — check the model name in Settings > Providers. Error: {msg}")
     } else if msg.contains("timeout") || msg.contains("connect") {
         format!("Network error — check your connection. Error: {msg}")
     } else {
@@ -212,8 +254,8 @@ mod tests {
     fn missing_fields_use_defaults() {
         let loaded: LlmApiConfig = serde_json::from_str("{}").unwrap();
         assert!(!loaded.is_configured());
-        assert!(loaded.provider.is_empty());
-        assert!(loaded.model.is_empty());
+        assert_eq!(loaded.provider, "");
+        assert_eq!(loaded.model, "");
         assert!(loaded.base_url.is_none());
     }
 

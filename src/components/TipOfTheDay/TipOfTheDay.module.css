@@ -123,3 +123,22 @@
   opacity: 1;
   background: var(--accent);
 }
+
+/* Contextual tip (ContextualTip, LongRunTip): an inline note with a Dismiss
+   action — a faint wash and one hairline, never a raised card. */
+.contextual {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--wash-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.contextual .content {
+  align-items: flex-start;
+  text-align: left;
+  flex-basis: 240px;
+}

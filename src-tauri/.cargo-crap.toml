@@ -13,7 +13,7 @@ threshold = 30.0
 # itself covers them.
 missing = "skip"
 
-# patches/ holds our vendored alacritty_terminal / vte / wayland-scanner forks.
+# patches/ holds our vendored forks, including alacritty_terminal and vte.
 # Upstream complexity (Performer::csi_dispatch is cyclomatic 94) is not ours to
 # refactor and swamps the report: 110 of 312 crappy functions came from there.
 #

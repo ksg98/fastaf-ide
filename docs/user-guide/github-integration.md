@@ -2,24 +2,30 @@
 
 FastAF monitors your GitHub PRs and CI status automatically.
 
+PR creation, issue creation, and review submission use the repository's selected account over HTTP, including GitHub Enterprise. These writes do not require an installed `gh` executable.
+
 ## Authentication
 
 FastAF needs a GitHub token to access PRs and CI status. You have two options:
 
 ### Option 1: OAuth Login (Recommended)
 
-1. Open **Settings > GitHub**
+1. Open **Settings > Git & GitHub**
 2. Click **"Login with GitHub"**
 3. A code appears — it's auto-copied to your clipboard
 4. Your browser opens GitHub's authorization page
 5. Paste the code and authorize
 6. Done — the token is stored securely in your OS keyring
 
-This method automatically requests the correct scope (`repo`) and works with private repositories and organization repos.
+Settings shows the requested scopes before login, using the same scope list as the login request. This method automatically requests the correct scopes (`repo` and `project`) and works with private repositories and organization repos.
 
-### Option 2: gh CLI
+### Option 2: Environment variable
 
-If you prefer, install the `gh` CLI and run `gh auth login`. FastAF will use the `gh` token automatically.
+Set `GH_TOKEN` or `GITHUB_TOKEN` before you start FastAF. A macOS app started from the Dock or Finder does not see variables from your shell profile, so OAuth login is the practical choice there.
+
+FastAF does not read the `gh` CLI login. If you only signed in with `gh auth login`, the GitHub tab shows "Not connected" until you use OAuth login or set a token variable.
+
+OAuth credentials show **Logout**. It removes the stored OAuth token and falls back to an environment token, if present. Environment credentials show **Switch to OAuth** and **Disconnect**. Disconnect stops using the default account until you log in again or restart the app; it does not remove your environment variables.
 
 ### Token Priority
 
@@ -28,7 +34,6 @@ When multiple sources are available, FastAF uses this priority:
 1. `GH_TOKEN` environment variable
 2. `GITHUB_TOKEN` environment variable
 3. OAuth token (from Settings login)
-4. `gh` CLI token
 
 ## Multiple Accounts (github.com + GitHub Enterprise)
 
@@ -36,7 +41,7 @@ FastAF is account-centric: you can monitor repos across **several GitHub account
 
 ### Adding accounts
 
-Open **Settings > GitHub > Additional GitHub Accounts**. The account you logged in with above is your default.
+Open **Settings > Git & GitHub > Additional GitHub Accounts**. The account you logged in with above is your default.
 
 - **Another github.com account** — click **"Add another github.com account"** and complete the device flow (same as the primary login).
 - **GitHub Enterprise Server** — under **"Add Enterprise account"**, enter the host (e.g. `github.mycompany.com`) and a **Personal Access Token** with `repo` scope, then click **Add account**. The PAT is validated against your GHE server and stored in the OS keyring. (GHE uses a PAT because there is no per-host OAuth App.)
@@ -45,13 +50,13 @@ Each account shows its login, avatar, and a source badge. Remove an account to d
 
 ### Binding repos to accounts
 
-Open **Settings > GitHub > Repository Bindings**. Each workspace repo shows how it resolves:
+Open **Settings > Git & GitHub > Repository Bindings**. Each workspace repo shows how it resolves:
 
 - **Bound** — the repo is monitored by the shown account. Click **Unbind** to detach it.
 - **Needs binding** — the repo matches more than one account or GitHub remote. FastAF does **not** guess `origin`; pick the right account/remote from the chooser to bind it.
 - **Needs account** — a github.com repo with no account configured yet; add one first.
 
-A repo with exactly one matching account is bound automatically. Worktrees share their main checkout's binding.
+A repo with exactly one matching account/remote resolves automatically without a saved binding. Repository Bindings stays hidden in this single-account setup. A fork and an upstream repository on the same account still require a remote choice because they have different PRs and issues. Worktrees share their main checkout's binding.
 
 ### How multiple accounts behave
 
@@ -110,8 +115,13 @@ Click a PR badge or CI ring to open the detail popover. Shows:
 - **Labels** — With GitHub-matching colors
 - **Line changes** — Total additions and deletions
 - **Commit count**
+- **Comments and review threads** — Opens this exact PR in Tasks, selects its provider account and scrolls to Comments. The unresolved-threads count is also a button for this route. Normal comments, review summaries and review threads stay in the existing Tasks detail. The first review-thread page loads automatically; use **Load more comments** for later pages.
+
+FastAF ships no GitHub work-item provider plugin, so this is the default: while no GitHub Work plugin is loaded, the button reads **Comments on GitHub** and opens the PR conversation in your browser instead. The thread-count button uses the same fallback. In a Tasks PR detail, **Open branch _name_** returns to its existing sidebar branch/worktree. This action is absent if no matching workspace exists.
 
 ## PR Notifications (Toolbar Bell)
+
+Click a PR notification to open that PR’s comments and review threads in Tasks (in your browser while no work-item provider plugin is installed). The notification keeps its PR URL, so a later PR on the same branch does not change the destination. Native OS PR notices use the same route. If the provider is unavailable, the PR conversation opens on GitHub.
 
 When any branch has a PR event that needs attention, a bell icon with a count badge appears in the toolbar.
 
@@ -134,6 +144,10 @@ When any branch has a PR event that needs attention, a bell icon with a count ba
 - **Click the dismiss (x) button** on an item — Dismiss that single notification
 - **Click "Dismiss All"** — Clear all notifications at once
 
+### OS Notifications
+
+While FastAF is in the background, **ready**, **CI failed**, **changes requested** and **merged** transitions also raise an operating-system notification showing `repo #number: title`. On macOS, clicking it opens the PR on GitHub. The same event delivered twice within two minutes notifies once. Turn it off in **Settings > Notifications > Pull Requests**.
+
 ### PR Badge on Sidebar Branches
 
 Click the colored PR status badge on any branch in the sidebar to open the PR detail popover directly.
@@ -142,11 +156,17 @@ Click the colored PR status badge on any branch in the sidebar to open the PR de
 
 GitHub data is polled automatically:
 
-- **Active window:** Every 30 seconds
+- **Active window:** Every 60 seconds (backs off to 120 s when the rate-limit budget runs low, up to 300 s)
 - **Hidden window:** Every 2 minutes (reduced to save API budget)
-- **API budget:** ~2 calls/min/repo = 1,200/hr for 10 repos (GitHub limit: 5,000/hr)
+- **API budget:** one batched GraphQL query per repository per poll. Measured with `rateLimit(dryRun: true)`: 2 points for 1 repository and 6 for 6 (5 before the unresolved-thread count was added), i.e. about 360 points/hr for 6 repositories at 60 s (GitHub limit: 5,000/hr). Unresolved threads are read as a plain `isResolved` flag (first 50 per PR); reading the thread comments in the batch would have cost 17 points for 1 repository and 51 for 6, so the bot/human split is fetched per PR, on demand, when the PR panel opens.
 
 Polling starts automatically when a repository with a GitHub remote is active.
+
+## Readiness Verdict
+
+The sidebar badge, the PR panel chip and the Ops dashboard all show one verdict, computed in a single function (`src/utils/prReadiness.ts`). First match wins: Draft, Merged, Closed, Conflicts, Checking (GitHub still computing mergeability), CI Failed, Changes Req., Comments (unresolved review threads), Review, CI Running, Ready (approved, mergeable, nothing outstanding), otherwise Open.
+
+The PR panel also shows the number of unresolved review threads, split into human and bot threads (a bot is a GitHub App/bot author; the author of a thread is the author of its first comment). Counts cover the first 50 threads of a PR.
 
 ## Merge State Classification
 
@@ -161,7 +181,13 @@ Polling starts automatically when a repository with a GitHub remote is active.
 
 ## CI Auto-Heal
 
-Enable **Auto-heal** in a blocked PR's detail popover to send failed GitHub Actions job logs to the agent terminal assigned to that branch. A completed failed job can trigger healing while other jobs in the same workflow are still running. The displayed three-attempt budget counts only prompts successfully delivered to the agent; log-fetch and terminal-delivery errors do not consume it.
+Actions log fetching uses the repository account on github.com or GitHub Enterprise and does not require the GitHub CLI. It keeps failure tails and stops the log sweep after 60 seconds.
+
+Enable **Auto-heal** in a blocked PR's detail popover to send failed GitHub Actions or configured CircleCI job logs to the agent terminal assigned to that branch. A completed failed job can trigger healing while other jobs in the same workflow are still running. The displayed three-attempt budget counts only prompts successfully delivered to the agent; log-fetch and terminal-delivery errors do not consume it.
+
+Auto-heal reads failing checks directly from the selected or local head commit, including external CI links. It uses the repository's GitHub account and reads every check page before discarding older reruns; the number of open PRs does not limit this lookup.
+
+Set a read-only CircleCI token in **Settings > Git & GitHub > CircleCI**. The token is never shown again. The Log button on a failed CircleCI check also works for remote-only PRs.
 
 ## Review State Classification
 
@@ -173,7 +199,7 @@ Enable **Auto-heal** in a blocked PR's detail popover to send failed GitHub Acti
 
 ## Auto-Delete Branch on PR Close
 
-When a PR is merged or closed on GitHub, FastAF can automatically clean up the corresponding local branch. Configure per-repo in **Settings > Repository Settings** or set a global default in **Settings > General > Repository Defaults**.
+When a PR is merged or closed on GitHub, FastAF can automatically clean up the corresponding local branch. Configure per-repo in **Settings > Repository Settings** or set a global default in **Settings > Git & GitHub > Pull Requests > Auto-Delete on PR Close**.
 
 | Mode | Behavior |
 |------|----------|
@@ -201,7 +227,7 @@ Clicking the PR badge on any branch (local or remote-only) opens the detail popo
 | Button | When Shown | What It Does |
 |--------|------------|--------------|
 | **View Diff** | Always | Opens PR diff in a dedicated panel tab |
-| **Merge** | PR is open, approved, CI green | Merges via GitHub API (auto-detects allowed merge method) |
+| **Merge** | PR is open, approved, CI green | Merges via GitHub API (auto-detects allowed merge method). The merge is pinned to the head commit the panel showed: if the agent pushed since, GitHub refuses and the panel shows "PR head changed" — refresh and review before merging again |
 | **Approve** | Remote-only PRs | Submits an approving review via GitHub API |
 
 ### Post-Merge Cleanup
@@ -225,7 +251,7 @@ The GitHub panel shows issues alongside PRs in a unified view.
 
 ### Issue Filter
 
-Control which issues appear using the filter dropdown in **Settings > GitHub** or directly in the panel:
+Control which issues appear using the filter dropdown in **Settings > Git & GitHub** or directly in the panel:
 
 | Filter | Shows |
 |--------|-------|
@@ -252,6 +278,22 @@ Expand an issue to see:
 | Close / Reopen | Changes issue state via GitHub API |
 | Copy number | Copies `#123` to clipboard |
 
+### PR Row Actions (panel)
+
+Expand a PR in the GitHub panel for these actions, next to Checkout, Merge and Diff:
+
+| Action | When Shown | What It Does |
+|--------|------------|--------------|
+| **Update branch** | PR is open and GitHub reports it behind its base | Merges the base branch into the PR branch, pinned to the head the panel showed (refuses with "PR head changed" if the agent pushed meanwhile). The merge commit lands on the remote: pull it in any local clone |
+| **Close** | PR is open | Closes the PR without merging, after a confirmation |
+| **Copy ref** | PR has a GitHub URL | Copies `owner/repo#number` for pasting into prompts |
+
+Open PRs older than two weeks carry an age marker on the row: `2w`, `1m`, `3m` or `6m`, measured from the creation date.
+
+### PR Diff: collapsed files
+
+In the PR diff tab, lockfiles (`pnpm-lock.yaml`, `Cargo.lock`, ...), generated files (`dist/`, `*.min.js`, `*.snap`, `*.pb.go`, files marked `linguist-generated` in the repo's `.gitattributes`) and test files (`__tests__/`, `*.test.*`, `*_test.go`, ...) start collapsed. The header shows how many are collapsed; click a file header to expand it. `.gitattributes` is read from the local checkout, which stands in for the PR's base when another branch is checked out.
+
 ## Panel Keyboard Navigation
 
 The GitHub panel is keyboard-navigable without ever moving focus off the panel itself:
@@ -269,10 +311,51 @@ own default: PR sections start collapsed when empty, Issues starts open.
 ## Troubleshooting
 
 **No PR data showing:**
-1. Check `gh auth status` — must be authenticated
+1. Check Settings > Git & GitHub — the account must show as signed in
 2. Check repository has a GitHub remote (`git remote -v`)
-3. Check that `gh pr list` works in the repo directory
+3. Check that the repository is bound to the intended account
 
 **Stale data:**
 - Click the refresh button or switch away and back to the branch
-- Polling updates every 30 seconds automatically
+- Polling updates every 60 seconds automatically
+
+Merged-PR evidence for worktree and local-branch cleanup uses the GitHub account
+and host selected for that repository. It no longer depends on the GitHub CLI
+login. If the complete PR history cannot be read, cleanup does not treat that
+lookup as proof that a branch was merged.
+
+### Tasks notifications
+
+Settings → Notifications → Tasks has **OS notifications for Tasks**, off by default and independent of the existing PR notification preference. Failed checks on a linked GitHub PR use the existing PR notice once and name the linked Tasks item. Click the notice to open that PR’s Comments section in Tasks, or its GitHub conversation when the provider is not loaded.
+
+Use **Follow task** in an item detail to follow comments locally; use **Unfollow task** to stop. Follow state and the policy are saved in the existing Tasks UI preferences. A first observation establishes a silent baseline. Existing visible detail refreshes (including its 60-second refresh) and provider-bridge detail reads compare authoritative comments; there is no extra background poller. Your own comment action advances the baseline silently. Native notices recheck the Tasks policy after permission is granted and retain the existing background-window policy; browser clients do not send native OS notices.
+
+GitHub provides a full normal-comment count, so an increase is detected even beyond the first page. Jira and GitLab provide paged comment entries: newly observed comments notify when their creation time is newer than the prior baseline, or when a previously unseen comment ID shares its latest timestamp. Unloaded pages, unseen review sources and items that are not refreshed cannot produce a notice. Editing a comment or loading older history does not notify. No Linear provider is shipped, so it is not covered.
+
+Existing GitHub logins with only `read:project` can read Projects but cannot move cards or edit project fields. Log in again from Settings → Git & GitHub to grant `project` read/write consent. Settings explains missing write consent without disconnecting your account. For external tokens, update the token's project permissions; organization approval may also be required. Read-only boards keep their cards and show the permission message. PRs, issues, comments and the sidebar retain their existing access. After a project-specific write denial, grant access and reload Tasks. Credentials are not upgraded automatically.
+
+## Setup through Settings MCP
+
+After you enable the Settings MCP tool in trusted UI, an assistant can discover the published GitHub owner actions. Cloud setup uses device login; you authenticate on GitHub, and the assistant follows the returned flow state and poll interval. Enterprise PAT setup verifies the host/account before storage. A pending or expired flow is not a connected account. [Settings startup workflows](../backend/settings-startup.md#github) documents `list_accounts` for stable account IDs and credential presence, plus `/auth/source` for current credential provenance. Enumeration never returns token values or proves a live account login.
+
+## Persistent PR visibility filters
+
+Global `pr_hide_drafts`, `pr_hide_conflicting` and `pr_hide_ci_failing` values
+persist in `config.json` and default to false (show all). Each repository stores
+nullable overrides in `repo-settings.json`: null inherits the current global
+value, true hides the matching PRs, and false explicitly shows them. Settings
+owner transactions preserve unrelated fields, and settings refresh adopts owner
+readback without saving it again. The Rust settings catalogue describes both scopes.
+
+### Troubleshoot repository access
+
+Settings > Git & GitHub shows repository access failures by owner and account,
+with GitHub's exact message. Reasons distinguish NOT_FOUND, FORBIDDEN and unknown
+responses without inferring organization policy from message wording.
+
+For any github.com OAuth failure, select **Grant or request organization access**
+to open the authorized FastAF OAuth app page. This action is also available
+for NOT_FOUND because pending organization approval can hide private repositories. After granting access, select **Refresh status** to clear NOT_FOUND retry
+delays for all accounts, then wait for the next monitoring poll. Access denials do not require a new
+login or a 24-hour wait. Only explicit `NOT_FOUND` responses keep the 24-hour retry
+interval. GitHub can use this response for an inaccessible private repository too.

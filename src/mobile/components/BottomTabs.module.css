@@ -2,7 +2,7 @@
   display: flex;
   align-items: stretch;
   height: 56px;
-  background: rgba(37, 37, 38, 0.85);
+  background: var(--bg-secondary);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   will-change: transform;
@@ -16,14 +16,11 @@
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-height: 44px;
   background: none;
-  border: none;
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition: color 0.15s ease;
-  padding: 0;
 }
 
 .tab:active {
@@ -48,7 +45,7 @@
 }
 
 .label {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   line-height: 1;
 }

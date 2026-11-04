@@ -1,0 +1,5 @@
+Error: react-stack-top-frame
+    at jsxDEV (http://127.0.0.1:5173/node_modules/react/jsx-dev-runtime.js:1:1)
+    at App (http://127.0.0.1:5173/src/App.js:1:1)
+    at react_stack_bottom_frame (http://127.0.0.1:5173/react-dom.js:1:1)
+    at Parent (http://127.0.0.1:5173/should-not-resolve.js:1:1)

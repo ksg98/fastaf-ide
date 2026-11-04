@@ -1,0 +1,31 @@
+/* Work-item key on a sidebar branch row (story 1685-4b12). Drawn as the same
+   tinted pill as the PR badge (Sidebar.module.css .prBadge): an 18px pill of
+   the tone's colour over a 12% wash of it, no outline. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 4px;
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.badge:hover {
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.neutral { color: var(--fg-muted); }
+.info { color: var(--accent); }
+.success { color: var(--success); }
+.warning { color: var(--warning); }
+.danger { color: var(--error); }

@@ -3,27 +3,31 @@ import releaseNotes from "../../assets/release-notes.json";
 import { useGitHub } from "../../hooks/useGitHub";
 import { t } from "../../i18n";
 import type { ActivityItem } from "../../plugins/types";
+import { openTaskConversation } from "../../services/taskNavigation";
 import { activityStore } from "../../stores/activityStore";
 import { commandPaletteStore } from "../../stores/commandPalette";
 import { editorTabsStore } from "../../stores/editorTabs";
+import { githubStore } from "../../stores/github";
 import { mdTabsStore } from "../../stores/mdTabs";
 import { pluginStore } from "../../stores/pluginStore";
 import type { PrNotification } from "../../stores/prNotifications";
 import { type PrNotificationType, prNotificationsStore } from "../../stores/prNotifications";
+import { progressStore } from "../../stores/progress";
 import { repositoriesStore } from "../../stores/repositories";
-import { settingsStore } from "../../stores/settings";
 import { terminalsStore } from "../../stores/terminals";
 import { uiStore } from "../../stores/ui";
 import { updaterStore } from "../../stores/updater";
 import { isTauri } from "../../transport";
+import { getRepoConnection } from "../../transportRuntime";
 import { cx } from "../../utils";
 import { keyFor } from "../../utils/hotkey";
-import { getRepoColor } from "../../utils/repoColor";
+import { navigateToTerminal } from "../../utils/navigateToTerminal";
+import { getRepoTextColor } from "../../utils/repoColor";
 import { IdeLauncher } from "../IdeLauncher";
-import { IconBell, IconEye, IconPanelLeft, IconSearch } from "../icons";
+import { IconBell, IconPanelLeft, IconSearch } from "../icons";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
 import { SmartPromptsDropdown } from "../SmartPromptsDropdown/SmartPromptsDropdown";
-import { WatcherManager } from "../WatcherManager/WatcherManager";
+import { StoriesButton } from "./StoriesButton";
 import s from "./Toolbar.module.css";
 
 function relativeAge(timestamp: number): string {
@@ -35,6 +39,24 @@ function relativeAge(timestamp: number): string {
 	if (hours < 24) return `${hours}h ago`;
 	return `${Math.floor(hours / 24)}d ago`;
 }
+
+/** Back/forward arrows over the terminal activation history. */
+const HISTORY_BUTTONS = [
+	{
+		direction: "back",
+		action: "history-back",
+		icon: "M10 3 5 8l5 5",
+		go: (name: string) => t("toolbar.historyBack", "Back to {name}", { name }),
+		none: () => t("toolbar.historyBackNone", "No earlier terminal"),
+	},
+	{
+		direction: "forward",
+		action: "history-forward",
+		icon: "m6 3 5 5-5 5",
+		go: (name: string) => t("toolbar.historyForward", "Forward to {name}", { name }),
+		none: () => t("toolbar.historyForwardNone", "No later terminal"),
+	},
+] as const;
 
 const NOTIFICATION_LABELS: Record<PrNotificationType, { label: string; icon: string; cls: string }> = {
 	merged: { label: "Merged", icon: "\u2714", cls: s.notifMerged },
@@ -122,11 +144,14 @@ export function lastItemKey(src: LastItemSource): string {
 }
 
 export interface ToolbarProps {
+	/** Confirms and restarts into an installed update while sessions are still busy. */
+	onRestartNow?: () => void;
 	repoPath?: string;
 	runCommand?: string;
 	onBranchClick?: () => void;
 	onRun?: (shiftKey: boolean) => void;
 	onReviewPr?: (repoPath: string, branchName: string, command: string) => void;
+	/** Opens Settings on the Smart Prompts tab. */
 	onOpenSettings?: () => void;
 	onShowWhatsNew?: (version: string) => void;
 	/** The tab strip. When given it takes the centre of the bar, the way Codex
@@ -138,20 +163,15 @@ export interface ToolbarProps {
 
 export const Toolbar: Component<ToolbarProps> = (props) => {
 	const [showNotifPopover, setShowNotifPopover] = createSignal(false);
-	const [showWatcherPopover, setShowWatcherPopover] = createSignal(false);
 	const [prDetailTarget, setPrDetailTarget] = createSignal<{ repoPath: string; branch: string } | null>(null);
 	let notifRef: HTMLDivElement | undefined;
-	let watcherRef: HTMLDivElement | undefined;
 
 	// Close popover on outside click
 	createEffect(() => {
-		if (!showNotifPopover() && !showWatcherPopover()) return;
+		if (!showNotifPopover()) return;
 		const handler = (e: MouseEvent) => {
-			if (showNotifPopover() && notifRef && !notifRef.contains(e.target as Node)) {
+			if (notifRef && !notifRef.contains(e.target as Node)) {
 				setShowNotifPopover(false);
-			}
-			if (showWatcherPopover() && watcherRef && !watcherRef.contains(e.target as Node)) {
-				setShowWatcherPopover(false);
 			}
 		};
 		document.addEventListener("mousedown", handler);
@@ -177,7 +197,8 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 			repoPath,
 		);
 	});
-	const totalBadgeCount = () => activeNotifs().length + visibleActivityCount() + (hasUpdate() ? 1 : 0);
+	const totalBadgeCount = () =>
+		activeNotifs().length + visibleActivityCount() + progressStore.unreadCount + (hasUpdate() ? 1 : 0);
 	// Keys of last-items the user already "saw" by clicking the pill. Ephemeral
 	// (per session): hides the pill without dismissing the underlying notification,
 	// which stays in the bell dropdown until dismissed there.
@@ -192,11 +213,11 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 		const activeRepoPath = repositoriesStore.state.activeRepoPath;
 		if (!activeRepoPath) return null;
 		const repo = repositoriesStore.state.repositories[activeRepoPath];
-		if (!repo?.activeBranch) return null;
-		return repo.branches[repo.activeBranch] || null;
+		if (!repo?.activeWorkspaceId) return null;
+		return repo.workspaces[repo.activeWorkspaceId] || null;
 	};
 
-	const activeBranchName = () => activeBranch()?.name || null;
+	const activeBranchName = () => activeBranch()?.branchName || null;
 
 	const activeRepoName = () => {
 		const activeRepoPath = repositoriesStore.state.activeRepoPath;
@@ -209,11 +230,12 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 	const activeRepoColor = () => {
 		const activeRepoPath = repositoriesStore.state.activeRepoPath;
 		if (!activeRepoPath) return undefined;
-		return getRepoColor(activeRepoPath);
+		return getRepoTextColor(activeRepoPath);
 	};
 
-	const getRepoPath = () => props.repoPath;
-	const github = useGitHub(getRepoPath);
+	const launchPath = () => activeBranch()?.worktreePath || props.repoPath;
+	// Ahead/behind belongs to the selected branch's checkout, not the repo root
+	const github = useGitHub(launchPath);
 
 	const aheadBehind = () => {
 		const gs = github.status();
@@ -223,8 +245,6 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 		if (gs.behind > 0) return ` ↓${gs.behind}`;
 		return null;
 	};
-
-	const launchPath = () => activeBranch()?.worktreePath || props.repoPath;
 
 	const focusedFilePath = (): string | undefined => {
 		const editTab = editorTabsStore.getActive();
@@ -255,7 +275,6 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 		if (!src) return;
 		setSeenKeys((prev) => new Set(prev).add(lastItemKey(src)));
 		setShowNotifPopover(true);
-		if (showWatcherPopover()) setShowWatcherPopover(false);
 	};
 
 	return (
@@ -272,6 +291,43 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 				>
 					<IconPanelLeft size={16} />
 				</button>
+				{/* Back/forward over the terminal activation history (upstream 2.0),
+				    drawn as the same 28px ghost icon buttons as the sidebar toggle. */}
+				<For each={HISTORY_BUTTONS}>
+					{(btn) => {
+						const target = () => terminalsStore.getHistoryTarget(btn.direction);
+						const title = () => {
+							const id = target();
+							if (!id) return btn.none();
+							const name = terminalsStore.get(id)?.name ?? "";
+							return `${btn.go(name)} (${keyFor(btn.action)})`;
+						};
+						return (
+							<button
+								type="button"
+								class={cx(s.sidebarToggle, s.historyBtn)}
+								disabled={!target()}
+								onClick={() => {
+									const id = terminalsStore.stepHistory(btn.direction);
+									if (id) navigateToTerminal(id);
+								}}
+								title={title()}
+								aria-label={title()}
+								data-testid={`history-${btn.direction}`}
+							>
+								<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+									<path
+										d={btn.icon}
+										stroke="currentColor"
+										stroke-width="1.5"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									/>
+								</svg>
+							</button>
+						);
+					}}
+				</For>
 				<span class={s.leftSpacer} data-tauri-drag-region />
 			</div>
 			<div class={cx(s.center, props.tabs !== undefined && s.centerTabs)} data-tauri-drag-region>
@@ -301,30 +357,14 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 			</div>
 
 			<div class={s.right}>
-				{/* Notification group: smart prompts + watcher (eye) + last-item pill + bell.
-				    The eye sits left of the pill so the pill and bell stay adjacent —
-				    the pill is a preview of the bell's newest notification. */}
+				<Show when={props.repoPath}>
+					<StoriesButton repoPath={props.repoPath as string} />
+				</Show>
+				{/* Notification group: smart prompts + last-item pill + bell.
+				    The pill is a preview of the bell's newest notification, so the two
+				    stay adjacent. */}
 				<div class={s.notifGroup} ref={notifRef}>
-					<SmartPromptsDropdown repoPath={props.repoPath} onOpenSettings={props.onOpenSettings} />
-
-					{/* Watcher manager (eye) */}
-					<Show when={settingsStore.isAiWatchersEnabled()}>
-						<div ref={watcherRef} style={{ position: "relative", display: "inline-flex", height: "100%" }}>
-							<button
-								class={s.watcherBtn}
-								onClick={() => {
-									setShowWatcherPopover(!showWatcherPopover());
-									if (showNotifPopover()) setShowNotifPopover(false);
-								}}
-								title="Watchers"
-							>
-								<IconEye size={16} />
-							</button>
-							<Show when={showWatcherPopover()}>
-								<WatcherManager />
-							</Show>
-						</div>
-					</Show>
+					<SmartPromptsDropdown triggerSize="compact" repoPath={props.repoPath} onOpenSettings={props.onOpenSettings} />
 
 					{/* Last-item shortcut — only when there are items */}
 					<Show when={lastItem()}>
@@ -396,11 +436,41 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 					</button>
 					<Show when={showNotifPopover()}>
 						<div class={s.popover}>
+							<div class={s.sectionHeader}>
+								<span class={s.sectionLabel}>PROGRESS</span>
+								<Show when={progressStore.unreadCount > 0}>
+									<button type="button" class={s.dismissAll} onClick={() => progressStore.markRead()}>
+										{t("toolbar.markAsRead", "Mark as read")}
+									</button>
+								</Show>
+							</div>
+							<div
+								class={s.activityItem}
+								onClick={(event) => {
+									event.stopPropagation();
+									setShowNotifPopover(false);
+									progressStore.open(repositoriesStore.state.activeRepoPath);
+								}}
+							>
+								<span class={s.activityItemIcon}>
+									<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
+										<path d="M2 13.5h12v1H1.5a.5.5 0 0 1-.5-.5V1h1v12.5zM4 10l2.5-3 2 2L13 3.5l1 1-5.5 7-2-2L5 11z" />
+									</svg>
+								</span>
+								<div class={s.activityItemBody}>
+									<span class={s.activityItemTitle}>Terminal Progress</span>
+									<span class={s.activityItemSubtitle}>
+										<Show when={progressStore.unreadCount > 0} fallback="Open project journal">
+											{progressStore.unreadCount} new update{progressStore.unreadCount === 1 ? "" : "s"}
+										</Show>
+									</span>
+								</div>
+							</div>
 							{/* App update section */}
 							<Show when={hasUpdate()}>
 								<div class={s.notifHeader}>
 									<span class={s.notifTitle}>{t("toolbar.appUpdate", "APP UPDATE")}</span>
-									<button class={s.dismissAll} onClick={() => updaterStore.dismiss()}>
+									<button type="button" class={s.dismissAll} onClick={() => updaterStore.dismiss()}>
 										{t("toolbar.dismiss", "Dismiss")}
 									</button>
 								</div>
@@ -409,7 +479,8 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 									onClick={(e) => {
 										e.stopPropagation();
 										setShowNotifPopover(false);
-										updaterStore.downloadAndInstall();
+										if (updaterStore.state.restartPending) props.onRestartNow?.();
+										else updaterStore.downloadAndInstall();
 									}}
 								>
 									<span class={s.notifIcon}>
@@ -422,9 +493,17 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 											{`v${updaterStore.state.version} ${t("toolbar.available", "available")}`}
 										</span>
 										<span class={s.notifBranch}>
-											{updaterStore.state.downloading
-												? `${t("statusBar.updating", "Updating")} ${updaterStore.state.progress}%`
-												: t("toolbar.clickToUpdate", "Click to update")}
+											{updaterStore.state.restartPending
+												? t(
+														"toolbar.restartPending",
+														"Restarts when agents are idle ({count} busy) — click to restart now",
+														{
+															count: String(updaterStore.busyCount()),
+														},
+													)
+												: updaterStore.state.downloading
+													? `${t("statusBar.updating", "Updating")} ${updaterStore.state.progress}%`
+													: t("toolbar.clickToUpdate", "Click to update")}
 										</span>
 										<Show
 											when={
@@ -558,7 +637,12 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 													e.stopPropagation();
 													setShowNotifPopover(false);
 													requestAnimationFrame(() => {
-														setPrDetailTarget({ repoPath: notif.repoPath, branch: notif.branch });
+														if (getRepoConnection(notif.repoPath) !== notif.connectionId) return;
+														const pr = githubStore.getBranchPrData(notif.repoPath, notif.branch);
+														const url =
+															notif.url ?? pr?.url?.replace(/\/pull\/\d+(?:[?#].*)?$/, `/pull/${notif.prNumber}`);
+														if (url) void openTaskConversation(url);
+														else setPrDetailTarget({ repoPath: notif.repoPath, branch: notif.branch });
 													});
 												}}
 											>
@@ -567,7 +651,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 													<span
 														class={s.notifRepo}
 														style={(() => {
-															const color = getRepoColor(notif.repoPath);
+															const color = getRepoTextColor(notif.repoPath);
 															return color ? { color } : undefined;
 														})()}
 													>

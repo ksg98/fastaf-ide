@@ -69,12 +69,6 @@ describe("updatePlugin", () => {
 // ---------------------------------------------------------------------------
 
 describe("getLogger", () => {
-	it("creates a logger lazily on first call", () => {
-		const logger = pluginStore.getLogger("lazy-plugin");
-		expect(logger).toBeDefined();
-		expect(typeof logger.info).toBe("function");
-	});
-
 	it("returns the same logger instance on subsequent calls", () => {
 		const a = pluginStore.getLogger("same-plugin");
 		const b = pluginStore.getLogger("same-plugin");

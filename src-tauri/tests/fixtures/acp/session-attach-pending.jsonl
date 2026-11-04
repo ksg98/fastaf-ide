@@ -1,0 +1,11 @@
+// A session whose `session/load` is still unanswered when a second attach for
+// it arrives.
+//
+// The first load is never answered on purpose: what is being proved is that
+// the client refuses the second while the first is pending, before a byte is
+// written. A client that forwarded it would hit `expect_no_frame`, and each
+// forwarded load makes ego admit every MCP server again.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/load","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"load"}
+{"step":"expect_no_frame"}

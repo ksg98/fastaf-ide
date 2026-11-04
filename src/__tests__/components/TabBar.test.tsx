@@ -1,11 +1,35 @@
 import { fireEvent, render } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getModifierSymbol } from "../../platform";
+import { useQuickSwitcherVisibility } from "../../hooks/useQuickSwitcherVisibility";
+import { getModifierSymbol, isMacOS, resetPlatformCache } from "../../platform";
 import type { AwaitingInputType } from "../../stores/terminals";
+
+const mockCopyPathToClipboard = vi.hoisted(() => vi.fn());
+const mockWriteClipboard = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("../../utils/clipboard", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../utils/clipboard")>()),
+	copyPathToClipboard: mockCopyPathToClipboard,
+	writeClipboard: mockWriteClipboard,
+}));
+
+const { mockOpenLocalPath, mockHandleOpenUrl } = vi.hoisted(() => ({
+	mockOpenLocalPath: vi.fn(),
+	mockHandleOpenUrl: vi.fn(),
+}));
+vi.mock("../../utils/openUrl", () => ({
+	openLocalPath: mockOpenLocalPath,
+	handleOpenUrl: mockHandleOpenUrl,
+}));
 
 // Mock Tauri APIs
 vi.mock("@tauri-apps/api/core", () => ({
 	invoke: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../../invoke", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../invoke")>()),
+	invoke: vi.fn().mockResolvedValue(undefined),
+	listen: vi.fn().mockResolvedValue(vi.fn()),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
 	listen: vi.fn().mockResolvedValue(vi.fn()),
@@ -24,7 +48,10 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 	openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
+import type { ContextMenuItem } from "../../components/ContextMenu/ContextMenu";
 import { TabBar } from "../../components/TabBar/TabBar";
+import { ToastList } from "../../components/ToastContainer/ToastList";
+import { invoke, listen } from "../../invoke";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { editorTabsStore } from "../../stores/editorTabs";
 import { globalWorkspaceStore } from "../../stores/globalWorkspace";
@@ -32,12 +59,19 @@ import { mdTabsStore } from "../../stores/mdTabs";
 import { paneLayoutStore } from "../../stores/paneLayout";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore, type TabOrderingMode } from "../../stores/settings";
-import { tabOrderingStore } from "../../stores/tabOrdering";
+import { tabOrderingStore } from "../../stores/tabManager";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
+import { uiStore } from "../../stores/ui";
+import * as transport from "../../transport";
+import { keyFor } from "../../utils/hotkey";
+import { adoptSuspendedSession } from "../../utils/suspendedSessions";
 
 describe("TabBar", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
+		vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
+		vi.mocked(listen).mockReset().mockResolvedValue(vi.fn());
 		localStorage.clear();
 		// Clean up any terminals from previous tests
 		for (const id of terminalsStore.getIds()) {
@@ -59,6 +93,9 @@ describe("TabBar", () => {
 			editorTabsStore.remove(id);
 		}
 		tabOrderingStore.clear();
+		for (const panelId of Object.keys(uiStore.state.detachedPanels)) {
+			if (panelId.startsWith("markdown-tab-")) uiStore.clearDetached(panelId);
+		}
 		settingsStore.setTabOrderingMode("grouped-by-type");
 		// Deactivate global workspace
 		if (globalWorkspaceStore.isActive()) {
@@ -93,6 +130,38 @@ describe("TabBar", () => {
 		});
 	}
 
+	// Catches: a persisted backend record being lost when a fresh frontend mounts.
+	it("suspended_record_survives_restart_and_frontend_renders_it", () => {
+		const id = adoptSuspendedSession(
+			{
+				tuic_session: "durable-tab",
+				session_id: "old-pty",
+				agent_type: null,
+				cwd: "/Gits/alpha",
+				worktree: null,
+				agent_session_id: null,
+				launch_command: null,
+				alias: "parked",
+				pane_slot: null,
+				reason: "user",
+				name: "Durable shell",
+			},
+			14,
+		);
+		const view = render(() => (
+			<TabBar
+				onTabSelect={() => {}}
+				onTabClose={() => {}}
+				onCloseOthers={() => {}}
+				onCloseToRight={() => {}}
+				onNewTab={() => {}}
+			/>
+		));
+		expect(view.getByText("Durable shell")).toBeTruthy();
+		expect(terminalsStore.get(id)?.suspended).toBe(true);
+		expect(view.container.querySelector(".suspendedBadge")).toBeTruthy();
+	});
+
 	it("clicking new tab button calls onNewTab directly", () => {
 		const onNewTab = vi.fn();
 		const { container } = render(() => (
@@ -108,36 +177,181 @@ describe("TabBar", () => {
 		expect(onNewTab).toHaveBeenCalledTimes(1);
 	});
 
-	it("right-clicking new tab button opens split context menu", () => {
-		const { container } = render(() => (
-			<TabBar
-				onTabSelect={() => {}}
-				onTabClose={() => {}}
-				onCloseOthers={() => {}}
-				onCloseToRight={() => {}}
-				onNewTab={() => {}}
-			/>
-		));
-		const btn = container.querySelector(".newBtn")!;
-		vi.spyOn(btn, "getBoundingClientRect").mockReturnValue({
-			left: 100,
-			bottom: 50,
-			top: 20,
-			right: 150,
-			width: 50,
-			height: 30,
-			x: 100,
-			y: 20,
-			toJSON: () => {},
-		} as DOMRect);
-		fireEvent.contextMenu(btn);
-		const menus = document.querySelectorAll(".menu");
-		expect(menus.length).toBeGreaterThan(0);
-		const labels = Array.from(menus[menus.length - 1].querySelectorAll(".label"));
-		const labelTexts = labels.map((l) => l.textContent);
-		expect(labelTexts).toContain("New Tab");
-		expect(labelTexts).toContain("Split Vertically");
-		expect(labelTexts).toContain("Split Horizontally");
+	describe("long press on new tab button", () => {
+		const renderWithAgents = (onNewTab: () => void, getNewAgentMenuItems: () => ContextMenuItem[]) =>
+			render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={onNewTab}
+					getNewAgentMenuItems={getNewAgentMenuItems}
+				/>
+			));
+		const menuLabels = (_container: HTMLElement) =>
+			Array.from(document.querySelectorAll(".menu .label")).map((l) => l.textContent);
+
+		it("opens the agent list instead of a plain tab, and launching an agent is one click away", () => {
+			const onNewTab = vi.fn();
+			const launchClaude = vi.fn();
+			const { container } = renderWithAgents(onNewTab, () => [
+				{ label: "Claude Code", action: launchClaude },
+				{ label: "Codex", action: () => {} },
+			]);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			vi.advanceTimersByTime(500);
+			fireEvent.pointerUp(btn);
+			fireEvent.click(btn);
+
+			expect(onNewTab).not.toHaveBeenCalled();
+			expect(menuLabels(container)).toEqual(expect.arrayContaining(["Claude Code", "Codex"]));
+			const claude = Array.from(document.querySelectorAll(".menu .label")).find(
+				(l) => l.textContent === "Claude Code",
+			)!;
+			fireEvent.click(claude.closest(".item") ?? claude);
+			expect(launchClaude).toHaveBeenCalledTimes(1);
+		});
+
+		it("a short press still opens a plain tab", () => {
+			const onNewTab = vi.fn();
+			const getItems = vi.fn(() => [{ label: "Claude Code", action: () => {} }]);
+			const { container } = renderWithAgents(onNewTab, getItems);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			vi.advanceTimersByTime(200);
+			fireEvent.pointerUp(btn);
+			fireEvent.click(btn);
+			vi.advanceTimersByTime(1000);
+
+			expect(onNewTab).toHaveBeenCalledTimes(1);
+			expect(getItems).not.toHaveBeenCalled();
+		});
+
+		it("leaving the button cancels the press", () => {
+			const getItems = vi.fn(() => [{ label: "Claude Code", action: () => {} }]);
+			const { container } = renderWithAgents(() => {}, getItems);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			fireEvent.pointerLeave(btn);
+			vi.advanceTimersByTime(1000);
+
+			expect(getItems).not.toHaveBeenCalled();
+		});
+
+		it("a long press released off the button does not swallow the next keyboard activation", () => {
+			// No click follows a release elsewhere, so only the menu closing can
+			// tell the button that the long press is over.
+			const onNewTab = vi.fn();
+			const { container } = renderWithAgents(onNewTab, () => [{ label: "Claude Code", action: () => {} }]);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			vi.advanceTimersByTime(500);
+			fireEvent.pointerLeave(btn);
+			fireEvent.keyDown(document, { key: "Escape" });
+			expect(menuLabels(container)).not.toContain("Claude Code");
+
+			fireEvent.click(btn);
+			expect(onNewTab).toHaveBeenCalledTimes(1);
+		});
+
+		it("the native contextmenu of a touch long press does not open the list a second time", () => {
+			const getItems = vi.fn(() => [{ label: "Claude Code", action: () => {} }]);
+			const { container } = renderWithAgents(() => {}, getItems);
+			const btn = container.querySelector(".newBtn")!;
+			// The press timer fires first and opens the list; the native event follows.
+			fireEvent.pointerDown(btn, { button: 0 });
+			vi.advanceTimersByTime(500);
+			fireEvent.contextMenu(btn);
+			expect(getItems).toHaveBeenCalledTimes(1);
+			expect(menuLabels(container)).toContain("Claude Code");
+		});
+
+		it("a touch long press whose native contextmenu beats the timer still opens the list", () => {
+			// The browser's gesture recognizer and the 500 ms timer race. If the
+			// contextmenu wins, the pointerup that follows must not cancel the list
+			// and let the click open a plain tab instead.
+			const onNewTab = vi.fn();
+			const getItems = vi.fn(() => [{ label: "Claude Code", action: () => {} }]);
+			const { container } = renderWithAgents(onNewTab, getItems);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			vi.advanceTimersByTime(450);
+			const early = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+			btn.dispatchEvent(early);
+			fireEvent.pointerUp(btn);
+			fireEvent.click(btn);
+			vi.advanceTimersByTime(1000);
+
+			expect(early.defaultPrevented).toBe(true);
+			expect(menuLabels(container)).toContain("Claude Code");
+			expect(getItems).toHaveBeenCalledTimes(1);
+			expect(onNewTab).not.toHaveBeenCalled();
+		});
+
+		it("a cancelled pointer gesture cancels the press", () => {
+			// A touch that turns into a scroll ends in pointercancel, not pointerup.
+			const getItems = vi.fn(() => [{ label: "Claude Code", action: () => {} }]);
+			const { container } = renderWithAgents(() => {}, getItems);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			fireEvent.pointerCancel(btn);
+			vi.advanceTimersByTime(1000);
+
+			expect(getItems).not.toHaveBeenCalled();
+		});
+
+		it("a right click opens the agent list without opening a tab", () => {
+			const onNewTab = vi.fn();
+			const launchCodex = vi.fn();
+			const { container } = renderWithAgents(onNewTab, () => [
+				{ label: "Claude Code", action: () => {} },
+				{ label: "Codex", action: launchCodex },
+			]);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 2 });
+			const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+			btn.dispatchEvent(ev);
+			expect(ev.defaultPrevented).toBe(true);
+			vi.advanceTimersByTime(1000);
+
+			expect(onNewTab).not.toHaveBeenCalled();
+			const codex = Array.from(document.querySelectorAll(".menu .label")).find((l) => l.textContent === "Codex")!;
+			fireEvent.click(codex.closest(".item") ?? codex);
+			expect(launchCodex).toHaveBeenCalledTimes(1);
+		});
+
+		it("unwraps the single Add Agent submenu so the agents are the list", () => {
+			const { container } = renderWithAgents(
+				() => {},
+				() => [
+					{
+						label: "Add Agent",
+						action: () => {},
+						children: [
+							{ label: "Claude Code", action: () => {} },
+							{ label: "Codex", action: () => {} },
+						],
+					},
+				],
+			);
+			fireEvent.contextMenu(container.querySelector(".newBtn")!);
+			expect(menuLabels(container)).toEqual(expect.arrayContaining(["Claude Code", "Codex"]));
+			expect(menuLabels(container)).not.toContain("Add Agent");
+		});
+
+		it("with no agents available a long press falls back to opening a plain tab", () => {
+			const onNewTab = vi.fn();
+			const { container } = renderWithAgents(onNewTab, () => []);
+			const btn = container.querySelector(".newBtn")!;
+			fireEvent.pointerDown(btn, { button: 0 });
+			vi.advanceTimersByTime(500);
+			fireEvent.pointerUp(btn);
+			fireEvent.click(btn);
+
+			expect(onNewTab).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	it("new tab button has correct title", () => {
@@ -430,11 +644,11 @@ describe("TabBar", () => {
 		const t2 = addTerminal({ name: "Branch Term 2" });
 		addTerminal({ name: "Other Term" }); // Not in the branch
 
-		repositoriesStore.setBranch(repoPath, "main", {
-			name: "main",
+		repositoriesStore.setWorkspace(repoPath, "main", {
+			branchName: "main",
 			terminals: [t1, t2],
 		});
-		repositoriesStore.setActiveBranch(repoPath, "main");
+		repositoriesStore.setActiveWorkspace(repoPath, "main");
 
 		const { container } = render(() => (
 			<TabBar
@@ -478,11 +692,11 @@ describe("TabBar", () => {
 		const promoted2 = addTerminal({ name: "Promoted 2" });
 		const repoBound = addTerminal({ name: "Repo Term" });
 
-		repositoriesStore.setBranch(repoPath, "main", {
-			name: "main",
+		repositoriesStore.setWorkspace(repoPath, "main", {
+			branchName: "main",
 			terminals: [repoBound],
 		});
-		repositoriesStore.setActiveBranch(repoPath, "main");
+		repositoriesStore.setActiveWorkspace(repoPath, "main");
 
 		globalWorkspaceStore.promote(promoted1);
 		globalWorkspaceStore.promote(promoted2);
@@ -621,9 +835,9 @@ describe("TabBar", () => {
 		/** Set up an active repo+branch so diff/md tab visibility filtering works */
 		function setupActiveRepo() {
 			repositoriesStore.add({ path: "/repo", displayName: "repo" });
-			repositoriesStore.setBranch("/repo", "main", { isMain: true, worktreePath: null });
+			repositoriesStore.setWorkspace("/repo", "main", { isMain: true, worktreePath: null });
 			repositoriesStore.setActive("/repo");
-			repositoriesStore.setActiveBranch("/repo", "main");
+			repositoriesStore.setActiveWorkspace("/repo", "main");
 		}
 
 		it("renders diff tabs", () => {
@@ -702,10 +916,106 @@ describe("TabBar", () => {
 	});
 
 	describe("markdown tabs", () => {
+		it("retains an MCP file tab after selecting a terminal in a repo without a workspace", () => {
+			repositoriesStore.add({ path: "/repo", displayName: "repo" });
+			repositoriesStore.setActive("/repo");
+			const terminalId = addTerminal();
+			const id = mdTabsStore.add("/repo", "/Users/boss/Gits/.tmp/boss/ego-coordinator-proposal.md");
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			terminalsStore.setActive(terminalId);
+			expect(mdTabsStore.get(id)).toBeDefined();
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).not.toBeNull();
+			repositoriesStore.add({ path: "/other", displayName: "other" });
+			repositoriesStore.setActive("/other");
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).toBeNull();
+			repositoriesStore.setActive("/repo");
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).not.toBeNull();
+		});
+
+		it("shows two different MCP file tabs together in a repo without a workspace", () => {
+			repositoriesStore.add({ path: "/repo", displayName: "repo" });
+			repositoriesStore.setActive("/repo");
+			const first = mdTabsStore.add("/repo", "/Users/boss/Gits/.tmp/boss/ego-coordinator-proposal.md");
+			const second = mdTabsStore.add("/repo", "/Users/boss/Gits/.tmp/boss/tuic-mobile-files.md");
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			expect(first).not.toBe(second);
+			expect(container.querySelector(`[data-tab-id="${first}"]`)).not.toBeNull();
+			expect(container.querySelector(`[data-tab-id="${second}"]`)).not.toBeNull();
+		});
+		it.each(["markdown", "editor"])("keeps an active pinned MCP %s tab visible across a repo switch", (kind) => {
+			for (const path of ["/repo-a", "/repo-b"]) {
+				repositoriesStore.add({ path, displayName: path });
+				repositoriesStore.setWorkspace(path, "main", { worktreePath: path });
+				repositoriesStore.setActiveWorkspace(path, "main");
+			}
+			repositoriesStore.setActive("/repo-a");
+			const id =
+				kind === "markdown"
+					? mdTabsStore.openUiTab("pinned-preview", "Preview", "<p>test</p>", true)
+					: editorTabsStore.add("/repo-a", "/outside/notes.txt");
+			const tabs = kind === "markdown" ? mdTabsStore : editorTabsStore;
+			if (kind === "editor") editorTabsStore.setPinned(id, true, true);
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			repositoriesStore.setActive("/repo-b");
+			expect(tabs.state.activeId).toBe(id);
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).not.toBeNull();
+			tabs.setPinned(id, false);
+			expect(tabs.state.activeId).toBeNull();
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).toBeNull();
+		});
+		it("hides an active MCP tab on repo switch and restores it on return", () => {
+			for (const path of ["/repo-a", "/repo-b"]) {
+				repositoriesStore.add({ path, displayName: path });
+				repositoriesStore.setWorkspace(path, "main", { worktreePath: path });
+				repositoriesStore.setActiveWorkspace(path, "main");
+			}
+			repositoriesStore.setActive("/repo-a");
+			const id = mdTabsStore.openUiTab("repo-preview", "Preview", "<p>test</p>", false);
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).not.toBeNull();
+			repositoriesStore.setActive("/repo-b");
+			expect(mdTabsStore.state.activeId).toBeNull();
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).toBeNull();
+			repositoriesStore.setActive("/repo-a");
+			expect(mdTabsStore.get(id)).toBeDefined();
+			expect(container.querySelector(`[data-tab-id="${id}"]`)).not.toBeNull();
+		});
 		function setupActiveRepo() {
 			repositoriesStore.add({ path: "/repo", displayName: "repo" });
 			repositoriesStore.setActive("/repo");
-			repositoriesStore.setActiveBranch("/repo", "main");
+			repositoriesStore.setActiveWorkspace("/repo", "main");
 		}
 
 		it("renders markdown tabs", () => {
@@ -765,17 +1075,182 @@ describe("TabBar", () => {
 		});
 	});
 
+	describe("cross-kind drag reorder", () => {
+		/** Set up a repo with one terminal plus one diff and one markdown tab. */
+		function setupMixedTabs() {
+			repositoriesStore.add({ path: "/repo", displayName: "repo" });
+			repositoriesStore.setWorkspace("/repo", "main", { isMain: true, worktreePath: null });
+			repositoriesStore.setActive("/repo");
+			repositoriesStore.setActiveWorkspace("/repo", "main");
+			const terminalId = addTerminal({ name: "Terminal" });
+			repositoriesStore.addTerminalToWorkspace("/repo", "main", terminalId);
+			const diffId = diffTabsStore.add("/repo", "/repo/change.ts", "M");
+			const markdownId = mdTabsStore.add("/repo", "/repo/readme.md");
+			return { terminalId, diffId, markdownId };
+		}
+
+		/** Drag `sourceEl` onto `targetEl` and release, dropping on the given half. */
+		function dragOnto(sourceEl: Element, targetEl: Element, side: "left" | "right") {
+			vi.spyOn(targetEl, "getBoundingClientRect").mockReturnValue({
+				left: 100,
+				right: 200,
+				top: 0,
+				bottom: 30,
+				width: 100,
+				height: 30,
+				x: 100,
+				y: 0,
+				toJSON: () => ({}),
+			} as DOMRect);
+			vi.spyOn(document, "elementFromPoint").mockReturnValue(targetEl);
+			const dropX = side === "left" ? 110 : 190;
+
+			fireEvent.pointerDown(sourceEl, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+			fireEvent.pointerMove(document, { pointerId: 1, clientX: dropX, clientY: 10 });
+			fireEvent.pointerUp(document, { pointerId: 1, clientX: dropX, clientY: 10 });
+		}
+
+		function renderedTabIds(container: HTMLElement): string[] {
+			return [...container.querySelectorAll("[data-tab-id]")].map((el) => (el as HTMLElement).dataset.tabId!);
+		}
+
+		it("free mode: dropping a diff on a terminal moves it before the terminal", () => {
+			const { terminalId, diffId, markdownId } = setupMixedTabs();
+			settingsStore.setTabOrderingMode("free");
+
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			expect(renderedTabIds(container)).toEqual([terminalId, diffId, markdownId]);
+
+			const source = container.querySelector(`[data-tab-id="${diffId}"]`)!;
+			const target = container.querySelector(`[data-tab-id="${terminalId}"]`)!;
+			dragOnto(source, target, "left");
+
+			expect(renderedTabIds(container)).toEqual([diffId, terminalId, markdownId]);
+		});
+
+		it("free mode: dropping a terminal on a markdown tab moves it after the markdown tab", () => {
+			const { terminalId, diffId, markdownId } = setupMixedTabs();
+			settingsStore.setTabOrderingMode("free");
+
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+
+			const source = container.querySelector(`[data-tab-id="${terminalId}"]`)!;
+			const target = container.querySelector(`[data-tab-id="${markdownId}"]`)!;
+			dragOnto(source, target, "right");
+
+			expect(renderedTabIds(container)).toEqual([diffId, markdownId, terminalId]);
+		});
+
+		it("terminals-first mode: dropping a markdown tab on a diff reorders the non-terminal tabs", () => {
+			const { terminalId, diffId, markdownId } = setupMixedTabs();
+			settingsStore.setTabOrderingMode("terminals-first");
+
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			expect(renderedTabIds(container)).toEqual([terminalId, diffId, markdownId]);
+
+			const source = container.querySelector(`[data-tab-id="${markdownId}"]`)!;
+			const target = container.querySelector(`[data-tab-id="${diffId}"]`)!;
+			dragOnto(source, target, "left");
+
+			expect(renderedTabIds(container)).toEqual([terminalId, markdownId, diffId]);
+		});
+
+		it("grouped mode: a same-kind drop still reorders within the kind", () => {
+			const { terminalId } = setupMixedTabs();
+			const secondDiffId = diffTabsStore.add("/repo", "/repo/other.ts", "M");
+			settingsStore.setTabOrderingMode("grouped-by-type");
+
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			const ids = renderedTabIds(container);
+			const firstDiffId = ids[1];
+
+			const source = container.querySelector(`[data-tab-id="${secondDiffId}"]`)!;
+			const target = container.querySelector(`[data-tab-id="${firstDiffId}"]`)!;
+			dragOnto(source, target, "left");
+
+			expect(renderedTabIds(container).slice(0, 3)).toEqual([terminalId, secondDiffId, firstDiffId]);
+		});
+
+		it("terminals-first mode: dropping a terminal on a terminal still calls onReorder", () => {
+			setupMixedTabs();
+			const secondTerminalId = addTerminal({ name: "Terminal 2" });
+			repositoriesStore.addTerminalToWorkspace("/repo", "main", secondTerminalId);
+			settingsStore.setTabOrderingMode("terminals-first");
+			const onReorder = vi.fn();
+
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+					onReorder={onReorder}
+				/>
+			));
+			const ids = renderedTabIds(container);
+
+			const source = container.querySelector(`[data-tab-id="${secondTerminalId}"]`)!;
+			const target = container.querySelector(`[data-tab-id="${ids[0]}"]`)!;
+			dragOnto(source, target, "left");
+
+			expect(onReorder).toHaveBeenCalledWith(1, 0);
+		});
+
+		it("closing a tab drops it from the cross-kind order", () => {
+			const { terminalId, diffId, markdownId } = setupMixedTabs();
+			settingsStore.setTabOrderingMode("free");
+
+			mdTabsStore.remove(markdownId);
+
+			expect(tabOrderingStore.getOrdered(new Set([terminalId, diffId]))).toEqual([terminalId, diffId]);
+			expect(tabOrderingStore.state.order).not.toContain(markdownId);
+		});
+	});
+
 	describe("tab-kind parity across ordering modes", () => {
 		it.each(["grouped-by-type", "free"] satisfies TabOrderingMode[])(
 			"renders and selects every tab kind in %s mode",
 			(mode) => {
 				repositoriesStore.add({ path: "/repo", displayName: "repo" });
-				repositoriesStore.setBranch("/repo", "main", { isMain: true, worktreePath: null });
+				repositoriesStore.setWorkspace("/repo", "main", { isMain: true, worktreePath: null });
 				repositoriesStore.setActive("/repo");
-				repositoriesStore.setActiveBranch("/repo", "main");
+				repositoriesStore.setActiveWorkspace("/repo", "main");
 
 				const terminalId = addTerminal({ name: "Terminal parity" });
-				repositoriesStore.addTerminalToBranch("/repo", "main", terminalId);
+				repositoriesStore.addTerminalToWorkspace("/repo", "main", terminalId);
 				const diffId = diffTabsStore.add("/repo", "/repo/change.ts", "M");
 				const markdownId = mdTabsStore.add("/repo", "/repo/readme.md");
 				const editorId = editorTabsStore.add("/repo", "/repo/edit.ts");
@@ -872,7 +1347,206 @@ describe("TabBar", () => {
 		});
 	});
 
+	// The tab stores keep `filePath` RELATIVE to the tab's filesystem root. Copy Path
+	// used to hand the bare `filePath` to the clipboard, so a tab yielded `src/a.ts`
+	// while the File Browser yielded the full path for the same file — useless
+	// anywhere the consumer's cwd is not the repo root.
+	describe("Copy Path copies the absolute path", () => {
+		function setupRepo() {
+			repositoriesStore.add({ path: "/repo", displayName: "repo" });
+			repositoriesStore.setWorkspace("/repo", "main", { isMain: true, worktreePath: null });
+			repositoriesStore.setActive("/repo");
+			repositoriesStore.setActiveWorkspace("/repo", "main");
+		}
+
+		function clickCopyPath(container: HTMLElement, tabSelector: string) {
+			fireEvent.contextMenu(container.querySelector(tabSelector)!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find(
+				(i) => i.querySelector(".label")?.textContent === "Copy Path",
+			)!;
+			fireEvent.click(item);
+		}
+
+		const renderTabBar = () =>
+			render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+
+		beforeEach(() => {
+			mockCopyPathToClipboard.mockClear();
+			mockOpenLocalPath.mockClear();
+			mockHandleOpenUrl.mockClear();
+			setupRepo();
+		});
+
+		it("joins a diff tab's relative path onto its repo root", () => {
+			diffTabsStore.add("/repo", "src/file.ts", "M");
+			const { container } = renderTabBar();
+			clickCopyPath(container, ".diffTab");
+			expect(mockCopyPathToClipboard).toHaveBeenCalledWith("/repo/src/file.ts");
+		});
+
+		it("joins a markdown tab's relative path onto its worktree root", () => {
+			mdTabsStore.add("/repo", "docs/readme.md", "/wt/feature");
+			const { container } = renderTabBar();
+			clickCopyPath(container, ".mdTab");
+			expect(mockCopyPathToClipboard).toHaveBeenCalledWith("/wt/feature/docs/readme.md");
+		});
+
+		it("joins an editor tab's relative path onto its fs root", () => {
+			editorTabsStore.add("/repo", "src/main.rs", undefined, { fsRoot: "/wt/feature" });
+			const { container } = renderTabBar();
+			clickCopyPath(container, ".editTab");
+			expect(mockCopyPathToClipboard).toHaveBeenCalledWith("/wt/feature/src/main.rs");
+		});
+
+		// `ui action=tab url=file://…` renders through srcdoc because the iframe
+		// sandbox blocks file://, so the panel looks memory-only. It is not — the
+		// url is the only record of where the document came from.
+		it("recovers the path of a file:// panel tab", () => {
+			mdTabsStore.openUiTab("bench", "Dev benchmark 90d", "", false, "file:///tmp/report%20one.html", false);
+			const { container } = renderTabBar();
+			clickCopyPath(container, ".panelTab");
+			expect(mockCopyPathToClipboard).toHaveBeenCalledWith("/tmp/report one.html");
+		});
+
+		// `handleOpenUrl` allows http/https/mailto only — terminal output is
+		// untrusted — so a file:// panel must go to the OS opener instead, or the
+		// menu item does nothing but log "Blocked URL with disallowed scheme".
+		it("sends a file:// panel to the OS opener, not the URL allowlist", () => {
+			mdTabsStore.openUiTab("bench2", "Report", "", false, "file:///tmp/report.html", false);
+			const { container } = renderTabBar();
+			fireEvent.contextMenu(container.querySelector(".panelTab")!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find(
+				(i) => i.querySelector(".label")?.textContent === "Open in Browser",
+			)!;
+			fireEvent.click(item);
+			expect(mockOpenLocalPath).toHaveBeenCalledWith("/tmp/report.html");
+			expect(mockHandleOpenUrl).not.toHaveBeenCalled();
+		});
+
+		it("keeps an http panel on the URL allowlist", () => {
+			mdTabsStore.openUiTab("web", "Dashboard", "", false, "http://127.0.0.1:14319", false);
+			const { container } = renderTabBar();
+			fireEvent.contextMenu(container.querySelector(".panelTab")!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find(
+				(i) => i.querySelector(".label")?.textContent === "Open in Browser",
+			)!;
+			fireEvent.click(item);
+			expect(mockHandleOpenUrl).toHaveBeenCalledWith("http://127.0.0.1:14319");
+			expect(mockOpenLocalPath).not.toHaveBeenCalled();
+		});
+
+		it("offers no Copy Path for a panel tab with inline HTML only", () => {
+			mdTabsStore.openUiTab("inline", "Inline panel", "<p>hi</p>", false, undefined, false);
+			const { container } = renderTabBar();
+			fireEvent.contextMenu(container.querySelector(".panelTab")!);
+			const labels = Array.from(document.querySelectorAll(".menu .item .label")).map((l) => l.textContent);
+			expect(labels).not.toContain("Copy Path");
+		});
+
+		it("leaves an already-absolute path from an external file alone", () => {
+			editorTabsStore.add("/repo", "/etc/hosts");
+			const { container } = renderTabBar();
+			clickCopyPath(container, ".editTab");
+			expect(mockCopyPathToClipboard).toHaveBeenCalledWith("/etc/hosts");
+		});
+	});
+
+	describe("alias context menu item", () => {
+		const renderTabBar = () =>
+			render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+
+		function aliasItem(container: HTMLElement): Element | undefined {
+			fireEvent.contextMenu(container.querySelector(".tab")!);
+			return Array.from(document.querySelectorAll(".menu .item")).find((item) =>
+				item.querySelector(".label")?.textContent?.startsWith("Alias:"),
+			);
+		}
+
+		beforeEach(() => {
+			mockWriteClipboard.mockClear();
+		});
+
+		// The alias is the address another agent has to be told, so it has to be
+		// readable and copyable from the tab that owns it — otherwise it is only
+		// ever visible inside an MCP payload.
+		it("shows the alias and copies it to the clipboard", () => {
+			const id = addTerminal({ name: "Tab 1" });
+			terminalsStore.update(id, { alias: "tu-2" });
+
+			const { container } = renderTabBar();
+			const item = aliasItem(container);
+
+			expect(item?.querySelector(".label")?.textContent).toBe("Alias: tu-2");
+			fireEvent.click(item!);
+			expect(mockWriteClipboard).toHaveBeenCalledWith("tu-2");
+		});
+
+		it("is absent while the session has no alias yet", () => {
+			addTerminal({ name: "Tab 1" });
+			const { container } = renderTabBar();
+			expect(aliasItem(container)).toBeUndefined();
+		});
+	});
+
 	describe("context menu", () => {
+		it("focuses the detached Markdown window instead of selecting a second copy", () => {
+			const id = mdTabsStore.add("/repo", "notes.md");
+			uiStore.setDetached(`markdown-tab-${id}`, `panel-markdown-tab-${id}`);
+			const onSelect = vi.fn();
+			const onFocusDetached = vi.fn();
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={onSelect}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+					onFocusDetachedTab={onFocusDetached}
+				/>
+			));
+			fireEvent.click(container.querySelector(`[data-tab-id="${id}"]`)!);
+			expect(onFocusDetached).toHaveBeenCalledExactlyOnceWith(id);
+			expect(onSelect).not.toHaveBeenCalled();
+		});
+
+		it("offers Detach to Window for a tuic://open Markdown document outside registered repos", () => {
+			const id = mdTabsStore.addMcpFile("digest-1", "", "/Users/boss/Gits/.tmp/report.md", false, false);
+			const onDetachTab = vi.fn();
+			const { container } = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+					onDetachTab={onDetachTab}
+				/>
+			));
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${id}"]`)!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find(
+				(node) => node.querySelector(".label")?.textContent === "Detach to Window",
+			);
+			expect(item).toBeDefined();
+			fireEvent.click(item!);
+			expect(onDetachTab).toHaveBeenCalledExactlyOnceWith(id);
+		});
+
 		it("right-click opens context menu", () => {
 			addTerminal({ name: "Tab 1" });
 
@@ -892,14 +1566,15 @@ describe("TabBar", () => {
 		});
 	});
 
-	describe("new tab menu", () => {
-		it("disables split when no active terminal", () => {
-			// Clear all terminals so there's no activeId
-			for (const id of terminalsStore.getIds()) {
-				terminalsStore.remove(id);
-			}
+	describe("design mode", () => {
+		function agentTab(sessionId: string, agentType: "claude" | null) {
+			const id = addTerminal({ name: sessionId, sessionId });
+			terminalsStore.update(id, { agentType });
+			return id;
+		}
 
-			const { container } = render(() => (
+		const renderBar = () =>
+			render(() => (
 				<TabBar
 					onTabSelect={() => {}}
 					onTabClose={() => {}}
@@ -908,65 +1583,139 @@ describe("TabBar", () => {
 					onNewTab={() => {}}
 				/>
 			));
-			const btn = container.querySelector(".newBtn")!;
-			vi.spyOn(btn, "getBoundingClientRect").mockReturnValue({
-				left: 100,
-				bottom: 50,
-				top: 20,
-				right: 150,
-				width: 50,
-				height: 30,
-				x: 100,
-				y: 20,
-				toJSON: () => {},
-			} as DOMRect);
-			fireEvent.contextMenu(btn);
-			const menus = document.querySelectorAll(".menu");
-			const menu = menus[menus.length - 1];
-			const items = Array.from(menu.querySelectorAll(".item"));
-			const splitV = items.find((i) => i.textContent?.includes("Split Vertically"));
-			const splitH = items.find((i) => i.textContent?.includes("Split Horizontally"));
-			expect(splitV).toBeDefined();
-			expect(splitH).toBeDefined();
-			expect(splitV!.classList.contains("disabled")).toBe(true);
-			expect(splitH!.classList.contains("disabled")).toBe(true);
+
+		it("offers design mode only for an agent session and starts the clicked tab", async () => {
+			const first = agentTab("first-session", "claude");
+			const second = agentTab("second-session", "claude");
+			terminalsStore.setActive(first);
+			const { container } = renderBar();
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${second}"]`)!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find((node) =>
+				node.textContent?.includes("Start Design Mode"),
+			);
+			expect(item).toBeDefined();
+			expect(document.body.textContent).not.toContain("Choose Design Mode browser");
+			fireEvent.click(item!);
+			const browser = Array.from(document.querySelectorAll(".item")).find(
+				(node) => node.textContent?.trim() === "Edge",
+			);
+			expect(browser).toBeDefined();
+			fireEvent.click(browser!);
+			await Promise.resolve();
+			expect(invoke).toHaveBeenCalledWith("start_design_mode", { sessionId: "second-session", browser: "edge" });
 		});
 
-		it("calls onSplitVertical when Split Vertically is clicked", () => {
-			const handleSplit = vi.fn();
-			const id = addTerminal({ name: "T1" });
-			terminalsStore.setActive(id);
-
-			const { container } = render(() => (
-				<TabBar
-					onTabSelect={() => {}}
-					onTabClose={() => {}}
-					onCloseOthers={() => {}}
-					onCloseToRight={() => {}}
-					onNewTab={() => {}}
-					onSplitVertical={handleSplit}
-				/>
-			));
-			const btn = container.querySelector(".newBtn")!;
-			vi.spyOn(btn, "getBoundingClientRect").mockReturnValue({
-				left: 100,
-				bottom: 50,
-				top: 20,
-				right: 150,
-				width: 50,
-				height: 30,
-				x: 100,
-				y: 20,
-				toJSON: () => {},
-			} as DOMRect);
-			fireEvent.contextMenu(btn);
-			const menus = document.querySelectorAll(".menu");
-			const menu = menus[menus.length - 1];
-			const splitBtn = Array.from(menu.querySelectorAll(".item")).find((i) =>
-				i.textContent?.includes("Split Vertically"),
+		it("removes the Design Mode badge when the bound session stops (regression: stopped badge remains)", async () => {
+			const shell = agentTab("shell-session", null);
+			const agent = agentTab("agent-session", "claude");
+			const { container } = renderBar();
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${shell}"]`)!);
+			expect(document.body.textContent).not.toContain("Start Design Mode");
+			await Promise.resolve();
+			const eventHandler = vi.mocked(listen).mock.calls.find(([name]) => name === "design-mode-changed")?.[1];
+			expect(eventHandler).toBeDefined();
+			eventHandler?.({ payload: { repo_path: "/repo", session_id: "agent-session", status: "armed" } });
+			expect(container.querySelector(`[data-tab-id="${agent}"] .designModeBadge`)?.textContent).toBe("D");
+			expect(container.querySelector(`[data-tab-id="${agent}"] .designModeBadge`)?.getAttribute("title")).toBe(
+				"Design Mode armed",
 			);
-			fireEvent.click(splitBtn!);
-			expect(handleSplit).toHaveBeenCalledOnce();
+			expect(container.querySelector(`[data-tab-id="${shell}"] .designModeBadge`)).toBeNull();
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${agent}"]`)!);
+			const stopItem = Array.from(document.querySelectorAll(".menu .item")).find((node) =>
+				node.textContent?.includes("Stop Design Mode"),
+			);
+			expect(stopItem).toBeDefined();
+			fireEvent.click(stopItem!);
+			expect(invoke).toHaveBeenCalledWith("stop_design_mode", { repoPath: "/repo" });
+			eventHandler?.({ payload: { repo_path: "/repo", session_id: "agent-session", status: "stopped" } });
+			expect(container.querySelector(`[data-tab-id="${agent}"] .designModeBadge`)).toBeNull();
+		});
+
+		it("restores design mode status after a webview reload", async () => {
+			const id = agentTab("agent-session", "claude");
+			vi.mocked(invoke).mockImplementation((command) =>
+				Promise.resolve(
+					command === "get_design_mode_status"
+						? [{ repoPath: "/repo", sessionId: "agent-session", status: "armed" }]
+						: undefined,
+				),
+			);
+			const { container } = renderBar();
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(invoke).toHaveBeenCalledWith("get_design_mode_status");
+			expect(container.querySelector(`[data-tab-id="${id}"] .designModeBadge`)?.getAttribute("title")).toBe(
+				"Design Mode armed",
+			);
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${id}"]`)!);
+			expect(document.body.textContent).toContain("Stop Design Mode");
+		});
+
+		it("keeps a newer design mode event when the mount snapshot arrives late", async () => {
+			const id = agentTab("agent-session", "claude");
+			let resolveSnapshot!: (value: unknown) => void;
+			const snapshot = new Promise<unknown>((resolve) => {
+				resolveSnapshot = resolve;
+			});
+			vi.mocked(invoke).mockImplementation((command) =>
+				command === "get_design_mode_status" ? snapshot : Promise.resolve(undefined),
+			);
+			const { container } = renderBar();
+			await Promise.resolve();
+			expect(invoke).toHaveBeenCalledWith("get_design_mode_status");
+			const eventHandler = vi.mocked(listen).mock.calls.find(([name]) => name === "design-mode-changed")?.[1];
+			eventHandler?.({ payload: { repo_path: "/repo", session_id: "agent-session", status: "stopped" } });
+			resolveSnapshot([{ repoPath: "/repo", sessionId: "agent-session", status: "armed" }]);
+			await Promise.resolve();
+			expect(container.querySelector(`[data-tab-id="${id}"] .designModeBadge`)).toBeNull();
+		});
+
+		it("shows the backend message when starting design mode fails", async () => {
+			const id = agentTab("agent-session", "claude");
+			vi.mocked(invoke).mockImplementation((command) =>
+				command === "start_design_mode"
+					? Promise.reject(new Error("Chrome is unavailable"))
+					: Promise.resolve(undefined),
+			);
+			const addToast = vi.spyOn(toastsStore, "add");
+			const { container } = renderBar();
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${id}"]`)!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find((node) =>
+				node.textContent?.includes("Start Design Mode"),
+			);
+			expect(document.body.textContent).not.toContain("Choose Design Mode browser");
+			fireEvent.click(item!);
+			const browser = Array.from(document.querySelectorAll(".item")).find(
+				(node) => node.textContent?.trim() === "Edge",
+			);
+			expect(browser).toBeDefined();
+			fireEvent.click(browser!);
+			await Promise.resolve();
+			expect(addToast).toHaveBeenCalledWith(expect.any(String), "Chrome is unavailable", "error");
+			addToast.mockRestore();
+		});
+
+		it("explains that browser design mode opens Chrome on the host", async () => {
+			for (const toast of [...toastsStore.toasts]) toastsStore.remove(toast.id);
+			const tauri = vi.spyOn(transport, "isTauri").mockReturnValue(false);
+			const id = agentTab("agent-session", "claude");
+			const notice = render(() => <ToastList onDismiss={() => {}} repoName={() => null} />);
+			const { container } = renderBar();
+			fireEvent.contextMenu(container.querySelector(`[data-tab-id="${id}"]`)!);
+			const item = Array.from(document.querySelectorAll(".menu .item")).find((node) =>
+				node.textContent?.includes("Start Design Mode"),
+			);
+			expect(document.body.textContent).not.toContain("Choose Design Mode browser");
+			fireEvent.click(item!);
+			const browser = Array.from(document.querySelectorAll(".item")).find(
+				(node) => node.textContent?.trim() === "Edge",
+			);
+			expect(browser).toBeDefined();
+			fireEvent.click(browser!);
+			await Promise.resolve();
+			expect(notice.getByText("Browser opened on the host machine.")).toBeVisible();
+			expect(notice.getByText("Design Mode")).toBeVisible();
+			tauri.mockRestore();
 		});
 	});
 
@@ -996,6 +1745,127 @@ describe("TabBar", () => {
 	});
 
 	describe("quick switcher badges", () => {
+		function renderLongPressHints() {
+			for (let i = 1; i <= 10; i++) addTerminal({ name: `Tab ${i}` });
+			return render(() => {
+				const [quick, setQuick] = createSignal(false);
+				const [hints, setHints] = createSignal(false);
+				useQuickSwitcherVisibility(setQuick, setHints);
+				return (
+					<TabBar
+						tabHintsActive={hints()}
+						quickSwitcherActive={quick()}
+						onTabSelect={() => {}}
+						onTabClose={() => {}}
+						onCloseOthers={() => {}}
+						onCloseToRight={() => {}}
+						onNewTab={() => {}}
+					/>
+				);
+			});
+		}
+
+		function primaryDown() {
+			fireEvent.keyDown(document, { key: isMacOS() ? "Meta" : "Control", metaKey: isMacOS(), ctrlKey: !isMacOS() });
+		}
+
+		it.each(["MacIntel", "Win32", "Linux x86_64"])(
+			"long press reveals only nine tab shortcuts and release hides them on %s",
+			(platform) => {
+				const original = navigator.platform;
+				Object.defineProperty(navigator, "platform", { configurable: true, value: platform });
+				resetPlatformCache();
+				const view = renderLongPressHints();
+				try {
+					primaryDown();
+					vi.advanceTimersByTime(449);
+					expect(view.container.querySelectorAll(".shortcutBadge")).toHaveLength(0);
+					vi.advanceTimersByTime(1);
+					const badges = view.container.querySelectorAll(".shortcutBadge");
+					expect([...badges].map((b) => b.textContent)).toEqual(
+						Array.from({ length: 9 }, (_, i) => keyFor(`switch-tab-${i + 1}`)),
+					);
+					fireEvent.keyUp(document, { key: isMacOS() ? "Meta" : "Control" });
+					expect(view.container.querySelectorAll(".shortcutBadge")).toHaveLength(0);
+				} finally {
+					view.unmount();
+					Object.defineProperty(navigator, "platform", { configurable: true, value: original });
+					resetPlatformCache();
+				}
+			},
+		);
+
+		it.each(["c", "t", "1", "mousedown", "wheel"])(
+			"%s cancels pending tab hints without consuming the event or rearming on repeat",
+			(action) => {
+				const { container } = renderLongPressHints();
+				primaryDown();
+				vi.advanceTimersByTime(200);
+				const event =
+					action === "mousedown"
+						? new MouseEvent(action, { bubbles: true, cancelable: true })
+						: action === "wheel"
+							? new WheelEvent(action, { bubbles: true, cancelable: true })
+							: new KeyboardEvent("keydown", {
+									key: action,
+									metaKey: isMacOS(),
+									ctrlKey: !isMacOS(),
+									bubbles: true,
+									cancelable: true,
+								});
+				document.dispatchEvent(event);
+				expect(event.defaultPrevented).toBe(false);
+				fireEvent.keyDown(document, {
+					key: isMacOS() ? "Meta" : "Control",
+					metaKey: isMacOS(),
+					ctrlKey: !isMacOS(),
+					repeat: true,
+				});
+				vi.advanceTimersByTime(1000);
+				expect(container.querySelectorAll(".shortcutBadge")).toHaveLength(0);
+			},
+		);
+
+		it.each(["mousedown", "wheel", "blur", "visibilitychange", "keydown"])(
+			"%s retracts visible long-press badges",
+			(action) => {
+				const { container } = renderLongPressHints();
+				primaryDown();
+				vi.advanceTimersByTime(450);
+				expect(container.querySelectorAll(".shortcutBadge")).toHaveLength(9);
+				(action === "blur" ? window : document).dispatchEvent(
+					action === "keydown" ? new KeyboardEvent(action, { key: "c" }) : new Event(action),
+				);
+				expect(container.querySelectorAll(".shortcutBadge")).toHaveLength(0);
+			},
+		);
+
+		it("quick-switcher chord stays immediate and cancels the primary hold", () => {
+			const { container } = renderLongPressHints();
+			primaryDown();
+			fireEvent.keyDown(document, {
+				key: isMacOS() ? "Control" : "Alt",
+				metaKey: isMacOS(),
+				ctrlKey: true,
+				altKey: !isMacOS(),
+			});
+			expect(container.querySelector(".shortcutBadge")?.textContent).toBe(keyFor("switch-branch-1"));
+			vi.advanceTimersByTime(1000);
+			expect(container.querySelector(".shortcutBadge")?.textContent).toBe(keyFor("switch-branch-1"));
+			fireEvent.keyUp(document, { key: isMacOS() ? "Control" : "Alt" });
+			expect(container.querySelectorAll(".shortcutBadge")).toHaveLength(0);
+		});
+
+		it("unmount cancels the pending timer and listeners", () => {
+			const { unmount } = renderLongPressHints();
+			primaryDown();
+			const clear = vi.spyOn(globalThis, "clearTimeout");
+			unmount();
+			expect(clear).toHaveBeenCalled();
+			vi.advanceTimersByTime(1000);
+			clear.mockRestore();
+		});
+
 		it("shows shortcut badges when quickSwitcherActive", () => {
 			addTerminal({ name: "Tab 1" });
 			addTerminal({ name: "Tab 2" });
@@ -1012,6 +1882,8 @@ describe("TabBar", () => {
 			));
 			const badges = container.querySelectorAll(".shortcutBadge");
 			expect(badges.length).toBe(2);
+			// The badge names the chord that is held (Cmd+Ctrl+N), not plain Cmd+N.
+			expect(badges[0].textContent).toBe(keyFor("switch-branch-1"));
 		});
 	});
 
@@ -1059,16 +1931,16 @@ describe("TabBar", () => {
 		function setupRepoWithWorktrees() {
 			// Create a repo with main branch and a worktree branch
 			repositoriesStore.add({ path: "/repo", displayName: "repo" });
-			repositoriesStore.setBranch("/repo", "main", { isMain: true, worktreePath: null });
-			repositoriesStore.setBranch("/repo", "feature-a", { isMain: false, worktreePath: "/repo-wt/feature-a" });
+			repositoriesStore.setWorkspace("/repo", "main", { isMain: true, worktreePath: null });
+			repositoriesStore.setWorkspace("/repo", "feature-a", { isMain: false, worktreePath: "/repo-wt/feature-a" });
 			repositoriesStore.setActive("/repo");
-			repositoriesStore.setActiveBranch("/repo", "main");
+			repositoriesStore.setActiveWorkspace("/repo", "main");
 		}
 
 		it("shows Move to Worktree submenu when repo has multiple worktrees", () => {
 			setupRepoWithWorktrees();
 			const termId = addTerminal({ name: "T1", sessionId: "sess-1" });
-			repositoriesStore.addTerminalToBranch("/repo", "main", termId);
+			repositoriesStore.addTerminalToWorkspace("/repo", "main", termId);
 			terminalsStore.setActive(termId);
 
 			const getTargets = () => [{ branchName: "feature-a", path: "/repo-wt/feature-a" }];
@@ -1092,11 +1964,11 @@ describe("TabBar", () => {
 
 		it("hides Move to Worktree when no worktree targets available", () => {
 			repositoriesStore.add({ path: "/repo", displayName: "repo" });
-			repositoriesStore.setBranch("/repo", "main", { isMain: true, worktreePath: null });
+			repositoriesStore.setWorkspace("/repo", "main", { isMain: true, worktreePath: null });
 			repositoriesStore.setActive("/repo");
-			repositoriesStore.setActiveBranch("/repo", "main");
+			repositoriesStore.setActiveWorkspace("/repo", "main");
 			const termId = addTerminal({ name: "T1", sessionId: "sess-1" });
-			repositoriesStore.addTerminalToBranch("/repo", "main", termId);
+			repositoriesStore.addTerminalToWorkspace("/repo", "main", termId);
 			terminalsStore.setActive(termId);
 
 			const getTargets = () => [] as Array<{ branchName: string; path: string }>;
@@ -1122,7 +1994,7 @@ describe("TabBar", () => {
 			setupRepoWithWorktrees();
 			const handleMove = vi.fn();
 			const termId = addTerminal({ name: "T1", sessionId: "sess-1" });
-			repositoriesStore.addTerminalToBranch("/repo", "main", termId);
+			repositoriesStore.addTerminalToWorkspace("/repo", "main", termId);
 			terminalsStore.setActive(termId);
 
 			const getTargets = () => [{ branchName: "feature-a", path: "/repo-wt/feature-a" }];

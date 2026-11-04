@@ -6,7 +6,7 @@ All shortcuts use `Cmd` on macOS and `Ctrl` on Windows/Linux unless noted.
 
 ### From the UI
 
-Open **Help > Keyboard Shortcuts** (or `Cmd+?` → Keyboard Shortcuts). Click the pencil icon next to any shortcut to enter recording mode, then press your new key combination. The app warns you if the combo is already used by another action. Overridden shortcuts are highlighted in accent color with a reset icon to revert individually. A "Reset all to defaults" button is at the bottom.
+Open **Settings > Keyboard Shortcuts**, or **Help > Keyboard Shortcuts** (or `Cmd+?` → Keyboard Shortcuts) — both show the same editor. Click the pencil icon next to any shortcut to enter recording mode, then press your new key combination. The app warns you if the combo is already used by another action. Overridden shortcuts are highlighted in accent color with a reset icon to revert individually. A "Reset all to defaults" button is at the bottom.
 
 **Extended function keys (macOS).** `F13`–`F20` are recordable, both here and for the Global Hotkey. macOS never forwards them to the app's WebView, so FastAF captures them natively and feeds them into the recorder; if one of them still appears dead, macOS itself consumed the key first (`F14`/`F15` drive keyboard illumination on many Macs — remap or disable that in System Settings > Keyboard). `F21`–`F24` are accepted in `keybindings.json` but have no macOS key code, so no Mac keyboard can produce them.
 
@@ -46,6 +46,30 @@ A configurable OS-level shortcut to toggle FastAF's visibility from any applicat
 - Not available in browser/PWA mode
 - Persists across app restarts
 
+## Terminal Compose Panel
+
+These shortcuts apply while the terminal Compose editor has focus, in CLI or Chat.
+They are editor-local, not configurable global keybindings. `Ctrl` means the
+Control key on every platform, including macOS.
+
+| Shortcut | Action |
+|----------|--------|
+| `Enter` | Send the draft immediately |
+| `Ctrl+Enter` / `Shift+Enter` | Insert a new line |
+| `Shift+Ctrl+Enter` | Queue for the next idle moment (agent sessions only) |
+
+Enter that confirms an IME candidate does not send the draft. Mobile terminal
+keybar controls send native terminal keys; they do not use Compose shortcuts.
+
+## AI Chat Composer
+
+AI Chat's composer handles `Ctrl+S` locally to park or restore its prompt,
+including on macOS. The same action is available from the composer button on a
+phone; it is not a configurable global shortcut.
+
+Press `Escape` in the AI Chat composer or transcript to stop a running turn
+without clearing your draft. When Find is open, Escape closes Find first.
+
 ## Terminal Operations
 
 | Shortcut | Action |
@@ -53,8 +77,8 @@ A configurable OS-level shortcut to toggle FastAF's visibility from any applicat
 | `Cmd+T` | New terminal tab |
 | `Cmd+W` | Close tab (or close active pane in split mode) |
 | `Cmd+Shift+T` | Reopen last closed tab |
-| `Cmd+R` | Run saved command |
-| `Cmd+Shift+R` | Edit and run command |
+| `Cmd+Shift+R` | Run saved command |
+| `Cmd+R` | Reload active web/preview tab |
 | `Cmd+L` | Clear terminal |
 | `Cmd+Shift+L` | Refresh terminal (fix rendering glyphs) |
 | `Cmd+F` | Find in terminal / diff tab |
@@ -74,6 +98,8 @@ A configurable OS-level shortcut to toggle FastAF's visibility from any applicat
 | `Cmd+Shift+Down` | Jump to next block |
 | `Cmd+Shift+B` | Toggle block-scoped search |
 
+Hands-free conversation: press `Cmd+Alt+V` (`Ctrl+Alt+V` on Windows/Linux) to start or stop listening on the active terminal. Dictation must be enabled. A custom binding or explicit unbind in Keyboard Shortcuts overrides this default.
+
 ## Tab Navigation
 
 | Shortcut | Action |
@@ -82,18 +108,22 @@ A configurable OS-level shortcut to toggle FastAF's visibility from any applicat
 | `Ctrl+Tab` | Next tab |
 | `Ctrl+Shift+Tab` | Previous tab |
 
+Hold `Cmd` alone (`Ctrl` on Windows/Linux) for 450 ms to show shortcut badges on the first nine terminal tabs. Release the modifier to hide them. Any other key, mouse button, wheel event, window blur, or visibility change cancels the hints. Tab shortcuts work immediately, even without badges. The existing quick-switcher chord is unchanged.
+
 ## Zoom
 
 | Shortcut | Action |
 |----------|--------|
-| `Cmd+=` (or `Cmd++`) | Zoom in (active terminal) |
-| `Cmd+-` | Zoom out (active terminal) |
-| `Cmd+0` | Reset zoom to default (active terminal) |
-| `Cmd+Shift+=` (or `Cmd+Shift++`) | Zoom in all terminals |
-| `Cmd+Shift+-` | Zoom out all terminals |
-| `Cmd+Shift+0` | Reset zoom all terminals |
+| `Cmd+=` (or `Cmd++`) | Zoom in (active terminal CLI/Chat view, Markdown tab, or code editor) |
+| `Cmd+-` | Zoom out (active terminal CLI/Chat view, Markdown tab, or code editor) |
+| `Cmd+0` | Reset zoom to default (active terminal CLI/Chat view, Markdown tab, or code editor) |
+| `Cmd+Shift+=` (or `Cmd+Shift++`) | Zoom in all tabs |
+| `Cmd+Shift+-` | Zoom out all tabs |
+| `Cmd+Shift+0` | Reset zoom all tabs |
 
-Font size range: 8px to 32px, step 2px per action.
+The collective shortcuts affect all open terminal, Markdown, and code editor tabs, including inactive tabs. Each tab uses its existing zoom step and bounds. Reset uses the Markdown default or the configured terminal/editor default. Standard zoom shortcuts affect only the active tab.
+
+Font size range: 8px to 32px, step 2px per action. A session shares one zoom level between its CLI and Chat views. The collective shortcuts also update terminal Chat views.
 
 ## Split Panes
 
@@ -135,6 +165,7 @@ Note: File browser and Markdown panels are mutually exclusive — opening one cl
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+P` | Command palette |
+| `Cmd+Shift+P` | Open Terminal Progress |
 | `Cmd+Shift+A` | Activity dashboard |
 
 ## Git
@@ -181,7 +212,7 @@ The panel is mouse-first — branch actions (checkout, merge, rebase, push, pull
 | Shortcut | Action |
 |----------|--------|
 | Hold `Cmd+Ctrl` (macOS) or `Ctrl+Alt` (Win/Linux) | Show quick switcher overlay |
-| `Cmd+Ctrl+1-9` | Switch to branch by index |
+| `Cmd+Ctrl+1-9` | Switch to branch by index (in the Global Workspace: switch to tab N; only the tab hints show) |
 
 While holding the modifier, all branches show numbered badges. Press a number to switch instantly.
 
@@ -205,6 +236,7 @@ While holding the modifier, all branches show numbered badges. Press a number to
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+S` | Save file |
+| `Alt+Z` | Toggle line wrapping and remember it for this file kind |
 
 ## Ideas Panel (when textarea is focused)
 
@@ -245,7 +277,7 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | Right-click | Sidebar branch | Branch context menu |
 | Middle-click | Tab | Close tab |
 | Drag | Tab | Reorder tabs |
-| Drag | Sidebar right edge | Resize sidebar (200-500px) |
+| Drag | Sidebar right edge | Resize sidebar (300-500px); sidebar text grows 1px at 350, 400 and 450px |
 | Click | PR badge / CI ring | Open PR detail popover |
 | Click | Title bar panel buttons | Toggle Ideas/Files/Markdown/Git/Chat panels |
 | Drag | Panel left edge | Resize right-side panel (200-800px) |
@@ -258,21 +290,26 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | `zoom-in` | `Cmd+=` | Zoom in |
 | `zoom-out` | `Cmd+-` | Zoom out |
 | `zoom-reset` | `Cmd+0` | Reset zoom |
-| `zoom-in-all` | `Cmd+Shift+=` | Zoom in all terminals |
-| `zoom-out-all` | `Cmd+Shift+-` | Zoom out all terminals |
-| `zoom-reset-all` | `Cmd+Shift+0` | Reset zoom all terminals |
+| `zoom-in-all` | `Cmd+Shift+=` | Zoom in all tabs |
+| `zoom-out-all` | `Cmd+Shift+-` | Zoom out all tabs |
+| `zoom-reset-all` | `Cmd+Shift+0` | Reset zoom all tabs |
 | `new-terminal` | `Cmd+T` | New terminal tab |
 | `close-terminal` | `Cmd+W` | Close terminal/pane |
 | `reopen-closed-tab` | `Cmd+Shift+T` | Reopen closed tab |
 | `clear-terminal` | `Cmd+L` | Clear terminal |
 | `refresh-terminal` | `Cmd+Shift+L` | Refresh terminal (fix glyphs) |
-| `run-command` | `Cmd+R` | Run saved command |
-| `edit-command` | `Cmd+Shift+R` | Edit and run command |
+| `run-command` | `Cmd+Shift+R` | Run saved command |
+| `edit-command` | _(unbound)_ | Edit and run command |
+| `reload-tab` | `Cmd+R` | Reload the active web/preview tab |
 | `split-vertical` | `Cmd+\` | Split vertically |
 | `split-horizontal` | `Cmd+Alt+\` | Split horizontally |
 | `prev-tab` | `Ctrl+Shift+Tab` | Previous tab |
+
+Hold `Cmd` alone (`Ctrl` on Windows/Linux) for 450 ms to show shortcut badges on the first nine terminal tabs. Release the modifier to hide them. Any other key, mouse button, wheel event, window blur, or visibility change cancels the hints. Tab shortcuts work immediately, even without badges. The existing quick-switcher chord is unchanged.
 | `next-tab` | `Ctrl+Tab` | Next tab |
 | `focus-last-terminal` | `Cmd+Ctrl+Backspace` | Return to last terminal (toggle, across repos) |
+| `history-back` | `Cmd+Alt+ArrowLeft` | Back to the previous terminal in the activation history (last 10, across repos) |
+| `history-forward` | `Cmd+Alt+ArrowRight` | Forward to the next terminal in the activation history |
 | `jump-waiting-terminal` | `Cmd+U` | Jump to the next terminal awaiting input (cycles, across repos) |
 | `switch-tab-1..9` | `Cmd+1..9` | Switch to tab N |
 | `toggle-sidebar` | `Cmd+[` | Toggle sidebar |
@@ -291,6 +328,7 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | `quick-branch-switch` | `Cmd+B` | Quick branch switch |
 | `find-in-terminal` | `Cmd+F` | Find in terminal |
 | `command-palette` | `Cmd+P` | Command palette |
+| `progress` | `Cmd+Shift+P` | Open Terminal Progress |
 | `activity-dashboard` | `Cmd+Shift+A` | Activity dashboard |
 | `toggle-multiview` | `Cmd+Alt+M` | Multiview — grid of every live terminal across all repos/branches |
 | `toggle-error-log` | `Cmd+Shift+E` | Toggle error log |
@@ -305,7 +343,7 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | `toggle-file-browser-content-search` | `Cmd+Shift+F` | File content search |
 | `toggle-diff-scroll` | `Cmd+Shift+G` | Diff scroll view |
 | `toggle-global-workspace` | `Cmd+Shift+X` | Toggle global workspace |
-| `toggle-ai-chat` | `Cmd+Alt+A` | Toggle AI Chat panel |
+| `toggle-ai-chat` | `Cmd+Alt+A` | Toggle the ego-backed AI Chat panel. Listed only while **Experimental features** is on |
 | `clear-scrollback` | `Cmd+K` | Clear scrollback |
 | `open-folder` | `Cmd+Shift+O` | Open folder picker |
 | `open-path` | `Cmd+Alt+O` | Open path… |
@@ -313,7 +351,7 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | `copy-relative-file-path` | `Cmd+Shift+Alt+C` | Copy active file's repo-relative path |
 | `open-secondary-window` | — | Open secondary window |
 | `command-overview` | — | Command overview |
-| `ai-triage` | — | AI Triage |
+| `open-tasks` | — | Open Tasks (listed only while a work-item provider plugin is loaded) |
 | `toggle-outline` | `Cmd+Alt+L` | Toggle outline panel |
 | `toggle-compose-panel` | `Cmd+I` | Toggle compose panel |
 | `detach-activity-dashboard` | — | Open Activity Dashboard in separate window |
@@ -325,3 +363,11 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | `block-prev` | `Cmd+Shift+Up` | Previous command block |
 | `block-next` | `Cmd+Shift+Down` | Next command block |
 | `block-search-toggle` | `Cmd+Shift+B` | Search in block |
+| `answers-only` | `Cmd+Alt+R` | Show every prompt of the session with its 💬 answers (turns without an answer are left out); press again to return to the live terminal |
+| `toggle-hands-free` | `Cmd+Alt+V` | Start/stop hands-free conversation with the active terminal |
+
+## Plugin action discovery
+
+A connected frontend publishes its registered plugin command IDs for the shared settings owner. Explicit keybinding-choice refresh includes those IDs and built-in actions. Unloading removes the plugin IDs from later refreshes. Before any frontend publication, plugin choices report unavailable rather than an empty successful list. Publication does not change shortcut overrides.
+
+PR comments are also reachable without a shortcut: use **Comments and review threads** in the sidebar PR popover, its unresolved-threads count, or a PR notification. Each route opens that PR in Tasks; an unavailable provider falls back to GitHub.

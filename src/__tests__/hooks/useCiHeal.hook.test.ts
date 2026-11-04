@@ -6,12 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // + buildCiFixPrompt purity is covered separately in useCiHeal.test.ts.)
 const h = vi.hoisted(() => {
 	const repoState = {
-		repositories: {} as Record<string, { branches: Record<string, { ciAutoHeal?: unknown; terminals: string[] }> }>,
+		repositories: {} as Record<
+			string,
+			{ workspaces: Record<string, { branchName?: string; ciAutoHeal?: unknown; terminals: string[] }> }
+		>,
 	};
 	return {
 		repoState,
-		setCiAutoHeal: vi.fn((repoPath: string, branch: string, val: unknown) => {
-			repoState.repositories[repoPath].branches[branch].ciAutoHeal = val;
+		setCiAutoHeal: vi.fn((repoPath: string, workspaceId: string, val: unknown) => {
+			repoState.repositories[repoPath].workspaces[workspaceId].ciAutoHeal = val;
 		}),
 		handlers: { onCiFailed: null as ((r: string, b: string, n: number) => void) | null },
 		terminals: new Map<string, unknown>(),
@@ -19,6 +22,9 @@ const h = vi.hoisted(() => {
 		invoke: vi.fn().mockResolvedValue("raw ci log"),
 		sendCommand: vi.fn().mockResolvedValue(undefined),
 		getShellFamily: vi.fn().mockResolvedValue("zsh"),
+		loggerDebug: vi.fn(),
+		loggerWarn: vi.fn(),
+		loggerError: vi.fn(),
 	};
 });
 
@@ -28,6 +34,16 @@ vi.mock("../../stores/repositories", () => ({
 			return h.repoState;
 		},
 		setCiAutoHeal: h.setCiAutoHeal,
+		// CI names a branch; the healer resolves the row through this seam. Mocked
+		// with the real scan so a fixture keyed by an id that is NOT the branch
+		// still finds its row — which is the case this indirection exists for.
+		workspaceIdOnBranch: (repoPath: string, branchName: string) => {
+			const workspaces = h.repoState.repositories[repoPath]?.workspaces ?? {};
+			for (const [workspaceId, workspace] of Object.entries(workspaces)) {
+				if ((workspace.branchName ?? workspaceId) === branchName) return workspaceId;
+			}
+			return null;
+		},
 	},
 }));
 vi.mock("../../stores/github", () => ({
@@ -43,6 +59,9 @@ vi.mock("../../stores/terminals", () => ({
 	terminalsStore: { get: (id: string) => h.terminals.get(id) },
 }));
 vi.mock("../../stores/toasts", () => ({ toastsStore: { add: h.toastAdd } }));
+vi.mock("../../stores/appLogger", () => ({
+	appLogger: { debug: h.loggerDebug, info: vi.fn(), warn: h.loggerWarn, error: h.loggerError },
+}));
 vi.mock("../../invoke", () => ({ invoke: h.invoke }));
 vi.mock("../../utils/sendCommand", () => ({ sendCommand: h.sendCommand, getShellFamily: h.getShellFamily }));
 vi.mock("../../transport", () => ({ rpc: vi.fn().mockResolvedValue(undefined) }));
@@ -58,7 +77,7 @@ function seed(ciAutoHeal: unknown, opts: { withAgentTerminal?: boolean } = {}) {
 	h.terminals.clear();
 	if (withAgent) h.terminals.set("term1", { agentType: "claude", sessionId: "sess1", shellState: "idle" });
 	h.repoState.repositories = {
-		"/repo": { branches: { main: { ciAutoHeal, terminals: ["term1"] } } },
+		"/repo": { workspaces: { main: { ciAutoHeal, terminals: ["term1"] } } },
 	};
 }
 
@@ -73,6 +92,9 @@ describe("useCiHeal budget + re-entry guard", () => {
 		h.invoke.mockResolvedValue("raw ci log");
 		h.sendCommand.mockClear();
 		h.getShellFamily.mockClear();
+		h.loggerWarn.mockClear();
+		h.loggerDebug.mockClear();
+		h.loggerError.mockClear();
 		createRoot((d) => {
 			dispose = d;
 			useCiHeal();
@@ -134,11 +156,62 @@ describe("useCiHeal budget + re-entry guard", () => {
 		await flush();
 
 		expect(h.sendCommand).not.toHaveBeenCalled();
-		expect(h.repoState.repositories["/repo"].branches.main.ciAutoHeal).toEqual({
+		expect(h.repoState.repositories["/repo"].workspaces.main.ciAutoHeal).toEqual({
 			enabled: true,
 			attempts: 0,
 			healing: false,
 		});
+	});
+
+	it("clears healing on a workspace whose id differs from its branch", async () => {
+		seed({ enabled: true, attempts: 0, healing: false });
+		const workspace = h.repoState.repositories["/repo"].workspaces.main;
+		workspace.branchName = "main";
+		h.repoState.repositories["/repo"].workspaces = { "workspace-1": workspace };
+		let rejectLogs!: (error: Error) => void;
+		h.invoke.mockImplementationOnce(
+			() =>
+				new Promise((_resolve, reject) => {
+					rejectLogs = reject;
+				}),
+		);
+		fireCiFailed();
+		expect(workspace.ciAutoHeal).toEqual({ enabled: true, attempts: 0, healing: true });
+		expect(h.repoState.repositories["/repo"].workspaces).not.toHaveProperty("main");
+		rejectLogs(new Error("logs unavailable"));
+		await flush();
+		expect(h.setCiAutoHeal).toHaveBeenCalledWith("/repo", "workspace-1", expect.objectContaining({ healing: true }));
+		expect(workspace.ciAutoHeal).toEqual({ enabled: true, attempts: 0, healing: false });
+		expect(h.repoState.repositories["/repo"].workspaces).not.toHaveProperty("main");
+	});
+
+	it.each([
+		"CircleCI token not configured",
+		"Failing checks are on external CI (not supported): Codacy",
+		"No failed GitHub Actions job found for the head commit",
+		"Timeout waiting for agent idle",
+		"Terminal no longer exists",
+	])("treats %s as an expected failure with a warn toast", async (message) => {
+		seed({ enabled: true, attempts: 0, healing: false });
+		h.invoke.mockRejectedValueOnce(new Error(message));
+		fireCiFailed();
+		await flush();
+		expect(h.loggerWarn).toHaveBeenCalled();
+		expect(h.loggerError).not.toHaveBeenCalled();
+		expect(h.toastAdd).toHaveBeenCalledWith(expect.any(String), expect.any(String), "warn");
+		// An expected failure is a delivery failure, not a heal attempt.
+		expect(h.repoState.repositories["/repo"].workspaces.main.ciAutoHeal).toEqual(
+			expect.objectContaining({ attempts: 0, healing: false }),
+		);
+	});
+
+	it("shows an error toast for an unexpected CI log failure", async () => {
+		seed({ enabled: true, attempts: 0, healing: false });
+		h.invoke.mockRejectedValueOnce(new Error("GitHub checks request timed out"));
+		fireCiFailed();
+		await flush();
+		expect(h.loggerError).toHaveBeenCalled();
+		expect(h.toastAdd).toHaveBeenCalledWith(expect.any(String), expect.any(String), "error");
 	});
 
 	it("does not consume an attempt when prompt delivery fails", async () => {
@@ -147,7 +220,7 @@ describe("useCiHeal budget + re-entry guard", () => {
 		fireCiFailed();
 		await flush();
 
-		expect(h.repoState.repositories["/repo"].branches.main.ciAutoHeal).toEqual({
+		expect(h.repoState.repositories["/repo"].workspaces.main.ciAutoHeal).toEqual({
 			enabled: true,
 			attempts: 1,
 			healing: false,

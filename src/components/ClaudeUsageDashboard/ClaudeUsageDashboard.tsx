@@ -1,6 +1,7 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
+import { formatQuotaWindow } from "../../utils/sessionUsageFormatting";
 import s from "./ClaudeUsageDashboard.module.css";
 
 // ---------------------------------------------------------------------------
@@ -203,7 +204,7 @@ function svgPath(points: { x: number; y: number }[]): string {
 function svgAreaPath(points: { x: number; y: number }[]): string {
 	if (points.length === 0) return "";
 	const line = svgPath(points);
-	const lastX = points[points.length - 1].x;
+	const lastX = points.at(-1)!.x;
 	const firstX = points[0].x;
 	return `${line} L${lastX.toFixed(1)},${PLOT_H.toFixed(1)} L${firstX.toFixed(1)},${PLOT_H.toFixed(1)} Z`;
 }
@@ -439,7 +440,7 @@ const UsageChart: Component<{ timeline: TimelinePoint[]; days: number }> = (prop
 // Component
 // ---------------------------------------------------------------------------
 
-export const ClaudeUsageDashboard: Component = () => {
+export const ClaudeUsageDashboard: Component<{ sessionId?: string | (() => string | undefined) }> = (props) => {
 	const [apiData, setApiData] = createSignal<UsageApiResponse | null>(null);
 	const [apiError, setApiError] = createSignal<string | null>(null);
 	const [sessionStats, setSessionStats] = createSignal<SessionStats | null>(null);
@@ -448,14 +449,19 @@ export const ClaudeUsageDashboard: Component = () => {
 	const [timeline, setTimeline] = createSignal<TimelinePoint[]>([]);
 	const [scope, setScope] = createSignal("all");
 	const [loading, setLoading] = createSignal(true);
+	let apiFetchSeq = 0;
 
 	// Fetch API usage data
-	const fetchApi = async () => {
+	const fetchApi = async (sessionId?: string) => {
+		const seq = ++apiFetchSeq;
 		try {
-			const data = await invoke<UsageApiResponse>("get_claude_usage_api");
+			const data = await invoke<UsageApiResponse>("get_claude_usage_api", sessionId ? { sessionId } : undefined);
+			if (seq !== apiFetchSeq) return;
 			setApiData(data);
 			setApiError(null);
 		} catch (err) {
+			if (seq !== apiFetchSeq) return;
+			setApiData(null);
 			setApiError(String(err));
 		}
 	};
@@ -491,9 +497,15 @@ export const ClaudeUsageDashboard: Component = () => {
 		}
 	};
 
-	// Fetch API usage and project list once on mount (not scope-dependent).
+	const selectedSessionId = () => (typeof props.sessionId === "function" ? props.sessionId() : props.sessionId);
+	createEffect(() => {
+		setApiData(null);
+		void fetchApi(selectedSessionId());
+	});
+
+	// Fetch the project list once on mount (not scope-dependent).
 	onMount(() => {
-		void Promise.all([fetchApi(), fetchProjects()]);
+		void fetchProjects();
 	});
 
 	// Sequential by design: fetchStats writes the JSONL cache that fetchTimeline reads.
@@ -512,7 +524,7 @@ export const ClaudeUsageDashboard: Component = () => {
 	// Auto-refresh every 5 minutes
 	const timer = setInterval(
 		() => {
-			void fetchApi();
+			void fetchApi(selectedSessionId());
 			void refreshStatsAndTimeline(scope());
 		},
 		5 * 60 * 1000,
@@ -568,7 +580,7 @@ export const ClaudeUsageDashboard: Component = () => {
 	/** Pretty-print a claim key like "seven_day_sonnet" → "7-Day Sonnet". */
 	const claimLabel = (key: string): string => {
 		const match = rateBuckets().find((b) => b.key === key);
-		return match ? match.label : key.replace(/_/g, " ");
+		return match ? match.label : key.replaceAll("_", " ");
 	};
 
 	/** Format a number with thousand separators (no decimal for integers). */
@@ -693,8 +705,9 @@ export const ClaudeUsageDashboard: Component = () => {
 				)}
 			</Show>
 
-			{/* Rate limits — show section whenever we have data OR an error to report */}
-			<Show when={rateBuckets().length > 0 || (apiError() && !loading())}>
+			{/* Rate limits — show section whenever we have rate buckets, extra_usage (e.g.
+			    enterprise/spend-based plans that never populate the named buckets), or an error to report */}
+			<Show when={rateBuckets().length > 0 || apiData()?.extra_usage || (apiError() && !loading())}>
 				<div class={s.section}>
 					<div class={s.sectionTitle}>
 						<span>Rate Limits</span>
@@ -724,9 +737,16 @@ export const ClaudeUsageDashboard: Component = () => {
 												style={{ transform: `scaleX(${Math.min(100, item.bucket.utilization) / 100})` }}
 											/>
 										</div>
-										<Show when={item.bucket.resets_at}>
-											<span class={s.rateReset}>Resets in {formatResetTime(item.bucket.resets_at!)}</span>
-										</Show>
+										<span class={s.rateReset}>
+											{formatQuotaWindow({
+												provider: "Claude",
+												plan: apiData()?.plan?.subscription_type ?? null,
+												window_seconds: item.key === "five_hour" ? 18000 : 604800,
+												window_name: item.label,
+												used_percent: item.bucket.utilization,
+												resets_at: item.bucket.resets_at,
+											})}
+										</span>
 									</div>
 								)}
 							</For>
@@ -735,7 +755,7 @@ export const ClaudeUsageDashboard: Component = () => {
 					<Show when={apiError() && rateBuckets().length === 0}>
 						<div class={s.rateLimitHint}>
 							<span>Rate limit data unavailable</span>
-							<button class={s.retryButton} onClick={() => fetchApi()}>
+							<button type="button" class={s.retryButton} onClick={() => fetchApi(selectedSessionId())}>
 								Retry
 							</button>
 						</div>
@@ -746,7 +766,7 @@ export const ClaudeUsageDashboard: Component = () => {
 						{(_) => {
 							const extra = (): ExtraUsage | null => apiData()?.extra_usage ?? null;
 							const enabled = () => extra()?.is_enabled === true;
-							const util = () => extra()?.utilization ?? 0;
+							const util = (): number | null => extra()?.utilization ?? null;
 							const limit = () => extra()?.monthly_limit;
 							const used = () => extra()?.used_credits;
 							return (
@@ -767,7 +787,7 @@ export const ClaudeUsageDashboard: Component = () => {
 											when={limit() != null && used() != null}
 											fallback={
 												<div class={s.extraBody}>
-													<span class={s.extraValue}>{Math.round(util()).toString()}%</span>
+													<span class={s.extraValue}>{util() == null ? "Unavailable" : `${Math.round(util()!)}%`}</span>
 													<span class={s.extraSub}>(credit detail available via primary API only)</span>
 												</div>
 											}
@@ -777,13 +797,18 @@ export const ClaudeUsageDashboard: Component = () => {
 													{formatCount(used()!)} / {formatCount(limit()!)}
 													<span class={s.extraUnit}> credits</span>
 												</span>
-												<div class={s.extraBar}>
-													<div
-														class={`${s.extraFill} ${rateClass(util())}`}
-														style={{ transform: `scaleX(${Math.min(100, util()) / 100})` }}
-													/>
-												</div>
-												<span class={s.extraSub}>{util().toFixed(1)}% used</span>
+												<Show
+													when={util() != null}
+													fallback={<span class={s.extraSub}>Usage percentage unavailable</span>}
+												>
+													<div class={s.extraBar}>
+														<div
+															class={`${s.extraFill} ${rateClass(util()!)}`}
+															style={{ transform: `scaleX(${Math.min(100, util()!) / 100})` }}
+														/>
+													</div>
+													<span class={s.extraSub}>{util()!.toFixed(1)}% used</span>
+												</Show>
 											</div>
 										</Show>
 										<Show when={extra()?.resets_at}>

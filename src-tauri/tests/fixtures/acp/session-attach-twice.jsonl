@@ -1,0 +1,13 @@
+// A session that is loaded once, prompted, and then asked for a second time.
+//
+// The second `session/load` must never reach the wire, which is what the
+// terminal `expect_no_frame` says: the connection closes with nothing further
+// sent. The prompt is deliberately left unanswered, because what is being
+// proved is the state the client holds while a turn is running, not how the
+// turn ends.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/load","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"load"}
+{"step":"respond","to":"load","result":{"configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"prompt"}
+{"step":"expect_no_frame"}

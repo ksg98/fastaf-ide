@@ -51,7 +51,6 @@ function branchRecord(name: string, overrides: Record<string, unknown> = {}): Re
 		worktreePath: null,
 		terminals: [],
 		hadTerminals: false,
-		tabsExpanded: false,
 		lastActiveTerminal: null,
 		additions: 0,
 		deletions: 0,
@@ -95,7 +94,7 @@ describe("repositoriesStore remote sync", () => {
 	} | null {
 		const calls = mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === "save_repositories");
 		if (calls.length === 0) return null;
-		return (calls[calls.length - 1][1] as { config: ReturnType<typeof lastSavedMutation> }).config;
+		return (calls.at(-1)![1] as { config: ReturnType<typeof lastSavedMutation> }).config;
 	}
 
 	beforeEach(async () => {
@@ -206,7 +205,7 @@ describe("repositoriesStore remote sync", () => {
 
 		await testInScopeAsync(async () => {
 			await store.hydrate();
-			store.addTerminalToBranch("/repo", "main", "term-1");
+			store.addTerminalToWorkspace("/repo", "main", "term-1");
 			await vi.advanceTimersByTimeAsync(500);
 
 			// Tab placement is memory-only: disk never carries it, so an adoption that
@@ -220,7 +219,7 @@ describe("repositoriesStore remote sync", () => {
 			await broadcast();
 
 			expect(store.get("/repo")?.displayName).toBe("Renamed");
-			expect(store.get("/repo")?.branches["main"].terminals).toEqual(["term-1"]);
+			expect(store.get("/repo")?.workspaces["main"].terminals).toEqual(["term-1"]);
 		});
 	});
 
@@ -232,14 +231,14 @@ describe("repositoriesStore remote sync", () => {
 
 		await testInScopeAsync(async () => {
 			await store.hydrate();
-			store.addTerminalToBranch("/repo", "main", "term-1");
+			store.addTerminalToWorkspace("/repo", "main", "term-1");
 			await vi.advanceTimersByTimeAsync(500);
 
 			setDisk({ repos: {}, repoOrder: [] });
 			await broadcast();
 
 			expect(store.get("/repo")).toBeDefined();
-			expect(store.get("/repo")?.branches["main"].terminals).toEqual(["term-1"]);
+			expect(store.get("/repo")?.workspaces["main"].terminals).toEqual(["term-1"]);
 			// The record survives, and so must its place in the order: the sidebar renders
 			// from `repoOrder`, so keeping the record alone leaves the pane running behind
 			// a row that no longer exists.
@@ -260,7 +259,7 @@ describe("repositoriesStore remote sync", () => {
 
 		await testInScopeAsync(async () => {
 			await store.hydrate();
-			store.addTerminalToBranch("/repo", "feature", "term-1");
+			store.addTerminalToWorkspace("/repo", "feature", "term-1");
 			await vi.advanceTimersByTimeAsync(500);
 
 			// Another client archived the worktree. The repo record stays, so the
@@ -271,7 +270,7 @@ describe("repositoriesStore remote sync", () => {
 			});
 			await broadcast();
 
-			expect(store.get("/repo")?.branches["feature"]?.terminals).toEqual(["term-1"]);
+			expect(store.get("/repo")?.workspaces["feature"]?.terminals).toEqual(["term-1"]);
 			expect(store.getRepoPathForTerminal("term-1")).toBe("/repo");
 		});
 	});
@@ -285,10 +284,10 @@ describe("repositoriesStore remote sync", () => {
 		await testInScopeAsync(async () => {
 			await store.hydrate();
 
-			// `updateBranchStats` never saves, so a repo under active work drifts from its
+			// `updateWorkspaceStats` never saves, so a repo under active work drifts from its
 			// own baseline every few seconds. Reading that as an edit would refuse every
 			// remote change for exactly the repos the user is working in.
-			store.updateBranchStats("/repo", "main", 42, 7);
+			store.updateWorkspaceStats("/repo", "main", 42, 7);
 
 			setDisk({
 				repos: { "/repo": repoRecord("/repo", "Renamed", { main: branchRecord("main") }) },
@@ -298,7 +297,7 @@ describe("repositoriesStore remote sync", () => {
 
 			expect(store.get("/repo")?.displayName).toBe("Renamed");
 			// This window's own count is the fresher one; disk's zero must not win.
-			expect(store.get("/repo")?.branches["main"].additions).toBe(42);
+			expect(store.get("/repo")?.workspaces["main"].additions).toBe(42);
 		});
 	});
 
@@ -340,8 +339,8 @@ describe("repositoriesStore remote sync", () => {
 			expect(adopted?.collapsed).toBe(false);
 			expect(adopted?.expanded).toBe(true);
 			expect(adopted?.parked).toBe(false);
-			expect(adopted?.branches["main"].isMerged).toBe(false);
-			expect(adopted?.branches["main"].savedTerminals?.[0]?.agentType).toBeNull();
+			expect(adopted?.workspaces["main"].isMerged).toBe(false);
+			expect(adopted?.workspaces["main"].savedTerminals?.[0]?.agentType).toBeNull();
 		});
 	});
 

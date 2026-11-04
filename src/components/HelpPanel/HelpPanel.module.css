@@ -228,3 +228,11 @@
 .linkButton:hover svg {
   opacity: 1;
 }
+
+/* Version + license block: centered under the sections. */
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+}

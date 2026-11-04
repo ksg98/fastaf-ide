@@ -1,4 +1,5 @@
 import { pathBasename } from "../utils/pathUtils";
+import { clampFontSize, FONT_STEP } from "../utils/terminalZoom";
 import { branchKeyFor } from "./repositories";
 import { type BaseTab, createTabManager } from "./tabManager";
 
@@ -11,7 +12,8 @@ export interface EditorTabData extends BaseTab {
 	filePath: string;
 	fileName: string; // Display name (basename of filePath)
 	isDirty: boolean;
-	initialLine?: number; // Line to scroll to on first mount
+	initialLine?: number; // 1-based line to select on first mount
+	initialCol?: number; // 1-based column to select on first mount
 	externalEditable?: boolean; // Allow editing external (absolute-path) files
 	cursorLine?: number; // 1-based cursor line, surfaced for custom-launcher {line}
 	cursorCol?: number; // 1-based cursor column, surfaced for custom-launcher {column}
@@ -34,6 +36,30 @@ function createEditorTabsStore() {
 		getVisibleIds: base.getVisibleIds,
 		getActive: base.getActive,
 		getCount: base.getCount,
+
+		/** Zoom the active editor, or a specified tab for collective zoom. */
+		zoomIn(defaultFontSize: number, id = base.state.activeId): void {
+			if (!id) return;
+			base._setState(
+				"tabs",
+				id,
+				"fontSize",
+				clampFontSize((base.state.tabs[id]?.fontSize ?? defaultFontSize) + FONT_STEP),
+			);
+		},
+		zoomOut(defaultFontSize: number, id = base.state.activeId): void {
+			if (!id) return;
+			base._setState(
+				"tabs",
+				id,
+				"fontSize",
+				clampFontSize((base.state.tabs[id]?.fontSize ?? defaultFontSize) - FONT_STEP),
+			);
+		},
+		zoomReset(defaultFontSize: number, id = base.state.activeId): void {
+			if (!id) return;
+			base._setState("tabs", id, "fontSize", clampFontSize(defaultFontSize));
+		},
 		setPinned: base.setPinned,
 		reorderByIds: base.reorderByIds,
 
@@ -62,13 +88,21 @@ function createEditorTabsStore() {
 			repoPath: string,
 			filePath: string,
 			initialLine?: number,
-			opts?: { fsRoot?: string; externalEditable?: boolean; background?: boolean },
+			opts?: { fsRoot?: string; externalEditable?: boolean; background?: boolean; initialCol?: number },
 		): string {
 			const fsRoot = opts?.fsRoot ?? repoPath;
 			const existing = Object.values(base.state.tabs).find(
-				(tab) => tab.repoPath === repoPath && tab.fsRoot === fsRoot && tab.filePath === filePath,
+				(tab) => !tab.mcpUiId && tab.repoPath === repoPath && tab.fsRoot === fsRoot && tab.filePath === filePath,
 			);
 			if (existing) {
+				if (initialLine !== undefined) {
+					base._setState("tabs", existing.id, "initialLine", initialLine);
+					base._setState("tabs", existing.id, "initialCol", opts?.initialCol);
+					const handle = handles.get(existing.id) as
+						| { goToPosition?: (line: number, col?: number) => void }
+						| undefined;
+					handle?.goToPosition?.(initialLine, opts?.initialCol);
+				}
 				if (!opts?.background) base.setActive(existing.id);
 				return existing.id;
 			}
@@ -85,8 +119,47 @@ function createEditorTabsStore() {
 				isDirty: false,
 				branchKey: branchKeyFor(repoPath),
 				initialLine,
+				initialCol: opts?.initialCol,
 				externalEditable: opts?.externalEditable,
 			});
+		},
+
+		/** Open a native editor tab using the MCP id, independent of its file path. */
+		addMcpFile(
+			mcpUiId: string,
+			repoPath: string,
+			filePath: string,
+			initialLine: number | undefined,
+			pinned: boolean,
+			opts: { background: boolean; externalEditable: boolean },
+		): string {
+			const existing = Object.values(base.state.tabs).find((tab) => tab.mcpUiId === mcpUiId);
+			const id = existing?.id ?? base._nextId("edit");
+			const tab: EditorTabData = {
+				id,
+				mcpUiId,
+				repoPath,
+				fsRoot: repoPath,
+				filePath,
+				fileName: pathBasename(filePath) || filePath,
+				isDirty: false,
+				branchKey: branchKeyFor(repoPath),
+				initialLine,
+				externalEditable: opts.externalEditable,
+				pinned,
+				pinAcrossRepos: true,
+			};
+			if (existing) {
+				base._setState("tabs", id, tab);
+				if (!opts.background) base.setActive(id);
+				return id;
+			}
+			return opts.background ? base._addTabBackground(tab) : base._addTab(tab);
+		},
+
+		closeMcpFile(mcpUiId: string): void {
+			const existing = Object.values(base.state.tabs).find((tab) => tab.mcpUiId === mcpUiId);
+			if (existing) base.remove(existing.id);
 		},
 
 		/** Mark a tab as dirty or clean */

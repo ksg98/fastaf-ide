@@ -1,0 +1,41 @@
+{
+  "agent": "goose",
+  "args": [
+    "session",
+    "--no-profile",
+    "--max-turns",
+    "1"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "idle",
+        "awaiting": false
+      },
+      "replay_expect": {
+        "awaiting": false
+      },
+      "timeout_secs": 20
+    },
+    {
+      "action": "prompt",
+      "text": "Reply with the single uppercase English word meaning prepared. Do not use any tools."
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "working"
+      },
+      "timeout_secs": 20
+    },
+    {
+      "action": "wait",
+      "text": "READY",
+      "timeout_secs": 30
+    },
+    {
+      "action": "interrupt"
+    }
+  ]
+}

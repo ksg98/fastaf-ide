@@ -1,0 +1,127 @@
+/* Terminal Chat: the agent's transcript, read the way FastAF's AI Chat panel
+   reads (FastAFChatPanel.module.css). Prose sits flat on the well, the user's
+   turns are quiet neutral bubbles, code sits on a card behind a hairline. The
+   shared Transcript is drawn by upstream's AIChatPanel.module.css; these rules
+   retone it only inside this view, through tokens and the stable hooks it
+   exposes ([data-terminal-chat], #markdown-content). */
+.chatView {
+  /* The user's turns: a neutral wash, not upstream's accent tint. */
+  --prompt-tint: var(--wash-1);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: var(--bg-primary);
+}
+
+/* The thread breathes like AI Chat's, and its first turn starts clear of the
+   CLI | Chat pill floating over the top-right corner. */
+.chatView [data-terminal-chat] {
+  padding: 42px 20px 10px;
+  gap: 14px;
+}
+
+/* With a Context row above, the pill sits on that row and the thread needs no clearance. */
+.toggle:has(~ [data-terminal-context]) ~ .chatView [data-terminal-chat] {
+  padding-top: 14px;
+}
+
+/* Find in chat is the terminal's own Find bar (shared SearchBar), and opens
+   where the CLI one does: below the pill, or at the top when a Context row
+   hosts the pill. Same 30px drop as Terminal.module.css .searchAnchor. */
+.chatView [data-chat-find] {
+  top: 30px;
+}
+
+.toggle:has(~ [data-terminal-context]) ~ .chatView [data-chat-find] {
+  top: 0;
+}
+
+.chatView [data-terminal-chat] :global(#markdown-content pre) {
+  padding: 8px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--wash-0);
+  box-shadow: inset 0 0 0 var(--hairline-w) var(--hairline);
+  font-size: var(--font-sm);
+}
+
+.chatView [data-terminal-chat] :global(#markdown-content :not(pre) > code) {
+  border-radius: var(--radius-sm);
+  background: var(--wash-1);
+}
+
+/* The CLI | Chat switch: a small pill over the terminal's top-right corner.
+   It reserves no row, so the grid keeps its full height, multiview tiles
+   included. Over the CLI it stays out of the agent's way: hidden until the
+   pointer is on the terminal (the scroll thumb's rule), then only a faint,
+   see-through outline, so the rows under it stay readable. It turns solid
+   when it is pointed at or has keyboard focus, and in Chat, where it stays
+   and the transcript leaves room for it. */
+.toggle {
+  --control-height: 24px;
+  --control-padding-x: 8px;
+  --control-segment-padding-x: 8px;
+  --control-font-size: var(--font-sm, 12px);
+  --control-radius: var(--radius-lg);
+  position: absolute;
+  top: 6px;
+  /* Clear of the grid's 14px scrollbar track. */
+  right: 18px;
+  /* Above the grid's scrollbar (20) and its overlays. */
+  z-index: 21;
+  display: flex;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out);
+}
+
+/* Pointer on the terminal: quiet and see-through. */
+:global([data-terminal-id]:hover) > .toggle {
+  opacity: 0.3;
+}
+
+/* Pointed at, keyboard-focused, or in Chat: solid, with an opaque base under
+   the chip fill so nothing shows through. Same specificity as the rule above,
+   and later, so it wins. */
+:global([data-terminal-id]) > .toggle:is(:hover, :has(:focus-visible), [data-mode="chat"]) {
+  opacity: 1;
+  background: var(--bg-primary);
+}
+
+/* Inside the Context row the switch sits on that row instead. */
+.toggle:has(~ [data-terminal-context]) {
+  top: 1px;
+}
+
+/* No pointer to reveal it: always solid. */
+@media (hover: none) {
+  .toggle {
+    opacity: 1;
+    background: var(--bg-primary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle {
+    transition: none;
+  }
+}
+
+.fallbackBanner {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  background: var(--wash-0);
+  border-bottom: var(--hairline-w) solid var(--hairline);
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+}
+
+.nativeQuestion {
+  flex-shrink: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  border-top: var(--hairline-w) solid var(--hairline);
+}

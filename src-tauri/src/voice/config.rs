@@ -78,8 +78,13 @@ pub fn load() -> VoiceConfig {
 }
 
 pub fn save(config: &VoiceConfig) -> Result<(), String> {
-    let file: crate::config::ConfigFile<VoiceConfig> = crate::config::ConfigFile::new(VOICE_CONFIG_FILE);
-    file.save(config)
+    let file: crate::config::ConfigFile<VoiceConfig> =
+        crate::config::ConfigFile::new(VOICE_CONFIG_FILE);
+    // Whole-document replace under the config locks; upstream made `save` test-only.
+    file.update(|current| {
+        *current = config.clone();
+        true
+    })
 }
 
 #[cfg(test)]

@@ -1,39 +1,52 @@
-import { cleanup, render } from "@solidjs/testing-library";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render } from "@solidjs/testing-library";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HeroMetrics } from "../components/HeroMetrics";
 
 afterEach(cleanup);
 
 describe("HeroMetrics", () => {
-	it("displays active session count", () => {
-		const { container } = render(() => <HeroMetrics activeCount={5} awaitingCount={0} />);
+	it("displays working session count", () => {
+		const { container } = render(() => <HeroMetrics workingCount={5} idleCount={0} awaitingCount={0} />);
 		const numbers = container.querySelectorAll("[data-testid='metric-number']");
 		expect(numbers[0].textContent).toBe("5");
 	});
 
 	it("displays awaiting input count", () => {
-		const { container } = render(() => <HeroMetrics activeCount={3} awaitingCount={2} />);
+		const { container } = render(() => <HeroMetrics workingCount={3} idleCount={1} awaitingCount={2} />);
 		const numbers = container.querySelectorAll("[data-testid='metric-number']");
-		expect(numbers[1].textContent).toBe("2");
+		expect(numbers[2].textContent).toBe("2");
 	});
 
 	it("displays zero counts correctly", () => {
-		const { container } = render(() => <HeroMetrics activeCount={0} awaitingCount={0} />);
+		const { container } = render(() => <HeroMetrics workingCount={0} idleCount={0} awaitingCount={0} />);
 		const numbers = container.querySelectorAll("[data-testid='metric-number']");
 		expect(numbers[0].textContent).toBe("0");
 		expect(numbers[1].textContent).toBe("0");
 	});
 
-	it("renders two metric cards", () => {
-		const { container } = render(() => <HeroMetrics activeCount={1} awaitingCount={1} />);
+	it("renders three metric cards", () => {
+		const { container } = render(() => <HeroMetrics workingCount={1} idleCount={1} awaitingCount={1} />);
 		const cards = container.querySelectorAll("[data-testid='metric-card']");
-		expect(cards.length).toBe(2);
+		expect(cards.length).toBe(3);
 	});
 
 	it("shows correct labels", () => {
-		const { container } = render(() => <HeroMetrics activeCount={1} awaitingCount={1} />);
+		const { container } = render(() => <HeroMetrics workingCount={1} idleCount={1} awaitingCount={1} />);
 		const labels = container.querySelectorAll("[data-testid='metric-label']");
-		expect(labels[0].textContent).toBe("Active");
-		expect(labels[1].textContent).toBe("Awaiting");
+		expect(labels[0].textContent).toBe("Working");
+		expect(labels[1].textContent).toBe("Idle");
+		expect(labels[2].textContent).toBe("Awaiting");
 	});
+});
+
+// Catches: zero-count states cannot be selected to inspect an empty result.
+it("allows the zero Awaiting counter to toggle", async () => {
+	const onToggleState = vi.fn();
+	const view = render(() => (
+		<HeroMetrics workingCount={2} idleCount={1} awaitingCount={0} onToggleState={onToggleState} />
+	));
+	const tile = view.getByRole("button", { name: "0 Awaiting" }) as HTMLButtonElement;
+	expect(tile.disabled).toBe(false);
+	await fireEvent.click(tile);
+	expect(onToggleState).toHaveBeenCalledWith("question");
 });

@@ -1,5 +1,5 @@
 import { createEffect, onCleanup, type Setter } from "solid-js";
-import { listen } from "../invoke";
+import { invoke, listen } from "../invoke";
 import { setLastMenuActionTime } from "../menuDedup";
 import { togglePanel } from "../panelRouter";
 import { appLogger } from "../stores/appLogger";
@@ -15,6 +15,7 @@ import { tunnelPanelStore } from "../stores/tunnelPanel";
 import { uiStore } from "../stores/ui";
 import { updaterStore } from "../stores/updater";
 import { handleOpenUrl } from "../utils/openUrl";
+import { globalWorkspaceTabIds } from "../utils/paneTabOrder";
 import { selectAllInFocused } from "../utils/selectAll";
 import type { useGitOperations } from "./useGitOperations";
 import type { ShortcutHandlers } from "./useKeyboardShortcuts";
@@ -27,9 +28,7 @@ interface NativeMenuBridgeOptions {
 	gitOps: ReturnType<typeof useGitOperations>;
 	splitPanes: ReturnType<typeof useSplitPanes>;
 	closeActiveTabOrPane: () => void;
-	forceQuit: () => void | Promise<void>;
 	setSettingsPanelVisible: Setter<boolean>;
-	setQuitDialogVisible: Setter<boolean>;
 	setRunCommandDialogVisible: Setter<boolean>;
 	setTaskQueueVisible: Setter<boolean>;
 	setShowProcessManager: Setter<boolean>;
@@ -64,17 +63,10 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 		case "settings":
 			options.setSettingsPanelVisible((visible) => !visible);
 			break;
-		case "quit-app": {
-			if (settingsStore.state.confirmBeforeQuit) {
-				const hasActiveTerminals = terminalsStore.getIds().some((id) => terminalsStore.get(id)?.sessionId);
-				if (hasActiveTerminals) {
-					options.setQuitDialogVisible(true);
-					break;
-				}
-			}
-			void options.forceQuit();
+		case "quit-app":
+			void invoke("request_quit").catch((error) => appLogger.error("app", "Quit request failed", error));
 			break;
-		}
+
 		case "copy":
 			terminalLifecycle.copyFromTerminal();
 			break;
@@ -114,13 +106,13 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 			shortcutHandlers.zoomReset();
 			break;
 		case "zoom-in-all":
-			terminalLifecycle.zoomInAll();
+			shortcutHandlers.zoomInAll();
 			break;
 		case "zoom-out-all":
-			terminalLifecycle.zoomOutAll();
+			shortcutHandlers.zoomOutAll();
 			break;
 		case "zoom-reset-all":
-			terminalLifecycle.zoomResetAll();
+			shortcutHandlers.zoomResetAll();
 			break;
 		case "diff-panel":
 			togglePanel("git");
@@ -129,7 +121,7 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 			uiStore.toggleMarkdownPanel();
 			break;
 		case "notes-panel":
-			uiStore.toggleNotesPanel();
+			uiStore.toggleIdeasPanel();
 			break;
 		case "file-browser":
 			uiStore.toggleFileBrowserPanel();
@@ -231,10 +223,10 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 			updaterStore.checkForUpdate().catch((error) => appLogger.warn("app", "Updater manual check failed", error));
 			break;
 		case "online-guide":
-			handleOpenUrl("https://tuicommander.com/docs/");
+			handleOpenUrl("https://github.com/ksg98/fastaf-ide#readme");
 			break;
 		case "changelog":
-			handleOpenUrl("https://github.com/sstraus/tuicommander/blob/main/CHANGELOG.md");
+			handleOpenUrl("https://github.com/ksg98/fastaf-ide/releases");
 			break;
 		case "about":
 			options.setHelpPanelVisible(true);
@@ -243,7 +235,7 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 			const tabMatch = action.match(/^switch-tab-(\d)$/);
 			if (!tabMatch) break;
 			const index = Number.parseInt(tabMatch[1], 10) - 1;
-			const ids = terminalLifecycle.terminalIds();
+			const ids = globalWorkspaceTabIds() ?? terminalLifecycle.terminalIds();
 			if (index < ids.length) terminalLifecycle.handleTerminalSelect(ids[index]);
 		}
 	}

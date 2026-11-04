@@ -198,3 +198,51 @@ describe("GitHubPanel section collapse persistence", () => {
 		expect(rows().length).toBe(PRS.length + ISSUES.length);
 	});
 });
+
+describe("GitHubPanel outside dismissal", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		resetCollapse();
+	});
+
+	afterEach(() => {
+		document.body.innerHTML = "";
+		uiStore._testCancelPendingSave();
+	});
+
+	// Catches: an invisible fixed inset:0 backdrop swallows the press (and wheel) meant for the sidebar.
+	it("closes on an outside pointer press without swallowing it", () => {
+		const onSidebarPress = vi.fn();
+		render(() => (
+			<>
+				<aside onPointerDown={onSidebarPress}>Repositories</aside>
+				<GitHubPanel {...baseProps} />
+			</>
+		));
+		expect(document.querySelector(".ghPanelOverlay")).toBeNull();
+		const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+		document.querySelector("aside")!.dispatchEvent(event);
+		expect(baseProps.onClose).toHaveBeenCalledOnce();
+		expect(onSidebarPress).toHaveBeenCalledOnce();
+		expect(event.defaultPrevented).toBe(false);
+	});
+
+	// Catches: pressing inside the panel is treated as an outside press.
+	it("stays open for a press inside the panel", () => {
+		render(() => <GitHubPanel {...baseProps} />);
+		fireEvent.pointerDown(panel());
+		expect(baseProps.onClose).not.toHaveBeenCalled();
+	});
+
+	// Catches: the badge that toggles the panel counts as outside, so its click re-opens what the press closed.
+	it("ignores presses on the toggle trigger", () => {
+		render(() => (
+			<>
+				<button data-gh-panel-trigger>badge</button>
+				<GitHubPanel {...baseProps} />
+			</>
+		));
+		fireEvent.pointerDown(document.querySelector("[data-gh-panel-trigger]")!);
+		expect(baseProps.onClose).not.toHaveBeenCalled();
+	});
+});

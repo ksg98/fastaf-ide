@@ -1,0 +1,2 @@
+// Dies before reading anything, so initialize never gets an answer.
+{"step":"exit","code":0}

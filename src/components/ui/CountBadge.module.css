@@ -1,0 +1,32 @@
+.countBadge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  border-radius: var(--radius-sm);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.accent {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.error {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+.success {
+  background: var(--success);
+  color: var(--text-on-success);
+}

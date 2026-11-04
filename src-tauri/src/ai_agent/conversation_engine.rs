@@ -175,6 +175,9 @@ pub(crate) enum ConversationEvent {
         tool_name: String,
         command: String,
         reason: String,
+        /// One-time id the answer must quote (see [`approve_conversation_action`]).
+        /// Only the conversation's own stream carries it, never `/events`.
+        approval_id: String,
     },
     /// Tool was executed without prompting because it's in the bypass set.
     Bypassed {
@@ -222,8 +225,20 @@ pub(crate) struct ConversationHandle {
     pub state: Arc<RwLock<AgentState>>,
     pub pause_notify: Arc<Notify>,
     pub event_tx: broadcast::Sender<ConversationEvent>,
-    pub approval_tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+    pub pending_approval: PendingApprovalSlot,
 }
+
+/// The tool call a conversation is waiting on, and the id an answer must quote.
+pub(crate) struct PendingApproval {
+    id: String,
+    tx: oneshot::Sender<bool>,
+}
+
+/// At most one pending approval per conversation; a new request replaces it.
+pub(crate) type PendingApprovalSlot = Arc<Mutex<Option<PendingApproval>>>;
+
+/// Refusal for an answer that does not quote the pending approval's id.
+pub(crate) const APPROVAL_NOT_PENDING: &str = "This approval is no longer pending";
 
 // ── System prompt ─────────────────────────────────────────────
 
@@ -309,14 +324,14 @@ pub(crate) async fn start_conversation(
     let conv_state = Arc::new(RwLock::new(AgentState::Running));
     let pause_notify = Arc::new(Notify::new());
     let (event_tx, event_rx) = broadcast::channel(256);
-    let approval_tx: Arc<Mutex<Option<oneshot::Sender<bool>>>> = Arc::new(Mutex::new(None));
+    let approval_tx: PendingApprovalSlot = Arc::new(Mutex::new(None));
 
     let handle = ConversationHandle {
         cancel: cancel.clone(),
         state: conv_state.clone(),
         pause_notify: pause_notify.clone(),
         event_tx: event_tx.clone(),
-        approval_tx: approval_tx.clone(),
+        pending_approval: approval_tx.clone(),
     };
 
     use dashmap::mapref::entry::Entry;
@@ -332,7 +347,10 @@ pub(crate) async fn start_conversation(
     }
 
     if config.autonomy == Autonomy::Autonomous {
-        state.unrestricted_sessions.insert(session_id.clone(), ());
+        state
+            .engine
+            .unrestricted_sessions
+            .insert(session_id.clone(), ());
     }
 
     let sid = session_id.clone();
@@ -350,8 +368,8 @@ pub(crate) async fn start_conversation(
         )
         .await;
 
-        state.unrestricted_sessions.remove(&sid);
-        state.file_sandboxes.remove(&sid);
+        state.engine.unrestricted_sessions.remove(&sid);
+        state.engine.file_sandboxes.remove(&sid);
         ACTIVE_CONVERSATIONS.remove(&sid);
 
         match result {
@@ -573,14 +591,31 @@ pub(crate) fn resume_conversation(session_id: &str) -> Result<(), String> {
 
 /// Respond to a NeedsApproval event. `approved = true` runs the tool;
 /// `false` rejects it and sends a rejection result back to the LLM.
-pub(crate) fn approve_conversation_action(session_id: &str, approved: bool) -> Result<(), String> {
+///
+/// `approval_id` must be the id of the request pending right now. Anything
+/// else — missing, guessed, or from an earlier request on the same session —
+/// is refused with [`APPROVAL_NOT_PENDING`] and changes nothing, so a stale
+/// toast cannot approve a newer, different command.
+pub(crate) fn approve_conversation_action(
+    session_id: &str,
+    approved: bool,
+    approval_id: Option<&str>,
+) -> Result<(), String> {
     let entry = ACTIVE_CONVERSATIONS
         .get(session_id)
-        .ok_or_else(|| format!("No active conversation on session {session_id}"))?;
-    if let Some(tx) = entry.approval_tx.lock().take() {
-        let _ = tx.send(approved);
+        .ok_or_else(|| APPROVAL_NOT_PENDING.to_string())?;
+    let mut slot = entry.pending_approval.lock();
+    let matches = matches!((slot.as_ref(), approval_id), (Some(p), Some(id)) if p.id == id);
+    match slot.take() {
+        Some(pending) if matches => {
+            let _ = pending.tx.send(approved);
+            Ok(())
+        }
+        other => {
+            *slot = other;
+            Err(APPROVAL_NOT_PENDING.to_string())
+        }
     }
-    Ok(())
 }
 
 // ── Stream draining ───────────────────────────────────────────
@@ -697,7 +732,7 @@ async fn run_conversation(
     conv_state: Arc<RwLock<AgentState>>,
     pause_notify: Arc<Notify>,
     event_tx: broadcast::Sender<ConversationEvent>,
-    approval_tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+    approval_tx: PendingApprovalSlot,
 ) -> Result<String, String> {
     use genai::chat::{
         ChatMessage, ChatOptions, ChatRequest, ContentPart, Tool, ToolCall, ToolResponse,
@@ -706,10 +741,12 @@ async fn run_conversation(
     // Create filesystem sandbox from the session's CWD so that file tools
     // (list_files, read_file, etc.) can resolve paths during the conversation.
     state
+        .engine
         .file_sandboxes
         .entry(session_id.clone())
         .or_try_insert_with(|| {
             let dir = state
+                .session_maps
                 .sessions
                 .get(&session_id)
                 .and_then(|s| s.lock().cwd.clone())
@@ -1017,14 +1054,20 @@ async fn run_conversation(
                     )
                     .await;
                 } else {
+                    // Armed before the event goes out, so an answer to it can
+                    // never arrive ahead of the slot it resolves.
+                    let approval_id = uuid::Uuid::new_v4().to_string();
+                    let (tx, rx) = oneshot::channel();
+                    *approval_tx.lock() = Some(PendingApproval {
+                        id: approval_id.clone(),
+                        tx,
+                    });
                     let _ = event_tx.send(ConversationEvent::NeedsApproval {
                         tool_name: tc.fn_name.clone(),
                         command: command.clone(),
                         reason: reason.clone(),
+                        approval_id,
                     });
-
-                    let (tx, rx) = oneshot::channel();
-                    *approval_tx.lock() = Some(tx);
 
                     let approved = tokio::select! {
                         res = rx => res.unwrap_or(false),
@@ -1280,9 +1323,11 @@ mod tests {
             tool_name: "run_command".into(),
             command: "rm -rf /tmp/test".into(),
             reason: "destructive command".into(),
+            approval_id: "a-1".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains("\"type\":\"needs_approval\""));
+        assert!(json.contains("\"approval_id\":\"a-1\""));
     }
 
     #[test]
@@ -1305,7 +1350,57 @@ mod tests {
 
     #[test]
     fn approve_missing_session_errors() {
-        assert!(approve_conversation_action("nonexistent-conv", true).is_err());
+        assert_eq!(
+            approve_conversation_action("nonexistent-conv", true, Some("any")),
+            Err(APPROVAL_NOT_PENDING.to_string())
+        );
+    }
+
+    #[test]
+    fn a_wrong_or_missing_approval_id_is_refused_and_approves_nothing() {
+        let session = "approve-wrong-id";
+        let mut rx = test_support::arm_approval(session, "id-right");
+        for id in [None, Some(""), Some("id-wrong")] {
+            assert_eq!(
+                approve_conversation_action(session, true, id),
+                Err(APPROVAL_NOT_PENDING.to_string()),
+                "{id:?}"
+            );
+        }
+        assert!(rx.try_recv().is_err(), "nothing was answered");
+        // The real request is still pending and still answerable.
+        assert_eq!(
+            approve_conversation_action(session, false, Some("id-right")),
+            Ok(())
+        );
+        assert_eq!(rx.try_recv(), Ok(false));
+        test_support::end(session);
+    }
+
+    #[test]
+    fn an_id_from_an_earlier_request_cannot_answer_a_newer_one() {
+        let session = "approve-stale-id";
+        drop(test_support::arm_approval(session, "id-first"));
+        let mut newer = test_support::arm_approval(session, "id-second");
+        assert_eq!(
+            approve_conversation_action(session, true, Some("id-first")),
+            Err(APPROVAL_NOT_PENDING.to_string())
+        );
+        assert!(
+            newer.try_recv().is_err(),
+            "the newer command was not approved"
+        );
+        assert_eq!(
+            approve_conversation_action(session, true, Some("id-second")),
+            Ok(())
+        );
+        assert_eq!(newer.try_recv(), Ok(true));
+        // Answered once: the same id cannot answer again.
+        assert_eq!(
+            approve_conversation_action(session, true, Some("id-second")),
+            Err(APPROVAL_NOT_PENDING.to_string())
+        );
+        test_support::end(session);
     }
 
     #[test]
@@ -1453,5 +1548,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(iteration_ceiling(&config), 3);
+    }
+}
+
+/// Pending approvals without an LLM, for the approval tests here and in
+/// `mcp_http::ai_routes`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Register a conversation on `session_id` (if none) with `approval_id`
+    /// pending. Re-arming replaces the pending request, as a new one does.
+    pub(crate) fn arm_approval(session_id: &str, approval_id: &str) -> oneshot::Receiver<bool> {
+        let entry = ACTIVE_CONVERSATIONS
+            .entry(session_id.to_string())
+            .or_insert_with(|| ConversationHandle {
+                cancel: Arc::new(AtomicBool::new(false)),
+                state: Arc::new(RwLock::new(AgentState::Running)),
+                pause_notify: Arc::new(Notify::new()),
+                event_tx: broadcast::channel(4).0,
+                pending_approval: Arc::new(Mutex::new(None)),
+            });
+        let (tx, rx) = oneshot::channel();
+        *entry.pending_approval.lock() = Some(PendingApproval {
+            id: approval_id.to_string(),
+            tx,
+        });
+        rx
+    }
+
+    pub(crate) fn end(session_id: &str) {
+        ACTIVE_CONVERSATIONS.remove(session_id);
     }
 }

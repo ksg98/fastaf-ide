@@ -86,7 +86,6 @@ Settings should match the panel/overlay scale. Proposed target:
 | File | Value | Should be |
 |---|---|---|
 | McpPopup.module.css | `10px`, `11px`, `12px`, `13px` | `2xs`, `xs`, `sm`, `md` |
-| KnowledgeHistoryOverlay.module.css | `10px` | `2xs` |
 | shared/dialog.module.css | `11px` | `xs` |
 | Sidebar.module.css (remoteBadge) | `9px` | below scale — keep or raise to `2xs` |
 | OutlinePanel.module.css (kindBadge) | `10px` | `2xs` |

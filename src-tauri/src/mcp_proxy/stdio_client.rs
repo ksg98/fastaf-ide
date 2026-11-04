@@ -279,7 +279,7 @@ pub(crate) struct StdioConfig {
     pub(crate) args: Vec<String>,
     pub(crate) env: std::collections::HashMap<String, String>,
     pub(crate) cwd: Option<String>,
-    /// How long to wait for one response line before declaring the upstream mute.
+    /// Deadline for one complete request exchange (write plus response).
     pub(crate) timeout: Duration,
 }
 
@@ -301,6 +301,8 @@ pub(crate) struct StdioMcpClient {
     stdin_tx: Option<std::sync::mpsc::SyncSender<WriteJob>>,
     /// When was the last spawn attempted (for rate limiting).
     last_spawn: Option<Instant>,
+    /// Consecutive failed health RPCs, never ordinary tool-call failures.
+    failed_health_probes: u8,
     /// JSON-RPC request counter.
     request_id: u64,
 }
@@ -314,6 +316,7 @@ impl StdioMcpClient {
             stdout_rx: None,
             stdin_tx: None,
             last_spawn: None,
+            failed_health_probes: 0,
             request_id: 0,
         }
     }
@@ -564,12 +567,31 @@ impl StdioMcpClient {
     /// Check if alive and refresh the tool list. Used for health checks.
     pub(crate) fn health_check(&mut self) -> Result<Vec<UpstreamToolDef>, String> {
         if !self.is_alive() {
-            return Err(format!(
-                "Upstream '{}' process is not running",
-                self.config.name
-            ));
+            // Health probes are the recovery path, not only a liveness report.
+            // Keep respawns under the same mutex and rate limit as initial setup.
+            return self.spawn_and_initialize();
         }
-        let tools_resp = self.rpc("tools/list", serde_json::json!({}))?;
+        let tools_resp = match self.rpc("tools/list", serde_json::json!({})) {
+            Ok(response) => {
+                self.failed_health_probes = 0;
+                response
+            }
+            Err(error) => {
+                self.failed_health_probes += 1;
+                if self.failed_health_probes >= 2 {
+                    // A slow tool's reply timeout must not kill its process.
+                    // Repeated failed health probes, however, must not keep
+                    // reusing a live but unresponsive child forever. The next
+                    // probe reinitializes through the existing spawn throttle.
+                    tracing::warn!(
+                        upstream = %self.config.name,
+                        "two consecutive health probes failed; retiring stdio upstream"
+                    );
+                    self.shutdown_internal();
+                }
+                return Err(error);
+            }
+        };
         let tools_arr = tools_resp["result"]["tools"]
             .as_array()
             .cloned()
@@ -616,6 +638,7 @@ impl StdioMcpClient {
     }
 
     fn shutdown_internal(&mut self) {
+        self.failed_health_probes = 0;
         // Close stdin first — signals EOF to the child
         drop(self.stdin_tx.take());
         if let Some(queue) = self.stdout_rx.take() {
@@ -699,9 +722,8 @@ impl StdioMcpClient {
     /// Write a JSON value as a newline-delimited line to stdin, waiting until
     /// `deadline` for the child to take it.
     ///
-    /// On timeout the client is torn down, for the same reason `read_line` does
-    /// it and for one more: killing the child is what unblocks the writer thread
-    /// still parked on the pipe.
+    /// A write timeout tears the client down: the frame may be partial, and
+    /// killing the child unblocks the writer thread still parked on the pipe.
     fn write_line(&mut self, value: &Value, deadline: Instant) -> Result<(), String> {
         let tx = self
             .stdin_tx
@@ -743,9 +765,10 @@ impl StdioMcpClient {
     /// Read a newline-delimited JSON response from stdout, waiting until
     /// `deadline` for it.
     ///
-    /// On timeout the client is torn down. That is not tidiness: the request we
-    /// gave up on may still be answered later, and leaving the pipe in place
-    /// would hand that stale reply to the next call as if it were its own.
+    /// A reply timeout ends this request, not the process: a healthy tool may
+    /// still be working. `rpc` matches monotonically increasing request ids, so
+    /// a late reply is discarded rather than returned as the next call's result.
+    /// This does not cancel or retry the action; its external outcome is unknown.
     fn read_line(&mut self, deadline: Instant) -> Result<Value, String> {
         let rx = self
             .stdout_rx
@@ -767,7 +790,6 @@ impl StdioMcpClient {
                     dropped,
                     "{message}"
                 );
-                self.shutdown_internal();
                 return Err(message);
             }
             Err(ReadEnd::Closed) => {
@@ -801,82 +823,63 @@ impl Drop for StdioMcpClient {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
-    /// Create a test config that runs a simple echo-style MCP server
-    /// implemented as a shell script.
-    fn make_config_for_echo_server(script: &str) -> StdioConfig {
-        // Write the script to a temp file
-        let mut tmp = std::env::temp_dir();
-        tmp.push(format!("tuic-mcp-test-{}.sh", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp, script).unwrap();
-        // Make it executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    /// The fixture MCP server, beside the test binary that is asking for it.
+    ///
+    /// `CARGO_BIN_EXE_*` exists for integration tests, and these are unit tests
+    /// inside the lib, so the path is derived: a unit-test binary lives in
+    /// `<target>/<profile>/deps/` and the package's binaries one level up.
+    ///
+    /// Cargo builds a package's binaries only when an integration test or a
+    /// bench is selected, so plain `cargo test --lib`/`cargo nextest run --lib`
+    /// leaves this one unbuilt. The nextest `fixture-bins-unix`/`-windows`
+    /// setup scripts (`.config/nextest.toml`) build it once before the run
+    /// starts; building it here on demand used to race under nextest, which
+    /// runs one process per test (ten nested `cargo build`s hit the same
+    /// cargo lock and each waited out its own 120s timeout).
+    fn fixture_server() -> PathBuf {
+        let mut dir = std::env::current_exe().expect("the test binary's own path");
+        dir.pop();
+        if dir.file_name().is_some_and(|name| name == "deps") {
+            dir.pop();
         }
+        let exe = dir.join(format!(
+            "tuic-mcp-fixture-server{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert!(
+            exe.exists(),
+            "{} was not built; it is a [[bin]] of this package",
+            exe.display(),
+        );
+        exe
+    }
+
+    /// A config that runs the fixture MCP server in one of its named scenarios.
+    ///
+    /// This used to write a `#!/bin/sh` script to `$TMPDIR` and run
+    /// `sh <script>` — deliberately, so the exec was of a warm system binary
+    /// and the never-before-seen file was only *read*, macOS scanning a fresh
+    /// executable on its first exec at a measured 0.31s against 0.013s. The
+    /// fixture server keeps that property for a different reason: it is one
+    /// binary, built once by cargo and exec'd by every test, so only the first
+    /// exec in a suite can pay a scan at all. See `shared_post_checkout_hook`
+    /// in worktree.rs for the measurements.
+    fn make_config_for_scenario(scenario: &str) -> StdioConfig {
         StdioConfig {
             name: "test".to_string(),
-            command: "sh".to_string(),
-            args: vec![tmp.to_str().unwrap().to_string()],
+            command: fixture_server().to_string_lossy().into_owned(),
+            args: vec![scenario.to_string()],
             env: HashMap::new(),
             cwd: None,
             timeout: Duration::from_secs(30),
         }
     }
 
-    /// A minimal MCP server script (shell) that responds correctly to the handshake.
-    fn minimal_mcp_script() -> String {
-        r#"#!/bin/sh
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized)
-            # No response for notifications
-            ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo tool","inputSchema":{"type":"object"}}]}}\n' "$id"
-            ;;
-        tools/call)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"echoed"}],"isError":false}}\n' "$id"
-            ;;
-        *)
-            printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$id"
-            ;;
-    esac
-done
-"#.to_string()
-    }
-
-    fn protocol_offer_probe_script() -> String {
-        r#"#!/bin/sh
-offered=wrong
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^\"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            if echo "$line" | grep -q '"protocolVersion":"2025-11-25"'; then
-                offered=legacy
-            fi
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized) ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"%s","description":"Protocol offer probe","inputSchema":{"type":"object"}}]}}\n' "$id" "$offered"
-            ;;
-    esac
-done
-"#.to_string()
-    }
-
     #[test]
     fn initialize_offers_legacy_protocol_revision_over_stdio() {
-        let config = make_config_for_echo_server(&protocol_offer_probe_script());
+        let config = make_config_for_scenario("protocol-offer-probe");
         let mut client = StdioMcpClient::new(config);
 
         let tools = client.spawn_and_initialize().unwrap();
@@ -886,7 +889,7 @@ done
 
     #[test]
     fn spawn_and_initialize_returns_tools() {
-        let config = make_config_for_echo_server(&minimal_mcp_script());
+        let config = make_config_for_scenario("minimal");
         let mut client = StdioMcpClient::new(config);
 
         let tools = client.spawn_and_initialize().unwrap();
@@ -900,8 +903,66 @@ done
     }
 
     #[test]
+    fn health_probe_recovers_live_unresponsive_stdio_child() {
+        // Catches repeatedly probing the same alive but permanently mute child.
+        let mut client = StdioMcpClient::new(make_config_for_scenario("mute-health-probes"));
+        client.spawn_and_initialize().expect("handshake");
+        let old_pid = client
+            .call_tool("probe", serde_json::json!({"mute_probes": u64::MAX}))
+            .unwrap();
+        client.config.timeout = Duration::from_millis(100);
+        assert!(client.health_check().unwrap_err().contains("timed out"));
+        assert!(
+            client.is_alive(),
+            "one failed probe must not retire the child"
+        );
+        assert!(client.health_check().unwrap_err().contains("timed out"));
+        assert!(
+            !client.is_alive(),
+            "two failed probes must retire the stuck child"
+        );
+
+        // Recovery still goes through the existing spawn throttle. Wait out its
+        // real interval before asking for a replacement, without forging state.
+        std::thread::sleep(Duration::from_secs(5));
+        client.config.timeout = Duration::from_secs(30);
+        let tools = client
+            .health_check()
+            .expect("fresh handshake restores tools");
+        assert_eq!(tools[0].original_name, "probe");
+        let new_pid = client.call_tool("probe", serde_json::json!({})).unwrap();
+        assert_ne!(old_pid, new_pid, "recovery must replace the stuck process");
+    }
+
+    #[test]
+    fn successful_health_probe_resets_failure_streak() {
+        // Catches cumulative rather than consecutive failures killing a healthy child.
+        let mut client = StdioMcpClient::new(make_config_for_scenario("mute-health-probes"));
+        client.spawn_and_initialize().expect("handshake");
+        let original = client.call_tool("probe", serde_json::json!({})).unwrap();
+        for _ in 0..3 {
+            client.config.timeout = Duration::from_secs(30);
+            client
+                .call_tool("probe", serde_json::json!({"mute_probes": 1}))
+                .unwrap();
+            client.config.timeout = Duration::from_millis(100);
+            assert!(client.health_check().unwrap_err().contains("timed out"));
+            assert!(
+                client.is_alive(),
+                "isolated probe failure must preserve child"
+            );
+            client.config.timeout = Duration::from_secs(30);
+            assert_eq!(client.health_check().unwrap()[0].original_name, "probe");
+            assert_eq!(
+                client.call_tool("probe", serde_json::json!({})).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
     fn call_tool_returns_result() {
-        let config = make_config_for_echo_server(&minimal_mcp_script());
+        let config = make_config_for_scenario("minimal");
         let mut client = StdioMcpClient::new(config);
         client.spawn_and_initialize().unwrap();
 
@@ -928,24 +989,22 @@ done
 
     #[test]
     fn is_alive_returns_false_after_process_exits() {
-        // A script that exits immediately after the handshake
-        let script = r#"#!/bin/sh
-IFS= read -r line
-id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-IFS= read -r _notif
-IFS= read -r line2
-id2=$(echo "$line2" | sed 's/.*"id":\([0-9]*\).*/\1/')
-printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id2"
-exit 0
-"#;
-        let config = make_config_for_echo_server(script);
-        let mut client = StdioMcpClient::new(config);
-        client.spawn_and_initialize().unwrap();
+        // Catches mistaking a delayed child exit for a liveness defect.
+        for scenario in ["exit-after-handshake", "delayed-exit-after-handshake"] {
+            let config = make_config_for_scenario(scenario);
+            let mut client = StdioMcpClient::new(config);
+            client.spawn_and_initialize().unwrap();
 
-        // Give the process a moment to exit
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(!client.is_alive());
+            // Exit is asynchronous; the bound catches a stuck fixture, not slow scheduling.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while client.is_alive() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{scenario}: child did not exit within 10 s after the handshake"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     #[test]
@@ -992,7 +1051,7 @@ exit 0
 
     #[test]
     fn shutdown_is_idempotent() {
-        let config = make_config_for_echo_server(&minimal_mcp_script());
+        let config = make_config_for_scenario("minimal");
         let mut client = StdioMcpClient::new(config);
         client.spawn_and_initialize().unwrap();
 
@@ -1003,45 +1062,19 @@ exit 0
 
     #[test]
     fn env_vars_are_passed_to_child() {
-        // Script that reads an env var and outputs it in the tool list
-        let script = r#"#!/bin/sh
-TEST_VAR_VALUE="$TUIC_TEST_ENV_VAR"
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized) ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"%s","description":"d","inputSchema":{"type":"object"}}]}}\n' "$id" "$TEST_VAR_VALUE"
-            ;;
-    esac
-done
-"#;
+        // The `env-tool-name` scenario reads `TUIC_TEST_ENV_VAR` and names its
+        // one tool after it, so the tool list is the child's view of its own
+        // environment.
         let mut env = HashMap::new();
         env.insert(
             "TUIC_TEST_ENV_VAR".to_string(),
             "hello-from-env".to_string(),
         );
 
-        let mut tmp = std::env::temp_dir();
-        tmp.push(format!("tuic-mcp-env-test-{}.sh", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
         let config = StdioConfig {
             name: "env-test".to_string(),
-            command: "sh".to_string(),
-            args: vec![tmp.to_str().unwrap().to_string()],
             env,
-            cwd: None,
-            timeout: Duration::from_secs(30),
+            ..make_config_for_scenario("env-tool-name")
         };
 
         let mut client = StdioMcpClient::new(config);
@@ -1075,28 +1108,7 @@ done
     fn rpc_skips_interleaved_notifications() {
         // Server sends a notification after initialized and before the
         // tools/list response — rpc() must skip it and return the correct response.
-        let script = r#"#!/bin/sh
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized)
-            # Emit a server notification (no id) — this used to cause "0 tools"
-            printf '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'
-            ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"alpha","description":"A","inputSchema":{"type":"object"}},{"name":"beta","description":"B","inputSchema":{"type":"object"}}]}}\n' "$id"
-            ;;
-        tools/call)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"
-            ;;
-    esac
-done
-"#;
-        let config = make_config_for_echo_server(script);
+        let config = make_config_for_scenario("notify-once");
         let mut client = StdioMcpClient::new(config);
         let tools = client.spawn_and_initialize().unwrap();
 
@@ -1113,26 +1125,25 @@ done
     #[test]
     fn call_tool_gives_up_on_a_mute_upstream() {
         // Handshake answers; `tools/call` is read and deliberately left unanswered.
-        let script = r#"#!/bin/sh
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized) ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"hang","description":"H","inputSchema":{"type":"object"}}]}}\n' "$id"
-            ;;
-        tools/call)
-            # Silence. The upstream is alive but will never answer.
-            ;;
-    esac
-done
-"#;
-        let mut config = make_config_for_echo_server(script);
-        config.timeout = Duration::from_millis(300);
+        //
+        // Three bounds, and only the middle one is what this test is about.
+        //
+        // `handshake` has to *succeed*: it is setup, not subject. It used to share
+        // the 300ms below, and a loaded suite pushed the shell server's
+        // initialize/tools-list past it — so the test died in `expect("handshake")`,
+        // surfaced as "call_tool never returned", and accused the deadline this
+        // test exists to prove works. Give setup room; arm the short deadline only
+        // once the upstream is up.
+        //
+        // `harness` is deliberately larger than the other two combined, so the only
+        // way it fires is a call that really never returns — which is what its
+        // message claims.
+        let handshake = Duration::from_secs(10);
+        let give_up = Duration::from_millis(300);
+        let harness = Duration::from_secs(30);
+
+        let mut config = make_config_for_scenario("mute-tool-call");
+        config.timeout = handshake;
 
         // Drive the call off-thread so a client with no deadline fails the test
         // instead of hanging it.
@@ -1140,12 +1151,13 @@ done
         std::thread::spawn(move || {
             let mut client = StdioMcpClient::new(config);
             client.spawn_and_initialize().expect("handshake");
+            client.config.timeout = give_up;
             let result = client.call_tool("hang", serde_json::json!({}));
             let _ = tx.send((result, client.is_alive()));
         });
 
         let (result, still_alive) = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(harness)
             .expect("call_tool never returned — no read deadline");
         let err = result.expect_err("a mute upstream must not report success");
         assert!(
@@ -1153,9 +1165,41 @@ done
             "expected a timeout error, got: {err}"
         );
         assert!(
-            !still_alive,
-            "a timed-out client must be torn down so the next call cannot read a stale reply"
+            still_alive,
+            "a fully written request timing out must not kill the upstream"
         );
+    }
+
+    #[test]
+    fn a_late_reply_does_not_kill_the_child_or_answer_the_next_call() {
+        // Catches reply-timeout teardown and returning an abandoned call's result.
+        let mut client = StdioMcpClient::new(make_config_for_scenario("delayed-tool-call"));
+        client.spawn_and_initialize().expect("handshake");
+        client.config.timeout = Duration::from_millis(100);
+        let result = client.call_tool(
+            "echo",
+            serde_json::json!({
+                "delay_ms": 500, "message": "late first reply"
+            }),
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(
+            client.is_alive(),
+            "reply timeout must preserve a healthy child"
+        );
+        client.config.timeout = Duration::from_secs(30);
+        let result = client
+            .call_tool(
+                "echo",
+                serde_json::json!({
+                    "delay_ms": 0, "message": "second reply"
+                }),
+            )
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "second reply");
+        let tools = client.health_check().expect("same child remains usable");
+        assert_eq!(tools[0].original_name, "echo");
+        client.shutdown();
     }
 
     /// The reply may sit behind any amount of server chatter. Bounding that by
@@ -1164,28 +1208,7 @@ done
     /// read already had, so the number of skipped messages does not matter.
     #[test]
     fn a_chatty_upstream_still_delivers_its_reply() {
-        let script = r#"#!/bin/sh
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized)
-            i=0
-            while [ $i -lt 500 ]; do
-                printf '{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","n":%s}}\n' "$i"
-                i=$((i+1))
-            done
-            ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"delta","description":"D","inputSchema":{"type":"object"}}]}}\n' "$id"
-            ;;
-    esac
-done
-"#;
-        let config = make_config_for_echo_server(script);
+        let config = make_config_for_scenario("chatty");
         let mut client = StdioMcpClient::new(config);
         let tools = client
             .spawn_and_initialize()
@@ -1429,29 +1452,7 @@ done
     #[test]
     fn rpc_skips_multiple_notifications() {
         // Server sends 3 notifications before the tools/list response.
-        let script = r#"#!/bin/sh
-while IFS= read -r line; do
-    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
-            ;;
-        notifications/initialized)
-            printf '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'
-            printf '{"jsonrpc":"2.0","method":"notifications/progress","params":{"token":"abc"}}\n'
-            printf '{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"starting"}}\n'
-            ;;
-        tools/list)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"gamma","description":"G","inputSchema":{"type":"object"}}]}}\n' "$id"
-            ;;
-        tools/call)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"
-            ;;
-    esac
-done
-"#;
-        let config = make_config_for_echo_server(script);
+        let config = make_config_for_scenario("notify-thrice");
         let mut client = StdioMcpClient::new(config);
         let tools = client.spawn_and_initialize().unwrap();
 

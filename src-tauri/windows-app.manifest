@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Application manifest for every Windows artifact this crate links: the
+  binaries and the test binaries alike.
+
+  tauri_build::build() embeds its own copy of this dependency, but through
+  cargo:rustc-link-arg-bins, which reaches binaries and not tests. Without it a
+  test binary loads C:\Windows\System32\comctl32.dll, which is version 5.82 and
+  does not export TaskDialogIndirect — a version 6 symbol that the dialog
+  plugin imports. The loader then aborts the process with
+  STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before a single test runs.
+
+  build.rs therefore turns the tauri manifest off and links this one into every
+  target, so the binaries and the tests bind the same side-by-side assembly.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

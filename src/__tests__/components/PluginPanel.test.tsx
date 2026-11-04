@@ -28,6 +28,8 @@ vi.mock("@tauri-apps/api/window", () => ({
 	})),
 }));
 
+vi.mock("../../utils/openUrl", () => ({ handleOpenUrl: vi.fn() }));
+
 // Track whether addEventListener("message") was called inside an onMount callback.
 // We wrap solid-js onMount to set a flag during its execution.
 let insideOnMount = false;
@@ -47,12 +49,14 @@ vi.mock("solid-js", async (importOriginal) => {
 	};
 });
 
-import { createSignal } from "solid-js";
+import { createSignal, For } from "solid-js";
 import { injectThemeVars, PluginPanel } from "../../components/PluginPanel/PluginPanel";
+import { TUIC_SDK_SCRIPT } from "../../components/PluginPanel/tuicSdk";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import { mdTabsStore } from "../../stores/mdTabs";
 import { repositoriesStore } from "../../stores/repositories";
 import { applyAppTheme } from "../../themes";
+import { handleOpenUrl } from "../../utils/openUrl";
 
 function makeTab(overrides: Partial<PluginPanelTab> = {}): PluginPanelTab {
 	return {
@@ -114,6 +118,31 @@ describe("PluginPanel", () => {
 		expect(messageCalls).toHaveLength(1);
 	});
 
+	it("opens an external URL only when the owning plugin iframe sends the message", () => {
+		const { container } = render(() => <PluginPanel tab={makeTab()} />);
+		const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+		const [, handler] = addEventListenerSpy.mock.calls.find(([event]: [string]) => event === "message")!;
+		const foreign = new MessageEvent("message", { data: { type: "tuic:open-url", url: "https://example.org/help" } });
+		(handler as EventListener)(foreign);
+		expect(handleOpenUrl).not.toHaveBeenCalled();
+		const own = new MessageEvent("message", { data: { type: "tuic:open-url", url: "https://example.org/help" } });
+		Object.defineProperty(own, "source", { get: () => iframe.contentWindow });
+		(handler as EventListener)(own);
+		expect(handleOpenUrl).toHaveBeenCalledWith("https://example.org/help");
+	});
+
+	it("does not let a URL-mode dashboard request browser opens through the message bridge", () => {
+		const { container } = render(() => <PluginPanel tab={makeTab({ url: "about:blank", html: "" })} />);
+		const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+		const [, handler] = addEventListenerSpy.mock.calls.find(([event]: [string]) => event === "message")!;
+		const request = new MessageEvent("message", {
+			data: { type: "tuic:open-url", url: "https://example.org/help" },
+		});
+		Object.defineProperty(request, "source", { get: () => iframe.contentWindow });
+		(handler as EventListener)(request);
+		expect(handleOpenUrl).not.toHaveBeenCalled();
+	});
+
 	it("removes message listener on unmount", () => {
 		const tab = makeTab();
 		const { unmount } = render(() => <PluginPanel tab={tab} />);
@@ -133,6 +162,53 @@ describe("PluginPanel", () => {
 		render(() => <PluginPanel tab={tab} />);
 
 		expect(pluginRegistry.registerPanelSendChannel).toHaveBeenCalledWith("tab-1", expect.any(Function));
+	});
+
+	it.each([{ answer: 42 }, "hello", null])("host send reaches tuic.onMessage for %j", (payload) => {
+		const { container } = render(() => <PluginPanel tab={makeTab()} />);
+		const frame = container.querySelector("iframe")!.contentWindow!;
+		// Execute the shipped SDK in its real receiving window, then deliver the
+		// mounted host channel's postMessage output across that window boundary.
+		(frame as Window & typeof globalThis).eval(
+			TUIC_SDK_SCRIPT.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, ""),
+		);
+		const received: unknown[] = [];
+		(frame as unknown as { tuic: { onMessage: (cb: (data: unknown) => void) => void } }).tuic.onMessage((data) =>
+			received.push(data),
+		);
+		vi.spyOn(frame, "postMessage").mockImplementation((data) => {
+			frame.dispatchEvent(new MessageEvent("message", { data, source: window }));
+		});
+		const send = vi.mocked(pluginRegistry.registerPanelSendChannel).mock.calls.at(-1)![1];
+		send(payload);
+		expect(received).toEqual([payload]);
+	});
+
+	it("forwards transferable ownership through iframe postMessage", () => {
+		const tab = makeTab();
+		const { container } = render(() => <PluginPanel tab={tab} />);
+		const iframe = container.querySelector("iframe");
+		expect(iframe?.contentWindow).toBeTruthy();
+		let received: { type: string; payload: { type: string; buffer: ArrayBuffer } } | undefined;
+		// happy-dom does not transfer ownership; use the native clone operation
+		// at the iframe boundary so dropping the transfer list fails this test.
+		vi.spyOn(iframe!.contentWindow!, "postMessage").mockImplementation(
+			(data: unknown, target?: string | WindowPostMessageOptions, transfer?: Transferable[]) => {
+				received = structuredClone(data as NonNullable<typeof received>, {
+					transfer: typeof target === "object" ? target.transfer : transfer,
+				});
+			},
+		);
+		const send = vi.mocked(pluginRegistry.registerPanelSendChannel).mock.calls.at(-1)?.[1];
+		const buffer = new ArrayBuffer(4);
+		new Uint8Array(buffer).set([1, 2, 3, 4]);
+
+		send?.({ type: "database", buffer }, [buffer]);
+
+		expect(buffer.byteLength).toBe(0);
+		expect(received?.type).toBe("tuic:host-message");
+		expect(received?.payload.type).toBe("database");
+		expect(Array.from(new Uint8Array(received!.payload.buffer))).toEqual([1, 2, 3, 4]);
 	});
 
 	it("unregisters send channel via pluginRegistry on unmount", () => {
@@ -216,20 +292,75 @@ describe("PluginPanel", () => {
 	});
 
 	describe("hidden panels (613-00e8 F102)", () => {
+		it.each([
+			["URL", { url: "about:blank", html: "" }],
+			["pinned URL", { url: "about:blank", html: "", pinned: true }],
+			["inline plugin", { html: "<p>Dashboard</p>" }],
+		])("unloads a hidden %s iframe and reloads it when shown", (_mode, overrides) => {
+			const [visible, setVisible] = createSignal(true);
+			const { container } = render(() => <PluginPanel tab={makeTab(overrides)} visible={visible} />);
+			const first = container.querySelector("iframe") as HTMLIFrameElement;
+			const src = first.getAttribute("src");
+			const srcdoc = first.getAttribute("srcdoc");
+			setVisible(false);
+			expect(container.querySelector("iframe")).toBeNull();
+			setVisible(true);
+			const second = container.querySelector("iframe") as HTMLIFrameElement;
+			expect(second).not.toBe(first);
+			expect(second.getAttribute("src")).toBe(src);
+			expect(second.getAttribute("srcdoc")).toBe(srcdoc);
+		});
+
+		it("removes the iframe when the UI tab closes", () => {
+			mdTabsStore.clearAll();
+			mdTabsStore.openUiTab("closing-panel", "Dashboard", "", false, "about:blank");
+			const { container } = render(() => (
+				<For each={mdTabsStore.getIds()}>
+					{(id) => {
+						const tab = mdTabsStore.get(id) as PluginPanelTab;
+						return <PluginPanel tab={tab} />;
+					}}
+				</For>
+			));
+			expect(container.querySelectorAll("iframe")).toHaveLength(1);
+
+			mdTabsStore.closeUiTab("closing-panel");
+			expect(container.querySelectorAll("iframe")).toHaveLength(0);
+		});
+
+		it("unloads only the hidden iframe when two panels share the page", () => {
+			const [firstVisible, setFirstVisible] = createSignal(true);
+			const [secondVisible, setSecondVisible] = createSignal(true);
+			const { container } = render(() => (
+				<>
+					<PluginPanel tab={makeTab({ id: "first", url: "about:blank#first", html: "" })} visible={firstVisible} />
+					<PluginPanel tab={makeTab({ id: "second", url: "about:blank#second", html: "" })} visible={secondVisible} />
+				</>
+			));
+			expect(container.querySelectorAll("iframe")).toHaveLength(2);
+
+			setFirstVisible(false);
+			expect([...container.querySelectorAll("iframe")].map((frame) => frame.getAttribute("src"))).toEqual([
+				"about:blank#second",
+			]);
+
+			setSecondVisible(false);
+			expect(container.querySelectorAll("iframe")).toHaveLength(0);
+		});
 		/**
 		 * Mount a panel and start spying on what reaches its iframe. The stub goes
 		 * in after mount on purpose — the mount-time handshake is not what this
 		 * block is about.
 		 */
+		let contentWindowSpy: ReturnType<typeof vi.spyOn> | undefined;
 		function spyOnPanelTraffic(visible: () => boolean) {
 			const tab = makeTab();
-			const { container } = render(() => <PluginPanel tab={tab} visible={visible} />);
-			const iframe = container.querySelector("iframe") as HTMLIFrameElement;
 			const postMessage = vi.fn();
-			Object.defineProperty(iframe, "contentWindow", {
-				configurable: true,
-				get: () => ({ postMessage }),
-			});
+			contentWindowSpy = vi
+				.spyOn(HTMLIFrameElement.prototype, "contentWindow", "get")
+				.mockReturnValue({ postMessage } as unknown as Window);
+			render(() => <PluginPanel tab={tab} visible={visible} />);
+			postMessage.mockClear();
 			return postMessage;
 		}
 
@@ -237,6 +368,8 @@ describe("PluginPanel", () => {
 			postMessage.mock.calls.filter((call) => call[0]?.type === "tuic:repo-changed");
 
 		afterEach(() => {
+			contentWindowSpy?.mockRestore();
+			contentWindowSpy = undefined;
 			repositoriesStore.setActive(null);
 			repositoriesStore._testCancelPendingSave();
 		});

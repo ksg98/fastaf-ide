@@ -9,7 +9,7 @@ const editorTheme = EditorView.theme(
 		"&": {
 			width: "100%",
 			height: "100%",
-			fontSize: "13px",
+			fontSize: "inherit",
 		},
 		".cm-scroller": {
 			fontFamily: "var(--font-mono)",

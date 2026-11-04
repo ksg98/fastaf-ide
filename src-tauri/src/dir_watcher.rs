@@ -1,3 +1,4 @@
+use dashmap::mapref::entry::Entry;
 use notify::{RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -19,7 +20,13 @@ pub(crate) struct DirChangedPayload {
     pub dir_path: String,
 }
 
-/// Start watching a directory non-recursively for content changes.
+/// One native watcher shared by all clients currently displaying this directory.
+pub(crate) struct DirectoryWatch {
+    _watcher: WatchHandle,
+    subscribers: usize,
+}
+
+/// Acquire a nonrecursive directory watch; each successful acquire needs a release.
 /// Emits `"dir-changed"` when files are created, deleted, or renamed.
 pub(crate) fn start_watching(dir_path: &str, state: &Arc<AppState>) -> Result<(), String> {
     let path = PathBuf::from(dir_path);
@@ -27,8 +34,14 @@ pub(crate) fn start_watching(dir_path: &str, state: &Arc<AppState>) -> Result<()
         return Err(format!("Directory does not exist: {dir_path}"));
     }
 
-    // Remove previous watcher for this path (idempotent restart)
-    state.dir_watchers.remove(dir_path);
+    // Keep the entry locked through creation so simultaneous clients share one watch.
+    let entry = match state.dir_watchers.entry(dir_path.to_string()) {
+        Entry::Occupied(mut entry) => {
+            entry.get_mut().subscribers += 1;
+            return Ok(());
+        }
+        Entry::Vacant(entry) => entry,
+    };
 
     let dir_path_owned = dir_path.to_string();
     #[cfg(feature = "desktop")]
@@ -87,16 +100,22 @@ pub(crate) fn start_watching(dir_path: &str, state: &Arc<AppState>) -> Result<()
         .watch(path.as_path(), RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch directory: {e}"))?;
 
-    state
-        .dir_watchers
-        .insert(dir_path.to_string(), WatchHandle(Mutex::new(watcher)));
+    entry.insert(DirectoryWatch {
+        _watcher: WatchHandle(Mutex::new(watcher)),
+        subscribers: 1,
+    });
     Ok(())
 }
 
-/// Stop watching a directory.
+/// Release a directory watch, dropping the native watcher only for the last client.
 pub(crate) fn stop_watching(dir_path: &str, state: &Arc<AppState>) {
-    // Dropping the WatchHandle stops the watcher automatically
-    state.dir_watchers.remove(dir_path);
+    if let Entry::Occupied(mut entry) = state.dir_watchers.entry(dir_path.to_string()) {
+        if entry.get().subscribers > 1 {
+            entry.get_mut().subscribers -= 1;
+        } else {
+            entry.remove();
+        }
+    }
 }
 
 // --- Tauri commands ---
@@ -161,9 +180,42 @@ mod tests {
         assert!(state.dir_watchers.contains_key(&path1));
         assert!(state.dir_watchers.contains_key(&path2));
 
-        // Re-watching the same path replaces the watcher (no error, no double entry)
+        // Another consumer of the same path shares the watcher (no double entry)
         start_watching(&path1, &state).unwrap();
         assert_eq!(state.dir_watchers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn releasing_one_client_keeps_shared_directory_notifications_alive() {
+        let tmp = TempDir::new_in(crate::test_support::test_temp_root()).unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let state = make_test_state();
+        let mut events = state.event_bus.subscribe();
+
+        start_watching(path, &state).unwrap();
+        start_watching(path, &state).unwrap();
+        stop_watching(path, &state);
+        std::fs::create_dir(tmp.path().join("roles")).unwrap();
+
+        // Catches a collapsing desktop tree dropping the phone's shared watch.
+        // The timeout is only a hang bound, not an assertion about notify latency.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let AppEvent::DirChanged { dir_path } = events.recv().await.unwrap()
+                    && dir_path == path
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("another client's release stopped shared directory notifications");
+
+        stop_watching(path, &state);
+        assert!(
+            !state.dir_watchers.contains_key(path),
+            "last release leaked the watcher"
+        );
     }
 
     /// FSEvents on macOS has inherent latency (~2s), making event emission tests

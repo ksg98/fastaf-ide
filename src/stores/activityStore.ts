@@ -1,10 +1,12 @@
 import { createStore, produce } from "solid-js/store";
 import { invoke } from "../invoke";
 import type { ActivityItem, ActivitySection, Disposable } from "../plugins/types";
+import { createConfigDeltaWriter } from "../utils/configDeltaWriter";
 import { appLogger } from "./appLogger";
 
 /** Serializable subset of ActivityItem (no onClick function) */
 type PersistedActivityItem = Omit<ActivityItem, "onClick">;
+const activityWriter = createConfigDeltaWriter<PersistedActivityItem[]>("save_activity", "items");
 
 interface ActivityStoreState {
 	items: ActivityItem[];
@@ -16,11 +18,16 @@ function toPersistedItems(items: ActivityItem[]): PersistedActivityItem[] {
 	return items.map(({ onClick: _, ...rest }) => rest);
 }
 
+let activityLoaded = false;
+let pendingActivitySave = false;
+
 /** Fire-and-forget persist to Rust backend */
 function persistActivityNow(items: ActivityItem[]): void {
-	invoke("save_activity", { items: toPersistedItems(items) }).catch((err) =>
-		appLogger.error("store", "Failed to save activity", err),
-	);
+	if (!activityLoaded) {
+		pendingActivitySave = true;
+		return;
+	}
+	activityWriter.save(toPersistedItems(items)).catch((err) => appLogger.error("store", "Failed to save activity", err));
 }
 
 /** Debounced persist (coalesces rapid mutations) */
@@ -45,9 +52,13 @@ function createActivityStore() {
 
 	async function hydrate(): Promise<void> {
 		try {
-			const loaded = await invoke<{ items?: PersistedActivityItem[] }>("load_activity");
-			if (loaded?.items && Array.isArray(loaded.items)) {
-				const migrated = loaded.items.map((item) => ({
+			const loaded = await invoke<PersistedActivityItem[] | { items?: PersistedActivityItem[] } | null>(
+				"load_activity",
+			);
+			activityWriter.loaded(Array.isArray(loaded) ? loaded : (loaded?.items ?? []));
+			const items = Array.isArray(loaded) ? loaded : loaded?.items;
+			if (Array.isArray(items)) {
+				const migrated = items.map((item) => ({
 					...item,
 					dismissed: item.dismissed ?? false,
 				}));
@@ -62,6 +73,13 @@ function createActivityStore() {
 						}
 					}),
 				);
+			}
+			activityLoaded = true;
+			if (pendingActivitySave) {
+				pendingActivitySave = false;
+				if (saveActivityTimer) clearTimeout(saveActivityTimer);
+				saveActivityTimer = null;
+				persistActivityNow(state.items);
 			}
 		} catch (err) {
 			appLogger.debug("store", "Failed to hydrate activity", err);
@@ -92,7 +110,7 @@ function createActivityStore() {
 	}
 
 	function getSections(): ActivitySection[] {
-		return [...state.sections].sort((a, b) => a.priority - b.priority);
+		return state.sections.toSorted((a, b) => a.priority - b.priority);
 	}
 
 	// -------------------------------------------------------------------------
@@ -191,7 +209,7 @@ function createActivityStore() {
 	}
 
 	/**
-	 * How many items the popover would show across these sections. The badge wants
+	 * How many dismissible notifications the popover shows across these sections. The badge wants
 	 * one number, so it walks the items once and never sorts — asking each section
 	 * for its list instead cost a scan and a sort per section, both discarded for
 	 * a `.length`.
@@ -201,7 +219,7 @@ function createActivityStore() {
 		const wanted = new Set(sectionIds);
 		let count = 0;
 		for (const item of state.items) {
-			if (wanted.has(item.sectionId) && isVisibleIn(item, item.sectionId, repoPath)) count++;
+			if (item.dismissible && wanted.has(item.sectionId) && isVisibleIn(item, item.sectionId, repoPath)) count++;
 		}
 		return count;
 	}

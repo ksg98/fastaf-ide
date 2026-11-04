@@ -2,8 +2,8 @@ use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -13,312 +13,28 @@ use crate::output_parser::{OutputParser, ParsedEvent};
 use crate::state::{
     AppState, ChangedRow, EscapeAwareBuffer, KittyAction, KittyKeyboardState,
     MAX_CONCURRENT_SESSIONS, OUTPUT_RING_BUFFER_CAPACITY, OrchestratorStats, OutputRingBuffer,
-    PtyConfig, PtySession, Utf8ReadBuffer, VT_LOG_BUFFER_CAPACITY, VtLogBuffer,
-    strip_kitty_sequences,
+    PtyConfig, PtySession, Utf8ReadBuffer, VT_LOG_BUFFER_CAPACITY, strip_kitty_sequences,
 };
 use crate::worktree::{
     WorktreeConfig, WorktreeResult, create_worktree_with_stale_recovery, remove_worktree_internal,
 };
 
-/// Get the platform-appropriate default shell when no override is configured.
-pub(crate) fn default_shell() -> String {
-    #[cfg(windows)]
-    {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-    }
-}
+mod bg_wake_diagnostics;
+pub(crate) mod frame_priority;
+mod injection;
+mod lifecycle;
+mod screen;
 
-/// Convert a Windows drive-letter path to a WSL `/mnt/` path.
-/// E.g. `C:\Users\foo\repos` → `/mnt/c/Users/foo/repos`.
-/// Returns the input unchanged if it's not a Windows drive-letter path.
-pub(crate) fn windows_to_wsl_path(path: &str) -> String {
-    let bytes = path.as_bytes();
-    // Match "X:\" or "X:/" where X is an ASCII letter
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-    {
-        let drive = (bytes[0] as char).to_ascii_lowercase();
-        let rest = &path[3..].replace('\\', "/");
-        format!("/mnt/{drive}/{rest}")
-    } else {
-        path.to_string()
-    }
-}
+pub(crate) use injection::*;
+pub(crate) use lifecycle::*;
+pub(crate) use screen::*;
 
-/// Check whether a shell string targets WSL (e.g. `wsl.exe`, `wsl.exe -d Ubuntu`).
-/// Handles both forward-slash and backslash path separators so it works
-/// correctly regardless of compilation target (cross-compiled from macOS/Linux).
-pub(crate) fn is_wsl_shell(shell: &str) -> bool {
-    let exe = shell.split_whitespace().next().unwrap_or("");
-    // Extract filename from the last path separator (either / or \)
-    let filename = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
-    // Strip .exe extension if present
-    let stem = filename
-        .strip_suffix(".exe")
-        .or_else(|| filename.strip_suffix(".EXE"))
-        .unwrap_or(filename);
-    stem.eq_ignore_ascii_case("wsl")
-}
-
-/// Remove parent-process preferences that must not become defaults for a new
-/// independent PTY. Call this immediately after constructing the command so an
-/// explicit per-agent environment may still restore the variable deliberately.
-pub(crate) fn sanitize_pty_parent_env(cmd: &mut CommandBuilder) {
-    // FastAF may itself be launched from Codex, whose NO_COLOR belongs
-    // to that parent process. Do not leak the opt-out into independent PTY
-    // sessions. Commands can still request monochrome output through their own
-    // explicit CLI flags or per-command environment.
-    cmd.env_remove("NO_COLOR");
-}
-
-/// Inject the Unix-style env vars that Claude Code / Ink need to detect
-/// terminal capabilities (color, kitty keyboard protocol, etc.).
-/// Give the PTY the identity its agent will announce, and record which terminal
-/// currently backs it.
-///
-/// Every session-creating path must call this. Before it existed only `create_pty`
-/// injected `TUIC_SESSION`, so a tab opened through the worktree, agent-spawn or
-/// HTTP paths ran with no identity at all: its bridge sent no `x-tuic-session`
-/// header, the server minted an MCP-scoped UUID at `register`, and that UUID
-/// matched no PTY — leaving the agent addressable by mail but unreachable through
-/// its own terminal.
-///
-/// `tuic_session` is the caller's stable identity when it has one (a desktop tab
-/// persists it across restarts for `claude --resume $TUIC_SESSION` and for goose's
-/// `--name`). Paths without one fall back to the PTY key itself, which makes
-/// identity and terminal trivially the same value for those sessions.
-pub(crate) fn bind_pty_identity(
-    state: &AppState,
-    cmd: &mut CommandBuilder,
-    session_id: &str,
-    tuic_session: Option<&str>,
-) {
-    let identity = tuic_session.unwrap_or(session_id);
-    cmd.env("TUIC_SESSION", identity);
-    cmd.env(
-        "TUIC_CONFIG_DIR",
-        crate::config::config_dir().to_string_lossy().as_ref(),
-    );
-    state.bind_live_pty(identity, session_id);
-}
-
-fn inject_unix_terminal_env(cmd: &mut CommandBuilder) {
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    // Signal kitty keyboard protocol support so apps (e.g. Claude Code / Ink)
-    // detect it via heuristic precheck and proceed to query confirmation.
-    cmd.env("KITTY_WINDOW_ID", "1");
-    // Announce as ghostty so Claude Code's terminal detection allow-list
-    // enables kitty keyboard protocol. CC ≥v2.1.52 only recognizes
-    // WezTerm, ghostty, and iTerm.app — "kitty" was removed from the list.
-    // ghostty is chosen because it has no iTerm/WezTerm-specific side effects.
-    // On macOS this also prevents /etc/zshrc sourcing zshrc_Apple_Terminal.
-    cmd.env("TERM_PROGRAM", "ghostty");
-    // iTerm2 feature-reporting protocol: advertise capabilities so tools
-    // (cargo, uv, mise, etc.) can detect support without a TERM_PROGRAM whitelist.
-    // T2=24-bit color, P=OSC 9;4 progress, H=OSC 8 hyperlinks, U=unicode,
-    // B=bracketed paste, Sy=synchronized output, M=mouse, F=focus reporting.
-    cmd.env("TERM_FEATURES", "T2PHUBSyMF");
-    // CC also checks TERM_PROGRAM_VERSION — missing or matching /^[0-2]\./
-    // causes rejection.  Use a value that passes the gate.
-    cmd.env("TERM_PROGRAM_VERSION", "3.0.0");
-    // Prevent nested-session detection when FastAF itself runs
-    // inside a Claude Code session (CLAUDECODE env var would propagate).
-    cmd.env_remove("CLAUDECODE");
-    if let Ok(lang) = std::env::var("LANG") {
-        cmd.env("LANG", lang);
-    } else {
-        // Fallback: ensure UTF-8 is available even when LANG is completely unset
-        cmd.env("LANG", "en_US.UTF-8");
-    }
-    // Agent Teams: always inject feature flag so CC unlocks team tools
-    cmd.env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
-}
-
-/// Attempts made before a PTY spawn is reported as failed.
-pub(crate) const PTY_SPAWN_ATTEMPTS: usize = 3;
-
-/// Open a PTY pair and spawn a command into it, retrying transient allocation failures.
-///
-/// Story 059 added this retry to `create_pty` after a spawn regression, but the
-/// other six production spawn sites kept a single `openpty`/`spawn_command` and
-/// failed hard — so whether a burst of tab creation survived a momentarily
-/// exhausted PTY table depended on *which* code path opened the terminal. This
-/// helper is deliberately the retry policy and nothing else: the sites diverge
-/// for real reasons (dimension clamping, shell-integration injection, env
-/// sanitising, cwd inheritance) and unifying past this point would force a false
-/// abstraction.
-///
-/// Command-spawn failures are never retried: invalid binaries, cwd, permissions,
-/// and arguments do not become valid after sleeping. Async entry points use the
-/// companion async wrapper so this bounded blocking backoff runs only on Tokio's
-/// blocking pool.
-pub(crate) fn spawn_pty_pair_with_retry<F>(
-    size: PtySize,
-    build_command: F,
-) -> Result<
-    (
-        portable_pty::PtyPair,
-        Box<dyn portable_pty::Child + Send + Sync>,
-    ),
-    String,
->
-where
-    F: FnOnce() -> CommandBuilder,
-{
-    let pty_system = native_pty_system();
-    let pair = retry_transient(
-        || pty_system.openpty(size),
-        is_transient_pty_open_error,
-        |attempt| {
-            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
-        },
-    )
-    .map_err(|(attempt, error)| format!("Failed to open PTY (attempt {attempt}): {error}"))?;
-
-    let child = pair
-        .slave
-        .spawn_command(build_command())
-        .map_err(|error| format!("Failed to spawn shell: {error}"))?;
-    Ok((pair, child))
-}
-
-fn retry_transient<T, E, O, C, S>(
-    mut operation: O,
-    is_transient: C,
-    mut sleep_before_retry: S,
-) -> Result<T, (usize, E)>
-where
-    O: FnMut() -> Result<T, E>,
-    C: Fn(&E) -> bool,
-    S: FnMut(usize),
-{
-    for attempt in 1..=PTY_SPAWN_ATTEMPTS {
-        match operation() {
-            Ok(value) => return Ok(value),
-            Err(error) if attempt < PTY_SPAWN_ATTEMPTS && is_transient(&error) => {
-                sleep_before_retry(attempt);
-            }
-            Err(error) => return Err((attempt, error)),
-        }
-    }
-    unreachable!("bounded retry loop always returns")
-}
-
-fn is_transient_pty_open_error(error: &anyhow::Error) -> bool {
-    let Some(io_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-    else {
-        return false;
-    };
-    if matches!(
-        io_error.kind(),
-        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-    ) {
-        return true;
-    }
-    let Some(code) = io_error.raw_os_error() else {
-        return false;
-    };
-    #[cfg(unix)]
-    if matches!(
-        code,
-        libc::EAGAIN | libc::EINTR | libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::ENXIO
-    ) {
-        return true;
-    }
-    #[cfg(windows)]
-    if matches!(code, 8 | 14 | 170 | 1450 | 1816) {
-        return true;
-    }
-    false
-}
-
-/// Run the synchronous PTY allocation policy without occupying an async worker.
-pub(crate) async fn spawn_pty_pair_with_retry_async<F>(
-    size: PtySize,
-    build_command: F,
-) -> Result<
-    (
-        portable_pty::PtyPair,
-        Box<dyn portable_pty::Child + Send + Sync>,
-    ),
-    String,
->
-where
-    F: FnOnce() -> CommandBuilder + Send + 'static,
-{
-    run_pty_spawn_blocking(move || spawn_pty_pair_with_retry(size, build_command)).await
-}
-
-async fn run_pty_spawn_blocking<T, F>(operation: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| format!("PTY spawn task panicked: {error}"))?
-}
-
-/// Build a CommandBuilder for the given shell with platform-appropriate flags.
-///
-/// The `shell` string may contain arguments (e.g. `wsl.exe -d Ubuntu`).
-/// The first whitespace-delimited token is the executable; the rest are args.
-pub(crate) fn build_shell_command(shell: &str) -> CommandBuilder {
-    let mut parts = shell.split_whitespace();
-    let exe = parts.next().unwrap_or(shell);
-    #[allow(unused_mut)]
-    let mut cmd = CommandBuilder::new(exe);
-    sanitize_pty_parent_env(&mut cmd);
-    for arg in parts {
-        cmd.arg(arg);
-    }
-
-    #[cfg(not(windows))]
-    {
-        // Login shell flag is Unix-only; PowerShell/cmd.exe don't support -l
-        cmd.arg("-l");
-        inject_unix_terminal_env(&mut cmd);
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, if the shell targets WSL, inject Unix-style env vars
-        // so that tools inside WSL (Claude Code, etc.) detect terminal
-        // capabilities correctly. These are passed through to the Linux
-        // environment by wsl.exe.
-        if is_wsl_shell(shell) {
-            inject_unix_terminal_env(&mut cmd);
-        }
-    }
-
-    cmd
-}
-
-/// Niceness applied to every PTY child process. A child inherits the parent's
-/// nice value at fork time, so deprioritizing the shell deprioritizes every
-/// process it later spawns — compilers, bundlers, test runners. The intent is
-/// that a heavy `cargo build` yields CPU to TUIC's own render thread and the
-/// rest of the system *under contention*, while still running at full speed on
-/// an idle machine (`nice` only bites when something else wants the core).
-///
-/// +10 was chosen over macOS QoS-background (`taskpolicy -b`), which pins the
-/// workload to the E-cores on Apple Silicon and makes builds crawl even when
-/// the P-cores are idle.
-///
-/// Overridable at launch via `TUIC_PTY_NICE` so the right value can be tuned on
-/// the real app without recompiling (nice 0..19; values outside that range are
-/// clamped by the kernel).
-#[cfg(unix)]
-const PTY_CHILD_NICE_DEFAULT: i32 = 10;
+#[cfg(all(test, unix))]
+mod child_reaping_tests;
+#[cfg(feature = "desktop")]
+mod commands;
+#[cfg(feature = "desktop")]
+pub(crate) use commands::*;
 
 /// Capacity of the per-session raw-byte flight recorder (story 056-7545).
 /// 2 MiB ≈ several minutes of heavy agent output — enough to capture the
@@ -494,80 +210,6 @@ fn assemble_watcher_lines(
     drop(batch);
 }
 
-/// Resolve the nice value to apply to PTY children: `TUIC_PTY_NICE` env override
-/// if set and parseable, else [`PTY_CHILD_NICE_DEFAULT`].
-#[cfg(unix)]
-fn pty_child_nice() -> i32 {
-    std::env::var("TUIC_PTY_NICE")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(PTY_CHILD_NICE_DEFAULT)
-}
-
-/// Lower the scheduling priority of a freshly-spawned PTY child so the workloads
-/// it spawns don't starve TUIC and the system.
-///
-/// Failure is logged and ignored: a build at the default priority is a degraded
-/// experience, not a broken one. Lowering priority on a process owned by the
-/// same user is always permitted, so a non-zero return here is unexpected.
-///
-/// Unix (macOS, Linux): `setpriority` to nice +10.
-#[cfg(unix)]
-fn lower_pty_child_priority(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
-    let nice = pty_child_nice();
-    // SAFETY: setpriority takes scalar args and is async-signal-safe; `pid` is
-    // the id of the child we just spawned.
-    let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, nice) };
-    if rc != 0 {
-        tracing::warn!(
-            pid,
-            nice,
-            error = %std::io::Error::last_os_error(),
-            "failed to lower PTY child priority"
-        );
-    }
-}
-
-/// Windows: `BELOW_NORMAL_PRIORITY_CLASS` — the priority-class analog of nice
-/// +10. NOT `IDLE_PRIORITY_CLASS`, which only runs the process when the system
-/// is otherwise idle (the Windows equivalent of macOS QoS-background) and would
-/// make builds crawl. macOS/Windows lack hard CPU affinity that works on the
-/// primary target, so priority lowering is the one strategy portable to all
-/// three platforms.
-#[cfg(windows)]
-fn lower_pty_child_priority(pid: Option<u32>) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_SET_INFORMATION, SetPriorityClass,
-    };
-    let Some(pid) = pid else { return };
-    // SAFETY: Win32 calls with scalar/handle args; `pid` is the id of the child
-    // we just spawned. The handle is closed on every path once obtained.
-    unsafe {
-        let handle = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
-        if handle.is_null() {
-            tracing::warn!(
-                pid,
-                error = %std::io::Error::last_os_error(),
-                "failed to open PTY child to lower priority"
-            );
-            return;
-        }
-        if SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS) == 0 {
-            tracing::warn!(
-                pid,
-                error = %std::io::Error::last_os_error(),
-                "failed to lower PTY child priority"
-            );
-        }
-        CloseHandle(handle);
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn lower_pty_child_priority(_pid: Option<u32>) {}
-
 /// macOS thread QoS for the interactive terminal path.
 ///
 /// `lower_pty_child_priority` nices compiler/test workloads *down*, but on
@@ -698,2963 +340,11 @@ fn interactive_io_boost() -> QosBoost {
     QosBoost
 }
 
-/// Resolve the shell to use: explicit override > env default > platform default.
-pub(crate) fn resolve_shell(override_shell: Option<String>) -> String {
-    let shell = override_shell.unwrap_or_else(default_shell);
-    crate::cli::expand_tilde(&shell)
-}
-
-/// Which family of shell is running inside a PTY.
-///
-/// Used by the frontend to decide whether control characters like Ctrl-U are
-/// honoured (POSIX readline) or echoed literally (`cmd.exe`, PowerShell).
-/// Classifying by the shell command rather than by host OS is the whole point
-/// of story 1274-2e38: Git Bash, Cygwin, MSYS and WSL all run on Windows yet
-/// support Ctrl-U, so a host-OS check alone is wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ShellFamily {
-    /// POSIX shell with readline semantics: sh, bash, zsh, fish, dash, ksh,
-    /// and friends — including WSL (spawns a Linux shell) and Git Bash /
-    /// Cygwin / MSYS (bash compiled for Windows).
-    Posix,
-    /// Native Windows shell that treats Ctrl-U as a literal character:
-    /// cmd.exe, PowerShell, pwsh.
-    WindowsNative,
-    /// Shell basename didn't match any known set. Callers should fall back to
-    /// the safer default for their host (on Windows: skip Ctrl-U; on
-    /// Unix: send it).
-    Unknown,
-}
-
-/// Classify a shell command string (as passed to `portable_pty`) into a
-/// [`ShellFamily`]. Pure function — no I/O, no env lookups — so it's easy to
-/// test against the set of strings the UI actually produces.
-///
-/// Parses the leading binary path first (supports Windows paths with spaces
-/// like `C:\Program Files\Git\bin\bash.exe`), then matches the basename
-/// case-insensitively with any `.exe` suffix stripped.
-pub(crate) fn classify_shell(cmd: &str) -> ShellFamily {
-    let trimmed = cmd.trim().trim_matches('"');
-    // Locate the binary portion: if there's a case-insensitive `.exe`, take
-    // everything up to and including it; otherwise split on first whitespace.
-    // This keeps `C:\Program Files\...\bash.exe` intact while still trimming
-    // trailing args like `wsl.exe -d Ubuntu`.
-    let exe = match trimmed.to_ascii_lowercase().find(".exe") {
-        Some(idx) => &trimmed[..idx + ".exe".len()],
-        None => trimmed.split_whitespace().next().unwrap_or(""),
-    };
-    let filename = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
-    let stem = filename
-        .strip_suffix(".exe")
-        .or_else(|| filename.strip_suffix(".EXE"))
-        .or_else(|| filename.strip_suffix(".Exe"))
-        .unwrap_or(filename)
-        .to_ascii_lowercase();
-
-    match stem.as_str() {
-        // POSIX shells (same set we pattern-match elsewhere in pty.rs)
-        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "ash" | "tcsh" | "csh" | "mksh" => {
-            ShellFamily::Posix
-        }
-        // WSL spawns a Linux shell — readline semantics apply.
-        "wsl" => ShellFamily::Posix,
-        // Native Windows shells: Ctrl-U is not line-kill.
-        "cmd" | "powershell" | "pwsh" => ShellFamily::WindowsNative,
-        _ => ShellFamily::Unknown,
-    }
-}
-
-/// How long the agent must be silent after printing a `?`-ending line before
-/// we treat it as a question waiting for input. 10s is long enough to avoid
-/// false positives from AI agents that pause while thinking between API calls.
-const SILENCE_QUESTION_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Maximum non-`?` chunks allowed after a `?` candidate before considering it stale.
-/// Claude Code prints 2-3 decoration chunks after a question (mode line, separator).
-/// Anything beyond this threshold means the agent continued working — not waiting.
-const STALE_QUESTION_CHUNKS: u32 = 10;
-
-/// How long the agent must be silent after printing a tool-error line before
-/// we treat it as a turn-ending error (fire `playError()`). Shorter than the
-/// question threshold because tool errors are typically followed by immediate
-/// turn end (no retry) — 5s is enough to rule out a same-chunk recovery.
-const SILENCE_TOOL_ERROR_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// How long a retry line ("Retrying … attempt N/M", "Unable to connect to API")
-/// holds the agent BUSY after it was last seen. During an API connection-retry
-/// loop the agent is mid-turn but its TUI freezes between attempts (the spinner
-/// stops repainting while the network call blocks), producing no changed rows —
-/// so the movement-based BUSY evidence (#446-596f) drops and the silence/ready
-/// path would flip the session idle mid-retry. Each new attempt line re-arms the
-/// hold; once retries stop (recovery or final failure) the hold self-expires and
-/// idle detection resumes. Long enough to bridge a stalled TCP connect (~10s).
-const AGENT_RETRY_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Detect a turn-ending tool-failure line like Claude Code's
-/// `⎿  Error: Exit code 1`. Anchored to line-start with only non-letter,
-/// non-quote prefix characters (whitespace, box-drawing glyphs) so source
-/// code or markdown that merely quotes the literal `"Error: Exit code N"`
-/// does NOT match — avoids false-positive red notifications when the user's
-/// own pty.rs tests are displayed in a terminal.
-fn is_tool_error_line(line: &str) -> bool {
-    lazy_static::lazy_static! {
-        static ref TOOL_ERROR_RE: regex::Regex =
-            regex::Regex::new(r#"^[^A-Za-z"]*Error:\s*Exit code\s+\d+"#).unwrap();
-    }
-    TOOL_ERROR_RE.is_match(line)
-}
-
-/// Detect an in-flight API connection-retry line, e.g. Claude's subagent SDK
-/// `Unable to connect to API (ECONNRESET) · Retrying in 0s · attempt 6/10` or
-/// the stream-error `retrying 5/5` form. Presence of such a line means the agent
-/// is still mid-turn (auto-retrying), not idle — see `AGENT_RETRY_HOLD`. The
-/// `attempt N/M` / `N/M` counter is required so plain prose mentioning "retrying"
-/// or a code line containing the string does not latch the session busy.
-fn is_retry_line(line: &str) -> bool {
-    lazy_static::lazy_static! {
-        static ref RETRY_RE: regex::Regex = regex::Regex::new(
-            r"(?i)(unable to connect to api|retrying\b[^\n]{0,40}attempt\s+\d+\s*/\s*\d+|retrying\s+\d+\s*/\s*\d+)"
-        ).unwrap();
-    }
-    RETRY_RE.is_match(line)
-}
-
-/// How often the timer thread wakes up to check for silence.
-const SILENCE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// If the wall-clock gap between two consecutive silence-timer ticks exceeds
-/// this threshold, the system was likely asleep (lid closed). The tick is
-/// skipped and timestamps are reset so stale elapsed times don't trigger
-/// false idle transitions or completion sounds for every terminal.
-const SLEEP_WAKE_GAP: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Grace period after a PTY resize during which parsed events (Question, RateLimit,
-/// ApiError) are suppressed. The shell redraws visible output after SIGWINCH, which
-/// would otherwise re-trigger notifications for content already on screen.
-const RESIZE_GRACE: std::time::Duration = std::time::Duration::from_millis(1000);
-
-/// How long after user input to ignore `?`-ending echo lines from the PTY.
-const ECHO_SUPPRESS_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Grace period after PTY session start during which notifications (Question,
-/// RateLimit, ApiError) are suppressed. When a CLI tool replays conversation
-/// history (e.g. `claude --continue`), the burst of historical output contains
-/// old errors and questions that would otherwise trigger stale notifications.
-/// The grace ends when output pauses for STARTUP_SETTLE_SILENCE seconds,
-/// indicating the replay is over and live output is starting.
-const STARTUP_SETTLE_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Safety cap: startup grace never lasts longer than this, even if output
-/// never pauses (e.g. continuous build log).
-const STARTUP_GRACE_MAX: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// Shell idle threshold: 500ms without real PTY output → transition busy→idle.
-/// Matches the frontend's previous 500ms setTimeout in checkIdle.
-const SHELL_IDLE_MS: u64 = 500;
-
-/// Agent idle threshold: 2.5s without real PTY output → transition busy→idle.
-/// AI agents produce output in bursts with natural thinking pauses (>500ms).
-/// Using the shell threshold causes visible blue→green→blue oscillation.
-/// Combined with the 2s frontend debounce, this gives ~4.5s total hold.
-const AGENT_IDLE_MS: u64 = 2500;
-
-/// Retry horizon for the payload-free orchestrator mail notice after an
-/// ambiguous PTY write. Ordinary payload injection remains non-retriable.
-const ORCHESTRATOR_WAKE_UNCERTAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// A ready prompt must remain visible across multiple silence-timer ticks before
-/// it can end an agent turn. Ink redraws are multi-chunk (erase, then repaint),
-/// so a single snapshot can briefly show the prompt without its working row.
-const AGENT_READY_CONFIRM: std::time::Duration = std::time::Duration::from_millis(1500);
-
-/// Interrupt intent is only a hint: Ctrl-C/Escape may be ignored or handled
-/// asynchronously. Keep it long enough to correlate the subsequent explicit
-/// interrupted screen, then discard it without changing shell state.
-const INTERRUPT_PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// How long a plain shell latched BUSY by OSC 133 must stay silent before its
-/// foreground process group is inspected for a nested prompt. A command that is
-/// genuinely running (build, test, `dd`) either prints inside this window or
-/// keeps a non-shell process in the group, so the probe stays off the hot path
-/// and costs nothing while work is actually happening.
-const SHELL_PROMPT_PROBE_SILENCE_MS: u64 = 3_000;
-
-/// Maximum time active_sub_tasks can block idle transition (30s).
-/// If the parser sets active_sub_tasks > 0 but the agent exits or the
-/// mode-line disappears without emitting count=0, the terminal would stay
-/// busy forever. After this timeout with no real output, we force-clear
-/// the stale counter and allow idle transition.
-const SUBTASK_STALE_MS: u64 = 30_000;
-
-/// AtomicU8 encoding for shell_states DashMap.
-pub(crate) const SHELL_NULL: u8 = 0;
-pub(crate) const SHELL_BUSY: u8 = 1;
-pub(crate) const SHELL_IDLE: u8 = 2;
-
-/// Wire representation of an observed shell state. `SHELL_NULL` means no
-/// lifecycle evidence has arrived yet and must remain absent/starting rather
-/// than being serialized as idle.
-pub(crate) fn shell_state_wire(state: u8) -> Option<&'static str> {
-    match state {
-        SHELL_BUSY => Some("busy"),
-        SHELL_IDLE => Some("idle"),
-        _ => None,
-    }
-}
-
 // Re-export from chrome module for use by this module and tests.
 use crate::chrome::is_chrome_row;
-
-/// Searches all changed rows (not just the last non-empty one) so a question row
-/// is found even when a mode/status line with a higher row index arrives in the same chunk.
-/// Applies content filters to reject lines that are clearly not questions (code comments,
-/// diff context, markdown headers, code syntax).
-pub(crate) fn extract_question_line(changed_rows: &[ChangedRow]) -> Option<String> {
-    changed_rows
-        .iter()
-        .rev()
-        .find(|r| !r.text.is_empty() && r.text.ends_with('?') && is_plausible_question(&r.text))
-        .map(|r| r.text.clone())
-}
-
-/// Returns false for lines that are clearly not questions: code comments, diff context,
-/// markdown headers, prompt-echoed user input, and lines containing code-specific syntax.
-fn is_plausible_question(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if crate::output_parser::line_is_diff_or_code_context(line) {
-        return false;
-    }
-    // Prompt-prefixed lines are user input echoed in the conversation, not agent questions.
-    if is_prompt_line(trimmed) {
-        return false;
-    }
-    // Comment/diff/markdown prefixes
-    if trimmed.starts_with("//")
-        || trimmed.starts_with('#')
-        || trimmed.starts_with('*')
-        || trimmed.starts_with('+')
-        || trimmed.starts_with('-')
-        || trimmed.starts_with('>')
-    {
-        return false;
-    }
-    // Code syntax markers — real questions don't contain these
-    if line.contains("->") || line.contains("=>") || line.contains("::") {
-        return false;
-    }
-    // Code try-syntax: word_or_> followed by (...)? — e.g. foo()?, bar(x)?, Vec<T>()?
-    // But NOT human option parentheticals like (y/n)?, (yes/no)? where `(` is
-    // preceded by whitespace or start-of-line, not a word character.
-    lazy_static::lazy_static! {
-        static ref CODE_TRY_RE: regex::Regex =
-            regex::Regex::new(r"[\w>]\([^)]*\)\?").unwrap();
-    }
-    if CODE_TRY_RE.is_match(line) {
-        return false;
-    }
-    true
-}
-
-/// Returns true if a changed_row text looks like a suggest token line.
-/// Used to exclude suggest rows from "real output" classification so they
-/// don't reset the silence timer or stale pending questions.
-fn is_suggest_row(text: &str) -> bool {
-    let t = text.trim();
-    t.contains("suggest:") && t.contains('|')
-}
-
-/// Verify that a question candidate is still visible among the bottom rows of the
-/// terminal screen. Returns true only if the exact question text appears as a
-/// complete row (trimmed) within the last `max_bottom_rows` non-empty lines.
-/// This prevents ghost notifications from stale `?` lines that have scrolled off.
-pub(crate) fn verify_question_on_screen(
-    screen_rows: &[String],
-    question: &str,
-    max_bottom_rows: usize,
-) -> bool {
-    let q = question.trim();
-    screen_rows
-        .iter()
-        .rev()
-        .filter(|r| !r.is_empty())
-        .take(max_bottom_rows)
-        .any(|r| {
-            let t = r.trim();
-            // Exact match or prefix match (question may be truncated/wrapped on screen)
-            t == q || (!q.is_empty() && t.starts_with(q))
-        })
-}
+use alacritty_terminal::vte;
 
 use crate::chrome::{is_prompt_line, is_separator_line};
-
-/// Returns true when the line is a TUIC protocol token (`suggest:` or `intent:`
-/// with pipe-separated items). These are structural markers consumed by the
-/// frontend, not agent chat content — they must be skipped by question detection.
-fn is_protocol_token_line(text: &str) -> bool {
-    let t = text.trim_start();
-    (t.starts_with("suggest:") || t.starts_with("intent:")) && t.contains('|')
-}
-
-/// Returns the set of row indices occupied by a protocol token (including
-/// terminal-wrapped continuation rows). A continuation row is a row that
-/// immediately follows a `suggest:` or `intent:` row and contains `|` but
-/// does NOT start a new token prefix. Used to exclude the entire suggest/intent
-/// block from "last chat line" detection — without this, the continuation row
-/// gets mistaken for real chat content and steals the question slot.
-fn collect_protocol_token_indices(screen_rows: &[String]) -> std::collections::HashSet<usize> {
-    let mut indices = std::collections::HashSet::new();
-    for (i, row) in screen_rows.iter().enumerate() {
-        if is_protocol_token_line(row) {
-            indices.insert(i);
-            // Walk forward to find continuation rows (wrapped by terminal width)
-            for (j, row) in screen_rows.iter().enumerate().skip(i + 1) {
-                let trimmed = row.trim();
-                if trimmed.is_empty() {
-                    break;
-                }
-                // Stop at rows that start a new protocol token or chat content
-                if is_protocol_token_line(row)
-                    || trimmed.starts_with('>')
-                    || trimmed.starts_with('›')
-                    || trimmed.starts_with('❯')
-                    || trimmed.starts_with('●')
-                    || trimmed.starts_with('⏺')
-                {
-                    break;
-                }
-                // A continuation row must contain the `|` separator — without
-                // it, the row is regular text (like an answer) that happens
-                // to follow the suggest line.
-                if !trimmed.contains('|') {
-                    break;
-                }
-                indices.insert(j);
-            }
-        }
-    }
-    indices
-}
-
-/// Find the last chat line above the prompt box and, if it is a plausible
-/// `?`-ending question, return it. Suggest/intent protocol blocks (including
-/// wrapped continuations) are transparently skipped because they sit between
-/// the agent's question and the prompt but are not real chat content — the
-/// agent emits the question first and the suggest arrives after.
-///
-/// Only the single last chat line is inspected. We deliberately do NOT walk
-/// deeper looking for an older `?`: a multi-line scan would scavenge past
-/// the current agent turn and pick up the user's own previous input (e.g.
-/// `❯ tutto ok?`) or stale content from earlier in the conversation, firing
-/// phantom notifications 10s after the reply.
-pub(crate) fn find_last_chat_question(screen_rows: &[String]) -> Option<String> {
-    let prompt_idx = screen_rows
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, row)| is_prompt_line(row))?
-        .0;
-
-    let protocol_indices = collect_protocol_token_indices(screen_rows);
-
-    for i in (0..prompt_idx).rev() {
-        if protocol_indices.contains(&i) {
-            continue;
-        }
-        let trimmed = screen_rows[i].trim();
-        if trimmed.is_empty() || is_separator_line(trimmed) || is_chrome_row(trimmed) {
-            continue;
-        }
-        // First non-skip row above the prompt — this is the last chat line.
-        // Check it for a question, otherwise give up: we do not scavenge
-        // deeper into the buffer.
-        if trimmed.ends_with('?') && is_plausible_question(trimmed) {
-            return Some(trimmed.to_string());
-        }
-        return None;
-    }
-    None
-}
-
-/// Whether the screen has a current input box and, if so, whether the last chat
-/// content above it is a question. This distinction matters to the silence
-/// fallback: `None` from `find_last_chat_question` can mean either "no prompt
-/// anchor" or "the current turn ends in non-question content". Only the former
-/// may use a changed-row fallback; the latter must not scavenge an older question
-/// from scrollback.
-fn current_chat_question(screen_rows: &[String]) -> CurrentChatQuestion {
-    if screen_rows.iter().any(|row| is_prompt_line(row)) {
-        CurrentChatQuestion::PromptAnchored(find_last_chat_question(screen_rows))
-    } else {
-        CurrentChatQuestion::NoPromptAnchor
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum CurrentChatQuestion {
-    NoPromptAnchor,
-    PromptAnchored(Option<String>),
-}
-
-/// Shared state between the PTY reader thread and the silence-detection timer thread.
-#[derive(Clone)]
-pub(crate) struct SilenceState {
-    /// When the last chunk of output was received from the PTY.
-    pub(crate) last_output_at: std::time::Instant,
-    /// The last line ending with `?` that hasn't been resolved yet.
-    pub(crate) pending_question_line: Option<String>,
-    /// Whether a Question event has already been emitted for the current pending line
-    /// (either by the instant regex detector or by the silence timer).
-    pub(crate) question_already_emitted: bool,
-    /// When the last resize was requested. Used to suppress re-parsing of redrawn output.
-    last_resize_at: Option<std::time::Instant>,
-    /// Deadline until which `on_chunk` ignores `?`-ending lines (suppresses PTY echo).
-    /// Set by `suppress_user_input()` so the echo of user-typed text doesn't
-    /// re-enable silence-based question detection.
-    pub(crate) suppress_echo_until: Option<std::time::Instant>,
-    /// When the last chunk of ANY kind (real or chrome-only) was processed.
-    /// Used by the backup idle timer to distinguish "no output at all" (reader
-    /// blocked on read()) from "only chrome-only ticks arriving". The backup
-    /// timer should only fire when truly no chunks arrive.
-    pub(crate) last_chunk_at: std::time::Instant,
-    /// When the last StatusLine (spinner) event was seen. If recent,
-    /// silence-based question detection is suppressed — spinner means the agent is working.
-    pub(crate) last_status_line_at: Option<std::time::Instant>,
-    /// How many non-`?` chunks arrived after the current pending question candidate.
-    /// Used to detect stale candidates: if the agent continued producing significant
-    /// output after the `?` line, it was not a real question.
-    output_chunks_after_question: u32,
-    /// The text of the last question emitted (by silence timer or check_silence).
-    /// Used to prevent re-emission of the same question when scrolling causes the
-    /// `?` line to reappear in changed_rows at a different row position.
-    /// Cleared on user input (new conversation cycle).
-    last_emitted_text: Option<String>,
-    /// When this session was created. Used with `startup_settled` to suppress
-    /// notifications during the initial output burst (e.g. `--continue` replay).
-    created_at: std::time::Instant,
-    /// True once the session has settled after the initial output burst.
-    /// Settled = output paused for STARTUP_SETTLE_SILENCE seconds, or
-    /// STARTUP_GRACE_MAX has elapsed since creation.
-    pub(crate) startup_settled: bool,
-    /// The last `Error: Exit code N` line seen, awaiting silence verification.
-    /// Cleared if real output (non-chrome, non-error) arrives — that means the
-    /// agent recovered and the error is not turn-ending.
-    pending_tool_error: Option<String>,
-    /// Error lines already surfaced via `ToolError` in the current "input epoch"
-    /// (since the last user line submit / session start). Persists across
-    /// `clear_tool_error_on_recovery` so that scroll-induced reappearances of
-    /// the same error in `changed_rows` do not re-fire the notification.
-    /// Cleared on explicit user input so a recurring failure in a later turn
-    /// can notify again.
-    surfaced_tool_errors: std::collections::HashSet<String>,
-    /// Parsed `suggest:` items awaiting silence-based flush. The parser detects
-    /// the token synchronously with output, but we hold the event here until
-    /// `check_suggest` confirms the turn has ended (`SILENCE_SUGGEST_THRESHOLD`
-    /// elapsed since the last real output chunk). Eliminates the frontend
-    /// `pendingSuggest` race: the event never reaches the UI before idle.
-    pending_suggest_items: Option<Vec<String>>,
-    /// Input-turn epoch associated with `pending_suggest_items`.
-    pending_suggest_turn_epoch: u64,
-    /// Timestamp when `pending_suggest_items` was parked. Currently for
-    /// diagnostics only — the flush decision is driven by `last_output_at`,
-    /// not the park time.
-    pending_suggest_at: Option<std::time::Instant>,
-    /// The agent emitted the protocol's explicit end-of-task marker for the
-    /// current input epoch. Unlike the pending item payload, this survives the
-    /// one-shot Suggest event drain so status/list can distinguish completed
-    /// work from a merely quiet ready prompt.
-    completion_declared: bool,
-    /// Input-turn epoch that declared completion.
-    completion_turn_epoch: u64,
-    /// True after an explicit OSC 133 / OSC 7770 busy marker and until an
-    /// explicit idle marker or a confirmed ready screen. Silence alone must not
-    /// override this state: hooks are stronger evidence than output timing.
-    explicit_busy: bool,
-    /// BUSY came from an observed agent hook. A stable ready screen may recover
-    /// from a missed idle hook, but the old prompt cannot do so before submitted
-    /// turn activity is observed.
-    hook_busy: bool,
-    /// An explicit idle marker outranks a stale Working row left in the same
-    /// render chunk. Cleared by the next explicit busy or later real activity.
-    explicit_idle: bool,
-    /// True only after OSC 7770 `state=` was observed (OSC 133 shell markers do
-    /// not prove that an agent's configured hooks are actually running).
-    hook_state_seen: bool,
-    /// Whether the current idle state is safe for downstream uses such as
-    /// standby and peer-message injection. Enforced for agents with a verified
-    /// screen adapter; legacy heuristic-only agents retain their prior behavior.
-    idle_confirmed: bool,
-    /// First observation of a stable agent ready prompt.
-    ready_since: Option<std::time::Instant>,
-    /// Recent user request to interrupt (Ctrl-C or bare Escape). This never
-    /// changes shell state by itself; it only strengthens a matching interrupted
-    /// screen emitted by the agent.
-    interrupt_requested_at: Option<std::time::Instant>,
-    /// A user/injected prompt started a turn on an adapter-backed agent.
-    turn_started_by_input: bool,
-    /// Strong activity (real output or Working marker) was observed after that
-    /// submission. Until then, the old ready prompt is not proof of completion.
-    turn_activity_seen: bool,
-    /// Monotonic owner for an IDLE→BUSY transition reserved by terminal
-    /// injection. The saved bool is the confirmed-idle value to restore only
-    /// when no PTY byte was written and this claim still owns the state.
-    active_injection_claim: Option<(u64, bool)>,
-    next_injection_claim: u64,
-    /// A payload may have been partially written or flushed without a complete
-    /// Enter. Such sessions remain conservatively BUSY and are surfaced in
-    /// status; automatic retry would risk duplicate or corrupted input.
-    pub(crate) injection_delivery_uncertain: bool,
-    injection_uncertain_since: Option<std::time::Instant>,
-    injection_uncertainty_retryable: bool,
-    /// Deadline until which an in-flight API connection-retry holds the agent
-    /// BUSY. Armed by `mark_api_retry` when `is_retry_line` matches a changed
-    /// row; blocks both the ready-screen and silence idle paths until it expires
-    /// or is cleared by recovery/user input. See `AGENT_RETRY_HOLD`.
-    api_retry_hold_until: Option<std::time::Instant>,
-}
-
-impl SilenceState {
-    pub(crate) fn new() -> Self {
-        Self {
-            last_output_at: std::time::Instant::now(),
-            pending_question_line: None,
-            question_already_emitted: false,
-            last_chunk_at: std::time::Instant::now(),
-            last_resize_at: None,
-            suppress_echo_until: None,
-            last_status_line_at: None,
-            output_chunks_after_question: 0,
-            last_emitted_text: None,
-            created_at: std::time::Instant::now(),
-            startup_settled: false,
-            pending_tool_error: None,
-            surfaced_tool_errors: std::collections::HashSet::new(),
-            pending_suggest_items: None,
-            pending_suggest_turn_epoch: 0,
-            pending_suggest_at: None,
-            completion_declared: false,
-            completion_turn_epoch: 0,
-            explicit_busy: false,
-            hook_busy: false,
-            explicit_idle: false,
-            hook_state_seen: false,
-            idle_confirmed: false,
-            ready_since: None,
-            interrupt_requested_at: None,
-            turn_started_by_input: false,
-            turn_activity_seen: false,
-            active_injection_claim: None,
-            next_injection_claim: 0,
-            injection_delivery_uncertain: false,
-            injection_uncertain_since: None,
-            injection_uncertainty_retryable: false,
-            api_retry_hold_until: None,
-        }
-    }
-
-    fn begin_injection_claim(&mut self, prior_idle_confirmed: bool) -> u64 {
-        self.next_injection_claim = self.next_injection_claim.wrapping_add(1).max(1);
-        let token = self.next_injection_claim;
-        self.active_injection_claim = Some((token, prior_idle_confirmed));
-        self.injection_delivery_uncertain = false;
-        self.injection_uncertain_since = None;
-        self.injection_uncertainty_retryable = false;
-        token
-    }
-
-    fn commit_injection_claim(&mut self, token: u64) -> bool {
-        if self
-            .active_injection_claim
-            .is_some_and(|(owner, _)| owner == token)
-        {
-            self.active_injection_claim = None;
-            self.injection_delivery_uncertain = false;
-            self.injection_uncertain_since = None;
-            self.injection_uncertainty_retryable = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn rollback_injection_claim(&mut self, token: u64) -> Option<bool> {
-        let (_, prior_idle_confirmed) = self
-            .active_injection_claim
-            .filter(|(owner, _)| *owner == token)?;
-        if self.turn_activity_seen || self.hook_busy {
-            self.active_injection_claim = None;
-            return None;
-        }
-        self.active_injection_claim = None;
-        self.injection_delivery_uncertain = false;
-        self.injection_uncertain_since = None;
-        self.injection_uncertainty_retryable = false;
-        self.idle_confirmed = prior_idle_confirmed;
-        Some(prior_idle_confirmed)
-    }
-
-    fn mark_injection_uncertain(&mut self, token: u64) {
-        self.mark_injection_uncertain_with_retry(token, false);
-    }
-
-    fn mark_orchestrator_notice_uncertain(&mut self, token: u64) {
-        self.mark_injection_uncertain_with_retry(token, true);
-    }
-
-    fn mark_injection_uncertain_with_retry(&mut self, token: u64, retryable: bool) {
-        if self
-            .active_injection_claim
-            .is_some_and(|(owner, _)| owner == token)
-        {
-            self.active_injection_claim = None;
-            self.injection_delivery_uncertain = true;
-            self.injection_uncertain_since = Some(std::time::Instant::now());
-            self.injection_uncertainty_retryable = retryable;
-        }
-    }
-
-    fn invalidate_injection_claim(&mut self) {
-        self.active_injection_claim = None;
-        self.injection_delivery_uncertain = false;
-        self.injection_uncertain_since = None;
-        self.injection_uncertainty_retryable = false;
-    }
-
-    fn expire_orchestrator_notice_uncertainty(&mut self) -> bool {
-        if !self.injection_delivery_uncertain
-            || !self.injection_uncertainty_retryable
-            || self
-                .injection_uncertain_since
-                .is_none_or(|since| since.elapsed() < ORCHESTRATOR_WAKE_UNCERTAIN_RETRY)
-        {
-            return false;
-        }
-        self.injection_delivery_uncertain = false;
-        self.injection_uncertain_since = None;
-        self.injection_uncertainty_retryable = false;
-        self.ready_since = None;
-        true
-    }
-
-    fn note_explicit_state(&mut self, state: u8, hook_state: bool) {
-        self.invalidate_injection_claim();
-        self.hook_state_seen |= hook_state;
-        self.ready_since = None;
-        match state {
-            SHELL_BUSY => {
-                self.explicit_busy = true;
-                self.hook_busy = hook_state;
-                self.explicit_idle = false;
-                self.idle_confirmed = false;
-                self.last_status_line_at = Some(std::time::Instant::now());
-            }
-            SHELL_IDLE => {
-                self.explicit_busy = false;
-                self.hook_busy = false;
-                self.explicit_idle = true;
-                self.idle_confirmed = true;
-                self.last_status_line_at = None;
-                self.interrupt_requested_at = None;
-                self.turn_started_by_input = false;
-                self.turn_activity_seen = false;
-            }
-            _ => {}
-        }
-    }
-
-    fn note_busy_evidence(&mut self) {
-        self.explicit_idle = false;
-        self.idle_confirmed = false;
-        self.ready_since = None;
-    }
-
-    fn note_working_screen(&mut self) {
-        self.invalidate_injection_claim();
-        self.note_busy_evidence();
-        self.turn_activity_seen = true;
-        // Keep silence-based question/tool-error detection aligned with shell
-        // activity. Previously the working marker refreshed last_output_ms but
-        // not SilenceState, allowing contradictory question events.
-        self.last_status_line_at = Some(std::time::Instant::now());
-    }
-
-    fn note_real_activity(&mut self) {
-        self.invalidate_injection_claim();
-        self.note_busy_evidence();
-        self.turn_activity_seen = true;
-    }
-
-    fn note_ready_screen(&mut self) -> bool {
-        if self.injection_delivery_uncertain
-            || (self.hook_busy && !self.turn_activity_seen)
-            || (self.turn_started_by_input && !self.turn_activity_seen)
-            || self.is_api_retry_active()
-        {
-            self.ready_since = None;
-            return false;
-        }
-        let now = std::time::Instant::now();
-        let since = self.ready_since.get_or_insert(now);
-        if since.elapsed() < AGENT_READY_CONFIRM {
-            return false;
-        }
-        self.explicit_busy = false;
-        self.hook_busy = false;
-        self.explicit_idle = false;
-        self.idle_confirmed = true;
-        self.last_status_line_at = None;
-        self.interrupt_requested_at = None;
-        self.turn_started_by_input = false;
-        self.turn_activity_seen = false;
-        true
-    }
-
-    fn note_interrupted_screen(&mut self) -> bool {
-        let pending = self
-            .interrupt_requested_at
-            .is_some_and(|at| at.elapsed() < INTERRUPT_PENDING_TTL);
-        if pending {
-            self.explicit_busy = false;
-            self.hook_busy = false;
-            self.explicit_idle = false;
-            self.idle_confirmed = true;
-            self.last_status_line_at = None;
-            self.ready_since = None;
-            self.interrupt_requested_at = None;
-            self.turn_started_by_input = false;
-            self.turn_activity_seen = false;
-            return true;
-        }
-        self.note_ready_screen()
-    }
-
-    fn note_unknown_screen(&mut self) {
-        self.ready_since = None;
-        if self
-            .interrupt_requested_at
-            .is_some_and(|at| at.elapsed() >= INTERRUPT_PENDING_TTL)
-        {
-            self.interrupt_requested_at = None;
-        }
-    }
-
-    pub(crate) fn note_interrupt_requested(&mut self) {
-        self.interrupt_requested_at = Some(std::time::Instant::now());
-        self.ready_since = None;
-    }
-
-    pub(crate) fn note_user_submission(&mut self, has_ready_adapter: bool) {
-        self.interrupt_requested_at = None;
-        self.completion_declared = false;
-        self.note_busy_evidence();
-        if has_ready_adapter {
-            self.explicit_busy = true;
-            self.last_status_line_at = Some(std::time::Instant::now());
-            self.turn_started_by_input = true;
-            self.turn_activity_seen = false;
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn confirm_idle(&mut self) {
-        self.explicit_busy = false;
-        self.hook_busy = false;
-        self.explicit_idle = false;
-        self.idle_confirmed = true;
-    }
-
-    /// Called by resize_pty when the terminal is resized.
-    /// Marks the start of a grace period during which parsed events are suppressed.
-    pub(crate) fn on_resize(&mut self) {
-        self.last_resize_at = Some(std::time::Instant::now());
-    }
-
-    /// Returns true if we are within the resize grace period.
-    /// Parsed events (Question, RateLimit, ApiError) should be suppressed during this window
-    /// because the shell redraws visible output after SIGWINCH, causing false re-detections.
-    pub(crate) fn is_resize_grace(&self) -> bool {
-        self.last_resize_at
-            .map(|t| t.elapsed() < RESIZE_GRACE)
-            .unwrap_or(false)
-    }
-
-    /// Returns true if we are still in the startup grace period.
-    /// During this window, notifications are suppressed to avoid reacting to
-    /// historical output replayed by `--continue` or similar session restore.
-    pub(crate) fn is_startup_grace(&self) -> bool {
-        !self.startup_settled
-    }
-
-    /// Check if the startup grace should end and update the flag.
-    /// Called by the silence timer thread every second.
-    pub(crate) fn check_startup_settle(&mut self) {
-        if self.startup_settled {
-            return;
-        }
-        // Safety cap: always settle after STARTUP_GRACE_MAX
-        if self.created_at.elapsed() >= STARTUP_GRACE_MAX {
-            self.startup_settled = true;
-            self.pending_suggest_items = None;
-            self.pending_suggest_at = None;
-            return;
-        }
-        // Settle after STARTUP_SETTLE_SILENCE without output
-        if self.last_output_at.elapsed() >= STARTUP_SETTLE_SILENCE {
-            self.startup_settled = true;
-            self.pending_suggest_items = None;
-            self.pending_suggest_at = None;
-        }
-    }
-
-    /// Called by the reader thread after each chunk.
-    /// `regex_found_question`: true if `parse()` already emitted a Question event.
-    /// `last_question_line`: the last `?`-ending line in the chunk, if any.
-    /// `has_status_line`: true if the chunk contained a StatusLine parsed event.
-    /// `status_line_only`: true if the chunk contained ONLY status-line/mode-line updates.
-    ///   Mode-line timer ticks (elapsed time updating every second) are not significant
-    ///   output — they must not reset the silence timer or the spinner timestamp,
-    ///   or questions asked by Ink agents will never be detected.
-    pub(crate) fn on_chunk(
-        &mut self,
-        regex_found_question: bool,
-        last_question_line: Option<String>,
-        has_status_line: bool,
-        status_line_only: bool,
-        suggest_only: bool,
-    ) {
-        // Always track that a chunk arrived — used by the backup idle timer
-        // to distinguish "reader blocked on read()" from "chrome ticks arriving".
-        self.last_chunk_at = std::time::Instant::now();
-
-        // Suggest-only chunks are not significant output — they are protocol
-        // tokens consumed by the frontend, not real agent text.
-        let insignificant = status_line_only || suggest_only;
-
-        if !insignificant {
-            self.last_output_at = std::time::Instant::now();
-        }
-
-        // Only mark spinner active when the status line accompanies real output.
-        // Mode-line timer ticks and suggest-only chunks are not agent activity
-        // and must not suppress question detection.
-        if has_status_line && !insignificant {
-            self.last_status_line_at = Some(std::time::Instant::now());
-        }
-
-        // Within the echo suppress window, ignore `?`-ending lines — they are
-        // the PTY echoing back user-typed text, not agent questions.
-        let in_echo_window = self
-            .suppress_echo_until
-            .map(|deadline| std::time::Instant::now() < deadline)
-            .unwrap_or(false);
-
-        if regex_found_question {
-            // The instant detector already fired — suppress the silence timer.
-            self.pending_question_line = None;
-            self.question_already_emitted = true;
-            self.output_chunks_after_question = 0;
-        } else if let Some(line) = last_question_line {
-            if in_echo_window {
-                // Ignore — this is the PTY echo of user input.
-            } else if self.question_already_emitted
-                && (self.pending_question_line.as_deref() == Some(&line)
-                    || self.last_emitted_text.as_deref() == Some(&line))
-            {
-                // Same `?` text as already emitted (either still pending, or
-                // previously emitted and reappearing because new output scrolled
-                // it to a different row). Don't reset — otherwise the silence
-                // timer will re-fire for every scroll of the same question.
-            } else {
-                // New candidate for silence-based detection.
-                self.pending_question_line = Some(line);
-                self.question_already_emitted = false;
-                self.output_chunks_after_question = 0;
-            }
-        } else if self.pending_question_line.is_some() && !insignificant {
-            // Non-`?` chunk with real output after a pending candidate — track staleness.
-            // Insignificant chunks (mode-line ticks, suggest tokens) are NOT real output
-            // and must not count toward staleness, or they will clear the pending question
-            // before the silence timer has a chance to detect it.
-            self.output_chunks_after_question = self.output_chunks_after_question.saturating_add(1);
-            // Once stale, clear pending so the repaint guard won't block the
-            // same question text from being detected again in a future session.
-            if self.output_chunks_after_question > STALE_QUESTION_CHUNKS {
-                self.pending_question_line = None;
-            }
-        }
-    }
-
-    /// Called by write_pty when the user submits a line of input.
-    /// Clears any pending question candidate since it was typed by the user, not the agent.
-    /// Also opens a time window to ignore the PTY echo of the typed text.
-    pub(crate) fn suppress_user_input(&mut self) {
-        self.pending_question_line = None;
-        // A new turn may legitimately ask the same text again. Re-open the
-        // screen-anchored strategy while retaining `last_emitted_text`; the
-        // unanchored changed-row fallback uses that memory to reject historical
-        // repaints of the prior turn.
-        self.question_already_emitted = false;
-        self.suppress_echo_until = Some(std::time::Instant::now() + ECHO_SUPPRESS_WINDOW);
-    }
-
-    /// Returns true if a spinner/status-line was seen recently.
-    /// Uses the same threshold as silence detection (10s) so that agents with
-    /// pauses between status-line updates (API calls, file reads) don't trigger
-    /// false question notifications during those gaps.
-    fn is_spinner_active(&self) -> bool {
-        self.explicit_busy
-            || self
-                .last_status_line_at
-                .map(|t| t.elapsed() < SILENCE_QUESTION_THRESHOLD)
-                .unwrap_or(false)
-    }
-
-    /// Returns true if any chunk (real or chrome-only) was received recently.
-    /// The backup idle timer uses this to avoid false idle transitions when the
-    /// reader thread IS processing chunks (even chrome-only status-line ticks).
-    /// Status-line ticking proves the agent is alive — the backup timer should
-    /// only fire when truly no chunks arrive (reader blocked on read()).
-    /// The 2s threshold matches the frontend debounce hold (BUSY_HOLD_MS).
-    #[allow(dead_code)] // called from tests; kept for backup-idle-timer reintegration
-    pub(crate) fn has_recent_chunks(&self) -> bool {
-        self.last_chunk_at.elapsed() < std::time::Duration::from_secs(2)
-    }
-
-    /// Called by the timer thread. Returns the question text if the silence
-    /// threshold has been reached and we haven't emitted yet.
-    pub(crate) fn check_silence(&mut self) -> Option<String> {
-        if self.question_already_emitted {
-            return None;
-        }
-        // Spinner active means the agent is working — not waiting for input.
-        if self.is_spinner_active() {
-            return None;
-        }
-        // Too much output after the `?` line — the agent continued working,
-        // so the `?` was not a real question (e.g. code comment, markdown).
-        if self.output_chunks_after_question > STALE_QUESTION_CHUNKS {
-            return None;
-        }
-        if let Some(ref line) = self.pending_question_line
-            && self.last_output_at.elapsed() >= SILENCE_QUESTION_THRESHOLD
-        {
-            if self.last_emitted_text.as_deref() == Some(line.as_str()) {
-                return None;
-            }
-            self.question_already_emitted = true;
-            self.last_emitted_text = Some(line.clone());
-            return Some(line.clone());
-        }
-        None
-    }
-
-    /// Clear a stale question candidate that failed screen verification.
-    /// Prevents the timer from re-checking the same stale candidate every second.
-    pub(crate) fn clear_stale_question(&mut self) {
-        self.pending_question_line = None;
-        self.question_already_emitted = true;
-    }
-
-    /// Register an `Error: Exit code N` line seen in visible output. The silence
-    /// timer will emit a ToolError event if the session goes idle without any
-    /// real-output chunk clearing the candidate (= agent did not recover).
-    ///
-    /// Idempotent across scroll-induced re-appearances: if this exact line has
-    /// already surfaced in the current input epoch, we drop it. Without this,
-    /// Ink-based TUIs (Claude Code, Codex) cause `changed_rows` to include the
-    /// old error line every time the viewport scrolls, re-arming the candidate
-    /// and re-firing the red notification long after the user has resumed.
-    pub(crate) fn mark_tool_error_candidate(&mut self, line: String) {
-        if self.surfaced_tool_errors.contains(&line) {
-            return;
-        }
-        if self.pending_tool_error.as_deref() == Some(&line) {
-            return;
-        }
-        self.pending_tool_error = Some(line);
-    }
-
-    /// Arm (or re-arm) the API connection-retry BUSY hold. Called when
-    /// `is_retry_line` matches a changed row: the agent is auto-retrying a failed
-    /// API call and is still mid-turn even though its TUI has frozen between
-    /// attempts. See `AGENT_RETRY_HOLD` for why this is needed.
-    pub(crate) fn mark_api_retry(&mut self) {
-        self.api_retry_hold_until = Some(std::time::Instant::now() + AGENT_RETRY_HOLD);
-    }
-
-    /// True while an in-flight API retry holds the agent BUSY. Consulted by the
-    /// ready-screen and silence idle paths to suppress a premature idle flip.
-    pub(crate) fn is_api_retry_active(&self) -> bool {
-        self.api_retry_hold_until
-            .is_some_and(|deadline| std::time::Instant::now() < deadline)
-    }
-
-    /// Called on every real-output chunk that is NOT an error line. Clears the
-    /// pending tool-error candidate: if the agent produced real output after an
-    /// error, it recovered (e.g. retry) and the error is not turn-ending.
-    ///
-    /// Does NOT reset `surfaced_tool_errors` — recovery is a transient backend
-    /// signal; the user-facing "I've already told you about this error" state
-    /// must survive it and only reset on explicit user input.
-    pub(crate) fn clear_tool_error_on_recovery(&mut self) {
-        self.pending_tool_error = None;
-        // Real non-error, non-retry output means the agent recovered from the
-        // connection-retry loop — release the BUSY hold so idle detection resumes.
-        self.api_retry_hold_until = None;
-    }
-
-    /// Clear the "already surfaced" memory so the next occurrence of any error
-    /// line — including one we've already fired — can notify again. Called
-    /// from `write_pty` when the user submits a line (or Ctrl+C), mirroring
-    /// the api-error dedup reset in `OutputParser::parse_clean_lines`.
-    pub(crate) fn reset_tool_error_memory(&mut self) {
-        self.pending_tool_error = None;
-        self.surfaced_tool_errors.clear();
-        self.api_retry_hold_until = None;
-    }
-
-    /// Called by the timer thread. Returns the error text if the silence
-    /// threshold has been reached and we haven't emitted yet. Semantics mirror
-    /// `check_silence` but use the shorter tool-error threshold.
-    pub(crate) fn check_tool_error(&mut self) -> Option<String> {
-        if self.is_spinner_active() {
-            return None;
-        }
-        let should_fire = self.pending_tool_error.is_some()
-            && self.last_output_at.elapsed() >= SILENCE_TOOL_ERROR_THRESHOLD;
-        if !should_fire {
-            return None;
-        }
-        let line = self.pending_tool_error.take()?;
-        self.surfaced_tool_errors.insert(line.clone());
-        Some(line)
-    }
-
-    /// Park `suggest:` items parsed from output. The silence timer will flush
-    /// them to the frontend once the shell state transitions to idle — this
-    /// is the single source of truth for "turn ended". A newer set overwrites
-    /// an older pending set: if the agent updates its suggestions mid-turn,
-    /// we deliver the latest.
-    pub(crate) fn mark_suggest_candidate(&mut self, items: Vec<String>, turn_epoch: u64) {
-        if items.is_empty() {
-            return;
-        }
-        self.completion_declared = true;
-        self.completion_turn_epoch = turn_epoch;
-        self.pending_suggest_items = Some(items);
-        self.pending_suggest_turn_epoch = turn_epoch;
-        self.pending_suggest_at = Some(std::time::Instant::now());
-    }
-
-    fn drain_pending_suggest_with_epoch(&mut self) -> Option<(u64, Vec<String>)> {
-        self.pending_suggest_at = None;
-        self.pending_suggest_items
-            .take()
-            .map(|items| (self.pending_suggest_turn_epoch, items))
-    }
-
-    /// Drain parked suggest items. No gates — trust the caller to invoke only
-    /// when the shell state is IDLE (the silence timer does exactly that).
-    /// Returns the items once and clears the park slot; a second call returns
-    /// `None` until new items are parked.
-    #[cfg(test)]
-    pub(crate) fn drain_pending_suggest(&mut self) -> Option<Vec<String>> {
-        self.drain_pending_suggest_with_epoch()
-            .map(|(_, items)| items)
-    }
-
-    /// Drop any parked suggest on user input. Parallels `reset_tool_error_memory`:
-    /// the user is engaging again, so stale suggestions from the previous turn
-    /// must not fire after a new input cycle starts.
-    pub(crate) fn reset_suggest_memory(&mut self) {
-        self.pending_suggest_items = None;
-        self.pending_suggest_turn_epoch = 0;
-        self.pending_suggest_at = None;
-        self.completion_declared = false;
-        self.completion_turn_epoch = 0;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn completion_declared(&self) -> bool {
-        self.completion_declared
-    }
-
-    pub(crate) fn completion_declared_for_epoch(&self, turn_epoch: u64) -> bool {
-        self.completion_declared && self.completion_turn_epoch == turn_epoch
-    }
-
-    /// Returns true if the session has been silent long enough and the spinner
-    /// is not active. Used by the timer thread before reading the screen.
-    pub(crate) fn is_silent(&self) -> bool {
-        !self.question_already_emitted
-            && !self.is_spinner_active()
-            && self.last_output_at.elapsed() >= SILENCE_QUESTION_THRESHOLD
-    }
-
-    /// Retraction is independent from question emission. Once a low-confidence
-    /// wait is active, the timer must keep reconciling it even though
-    /// `question_already_emitted` deliberately blocks another SET.
-    fn is_quiet_for_question_retraction(&self) -> bool {
-        !self.is_spinner_active() && self.last_output_at.elapsed() >= SILENCE_QUESTION_THRESHOLD
-    }
-
-    /// Mark that a question has been emitted (prevents re-emission).
-    /// Stores the emitted text so that scroll-induced reappearances of the same
-    /// `?` line in changed_rows are recognized as duplicates, not new questions.
-    pub(crate) fn mark_emitted(&mut self, text: &str) {
-        self.question_already_emitted = true;
-        self.last_emitted_text = Some(text.to_string());
-    }
-}
-
-/// Attempt a shell state transition using compare_exchange.
-/// Returns true if the transition was performed (and a ShellState event should be emitted).
-/// Attempt an atomic shell-state transition.
-///
-/// When `notify_parent` is true and the transition is BUSY→IDLE, pushes a
-/// state_change message to the parent's inbox (used during normal idle detection).
-/// Pass `notify_parent=false` from process-exit paths — the sole "exited"
-/// notification from `mark_session_exited` is sufficient; suppressing the
-/// intermediate "idle" avoids the orchestrator double-firing on exit.
-///
-/// RE-ENTRANCY INVARIANT (CONC-C, story 099-6526): this fn does its own
-/// `shell_states.get(session_id)` below. Callers MUST NOT hold a `shell_states`
-/// Ref for the same key across this call — a held Ref plus this second get on the
-/// same shard can deadlock under parking_lot writer-fairness when a concurrent
-/// session create/destroy is queued to write the shard between the two reads.
-/// Load what you need, drop the Ref, then call. Internally the Ref is dropped
-/// BEFORE any post-transition work for the same reason: both
-/// `flush_pending_injections` and `push_state_change_to_parent` (via
-/// `deliver_message_to_pty`) re-read `shell_states` through `should_inject_now`.
-fn try_shell_transition(
-    state: &crate::state::AppState,
-    session_id: &str,
-    expected: u8,
-    new: u8,
-    notify_parent: bool,
-) -> bool {
-    let observed_turn_epoch = state
-        .session_states
-        .get(session_id)
-        .map(|session| session.turn_epoch);
-    try_shell_transition_for_epoch(
-        state,
-        session_id,
-        expected,
-        new,
-        notify_parent,
-        observed_turn_epoch,
-    )
-}
-
-fn try_shell_transition_for_epoch(
-    state: &crate::state::AppState,
-    session_id: &str,
-    expected: u8,
-    new: u8,
-    notify_parent: bool,
-    observed_turn_epoch: Option<u64>,
-) -> bool {
-    try_shell_transition_with_hooks(
-        ShellTransitionRequest {
-            state,
-            session_id,
-            expected,
-            new,
-            notify_parent,
-            observed_turn_epoch,
-        },
-        ShellTransitionHooks {
-            after_epoch_snapshot: || {},
-            after_cas: || {},
-            before_parent_dispatch: || {},
-        },
-    )
-}
-
-#[cfg(test)]
-fn try_shell_transition_with_hook<F: FnOnce()>(
-    state: &crate::state::AppState,
-    session_id: &str,
-    expected: u8,
-    new: u8,
-    notify_parent: bool,
-    after_cas: F,
-) -> bool {
-    let observed_turn_epoch = state
-        .session_states
-        .get(session_id)
-        .map(|session| session.turn_epoch);
-    try_shell_transition_with_hooks(
-        ShellTransitionRequest {
-            state,
-            session_id,
-            expected,
-            new,
-            notify_parent,
-            observed_turn_epoch,
-        },
-        ShellTransitionHooks {
-            after_epoch_snapshot: || {},
-            after_cas,
-            before_parent_dispatch: || {},
-        },
-    )
-}
-
-#[derive(Clone, Copy)]
-struct ShellTransitionRequest<'a> {
-    state: &'a crate::state::AppState,
-    session_id: &'a str,
-    expected: u8,
-    new: u8,
-    notify_parent: bool,
-    observed_turn_epoch: Option<u64>,
-}
-
-struct ShellTransitionHooks<B: FnOnce(), A: FnOnce(), D: FnOnce()> {
-    after_epoch_snapshot: B,
-    after_cas: A,
-    before_parent_dispatch: D,
-}
-
-fn try_shell_transition_with_hooks<B: FnOnce(), A: FnOnce(), D: FnOnce()>(
-    transition: ShellTransitionRequest<'_>,
-    hooks: ShellTransitionHooks<B, A, D>,
-) -> bool {
-    // One lifecycle lock covers CAS through the authoritative parent inbox
-    // enqueue. Submitted-turn reservations take the same lock, so a new epoch
-    // cannot begin between an IDLE CAS and the preceding turn's notification.
-    (hooks.after_epoch_snapshot)();
-    let silence = transition
-        .state
-        .silence_states
-        .get(transition.session_id)
-        .map(|entry| Arc::clone(entry.value()));
-    let (transitioned, parent_dispatch) = {
-        let mut silence_guard = silence.as_ref().map(|silence| silence.lock());
-        let silence_state = silence_guard.as_deref_mut();
-        try_shell_transition_locked(transition, silence_state, hooks.after_cas)
-    };
-    if let Some(dispatch) = parent_dispatch {
-        (hooks.before_parent_dispatch)();
-        dispatch_parent_lifecycle(transition.state, dispatch);
-    }
-    transitioned
-}
-
-/// Perform a shell transition while the caller owns the lifecycle lock.
-/// `note_submitted_input` uses this form so epoch mutation and IDLE→BUSY are
-/// one critical section instead of recursively acquiring `SilenceState`.
-fn try_shell_transition_locked<F: FnOnce()>(
-    transition: ShellTransitionRequest<'_>,
-    mut silence_state: Option<&mut SilenceState>,
-    after_cas: F,
-) -> (bool, Option<ParentLifecycleDispatch>) {
-    let ShellTransitionRequest {
-        state,
-        session_id,
-        expected,
-        new,
-        notify_parent,
-        observed_turn_epoch,
-    } = transition;
-    if expected == SHELL_BUSY
-        && new == SHELL_IDLE
-        && observed_turn_epoch.is_some_and(|observed| {
-            state
-                .session_states
-                .get(session_id)
-                .is_some_and(|session| session.turn_epoch != observed)
-        })
-    {
-        return (false, None);
-    }
-    let ok = match state.shell_states.get(session_id) {
-        Some(atom) => atom
-            .compare_exchange(
-                expected,
-                new,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_ok(),
-        None => return (false, None),
-    };
-    let mut parent_dispatch = None;
-    if ok {
-        after_cas();
-    }
-    // Ref dropped here — post-transition work below re-enters shell_states.
-    if ok {
-        if new == SHELL_BUSY
-            && let Some(silence) = silence_state.as_mut()
-        {
-            silence.note_busy_evidence();
-            invalidate_background_probe_boundary_locked(state, session_id);
-        }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        // Insert with the correct timestamp immediately so concurrent
-        // readers never observe a transient 0 between or_insert and store.
-        state
-            .shell_state_since_ms
-            .entry(session_id.to_string())
-            .and_modify(|a| a.store(now_ms, std::sync::atomic::Ordering::Relaxed))
-            .or_insert_with(|| std::sync::atomic::AtomicU64::new(now_ms));
-        // Notify orchestrator when an agent goes idle (BUSY→IDLE only).
-        // Plain shell sessions are excluded — only registered agent sessions qualify.
-        if notify_parent && expected == SHELL_BUSY && new == SHELL_IDLE {
-            let session_lifecycle = state
-                .session_states
-                .get(session_id)
-                .map(|s| (s.agent_type.is_some(), s.turn_epoch));
-            let completion_declared = session_lifecycle.is_some_and(|(_, turn_epoch)| {
-                silence_state
-                    .as_ref()
-                    .is_some_and(|silence| silence.completion_declared_for_epoch(turn_epoch))
-            });
-            let is_agent = session_lifecycle.is_some_and(|(is_agent, _)| is_agent);
-            let has_background_work = state
-                .session_states
-                .get(session_id)
-                .is_some_and(|session| session.background_work);
-            let background_probe_pending = state
-                .session_states
-                .get(session_id)
-                .is_some_and(|session| session.has_pending_background_probe());
-            if is_agent && !completion_declared && !has_background_work && !background_probe_pending
-            {
-                parent_dispatch = enqueue_state_change_to_parent(
-                    state,
-                    session_id,
-                    serde_json::json!({
-                        "type": "state_change",
-                        "state": "idle",
-                        "session_id": session_id,
-                    }),
-                );
-            }
-        }
-    }
-    (ok, parent_dispatch)
-}
-
-/// Decision from `should_transition_idle`.
-///
-/// `force_cleared_subtasks` is true only on the stale-subtask recovery path —
-/// callers must emit `ActiveSubtasks { count: 0 }` so the frontend store and
-/// notification gate reset (story 1366-2b3e/H1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IdleDecision {
-    should_transition: bool,
-    force_cleared_subtasks: bool,
-    turn_epoch: Option<u64>,
-}
-
-impl IdleDecision {
-    const NO: Self = Self {
-        should_transition: false,
-        force_cleared_subtasks: false,
-        turn_epoch: None,
-    };
-
-    const fn yes(turn_epoch: Option<u64>) -> Self {
-        Self {
-            should_transition: true,
-            force_cleared_subtasks: false,
-            turn_epoch,
-        }
-    }
-}
-
-/// Current wall-clock time as milliseconds since the Unix epoch.
-fn now_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// Check whether the session should transition to idle (busy → idle).
-/// Conditions: last real output > threshold ago AND no active sub-tasks.
-/// Agent sessions use a longer threshold (AGENT_IDLE_MS) because AI agents
-/// produce output in bursts with natural thinking pauses between them.
-fn should_transition_idle(state: &crate::state::AppState, session_id: &str) -> IdleDecision {
-    should_transition_idle_with_hook(state, session_id, || {})
-}
-
-fn should_transition_idle_with_hook<F: FnOnce()>(
-    state: &crate::state::AppState,
-    session_id: &str,
-    after_silence_evidence: F,
-) -> IdleDecision {
-    // Capture the originating turn before reading the silence evidence. A new
-    // submission updates the epoch before stamping last_output_ms; either this
-    // decision sees the fresh timestamp, or the transition rejects its stale
-    // epoch. Reading these in the opposite order can pair old silence with the
-    // new turn and immediately idle a just-submitted task.
-    //
-    // Read the snapshot in a scoped block so the DashMap shard read-lock is
-    // released before we take a write-lock below — same shard would otherwise
-    // deadlock the runtime in the force-clear branch.
-    let (is_agent, sub_tasks, turn_epoch) = {
-        let session = state.session_states.get(session_id);
-        (
-            session
-                .as_ref()
-                .map(|s| s.agent_type.is_some())
-                .unwrap_or(false),
-            session.as_ref().map(|s| s.active_sub_tasks).unwrap_or(0),
-            session.as_ref().map(|s| s.turn_epoch),
-        )
-    };
-    let last_ms = state
-        .last_output_ms
-        .get(session_id)
-        .map(|ts| ts.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(0);
-    after_silence_evidence();
-    if last_ms == 0 {
-        return IdleDecision::NO;
-    }
-    let threshold = if is_agent {
-        AGENT_IDLE_MS
-    } else {
-        SHELL_IDLE_MS
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let elapsed = now.saturating_sub(last_ms);
-    if elapsed < threshold {
-        return IdleDecision::NO;
-    }
-    if sub_tasks == 0 {
-        return IdleDecision::yes(turn_epoch);
-    }
-    // Sub-tasks are active but no output for SUBTASK_STALE_MS — the mode-line
-    // disappeared without emitting count=0 (agent exited, user cleared, etc.).
-    // Force-clear the stale counter so we don't stay busy forever.
-    if elapsed >= SUBTASK_STALE_MS {
-        if let Some(mut entry) = state.session_states.get_mut(session_id) {
-            entry.active_sub_tasks = 0;
-        }
-        return IdleDecision {
-            should_transition: true,
-            force_cleared_subtasks: true,
-            turn_epoch,
-        };
-    }
-    IdleDecision::NO
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentScreenActivity {
-    Working,
-    Ready,
-    Interrupted,
-    Unknown,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ProcessTreeEntry {
-    pid: u32,
-    parent_pid: u32,
-    name: String,
-    command: String,
-    /// Seconds this process has been alive, when the platform snapshot reports
-    /// it. `None` on Windows, whose `PROCESSENTRY32` carries no creation time —
-    /// see [`started_with_agent`] for what the absence costs.
-    age_seconds: Option<u64>,
-}
-
-#[derive(Default)]
-struct ProcessSnapshotState {
-    generation: u64,
-    current: Option<Arc<Vec<ProcessTreeEntry>>>,
-}
-
-#[derive(Default)]
-pub(crate) struct ProcessSnapshotCache {
-    state: parking_lot::RwLock<ProcessSnapshotState>,
-}
-
-impl ProcessSnapshotCache {
-    fn store(&self, snapshot: Option<Vec<ProcessTreeEntry>>) {
-        let mut state = self.state.write();
-        state.generation = state.generation.wrapping_add(1);
-        state.current = snapshot.map(Arc::new);
-    }
-
-    fn load(&self) -> Option<(u64, Arc<Vec<ProcessTreeEntry>>)> {
-        let state = self.state.read();
-        Some((state.generation, Arc::clone(state.current.as_ref()?)))
-    }
-
-    fn generation(&self) -> u64 {
-        self.state.read().generation
-    }
-}
-
-fn normalized_process_name(value: &str) -> &str {
-    value
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(value)
-        .trim_end_matches(".exe")
-}
-
-/// Apply the same basename/path convention used by `process_name_from_pid`.
-/// Claude's installer notably uses a version number as the executable basename,
-/// so the containing `claude/versions/` path is authoritative.
-fn classify_agent_name_or_path(value: &str) -> Option<&'static str> {
-    let normalized = value.to_ascii_lowercase();
-    let basename = normalized_process_name(&normalized);
-    classify_agent(basename)
-        .or_else(|| normalized.split(['/', '\\']).rev().find_map(classify_agent))
-}
-
-fn is_persistent_agent_helper(process: &ProcessTreeEntry) -> bool {
-    is_persistent_agent_helper_with_command_line(process, cfg!(not(windows)))
-}
-
-fn is_standalone_timed_caffeinate(command: &str) -> bool {
-    let mut argv = command.split_whitespace();
-    let executable = argv.next().map(normalized_process_name).unwrap_or("");
-    if executable != "caffeinate" {
-        return false;
-    }
-    let first = argv.next();
-    let second = argv.next();
-    let third = argv.next();
-    if argv.next().is_some() {
-        return false;
-    }
-    let positive_timeout = |value: &str| value.parse::<u64>().is_ok_and(|seconds| seconds > 0);
-    matches!((first, second, third), (Some("-i"), Some("-t"), Some(value)) if positive_timeout(value))
-        || matches!((first, second, third), (Some("-t"), Some(value), Some("-i")) if positive_timeout(value))
-}
-
-fn is_persistent_agent_helper_with_command_line(
-    process: &ProcessTreeEntry,
-    command_line_authoritative: bool,
-) -> bool {
-    let name = process.name.to_ascii_lowercase();
-    let name = normalized_process_name(&name);
-    let command = process.command.to_ascii_lowercase();
-    let mut argv = command.split_whitespace();
-    let executable = argv.next().map(normalized_process_name).unwrap_or("");
-    let script = argv.next().map(normalized_process_name).unwrap_or("");
-    matches!(name, "mdkb" | "tuic-bridge" | "node_repl")
-        || (command_line_authoritative
-            && (matches!(executable, "mdkb" | "tuic-bridge" | "node_repl")
-                || (matches!(executable, "node" | "nodejs")
-                    && script.trim_end_matches(".js") == "node_repl")
-                || is_standalone_timed_caffeinate(&command)))
-}
-
-/// How long after the agent's own start a descendant may appear and still count
-/// as session plumbing rather than work.
-///
-/// Measured against a live 14-session instance: every integration daemon came up
-/// within 18s of its agent (`codex-code-mode-host` 12–18s, MCP servers 0–10s),
-/// while work spawned by a turn was hundreds to thousands of seconds younger
-/// than its agent. 60s sits in that gap with room for a cold MCP start.
-const AGENT_STARTUP_WINDOW_SECS: u64 = 60;
-
-/// Whether `descendant` came up alongside the agent instead of being spawned by
-/// a turn.
-///
-/// [`is_persistent_agent_helper`] answers the same question by name, and a name
-/// list cannot keep up: `codex-code-mode-host` arrived with Codex 0.149.0, and
-/// an MCP server started through `npm exec` reports as `npm` — a name that must
-/// stay meaningful because a turn also runs npm. Both pinned every session on
-/// this machine to `working` forever, because `background_work` outranks both
-/// `completion_declared` and an idle shell in the agent-state ladder.
-///
-/// Age is the property that actually separates the two, and it needs no
-/// per-tool knowledge. When either age is missing this returns false, leaving
-/// the name list as the sole rule — which is exactly the Windows behaviour, and
-/// errs toward reporting work rather than hiding it.
-// DEFERRED (2026-08-23) — a daemon that dies and respawns mid-session escapes
-// this window and is then counted as work for the rest of the session. Measured
-// once over the live 14-session instance: 1 session, whose
-// `codex-code-mode-host` had restarted 2494s after its agent. The remaining 13
-// were classified correctly, against 14 wrong before the window existed. Fixing
-// it needs per-session memory of pids already judged plumbing, which is state
-// this pure function does not have — do not reach for a wider window instead,
-// that is the same name-list mistake measured in seconds.
-//
-// DEFERRED (2026-08-25) — the mirror blind spot: real work spawned inside the
-// agent's own first 60s is classified as plumbing, and the difference of two
-// ages is constant, so the misclassification lasts that process's whole life.
-// It bites a fast first turn that declares completion while a build it started
-// keeps running — the session then reads idle. Do NOT "fix" it by skipping the
-// window while the agent is young: every integration daemon comes up in the
-// first 18s, so that trades this narrow false-idle for a guaranteed
-// false-working minute on every session ever opened. Same per-session pid
-// memory as above is the real fix.
-fn started_with_agent(descendant: &ProcessTreeEntry, agent_age_seconds: Option<u64>) -> bool {
-    let (Some(agent_age), Some(descendant_age)) = (agent_age_seconds, descendant.age_seconds)
-    else {
-        return false;
-    };
-    agent_age.saturating_sub(descendant_age) <= AGENT_STARTUP_WINDOW_SECS
-}
-
-fn agent_process_root(
-    session_root: u32,
-    agent_type: &str,
-    processes: &[ProcessTreeEntry],
-) -> Option<u32> {
-    let mut children = std::collections::HashMap::<u32, Vec<&ProcessTreeEntry>>::new();
-    let mut by_pid = std::collections::HashMap::<u32, &ProcessTreeEntry>::new();
-    for process in processes {
-        children
-            .entry(process.parent_pid)
-            .or_default()
-            .push(process);
-        by_pid.insert(process.pid, process);
-    }
-    by_pid.get(&session_root)?;
-    let mut queue = std::collections::VecDeque::from([session_root]);
-    while let Some(pid) = queue.pop_front() {
-        if let Some(process) = by_pid.get(&pid) {
-            let executable_arg = process.command.split_whitespace().next().unwrap_or("");
-            if classify_agent_name_or_path(&process.name) == Some(agent_type)
-                || classify_agent_name_or_path(executable_arg) == Some(agent_type)
-            {
-                return Some(pid);
-            }
-        }
-        if let Some(descendants) = children.get(&pid) {
-            queue.extend(descendants.iter().map(|process| process.pid));
-        }
-    }
-    // A configured custom alias may have no classifiable executable path. The
-    // process-group leader is then the established foreground-process fallback;
-    // descendants, rather than the alias process itself, represent background work.
-    Some(session_root)
-}
-
-/// Return whether `root_pid` owns at least one meaningful live descendant.
-/// Helper roots and their entire subtrees are ignored: integration daemons are
-/// session plumbing, not evidence that the agent still owns autonomous work.
-/// A daemon is recognised either by name ([`is_persistent_agent_helper`]) or by
-/// having started with the agent ([`started_with_agent`]).
-fn has_meaningful_descendant(root_pid: u32, processes: &[ProcessTreeEntry]) -> bool {
-    let mut children = std::collections::HashMap::<u32, Vec<&ProcessTreeEntry>>::new();
-    let mut agent_age = None;
-    for process in processes {
-        children
-            .entry(process.parent_pid)
-            .or_default()
-            .push(process);
-        if process.pid == root_pid {
-            agent_age = process.age_seconds;
-        }
-    }
-    let mut stack = vec![root_pid];
-    while let Some(parent) = stack.pop() {
-        let Some(descendants) = children.get(&parent) else {
-            continue;
-        };
-        for descendant in descendants {
-            if is_persistent_agent_helper(descendant) || started_with_agent(descendant, agent_age) {
-                continue;
-            }
-            return true;
-        }
-    }
-    false
-}
-
-fn background_work_from_snapshot(
-    session_root: u32,
-    agent_type: &str,
-    processes: &[ProcessTreeEntry],
-) -> Option<bool> {
-    let agent_root = agent_process_root(session_root, agent_type, processes)?;
-    Some(has_meaningful_descendant(agent_root, processes))
-}
-
-/// Interactive shells, and the privilege wrappers that exist only to start one.
-/// `login` and `doas` are here for the same reason as `sudo`/`su`: on their own
-/// they are not work, they are the two hops between the outer prompt and the
-/// inner one.
-const PROMPT_SHELL_NAMES: &[&str] = &[
-    "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "csh", "tcsh", "ash",
-];
-const PROMPT_SHELL_WRAPPERS: &[&str] = &["sudo", "su", "doas", "login"];
-
-/// Whether this process is a shell sitting at a prompt rather than running a
-/// script. A login shell reports as `-zsh`, so the leading dash is stripped;
-/// `-c` means the shell was handed a command and is therefore work.
-fn is_prompt_shell_process(process: &ProcessTreeEntry) -> bool {
-    let name = process.name.to_ascii_lowercase();
-    let name = normalized_process_name(&name)
-        .trim_start_matches('-')
-        .to_string();
-    if PROMPT_SHELL_WRAPPERS.contains(&name.as_str()) {
-        return true;
-    }
-    if !PROMPT_SHELL_NAMES.contains(&name.as_str()) {
-        return false;
-    }
-    !process
-        .command
-        .split_whitespace()
-        .skip(1)
-        .any(|argument| argument == "-c")
-}
-
-/// Whether the PTY's foreground process group is nothing but shells.
-///
-/// OSC 133 marks a command busy once and clears it once, so an interactive
-/// subshell (`sh`, `sudo su`, `bash -l`) latches the outer shell BUSY for its
-/// entire life — the inner shell has no integration of its own and never emits
-/// the closing marker. The user is looking at an idle prompt while the tab says
-/// working, which is what this repairs.
-///
-/// The whole subtree must qualify, not just its root: `sudo dd …` is a wrapper
-/// with real work underneath it, and `sudo` on macOS allocates its own PTY, so
-/// the inner shell is only reachable through the parent chain.
-fn foreground_group_at_prompt(root_pid: u32, processes: &[ProcessTreeEntry]) -> bool {
-    let mut children = std::collections::HashMap::<u32, Vec<&ProcessTreeEntry>>::new();
-    let mut root = None;
-    for process in processes {
-        children
-            .entry(process.parent_pid)
-            .or_default()
-            .push(process);
-        if process.pid == root_pid {
-            root = Some(process);
-        }
-    }
-    let Some(root) = root else {
-        return false;
-    };
-    let mut stack = vec![root];
-    while let Some(process) = stack.pop() {
-        if !is_prompt_shell_process(process) {
-            return false;
-        }
-        if let Some(descendants) = children.get(&process.pid) {
-            stack.extend(descendants.iter().copied());
-        }
-    }
-    true
-}
-
-/// The pid whose process tree represents this session's foreground work.
-fn session_foreground_pid(state: &AppState, session_id: &str) -> Option<u32> {
-    let entry = state.sessions.get(session_id)?;
-    let session = entry.value().lock();
-    #[cfg(not(windows))]
-    {
-        session.master.process_group_leader().map(|pid| pid as u32)
-    }
-    #[cfg(windows)]
-    {
-        session._child.process_id()
-    }
-}
-
-/// Cheap precondition for the nested-prompt probe: a plain shell, currently
-/// BUSY, silent long enough that no running command would still be quiet.
-/// Shared by the probe itself and by the process-snapshot demand check, so the
-/// snapshot is only enumerated while a session could actually use it.
-fn prompt_probe_applies(state: &AppState, session_id: &str) -> bool {
-    if state
-        .session_states
-        .get(session_id)
-        .is_none_or(|session| session.agent_type.is_some())
-    {
-        return false;
-    }
-    if state
-        .shell_states
-        .get(session_id)
-        .is_none_or(|shell| shell.load(std::sync::atomic::Ordering::Acquire) != SHELL_BUSY)
-    {
-        return false;
-    }
-    let last_ms = state
-        .last_output_ms
-        .get(session_id)
-        .map(|ts| ts.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(0);
-    last_ms != 0 && now_epoch_ms().saturating_sub(last_ms) >= SHELL_PROMPT_PROBE_SILENCE_MS
-}
-
-/// Whether an explicit OSC 133 busy marker should be overruled because the
-/// session is parked at a nested shell prompt. Must be evaluated before the
-/// SilenceState lock is taken: it locks the PtySession to read the foreground
-/// process group.
-fn explicit_busy_is_a_nested_prompt(state: &AppState, session_id: &str) -> bool {
-    if !prompt_probe_applies(state, session_id) {
-        return false;
-    }
-    let Some((_, processes)) = state.process_snapshot_cache.load() else {
-        return false;
-    };
-    let Some(root_pid) = session_foreground_pid(state, session_id) else {
-        return false;
-    };
-    foreground_group_at_prompt(root_pid, &processes)
-}
-
-#[cfg(not(windows))]
-fn process_tree_snapshot() -> Option<Vec<ProcessTreeEntry>> {
-    let output = std::process::Command::new("ps")
-        .args(["-ww", "-axo", "pid=,ppid=,etime=,comm=,args="])
-        .output()
-        .ok()?;
-    parse_process_tree_snapshot(
-        output.status.success(),
-        &String::from_utf8_lossy(&output.stdout),
-    )
-}
-
-#[cfg(not(windows))]
-fn parse_process_tree_snapshot(success: bool, text: &str) -> Option<Vec<ProcessTreeEntry>> {
-    if !success {
-        return None;
-    }
-    let mut result = Vec::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let (pid, rest) = take_process_snapshot_field(line)?;
-        let (parent_pid, rest) = take_process_snapshot_field(rest)?;
-        let (elapsed, rest) = take_process_snapshot_field(rest)?;
-        let (name, command) = take_process_snapshot_field(rest)?;
-        result.push(ProcessTreeEntry {
-            pid: pid.parse().ok()?,
-            parent_pid: parent_pid.parse().ok()?,
-            name: name.to_string(),
-            command: command.trim_start().to_string(),
-            age_seconds: parse_elapsed_time(elapsed),
-        });
-    }
-    (!result.is_empty()).then_some(result)
-}
-
-/// Parse the POSIX `ps -o etime` field — `[[dd-]hh:]mm:ss` — into seconds.
-///
-/// Returns `None` for anything else so an unparsed field degrades to "age
-/// unknown" rather than to a fabricated age. `ps` always emits at least
-/// `mm:ss`, so a lone number is not a valid reading.
-#[cfg(not(windows))]
-fn parse_elapsed_time(value: &str) -> Option<u64> {
-    let (days, clock) = match value.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, value),
-    };
-    let mut seconds: u64 = 0;
-    let mut fields = 0;
-    for field in clock.split(':') {
-        seconds = seconds
-            .checked_mul(60)?
-            .checked_add(field.parse::<u64>().ok()?)?;
-        fields += 1;
-    }
-    (2..=3).contains(&fields).then_some(days * 86400 + seconds)
-}
-
-#[cfg(not(windows))]
-fn take_process_snapshot_field(value: &str) -> Option<(&str, &str)> {
-    let value = value.trim_start();
-    let end = value.find(char::is_whitespace).unwrap_or(value.len());
-    (end > 0).then(|| (&value[..end], &value[end..]))
-}
-
-#[cfg(windows)]
-fn process_tree_snapshot() -> Option<Vec<ProcessTreeEntry>> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
-    };
-
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            return None;
-        }
-        let mut result = Vec::new();
-        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-        if Process32First(snapshot, &mut entry) == 0 {
-            CloseHandle(snapshot);
-            return valid_process_snapshot(false, result);
-        }
-        loop {
-            let name_bytes: Vec<u8> = entry
-                .szExeFile
-                .iter()
-                .take_while(|&&byte| byte != 0)
-                .map(|&byte| byte as u8)
-                .collect();
-            let name = String::from_utf8_lossy(&name_bytes).into_owned();
-            result.push(ProcessTreeEntry {
-                pid: entry.th32ProcessID,
-                parent_pid: entry.th32ParentProcessID,
-                command: String::new(),
-                name,
-                age_seconds: None,
-            });
-            if Process32Next(snapshot, &mut entry) == 0 {
-                break;
-            }
-        }
-        CloseHandle(snapshot);
-        valid_process_snapshot(true, result)
-    }
-}
-
-#[cfg(any(windows, test))]
-fn valid_process_snapshot(
-    enumeration_succeeded: bool,
-    processes: Vec<ProcessTreeEntry>,
-) -> Option<Vec<ProcessTreeEntry>> {
-    (enumeration_succeeded && !processes.is_empty()).then_some(processes)
-}
-
-fn emit_suggest_event(state: &AppState, session_id: &str, turn_epoch: u64, items: Vec<String>) {
-    let parsed = ParsedEvent::Suggest { items };
-    if let Ok(mut json) = serde_json::to_value(&parsed) {
-        if let Some(object) = json.as_object_mut() {
-            object.insert("_turn_epoch".to_string(), turn_epoch.into());
-        }
-        #[cfg(feature = "desktop")]
-        if let Some(app) = state.app_handle.read().as_ref() {
-            let _ = app.emit(&format!("pty-parsed-{session_id}"), &json);
-        }
-        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-            session_id: session_id.to_string(),
-            parsed: json.into(),
-        });
-    }
-}
-
-fn set_background_work_for_epoch(
-    state: &AppState,
-    session_id: &str,
-    observed_turn_epoch: u64,
-    snapshot_generation: u64,
-    active: bool,
-) -> bool {
-    set_background_work_for_epoch_with_hook(
-        state,
-        session_id,
-        observed_turn_epoch,
-        snapshot_generation,
-        active,
-        || {},
-    )
-}
-
-fn set_background_work_for_epoch_with_hook<F: FnOnce()>(
-    state: &AppState,
-    session_id: &str,
-    observed_turn_epoch: u64,
-    snapshot_generation: u64,
-    active: bool,
-    after_lifecycle_snapshot: F,
-) -> bool {
-    let Some(silence) = state
-        .silence_states
-        .get(session_id)
-        .map(|entry| Arc::clone(entry.value()))
-    else {
-        return false;
-    };
-    after_lifecycle_snapshot();
-    let mut silence_state = silence.lock();
-    let still_owns_lifecycle = state
-        .silence_states
-        .get(session_id)
-        .is_some_and(|current| Arc::ptr_eq(current.value(), &silence));
-    if !still_owns_lifecycle || !state.shell_states.contains_key(session_id) {
-        return false;
-    }
-    let Some(mut session) = state.session_states.get_mut(session_id) else {
-        return false;
-    };
-    if session.turn_epoch != observed_turn_epoch
-        || snapshot_generation <= session.background_snapshot_generation
-    {
-        return false;
-    }
-    let reconciled_probe = if session.has_pending_background_probe() {
-        let Some(boundary) = session.background_probe_after_generation else {
-            return false;
-        };
-        if snapshot_generation <= boundary {
-            return false;
-        }
-        session.background_probe_turn_epoch = None;
-        session.background_probe_after_generation = None;
-        session.background_probe_satisfied_turn_epoch = Some(observed_turn_epoch);
-        true
-    } else if !session.background_work {
-        return false;
-    } else {
-        false
-    };
-    session.background_snapshot_generation = snapshot_generation;
-    if session.background_work == active {
-        if !reconciled_probe || active {
-            return true;
-        }
-    } else {
-        session.background_work = active;
-    }
-    drop(session);
-
-    let mut parent_dispatch = None;
-    if !active
-        && state
-            .shell_states
-            .get(session_id)
-            .is_some_and(|shell| shell.load(Ordering::Acquire) == SHELL_IDLE)
-    {
-        let completion = silence_state.drain_pending_suggest_with_epoch();
-        match completion {
-            Some((turn_epoch, items)) if turn_epoch == observed_turn_epoch => {
-                emit_suggest_event(state, session_id, turn_epoch, items);
-                parent_dispatch = enqueue_state_change_to_parent(
-                    state,
-                    session_id,
-                    serde_json::json!({
-                        "type": "state_change",
-                        "state": "completed",
-                        "session_id": session_id,
-                    }),
-                );
-            }
-            Some((turn_epoch, _)) => {
-                if silence_state.completion_turn_epoch == turn_epoch {
-                    silence_state.completion_declared = false;
-                    silence_state.completion_turn_epoch = 0;
-                }
-            }
-            None => {
-                parent_dispatch = enqueue_state_change_to_parent(
-                    state,
-                    session_id,
-                    serde_json::json!({
-                        "type": "state_change",
-                        "state": "idle",
-                        "session_id": session_id,
-                    }),
-                );
-            }
-        }
-    }
-    drop(silence_state);
-    if let Some(dispatch) = parent_dispatch {
-        dispatch_parent_lifecycle(state, dispatch);
-    }
-    true
-}
-
-fn ready_probe_satisfied_or_requested(
-    state: &AppState,
-    session_id: &str,
-    silence: &Arc<Mutex<SilenceState>>,
-) -> bool {
-    let still_owns_lifecycle = state
-        .silence_states
-        .get(session_id)
-        .is_some_and(|current| Arc::ptr_eq(current.value(), silence));
-    if !still_owns_lifecycle || !state.shell_states.contains_key(session_id) {
-        return false;
-    }
-    let Some(mut session) = state.session_states.get_mut(session_id) else {
-        return false;
-    };
-    if session.agent_type.is_none() {
-        return true;
-    }
-    let turn_epoch = session.turn_epoch;
-    if session.background_probe_satisfied_turn_epoch == Some(turn_epoch) {
-        return true;
-    }
-    if !session.has_pending_background_probe() {
-        session.background_probe_turn_epoch = Some(turn_epoch);
-        session.background_probe_after_generation = Some(state.process_snapshot_cache.generation());
-    }
-    false
-}
-
-/// Invalidate only the process-snapshot boundary for the current working
-/// episode. The caller must hold this session's SilenceState lifecycle lock.
-fn invalidate_background_probe_boundary_locked(state: &AppState, session_id: &str) {
-    let Some(mut session) = state.session_states.get_mut(session_id) else {
-        return;
-    };
-    session.background_probe_turn_epoch = None;
-    session.background_probe_after_generation = None;
-    session.background_probe_satisfied_turn_epoch = None;
-}
-
-fn arm_explicit_idle_background_probe(state: &AppState, session_id: &str, turn_epoch: u64) {
-    let Some(mut session) = state.session_states.get_mut(session_id) else {
-        return;
-    };
-    if session.agent_type.is_none() || session.turn_epoch != turn_epoch {
-        return;
-    }
-    session.background_probe_turn_epoch = Some(turn_epoch);
-    session.background_probe_after_generation = Some(state.process_snapshot_cache.generation());
-    session.background_probe_satisfied_turn_epoch = None;
-}
-
-fn refresh_background_work(state: &AppState, session_id: &str) {
-    let agent_type = state
-        .session_states
-        .get(session_id)
-        .and_then(|session| session.agent_type.clone());
-    let observed_turn_epoch = state
-        .session_states
-        .get(session_id)
-        .map(|session| session.turn_epoch);
-    let root_pid = session_foreground_pid(state, session_id);
-    let (Some(root_pid), Some(agent_type), Some(observed_turn_epoch)) =
-        (root_pid, agent_type, observed_turn_epoch)
-    else {
-        return;
-    };
-    refresh_background_work_from_cached_snapshot(
-        state,
-        session_id,
-        root_pid,
-        &agent_type,
-        observed_turn_epoch,
-        state.process_snapshot_cache.load(),
-    );
-}
-
-fn refresh_background_work_from_cached_snapshot(
-    state: &AppState,
-    session_id: &str,
-    root_pid: u32,
-    agent_type: &str,
-    observed_turn_epoch: u64,
-    cached: Option<(u64, Arc<Vec<ProcessTreeEntry>>)>,
-) -> bool {
-    let Some((generation, processes)) = cached else {
-        return false;
-    };
-    let Some(active) = background_work_from_snapshot(root_pid, agent_type, &processes) else {
-        return false;
-    };
-    set_background_work_for_epoch(state, session_id, observed_turn_epoch, generation, active)
-}
-
-fn process_snapshot_is_demanded(state: &AppState) -> bool {
-    state.session_states.iter().any(|session| {
-        (if session.agent_type.is_some() {
-            session.has_pending_background_probe() || session.background_work
-        } else {
-            prompt_probe_applies(state, session.key())
-        }) && state.silence_states.contains_key(session.key())
-            && state.shell_states.contains_key(session.key())
-    })
-}
-
-fn reconcile_process_snapshot_demand(state: &AppState) {
-    let sessions: Vec<String> = state
-        .session_states
-        .iter()
-        .filter(|session| {
-            session.agent_type.is_some()
-                && (session.has_pending_background_probe() || session.background_work)
-                && state.silence_states.contains_key(session.key())
-                && state.shell_states.contains_key(session.key())
-        })
-        .map(|session| session.key().clone())
-        .collect();
-    for session_id in sessions {
-        refresh_background_work(state, &session_id);
-    }
-}
-
-fn refresh_process_snapshot_if_demanded<F>(state: &AppState, enumerate: F) -> bool
-where
-    F: FnOnce() -> Option<Vec<ProcessTreeEntry>>,
-{
-    if !process_snapshot_is_demanded(state) {
-        return false;
-    }
-    state.process_snapshot_cache.store(enumerate());
-    reconcile_process_snapshot_demand(state);
-    true
-}
-
-/// Enumerate the OS process table at most once per lifecycle cadence on
-/// Tokio's blocking pool while a probe or tracked child needs reconciliation.
-/// Every demanding session reads the resulting app-wide cache.
-pub(crate) fn spawn_process_snapshot_refresher(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            let refresh_state = Arc::clone(&state);
-            let _ = tokio::task::spawn_blocking(move || {
-                refresh_process_snapshot_if_demanded(&refresh_state, process_tree_snapshot)
-            })
-            .await;
-        }
-    });
-}
-
-/// Inspect Codex's live prompt neighborhood on the UNFILTERED screen.
-///
-/// `find_chrome_cutoff` cannot be used here: Codex separators delimit tool
-/// output from summaries, not its prompt box. When a recent separator sits
-/// above `• Working`, the generic cutoff intentionally trims the whole region
-/// and used to hide the strongest activity signal from both reader and timer.
-/// Restricting the match to a few rows immediately above the lowest `›` prompt
-/// prevents a historical Working line elsewhere in the viewport from latching
-/// the session busy.
-fn detect_codex_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    const PROMPT_NEIGHBORHOOD: usize = 6;
-
-    let Some(prompt_idx) = find_live_prompt_row(rows, |row| {
-        let t = row.trim_start();
-        matches!(t.chars().next(), Some('\u{203A}' | '\u{00BB}'))
-            && !t.starts_with("\u{203A}\u{203A}")
-    }) else {
-        return AgentScreenActivity::Unknown;
-    };
-    let start = prompt_idx.saturating_sub(PROMPT_NEIGHBORHOOD);
-    let neighborhood = &rows[start..prompt_idx];
-
-    if neighborhood
-        .iter()
-        .any(|row| crate::chrome::is_working_status_row(row))
-    {
-        return AgentScreenActivity::Working;
-    }
-    if neighborhood
-        .iter()
-        .any(|row| row.trim_start().starts_with("■ Conversation interrupted"))
-    {
-        return AgentScreenActivity::Interrupted;
-    }
-    AgentScreenActivity::Ready
-}
-
-/// Find a prompt only in the current bottom chrome zone.
-///
-/// The rendered viewport includes transcript history, so a whole-screen search
-/// can mistake an old submitted prompt or markdown quote for the live composer.
-/// Prefer the structurally detected input box (including tall custom HUDs); if
-/// no box can be identified, accept only the final three non-padding rows.
-fn find_live_prompt_row<F>(rows: &[String], is_prompt: F) -> Option<usize>
-where
-    F: Fn(&str) -> bool,
-{
-    let content_end = rows
-        .iter()
-        .rposition(|row| !row.trim().is_empty())
-        .map_or(0, |index| index + 1);
-    if content_end == 0 {
-        return None;
-    }
-    let refs: Vec<&str> = rows[..content_end].iter().map(String::as_str).collect();
-    if let Some(prompt) = crate::chrome::find_input_box_prompt_row(&refs)
-        && is_prompt(&rows[prompt])
-    {
-        return Some(prompt);
-    }
-    (content_end.saturating_sub(3)..content_end)
-        .rev()
-        .find(|&index| is_prompt(&rows[index]))
-}
-
-/// Claude's active status is presence-based because current Claude versions can
-/// keep the empty composer visible while a long tool call is still running.
-/// The live marker is deliberately semantic rather than glyph-only: an animated
-/// spinner prefix plus an ellipsis in the phase name (`✽ Nucleating… (3m 50s)`)
-/// means active, while completed summaries (`✻ Sautéed for 1m 25s`), HUD bars,
-/// hints, and banner art remain inert. This also holds BUSY when DEC 2026 frame
-/// coalescing makes consecutive spinner paints text-identical.
-fn detect_claude_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    let content_end = rows
-        .iter()
-        .rposition(|row| !row.trim().is_empty())
-        .map_or(0, |idx| idx + 1);
-    let chrome_start = content_end.saturating_sub(crate::chrome::CHROME_SCAN_ROWS);
-    let prompt_idx = rows[chrome_start..content_end]
-        .iter()
-        .rposition(|row| row.trim() == "\u{276F}")
-        .map(|idx| chrome_start + idx);
-    let activity_end = prompt_idx.unwrap_or(content_end);
-    let activity_start = activity_end.saturating_sub(crate::chrome::CHROME_SCAN_ROWS);
-    if rows[activity_start..activity_end].iter().any(|row| {
-        crate::chrome::is_spinner_row(row)
-            && row.contains('\u{2026}')
-            && row.contains('(')
-            && row.contains(')')
-    }) {
-        return AgentScreenActivity::Working;
-    }
-    if prompt_idx.is_some() {
-        AgentScreenActivity::Ready
-    } else {
-        AgentScreenActivity::Unknown
-    }
-}
-
-fn gemini_prompt_present(rows: &[String]) -> bool {
-    find_live_prompt_row(rows, |row| {
-        let t = row.trim_start();
-        t == ">" || t.starts_with("> ")
-    })
-    .is_some()
-}
-
-/// Prompt-based only — see `detect_claude_screen_activity` for the rationale.
-fn detect_gemini_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    if gemini_prompt_present(rows) {
-        AgentScreenActivity::Ready
-    } else {
-        AgentScreenActivity::Unknown
-    }
-}
-
-/// Prompt-based only — see `detect_claude_screen_activity` for the rationale.
-/// During generation Aider has no bottom input box (prompt_toolkit returned),
-/// so the screen reads Unknown and BUSY is held by spinner movement + silence.
-fn detect_aider_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    if rows.iter().rev().take(3).any(|row| row.trim() == ">") {
-        AgentScreenActivity::Ready
-    } else {
-        AgentScreenActivity::Unknown
-    }
-}
-
-/// True for grok's composer row. Builds from 0.2.11x draw it inside a rounded box
-/// (`│ ❯                    │`); earlier builds emitted a bare `❯ Ask anything`. Missing the
-/// boxed form left the session stuck BUSY for the whole process, because Ready never fired.
-fn is_grok_composer_row(row: &str) -> bool {
-    let trimmed = row.trim_start();
-    let inner = trimmed
-        .strip_prefix('\u{2502}')
-        .unwrap_or(trimmed)
-        .trim_start();
-    let mut chars = inner.chars();
-    chars.next() == Some('\u{276F}') && chars.next().is_none_or(char::is_whitespace)
-}
-
-/// Grok keeps its composer visible while a turn is running, so the prompt
-/// alone is not enough to declare the session ready. Its turn-status row is
-/// structurally stronger: it starts with the animated braille spinner already
-/// recognized by `is_spinner_row` and disappears when the turn completes.
-fn detect_grok_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    let content_end = rows
-        .iter()
-        .rposition(|row| !row.trim().is_empty())
-        .map_or(0, |idx| idx + 1);
-    let chrome_start = content_end.saturating_sub(crate::chrome::CHROME_SCAN_ROWS);
-    let footer = &rows[chrome_start..content_end];
-
-    if footer.iter().any(|row| crate::chrome::is_spinner_row(row)) {
-        return AgentScreenActivity::Working;
-    }
-    if footer.iter().any(|row| is_grok_composer_row(row)) {
-        AgentScreenActivity::Ready
-    } else {
-        AgentScreenActivity::Unknown
-    }
-}
-
-/// True for pi's bottom status row: `↑1.3k ↓1.8k … 3.4%/272k (auto)   (openai) gpt-5.6-sol • medium`.
-/// The context-usage `N%/Nk` pair plus the ` • ` model separator is unique to that row and
-/// present in every state, so it identifies a pi screen without asserting readiness.
-fn is_pi_status_row(row: &str) -> bool {
-    let trimmed = row.trim();
-    if !trimmed.contains(" \u{2022} ") {
-        return false;
-    }
-    // `%/` only ever appears in the context gauge (`3.4%/272k`).
-    let Some(pos) = trimmed.find("%/") else {
-        return false;
-    };
-    trimmed[..pos]
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_ascii_digit())
-}
-
-/// pi keeps its composer, separators and status row on screen for the whole turn, and the
-/// composer carries no prompt glyph (it is a bare reverse-video cursor block), so readiness
-/// cannot be read from a prompt char. What does change is the composer row itself: while a
-/// turn runs it is replaced by an animated ` ⠏ Working...` row that `is_spinner_row` already
-/// recognises. Ready is therefore "this is a pi screen and nothing is spinning".
-fn detect_pi_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    let content_end = rows
-        .iter()
-        .rposition(|row| !row.trim().is_empty())
-        .map_or(0, |idx| idx + 1);
-    let chrome_start = content_end.saturating_sub(crate::chrome::CHROME_SCAN_ROWS);
-    let footer = &rows[chrome_start..content_end];
-
-    if footer.iter().any(|row| crate::chrome::is_spinner_row(row)) {
-        return AgentScreenActivity::Working;
-    }
-    if footer.iter().any(|row| is_pi_status_row(row)) {
-        AgentScreenActivity::Ready
-    } else {
-        AgentScreenActivity::Unknown
-    }
-}
-
-/// True for a row of OpenCode's composer frame: the heavy vertical `┃` (U+2503)
-/// running down the left edge of the prompt box.
-fn is_opencode_frame_row(row: &str) -> bool {
-    row.trim_start().starts_with('\u{2503}')
-}
-
-/// True for the row that closes OpenCode's composer frame: `╹` (U+2579) followed by a
-/// run of `▀` (U+2580). Present in every OpenCode state — welcome, mid-turn, finished.
-fn is_opencode_frame_close_row(row: &str) -> bool {
-    row.trim_start()
-        .strip_prefix('\u{2579}')
-        .is_some_and(|rest| rest.starts_with("\u{2580}\u{2580}\u{2580}\u{2580}"))
-}
-
-/// OpenCode is a full-screen Bubble Tea TUI, so neither of the two generic signals works:
-/// it paints no prompt glyph (`❯`/`›`/`>`), and its activity indicator is a `⬝`/`■`
-/// progress bar rather than anything `is_spinner_row` recognises. What IS stable across
-/// every state is the composer frame — `┃` rows closed by a `╹▀▀▀…` run — with the status
-/// bar painted underneath it. OpenCode only offers `esc interrupt` in that status bar while
-/// a turn is running (verified live on v1.18.5 across the model phase AND a tool phase, at
-/// both 120 and 62 columns), so Ready is "this is an OpenCode screen and nothing down there
-/// is offering an interrupt".
-///
-/// Declaring Ready additionally requires the status bar's `ctrl+p commands` hint, which is
-/// present in every state: without it a frame whose status bar has not been painted yet
-/// would read Ready mid-turn — exactly the false idle that lets auto-standby SIGSTOP a live
-/// session. The interrupt hint is checked first so a working screen is never downgraded.
-fn detect_opencode_screen_activity(rows: &[String]) -> AgentScreenActivity {
-    const STATUS_BAR_HINT: &str = "ctrl+p commands";
-    const INTERRUPT_HINT: &str = "esc interrupt";
-
-    let Some(close_idx) = rows
-        .iter()
-        .rposition(|row| is_opencode_frame_close_row(row))
-    else {
-        return AgentScreenActivity::Unknown;
-    };
-    if !rows[..close_idx]
-        .iter()
-        .any(|row| is_opencode_frame_row(row))
-    {
-        return AgentScreenActivity::Unknown;
-    }
-    let status_bar = &rows[close_idx + 1..];
-
-    if status_bar.iter().any(|row| row.contains(INTERRUPT_HINT)) {
-        return AgentScreenActivity::Working;
-    }
-    if status_bar.iter().any(|row| row.contains(STATUS_BAR_HINT)) {
-        AgentScreenActivity::Ready
-    } else {
-        AgentScreenActivity::Unknown
-    }
-}
-
-fn detect_agent_screen_activity(agent_type: Option<&str>, rows: &[String]) -> AgentScreenActivity {
-    match agent_type {
-        Some("claude") => detect_claude_screen_activity(rows),
-        Some("codex") => detect_codex_screen_activity(rows),
-        Some("gemini") => detect_gemini_screen_activity(rows),
-        Some("aider") => detect_aider_screen_activity(rows),
-        Some("grok") => detect_grok_screen_activity(rows),
-        Some("pi") => detect_pi_screen_activity(rows),
-        Some("opencode") => detect_opencode_screen_activity(rows),
-        _ => AgentScreenActivity::Unknown,
-    }
-}
-
-/// Classify the existing screen signal for an MCP submission receipt.
-/// Raw-output movement is checked by the caller first; `terminal_output` means
-/// the child moved but its agent adapter has no stronger current-state label.
-pub(crate) fn agent_submission_ack_kind(state: &AppState, session_id: &str) -> &'static str {
-    let agent_type = state
-        .session_states
-        .get(session_id)
-        .and_then(|session| session.agent_type.clone());
-    let activity = state
-        .vt_log_buffers
-        .get(session_id)
-        .map(|vt| detect_agent_screen_activity(agent_type.as_deref(), &vt.lock().screen_rows()))
-        .unwrap_or(AgentScreenActivity::Unknown);
-    match activity {
-        AgentScreenActivity::Working => "working_screen",
-        AgentScreenActivity::Ready => "ready_screen",
-        AgentScreenActivity::Interrupted => "interrupted_screen",
-        AgentScreenActivity::Unknown => "terminal_output",
-    }
-}
-
-/// Agents listed here recover to idle from the screen. An agent that is MISSING here and
-/// whose foreground command is long-lived stays busy for the whole process, because OSC 133
-/// marks that command busy once and nothing else ever clears it (#523-1df4, #534-e30c,
-/// #535-d4f5).
-///
-/// DEFERRED (2026-08-02) — amp, cursor, goose and droid were audited for the same failure
-/// while fixing opencode and could NOT be verified: none of the four binaries is installed
-/// on this machine, and an adapter written from documentation instead of a live capture is
-/// how grok first shipped green tests over a UI that stayed stuck BUSY. They are tracked in
-/// `to-test.md`; give each one an adapter only after capturing its real screens.
-pub(crate) fn has_ready_screen_adapter(agent_type: Option<&str>) -> bool {
-    matches!(
-        agent_type,
-        Some("claude" | "codex" | "gemini" | "aider" | "grok" | "pi" | "opencode")
-    )
-}
-
-fn stamp_last_output_now(state: &crate::state::AppState, session_id: &str, now_ms: u64) {
-    if let Some(ts) = state.last_output_ms.get(session_id) {
-        ts.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Apply positive working evidence immediately. In particular this repairs an
-/// already-false-idle session: working evidence is an edge into BUSY, not merely
-/// a keepalive that only runs while the state happens to be busy. An explicit
-/// idle marker (agent hook) outranks it until the next busy evidence.
-///
-/// Two evidence strengths call this (#446-596f):
-/// - `"working-screen"` — presence-based `• Working (… esc to interrupt)`;
-///   this holds an open turn but cannot reopen a completed Codex turn because
-///   completed screens can retain a stale static Working row.
-/// - `"working-screen-movement"` — that exact semantic row occurred among the
-///   post-cutoff `changed_rows`. Text-equality diffing means this fires only
-///   while the row actually animates or its elapsed time advances, so it can
-///   safely reopen an internal Codex continuation that had no PTY submission.
-fn apply_working_evidence(
-    state: &crate::state::AppState,
-    silence: &Arc<Mutex<SilenceState>>,
-    session_id: &str,
-    now_ms: u64,
-    source: &'static str,
-) {
-    let agent_type = state
-        .session_states
-        .get(session_id)
-        .and_then(|session| session.agent_type.clone());
-    let can_reopen_completed = agent_type.as_deref() == Some("claude")
-        || (agent_type.as_deref() == Some("codex") && source == "working-screen-movement");
-    let reopened_completion = {
-        let mut sl = silence.lock();
-        let turn_completed = state
-            .session_states
-            .get(session_id)
-            .is_some_and(|session| sl.completion_declared_for_epoch(session.turn_epoch));
-        if turn_completed && !can_reopen_completed {
-            return;
-        }
-        if sl.explicit_idle && !can_reopen_completed {
-            return;
-        }
-        let reopen = can_reopen_completed && (turn_completed || sl.explicit_idle);
-        if reopen {
-            // Claude can emit Stop/suggest before a blocking Stop hook finishes;
-            // Codex can start an internal continuation without a PTY submission.
-            // Current semantic movement is stronger than either stale boundary.
-            sl.reset_suggest_memory();
-        }
-        sl.note_working_screen();
-        invalidate_background_probe_boundary_locked(state, session_id);
-        reopen
-    };
-    if reopened_completion && let Some(mut session) = state.session_states.get_mut(session_id) {
-        session.suggested_actions = None;
-    }
-    stamp_last_output_now(state, session_id, now_ms);
-    let prev = state
-        .shell_states
-        .get(session_id)
-        .map(|atom| atom.load(std::sync::atomic::Ordering::Acquire));
-    if let Some(prev) = prev
-        && prev != SHELL_BUSY
-        && try_shell_transition(state, session_id, prev, SHELL_BUSY, true)
-    {
-        tracing::debug!(session_id, activity_source = source, "Shell state → busy");
-        emit_shell_state(state, session_id, "busy");
-    }
-}
-
-/// A submitted line to a known agent is strong BUSY evidence even before the
-/// first model token or spinner repaint. Adapter-backed agents hold that state
-/// until a ready screen/explicit Stop; unknown agents retain the timing fallback.
-pub(crate) fn note_submitted_input(state: &AppState, session_id: &str) {
-    note_submitted_input_with_hook(state, session_id, || {});
-}
-
-fn note_submitted_input_with_hook<F: FnOnce()>(state: &AppState, session_id: &str, after_epoch: F) {
-    let agent_type = state
-        .session_states
-        .get(session_id)
-        .and_then(|s| s.agent_type.clone());
-    let Some(agent_type) = agent_type else {
-        if let Some(sl) = state.silence_states.get(session_id) {
-            let mut silence = sl.lock();
-            silence.note_user_submission(false);
-            silence.reset_suggest_memory();
-        }
-        return;
-    };
-
-    let silence = state
-        .silence_states
-        .entry(session_id.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(SilenceState::new())))
-        .clone();
-    let transitioned_busy = {
-        // Lock order for submitted turns is SilenceState → SessionState → shell
-        // atomics. Completion drains and Suggest parsing use the same order.
-        let mut silence = silence.lock();
-        if let Some(mut session) = state.session_states.get_mut(session_id) {
-            session.turn_epoch = session.turn_epoch.wrapping_add(1);
-            session.suggested_actions = None;
-            // The denominator for marker compliance (#4421): one submitted turn
-            // is one chance for the agent to emit its markers.
-            state.note_marker(session_id, crate::state::MarkerKind::TurnSubmitted);
-        }
-        after_epoch();
-        silence.note_user_submission(has_ready_screen_adapter(Some(&agent_type)));
-        silence.reset_suggest_memory();
-        stamp_last_output_now(state, session_id, now_epoch_ms());
-        let prev = state
-            .shell_states
-            .get(session_id)
-            .map(|atom| atom.load(std::sync::atomic::Ordering::Acquire));
-        let transitioned = prev.is_some_and(|prev| {
-            prev != SHELL_BUSY
-                && try_shell_transition_locked(
-                    ShellTransitionRequest {
-                        state,
-                        session_id,
-                        expected: prev,
-                        new: SHELL_BUSY,
-                        notify_parent: true,
-                        observed_turn_epoch: None,
-                    },
-                    Some(&mut silence),
-                    || {},
-                )
-                .0
-        });
-        if transitioned {
-            emit_shell_state(state, session_id, "busy");
-        }
-        transitioned
-    };
-    if transitioned_busy {
-        tracing::debug!(
-            session_id,
-            activity_source = "user-submit",
-            "Shell state → busy"
-        );
-    }
-}
-
-/// Emit a ShellState parsed event via both event bus and Tauri IPC.
-fn emit_shell_state(state: &crate::state::AppState, session_id: &str, shell_state: &str) {
-    let agent_type = state
-        .session_states
-        .get(session_id)
-        .and_then(|s| s.agent_type.clone());
-    let parsed = ParsedEvent::ShellState {
-        state: shell_state.to_string(),
-        agent_type,
-    };
-    match serde_json::to_value(&parsed) {
-        Ok(json) => {
-            state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-                session_id: session_id.to_string(),
-                parsed: json.into(),
-            });
-        }
-        Err(e) => tracing::error!(session_id, "Failed to serialize ShellState event: {e}"),
-    }
-    #[cfg(feature = "desktop")]
-    if let Some(app) = state.app_handle.read().as_ref() {
-        let _ = app.emit(&format!("pty-parsed-{session_id}"), &parsed);
-    }
-}
-
-/// Apply an authoritative shell-state marker and emit the new state if it
-/// changed. Shared by OSC 133 A/C and OSC 7770 `state=` handlers.
-fn transition_explicit_shell_state(
-    state: &crate::state::AppState,
-    session_id: &str,
-    target: u8,
-    label: &str,
-    hook_state: bool,
-) {
-    transition_explicit_shell_state_with_hook(state, session_id, target, label, hook_state, || {});
-}
-
-fn transition_explicit_shell_state_with_hook<F: FnOnce()>(
-    state: &crate::state::AppState,
-    session_id: &str,
-    target: u8,
-    label: &str,
-    hook_state: bool,
-    before_transaction: F,
-) {
-    let evidence_turn_epoch = state
-        .session_states
-        .get(session_id)
-        .map(|session| session.turn_epoch);
-    before_transaction();
-    let silence = state
-        .silence_states
-        .get(session_id)
-        .map(|entry| Arc::clone(entry.value()));
-    let (transitioned, parent_dispatch) = {
-        let mut silence_guard = silence.as_ref().map(|silence| silence.lock());
-        if target == SHELL_IDLE
-            && evidence_turn_epoch.is_some_and(|observed| {
-                state
-                    .session_states
-                    .get(session_id)
-                    .is_some_and(|session| session.turn_epoch != observed)
-            })
-        {
-            return;
-        }
-        if let Some(silence) = silence_guard.as_mut() {
-            silence.note_explicit_state(target, hook_state);
-            if target == SHELL_BUSY {
-                invalidate_background_probe_boundary_locked(state, session_id);
-            }
-        }
-        if target == SHELL_BUSY {
-            stamp_last_output_now(state, session_id, now_epoch_ms());
-        }
-        let prev = match state.shell_states.get(session_id) {
-            Some(atom) => atom.load(std::sync::atomic::Ordering::Acquire),
-            None => return,
-        };
-        if prev == target {
-            return;
-        }
-        if prev == SHELL_BUSY
-            && target == SHELL_IDLE
-            && let Some(turn_epoch) = evidence_turn_epoch
-        {
-            arm_explicit_idle_background_probe(state, session_id, turn_epoch);
-        }
-        try_shell_transition_locked(
-            ShellTransitionRequest {
-                state,
-                session_id,
-                expected: prev,
-                new: target,
-                notify_parent: true,
-                observed_turn_epoch: evidence_turn_epoch,
-            },
-            silence_guard.as_deref_mut(),
-            || {},
-        )
-    };
-    if let Some(dispatch) = parent_dispatch {
-        dispatch_parent_lifecycle(state, dispatch);
-    }
-    if transitioned {
-        emit_shell_state(state, session_id, label);
-        // Publish IDLE before a queued delivery claims IDLE→BUSY again. Reversing
-        // this order leaves the backend BUSY while the frontend's last event is
-        // the stale IDLE emitted by this caller.
-        if target == SHELL_IDLE {
-            reevaluate_orchestrator_mail_wake(state, session_id);
-            flush_pending_injections(state, session_id);
-        }
-    }
-}
-
-/// Emit an ActiveSubtasks parsed event via both event bus and Tauri IPC.
-/// Used by the stale-subtasks recovery path to keep the frontend store in
-/// sync after `should_transition_idle` force-clears the in-memory counter.
-fn emit_active_subtasks(
-    state: &crate::state::AppState,
-    session_id: &str,
-    count: u32,
-    task_type: &str,
-) {
-    let parsed = ParsedEvent::ActiveSubtasks {
-        count,
-        task_type: task_type.to_string(),
-    };
-    match serde_json::to_value(&parsed) {
-        Ok(json) => {
-            state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-                session_id: session_id.to_string(),
-                parsed: json.into(),
-            });
-        }
-        Err(e) => tracing::error!(session_id, "Failed to serialize ActiveSubtasks event: {e}"),
-    }
-    #[cfg(feature = "desktop")]
-    if let Some(app) = state.app_handle.read().as_ref() {
-        let _ = app.emit(&format!("pty-parsed-{session_id}"), &parsed);
-    }
-}
-
-/// Extract a signal number from portable_pty's signal string.
-/// Format is typically "Killed: 9", "Interrupt: 2", or "Signal 15".
-pub(crate) fn parse_signal_number(sig: &str) -> i32 {
-    sig.rsplit(|c: char| !c.is_ascii_digit())
-        .find(|s| !s.is_empty())
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0)
-}
-
-fn parse_osc7_cwd(url: &str) -> Result<String, ()> {
-    let rest = url.strip_prefix("file://").ok_or(())?;
-    let path_start = rest.find('/').ok_or(())?;
-    let raw = &rest[path_start..];
-    if raw.is_empty() {
-        return Err(());
-    }
-    let decoded = percent_decode(raw)?;
-    let path = if decoded.len() > 1 && decoded.ends_with('/') {
-        &decoded[..decoded.len() - 1]
-    } else {
-        &decoded
-    };
-    if !path.starts_with('/') {
-        return Err(());
-    }
-    Ok(path.to_string())
-}
-
-fn percent_decode(s: &str) -> Result<String, ()> {
-    let mut out = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = hex_val(bytes[i + 1]).ok_or(())?;
-            let lo = hex_val(bytes[i + 2]).ok_or(())?;
-            out.push(hi << 4 | lo);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| ())
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn parse_osc133_exit_code(command: char, params: &str) -> Option<i32> {
-    if command == 'D' && !params.is_empty() {
-        params.parse::<i32>().ok()
-    } else {
-        None
-    }
-}
-
-/// Detect Claude Code tool call headers: `⏺ ToolName(args)`.
-/// The ⏺ (U+23FA) bullet followed by a capitalized word and `(` is unique to
-/// CC's expanded tool-call rendering — agent prose after ⏺ starts with a
-/// lowercase word or a proper noun without parens.
-fn is_cc_tool_call_header(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    let rest = if let Some(r) = trimmed.strip_prefix('\u{23FA}') {
-        r
-    } else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    if rest.is_empty() {
-        return false;
-    }
-    // Must start with uppercase ASCII (ToolName) or `mcp__` prefix.
-    let first = rest.as_bytes()[0];
-    if !first.is_ascii_uppercase() && !rest.starts_with("mcp__") {
-        return false;
-    }
-    // Find the opening paren — everything before it must be a single
-    // identifier (no spaces). Rejects prose like "Boss, ci sono (molti)".
-    rest.find('(').is_some_and(|pos| {
-        let before = &rest[..pos];
-        !before.is_empty()
-            && before
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    })
-}
-
-/// Emit an `Inferred` command outcome for shells that don't speak OSC 133.
-/// Called right after a busy→idle transition; no-op once we've ever observed
-/// a marker for this session (shell-integration path is authoritative then).
-/// The command text is unknown in this mode, but cwd + snippet still populate
-/// context summary and cwd history.
-fn record_inferred_outcome_if_no_osc133(state: &AppState, session_id: &str) {
-    use crate::ai_agent::knowledge::{CommandOutcome, OutcomeClass};
-
-    if state.has_osc133_integration.contains_key(session_id) {
-        return;
-    }
-    // try_lock to avoid blocking the timer thread if write_pty holds
-    // the session lock. Inferred outcomes are best-effort — missing cwd
-    // for one record is acceptable vs risking contention.
-    let cwd = state
-        .sessions
-        .get(session_id)
-        .and_then(|s| s.try_lock().and_then(|s| s.cwd.clone()))
-        .unwrap_or_default();
-    let output_snippet = state
-        .vt_log_buffers
-        .get(session_id)
-        .map(|b| {
-            let buf = b.lock();
-            buf.screen_rows().join("\n")
-        })
-        .unwrap_or_default();
-    let mut tail_start = output_snippet.len().saturating_sub(500);
-    while tail_start > 0 && !output_snippet.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    let output_snippet = output_snippet[tail_start..].to_string();
-
-    let outcome = CommandOutcome {
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        command: String::new(),
-        cwd,
-        exit_code: None,
-        output_snippet,
-        classification: OutcomeClass::Inferred,
-        duration_ms: 0,
-        id: 0,
-    };
-    state.record_outcome(session_id, outcome);
-}
 
 /// How many bottom screen rows to check when verifying a question candidate.
 /// Wide enough to cover agent footer layouts (mode line, spinner, Wiz HUD,
@@ -3665,7 +355,16 @@ const SCREEN_VERIFY_ROWS: usize = 20;
 struct TimerIdleTransition {
     transitioned: bool,
     force_cleared_subtasks: bool,
+    /// A stable Ready level still drives queued-command flushing.
     screen_confirms_idle: bool,
+    /// Only a new confirmation grants another orchestrator wake budget.
+    screen_newly_confirms_idle: bool,
+    // Returned provenance is inspected by regression tests; production uses the transition result.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "test-observed transition provenance")
+    )]
+    evidence: Option<Evidence>,
 }
 
 fn try_timer_idle_transition(
@@ -3681,10 +380,18 @@ fn try_timer_idle_transition(
     // probe locks the PtySession, which the reader thread holds while it takes
     // this same SilenceState.
     let nested_prompt = agent_type.is_none() && explicit_busy_is_a_nested_prompt(state, session_id);
-    let (transitioned, force_cleared_subtasks, screen_confirms_idle, parent_dispatch) = {
+    let (
+        transitioned,
+        force_cleared_subtasks,
+        screen_confirms_idle,
+        screen_newly_confirms_idle,
+        evidence,
+        parent_dispatch,
+    ) = {
         let mut silence = silence.lock();
         if evidence_turn_epoch.is_some_and(|observed| {
             state
+                .session_maps
                 .session_states
                 .get(session_id)
                 .is_some_and(|session| session.turn_epoch != observed)
@@ -3693,10 +400,34 @@ fn try_timer_idle_transition(
                 transitioned: false,
                 force_cleared_subtasks: false,
                 screen_confirms_idle: false,
+                screen_newly_confirms_idle: false,
+                evidence: None,
             };
         }
 
+        let idle_was_confirmed = silence.idle_confirmed();
+        let submission_stale = screen_activity == AgentScreenActivity::Unknown
+            && agent_type == Some("claude")
+            && silence.unacknowledged_submission_is_stale();
+        let protocol_stale =
+            screen_activity == AgentScreenActivity::Ready && silence.protocol_busy_is_stale();
         let screen_confirms_idle = match screen_activity {
+            AgentScreenActivity::Ready
+                if agent_type == Some("ego") && silence.injection_delivery_uncertain =>
+            {
+                silence.recover_uncertain_injection_on_empty_composer()
+            }
+            AgentScreenActivity::Ready if protocol_stale => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    activity_source = "protocol-stale",
+                    "authoritative busy signal became stale on a stable ready screen"
+                );
+                silence
+                    .evidence
+                    .force_idle(EvidenceRank::Process, "protocol-stale");
+                true
+            }
             AgentScreenActivity::Ready => silence.note_ready_screen(),
             AgentScreenActivity::Interrupted => silence.note_interrupted_screen(),
             AgentScreenActivity::Unknown => {
@@ -3705,15 +436,35 @@ fn try_timer_idle_transition(
             }
             AgentScreenActivity::Working => false,
         };
-        let is_busy = state
+        let screen_newly_confirms_idle = screen_confirms_idle && !idle_was_confirmed;
+        let observed_shell = state
+            .session_maps
             .shell_states
             .get(session_id)
-            .is_some_and(|atom| atom.load(std::sync::atomic::Ordering::Acquire) == SHELL_BUSY);
+            .map(|atom| atom.load(std::sync::atomic::Ordering::Acquire));
+        // A headless agent spawn never typed a launch line, so no shell edge
+        // ever marked it BUSY: the atom is still SHELL_NULL and a TUI that
+        // paints no working screen (Gemini) would never reach IDLE. For an
+        // agent session a screen-confirmed Ready is the same evidence that
+        // releases BUSY, so it releases NULL too. A plain shell
+        // (`agent_type == None`) keeps NULL until its own OSC 133 edge.
+        let is_busy = observed_shell == Some(SHELL_BUSY)
+            || (observed_shell == Some(SHELL_NULL) && agent_type.is_some() && screen_confirms_idle);
+        let released_from = observed_shell.unwrap_or(SHELL_NULL);
+        if !is_busy && screen_confirms_idle && !idle_was_confirmed {
+            tracing::debug!(
+                session_id,
+                queued_commands = queued_command_count(state, session_id),
+                "Ready confirmed after shell became idle"
+            );
+        }
         if !is_busy || screen_activity == AgentScreenActivity::Working {
             return TimerIdleTransition {
                 transitioned: false,
                 force_cleared_subtasks: false,
                 screen_confirms_idle,
+                screen_newly_confirms_idle,
+                evidence: None,
             };
         }
 
@@ -3721,34 +472,72 @@ fn try_timer_idle_transition(
             screen_activity,
             AgentScreenActivity::Ready | AgentScreenActivity::Interrupted
         ) && !screen_confirms_idle;
-        let ready_probe_satisfied = !screen_confirms_idle
-            || ready_probe_satisfied_or_requested(state, session_id, &lifecycle);
-        let decision = if screen_confirms_idle && ready_probe_satisfied {
-            IdleDecision::yes(evidence_turn_epoch)
-        } else if screen_confirms_idle
-            || (silence.explicit_busy && !nested_prompt)
-            || hold_for_ready_confirmation
-            || silence.is_api_retry_active()
-        {
-            IdleDecision::NO
+        let probe = if screen_confirms_idle {
+            foreground_probe(state, session_id, &lifecycle)
         } else {
-            should_transition_idle(state, session_id)
+            ForegroundProbe::Open
         };
+        let decision =
+            if submission_stale || (screen_confirms_idle && probe != ForegroundProbe::Pending) {
+                IdleDecision::yes(evidence_turn_epoch)
+            } else if screen_confirms_idle
+                || (silence.explicit_busy() && !nested_prompt)
+                || hold_for_ready_confirmation
+                || silence.is_api_retry_active()
+            {
+                IdleDecision::NO
+            } else {
+                should_transition_idle(state, session_id)
+            };
         if !decision.should_transition {
             return TimerIdleTransition {
                 transitioned: false,
                 force_cleared_subtasks: false,
                 screen_confirms_idle,
+                screen_newly_confirms_idle,
+                evidence: None,
             };
         }
-        if !screen_confirms_idle {
-            silence.idle_confirmed = agent_type.is_none();
+        if probe == ForegroundProbe::Quiet {
+            // The probe looked at the process table and found nothing left
+            // running under the agent. That outranks the ready screen that
+            // asked for it, so the turn closes on `activity_source=process`
+            // rather than on `agent-ready-screen` (#771-4733) — a reader can
+            // now tell a close backed by a live process observation from a
+            // `protocol-stale` give-up and from a bare silence timeout.
+            //
+            // `force_idle`, like the two screen adapters: the `else if` chain
+            // above already decided this transition is allowed, so the generic
+            // busy-rank gate in `record_idle` must not re-reject it.
+            silence
+                .evidence
+                .force_idle(EvidenceRank::Process, "process");
         }
+        if submission_stale {
+            silence
+                .evidence
+                .force_idle(EvidenceRank::Process, "submission-stale");
+        } else if !screen_confirms_idle {
+            // Silence-timeout evidence, forced in regardless of rank: the
+            // `else if` chain above (mirroring the old checks exactly, incl.
+            // `nested_prompt`) already decided this is allowed, so the generic
+            // busy-rank gate in `record_idle` must not re-reject it.
+            let source = if agent_type.is_none() {
+                "silence-timeout-shell"
+            } else {
+                "silence-timeout-agent"
+            };
+            silence.evidence.force_idle(EvidenceRank::Silence, source);
+        }
+        let evidence = match decide(&silence.evidence, true, std::time::Instant::now()) {
+            Some(Transition::ToIdle(evidence)) => Some(evidence),
+            _ => None,
+        };
         let (transitioned, parent_dispatch) = try_shell_transition_locked(
             ShellTransitionRequest {
                 state,
                 session_id,
-                expected: SHELL_BUSY,
+                expected: released_from,
                 new: SHELL_IDLE,
                 notify_parent: true,
                 observed_turn_epoch: decision.turn_epoch,
@@ -3760,6 +549,8 @@ fn try_timer_idle_transition(
             transitioned,
             decision.force_cleared_subtasks,
             screen_confirms_idle,
+            screen_newly_confirms_idle,
+            evidence,
             parent_dispatch,
         )
     };
@@ -3770,6 +561,8 @@ fn try_timer_idle_transition(
         transitioned,
         force_cleared_subtasks,
         screen_confirms_idle,
+        screen_newly_confirms_idle,
+        evidence,
     }
 }
 
@@ -3787,6 +580,7 @@ fn completion_adjusted_screen_activity(
     // reopens the same turn in `apply_working_evidence`; only adapters whose
     // completed screen can retain a stale Working row need this downgrade.
     if state
+        .session_maps
         .session_states
         .get(session_id)
         .is_some_and(|session| session.agent_type.as_deref() == Some("claude"))
@@ -3794,7 +588,15 @@ fn completion_adjusted_screen_activity(
         return AgentScreenActivity::Working;
     }
     let silence = silence.lock();
+    if silence
+        .evidence
+        .busy
+        .is_some_and(|busy| busy.rank > EvidenceRank::Screen)
+    {
+        return AgentScreenActivity::Working;
+    }
     if state
+        .session_maps
         .session_states
         .get(session_id)
         .is_some_and(|session| silence.completion_declared_for_epoch(session.turn_epoch))
@@ -3848,7 +650,7 @@ fn spawn_silence_timer(
                     gap_secs = tick_gap.as_secs(),
                     "Sleep-wake detected — resetting timestamps"
                 );
-                if let Some(ts) = state.last_output_ms.get(&session_id) {
+                if let Some(ts) = state.session_maps.last_output_ms.get(&session_id) {
                     ts.store(epoch_now, std::sync::atomic::Ordering::Release);
                 }
                 {
@@ -3856,6 +658,11 @@ fn spawn_silence_timer(
                     let now = std::time::Instant::now();
                     sl.last_output_at = now;
                     sl.last_chunk_at = now;
+                    if sl.injection_delivery_uncertain {
+                        // Resetting clocks is not a new composer repaint.
+                        sl.injection_uncertain_since = Some(now);
+                        sl.screen_ready_pending_since = None;
+                    }
                 }
                 continue;
             }
@@ -3867,34 +674,43 @@ fn spawn_silence_timer(
                 silence.lock().expire_orchestrator_notice_uncertainty();
             }
 
+            // Discovery must not depend on a frontend polling the desktop IPC.
+            // Headless/manual launches need the same parser and mail eligibility.
+            refresh_session_agent(&state, &session_id);
+
             // Reconcile high-confidence screen evidence before the silence
             // fallback. Working here means Codex's presence-based status line
             // (the only screen classifier that returns Working, #446-596f); it
             // runs regardless of current state so it repairs an already-false-
             // idle session instead of merely keeping a pre-existing BUSY alive.
-            // Claude/Gemini/Aider BUSY is movement-driven in the reader.
+            // Claude/Gemini BUSY is movement-driven in the reader.
             let idle_evidence_turn_epoch = state
+                .session_maps
                 .session_states
                 .get(&session_id)
                 .map(|session| session.turn_epoch);
             let agent_type = state
+                .session_maps
                 .session_states
                 .get(&session_id)
                 .and_then(|s| s.agent_type.clone());
-            let screen_activity = state
-                .vt_log_buffers
-                .get(&session_id)
-                .map(|vt| {
-                    detect_agent_screen_activity(agent_type.as_deref(), &vt.lock().screen_rows())
-                })
-                .unwrap_or(AgentScreenActivity::Unknown);
+            // Reused from the reader chunk path (#744-138c) instead of a fresh
+            // `detect_agent_screen_activity` call: with no chunk having
+            // arrived since the last classification, the screen the function
+            // would see is byte-identical, so the cached verdict is the same
+            // answer, not a stale one. Keeps the classifier to at most one
+            // call per session per `SILENCE_CHECK_INTERVAL` (previously two:
+            // one here, one in the reader).
+            let screen_activity = silence.lock().cached_screen_activity;
             let screen_activity =
                 completion_adjusted_screen_activity(&state, &silence, &session_id, screen_activity);
             let tracked_background_work = state
+                .session_maps
                 .session_states
                 .get(&session_id)
                 .is_some_and(|session| session.background_work);
             let shell_is_busy = state
+                .session_maps
                 .shell_states
                 .get(&session_id)
                 .is_some_and(|shell| shell.load(Ordering::Acquire) == SHELL_BUSY);
@@ -3926,23 +742,28 @@ fn spawn_silence_timer(
                     if transition.force_cleared_subtasks {
                         emit_active_subtasks(&state, &session_id, 0, "");
                     }
-                    if let Some(vt) = state.vt_log_buffers.get(&session_id) {
-                        vt.lock().process(b"\x1b[?25h");
+                    if let Some(vt) = state.grid.vt_log_buffers.get(&session_id) {
+                        vt.lock().process_local(b"\x1b[?25h");
                     }
-                    tracing::debug!(
-                        session_id,
-                        activity_source = if transition.screen_confirms_idle {
-                            "agent-ready-screen"
-                        } else {
-                            "silence"
-                        },
-                        idle_confirmed = silence.lock().idle_confirmed,
-                        "Shell state → idle"
-                    );
                     emit_shell_state(&state, &session_id, "idle");
                     reevaluate_orchestrator_mail_wake(&state, &session_id);
                     flush_pending_injections(&state, &session_id);
-                    record_inferred_outcome_if_no_osc133(&state, &session_id);
+                } else if transition.screen_confirms_idle && !shell_is_busy {
+                    // Silence can mark the shell idle before the Ready screen
+                    // stabilizes. That later confirmation has no second shell
+                    // edge, so it must retry the existing self-guarded flush.
+                    if transition.screen_newly_confirms_idle {
+                        reevaluate_orchestrator_mail_wake(&state, &session_id);
+                    } else if let Some(recipient) =
+                        orchestrator_recipient_for_pty(&state, &session_id)
+                    {
+                        // A stable Ready level may chase leftovers, but must not
+                        // undo the NotStarted cap for an unchanged composer.
+                        chase_orchestrator_mail_wake(&state, &recipient);
+                    }
+                    if queued_command_count(&state, &session_id) > 0 {
+                        flush_pending_injections(&state, &session_id);
+                    }
                 }
             }
 
@@ -3977,6 +798,7 @@ fn spawn_silence_timer(
             // IDLE makes the frontend's `pendingSuggest` race impossible —
             // the event physically cannot reach the UI before idle.
             emit_pending_suggest_if_idle(&state, &silence, &session_id);
+            emit_open_intent_if_idle(&state, &silence, &session_id);
 
             // Retraction is a reconciliation loop, not part of the one-shot
             // question-emission gate. Once a low-confidence wait has fired,
@@ -3984,25 +806,44 @@ fn spawn_silence_timer(
             // `is_silent()` made the documented backstop unreachable forever.
             let quiet_for_retraction = silence.lock().is_quiet_for_question_retraction();
             if quiet_for_retraction {
-                let active_question = state.session_states.get(&session_id).and_then(|s| {
-                    (s.awaiting_input && !s.question_confident && s.choice_prompt.is_none())
-                        .then(|| s.question_text.clone())
-                        .flatten()
-                });
+                let active_question =
+                    state
+                        .session_maps
+                        .session_states
+                        .get(&session_id)
+                        .and_then(|s| {
+                            (s.awaiting_input && !s.question_confident && s.choice_prompt.is_none())
+                                .then(|| s.question_text.clone())
+                                .flatten()
+                        });
                 if let Some(active_question) = active_question {
-                    let still_current = state.vt_log_buffers.get(&session_id).is_some_and(|vt| {
-                        match current_chat_question(&vt.lock().screen_rows()) {
-                            CurrentChatQuestion::PromptAnchored(Some(current)) => {
-                                current.trim() == active_question.trim()
-                            }
-                            CurrentChatQuestion::PromptAnchored(None) => false,
-                            CurrentChatQuestion::NoPromptAnchor => false,
-                        }
-                    });
+                    let still_current =
+                        state
+                            .grid
+                            .vt_log_buffers
+                            .get(&session_id)
+                            .is_some_and(|vt| {
+                                match current_chat_question(&vt.lock().screen_rows()) {
+                                    CurrentChatQuestion::PromptAnchored(Some(current)) => {
+                                        current.trim() == active_question.trim()
+                                    }
+                                    CurrentChatQuestion::PromptAnchored(None) => false,
+                                    CurrentChatQuestion::NoPromptAnchor => false,
+                                }
+                            });
                     if !still_current {
                         emit_question_cleared_if_stale(&state, &session_id);
                     }
                 }
+            }
+
+            // Chat-question heuristics, like open-dialog recovery in the reader,
+            // require a live agent. Its old title can remain above the returned
+            // shell prompt and must not become a new wait after ten quiet seconds.
+            if agent_type.is_none() {
+                silence.lock().clear_stale_question();
+                emit_question_cleared_if_stale(&state, &session_id);
+                continue;
             }
 
             // Check temporal conditions first (shared by both strategies).
@@ -4013,6 +854,7 @@ fn spawn_silence_timer(
             let (is_silent, question_turn_epoch) = {
                 let sl = silence.lock();
                 let epoch = state
+                    .session_maps
                     .session_states
                     .get(&session_id)
                     .map(|session| session.turn_epoch)
@@ -4027,7 +869,7 @@ fn spawn_silence_timer(
             // for the most recent plausible question within a bounded window.
             // This is robust to trailing non-question text between the question
             // and the prompt box (e.g. "(stopping here — waiting for your answer)").
-            let current_question = state.vt_log_buffers.get(&session_id).map(|vt| {
+            let current_question = state.grid.vt_log_buffers.get(&session_id).map(|vt| {
                 let rows = vt.lock().screen_rows();
                 let question = current_chat_question(&rows);
                 tracing::trace!(
@@ -4054,6 +896,7 @@ fn spawn_silence_timer(
                     match question {
                         Some(ref text) => {
                             let on_screen = state
+                                .grid
                                 .vt_log_buffers
                                 .get(&session_id)
                                 .map(|vt| {
@@ -4093,6 +936,7 @@ fn spawn_silence_timer(
             // runtime. A persisted config flag alone can be stale after a failed
             // install or an agent-version change.
             let hook_configured = state
+                .session_maps
                 .session_states
                 .get(&session_id)
                 .map(|s| s.hook_instrumented)
@@ -4125,106 +969,6 @@ fn spawn_silence_timer(
     });
 }
 
-/// Retract a low-confidence `awaiting_input` once the screen is quiet and no
-/// question is visible any more.
-///
-/// The three existing clears all need an event that may never arrive: a typed
-/// non-empty line (`UserInput`), a choice-prompt key (`resolve_choice_prompt_input`),
-/// or a parsed `status-line`. A user who answers an approval dialog with a bare
-/// Enter, or an agent whose spinner never parses as a status line, produces
-/// none of them — the badge then reads "question" for the rest of the session
-/// with the prompt long gone from the screen.
-///
-/// Only the heuristic (`confident == false`) state is retracted. A confident
-/// question stays sticky on purpose: grok keeps repainting while it waits, so
-/// "not on screen right now" is not proof that it was answered. A live
-/// `choice_prompt` owns its own resolution and is left alone.
-fn emit_question_cleared_if_stale(state: &Arc<AppState>, session_id: &str) {
-    let turn_epoch = state.session_states.get(session_id).and_then(|s| {
-        (s.awaiting_input && !s.question_confident && s.choice_prompt.is_none())
-            .then_some(s.turn_epoch)
-    });
-    let Some(turn_epoch) = turn_epoch else {
-        return;
-    };
-    tracing::debug!(
-        session_id = %session_id,
-        "silence_timer: retracting stale awaiting_input (no question on screen)"
-    );
-    let parsed = ParsedEvent::QuestionCleared;
-    if let Ok(mut json) = serde_json::to_value(&parsed) {
-        if let Some(object) = json.as_object_mut() {
-            object.insert("_turn_epoch".to_string(), turn_epoch.into());
-        }
-        #[cfg(feature = "desktop")]
-        if let Some(app) = state.app_handle.read().as_ref() {
-            let _ = app.emit(&format!("pty-parsed-{session_id}"), &json);
-        }
-        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-            session_id: session_id.to_string(),
-            parsed: json.into(),
-        });
-    }
-}
-
-/// Publish the explicit end-of-task marker only after the shell has settled.
-/// A completed lifecycle event is emitted from the same drain point, so an
-/// orchestrator never has to reinterpret an ambiguous BUSY→IDLE transition.
-fn emit_pending_suggest_if_idle(
-    state: &AppState,
-    silence: &Arc<Mutex<SilenceState>>,
-    session_id: &str,
-) -> bool {
-    let shell_is_idle = state
-        .shell_states
-        .get(session_id)
-        .map(|atom| atom.load(std::sync::atomic::Ordering::Acquire) == SHELL_IDLE)
-        .unwrap_or(false);
-    if !shell_is_idle {
-        return false;
-    }
-    // Serialize completion emission against note_submitted_input, which takes
-    // this same lock before advancing SessionState.turn_epoch and clearing the
-    // old turn. Whichever owns the lock first defines the lifecycle order.
-    let mut silence_state = silence.lock();
-    let Some((current_turn_epoch, background_work)) = state
-        .session_states
-        .get(session_id)
-        .map(|session| (session.turn_epoch, session.background_work))
-    else {
-        return false;
-    };
-    if background_work {
-        return false;
-    }
-    let Some((turn_epoch, items)) = silence_state.drain_pending_suggest_with_epoch() else {
-        return false;
-    };
-    if turn_epoch != current_turn_epoch {
-        if silence_state.completion_turn_epoch == turn_epoch {
-            silence_state.completion_declared = false;
-            silence_state.completion_turn_epoch = 0;
-        }
-        return false;
-    }
-    emit_suggest_event(state, session_id, turn_epoch, items);
-    let parent_dispatch = enqueue_state_change_to_parent(
-        state,
-        session_id,
-        serde_json::json!({
-            "type": "state_change",
-            "state": "completed",
-            "session_id": session_id,
-        }),
-    );
-    drop(silence_state);
-    if let Some(dispatch) = parent_dispatch {
-        dispatch_parent_lifecycle(state, dispatch);
-    }
-    reevaluate_orchestrator_mail_wake(state, session_id);
-    true
-}
-
 // ---------------------------------------------------------------------------
 // ChunkProcessor: shared output processing logic for desktop & headless readers
 // ---------------------------------------------------------------------------
@@ -4255,7 +999,10 @@ fn clean_action_required_title(title: &str) -> String {
 /// - `awaiting` → confident `Question` (sets `awaiting_input` + `question_confident`)
 /// - `busy`     → `UserInput` clear (hook busy is authoritative — clears an awaiting
 ///   set by a prior `PreToolUse(AskUserQuestion)`; empty content never overwrites
-///   `last_prompt`)
+///   `last_prompt`). Fires on every tool call too, so it carries no prompt row
+///   (`line = -1`).
+/// - `prompt`   → same clear, sent only by the user-prompt-submit hook, and the only
+///   one that carries the prompt row for the scrollbar marker
 /// - anything else (incl. `idle`, unknown) → `None`
 fn tuic_state_awaiting_event(payload: &str, line: i64) -> Option<ParsedEvent> {
     match payload {
@@ -4263,10 +1010,14 @@ fn tuic_state_awaiting_event(payload: &str, line: i64) -> Option<ParsedEvent> {
             prompt_text: String::new(),
             confident: true,
         }),
-        // `line` is the absolute prompt row (history_size + cursor row) at the
-        // busy transition — the row the user's submitted prompt sits on. Carried
-        // so the frontend can mark user-prompt lines on the scrollbar.
         "busy" => Some(ParsedEvent::UserInput {
+            content: String::new(),
+            line: -1,
+        }),
+        // `line` is the absolute prompt row (history_size + cursor row) at the
+        // submit — the row the user's prompt sits on. Carried so the frontend can
+        // mark user-prompt lines on the scrollbar.
+        "prompt" => Some(ParsedEvent::UserInput {
             content: String::new(),
             line,
         }),
@@ -4281,10 +1032,23 @@ pub(crate) fn hook_instrumented_for(
     agents: &crate::config::AgentsConfig,
     agent_type: Option<&str>,
 ) -> bool {
-    agent_type
-        .and_then(|at| agents.agents.get(at))
-        .and_then(|s| s.hook_instrumentation)
-        .unwrap_or(false)
+    let Some(agent_type) = agent_type else {
+        return false;
+    };
+    // ego emits OSC 7770 natively: there is no hook to install or disable.
+    if agent_type == "ego" {
+        return true;
+    }
+    let settings = agents.agents.get(agent_type);
+    if matches!(agent_type, "claude" | "codex") {
+        settings
+            .and_then(|s| s.native_status_signals)
+            .unwrap_or(true)
+    } else {
+        settings
+            .and_then(|s| s.hook_instrumentation)
+            .unwrap_or(false)
+    }
 }
 
 /// Events carried by the RAW byte stream, before any VT rendering — sequences
@@ -4294,11 +1058,9 @@ pub(crate) fn hook_instrumented_for(
 /// Deliberately separate from the clean-row parsers: everything appended here
 /// skips `suppress_heuristic_question`. That filter exists to stop regex
 /// *guesses* from double-firing against the hook's `state=awaiting`; the OSC 777
-/// parser first classifies whether the protocol notification actually requires
-/// a response. A qualifying OSC 777 notification is the only awaiting signal
-/// for a hook-instrumented agent whose prompt is not
-/// `PreToolUse(AskUserQuestion)` — a plan or skill Ink picker emits no hook
-/// state at all, which is why such a session sat blocked behind a "working" dot.
+/// parser accepts only unambiguous permission or approval wording. Claude's
+/// generic idle notification is not a question. Plan and skill Ink pickers
+/// without a hook state use the visible footer's presence recovery instead.
 ///
 /// Shared with the fixture harness (`awaiting_signal_fixtures`) so a test can
 /// never assert against a composition that production does not run.
@@ -4356,6 +1118,72 @@ fn unterminated_osc_tail(data: &str) -> String {
 /// longest observed notify body is under 60 bytes.
 const MAX_RAW_CARRY: usize = 512;
 
+/// Record an `intent:` marker as a Progress journal entry.
+///
+/// Silent on every skip. Three of them are ordinary and none is the user's
+/// problem: collection is off, the session is not inside a registered project,
+/// or the text does not survive validation. A missing project is deliberately
+/// NOT resolved to the focused UI repository — that files one agent's work
+/// under whatever the human happened to be looking at.
+///
+/// The write is synchronous. This runs on the PTY reader thread, which is not
+/// the async executor, and an intent arrives a few times a minute against a
+/// sub-millisecond WAL insert.
+fn record_intent_in_journal(state: &AppState, session_id: &str, text: &str) -> bool {
+    let (agent_type, agent_name) = crate::progress::session_identity(state, session_id);
+    if !crate::progress::progress_tracking_enabled(state, agent_type.as_deref()) {
+        return true;
+    }
+    let Some(project) = crate::progress::project_for_session(state, session_id) else {
+        return true;
+    };
+    match crate::progress::record_intent(
+        state,
+        Some(&project),
+        text,
+        agent_name,
+        agent_type.as_deref(),
+        Some(session_id),
+    ) {
+        Ok(entry) => {
+            crate::mcp_http::mcp_transport::emit_progress_entry(state, entry);
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+            source = "progress",
+            session_id = %session_id,
+            error = %error,
+            "intent: not recorded in the Progress journal"
+            );
+            false
+        }
+    }
+}
+
+fn publish_intent_event(state: &AppState, session_id: &str, event: &ParsedEvent, turn_epoch: u64) {
+    let ParsedEvent::Intent { text, .. } = event else {
+        return;
+    };
+    if !record_intent_in_journal(state, session_id, text) {
+        return;
+    }
+    state.note_marker(session_id, crate::state::MarkerKind::Intent);
+    if let Ok(mut json) = serde_json::to_value(event) {
+        if let Some(object) = json.as_object_mut() {
+            object.insert("_turn_epoch".to_string(), turn_epoch.into());
+        }
+        #[cfg(feature = "desktop")]
+        if let Some(app) = state.app_handle.read().as_ref() {
+            let _ = app.emit(&format!("pty-parsed-{session_id}"), &json);
+        }
+        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
+            session_id: session_id.to_string(),
+            parsed: json.into(),
+        });
+    }
+}
+
 /// Whether a heuristic `Question` event should be suppressed for this session.
 /// Hook-instrumented agents report awaiting via OSC 7770 (`state=awaiting`), so
 /// the silence/regex question heuristics would only double-fire. Only `Question`
@@ -4391,12 +1219,11 @@ fn suppress_heuristic_question(hook_instrumented: bool, event: &ParsedEvent) -> 
 /// non-hook `AskUserQuestion`'s opening frame.
 fn rearm_awaiting_for_open_dialog(
     screen: &[String],
-    hook_instrumented: bool,
     awaiting_input: bool,
     has_choice_prompt: bool,
     question_this_tick: bool,
 ) -> Option<ParsedEvent> {
-    if hook_instrumented || awaiting_input || has_choice_prompt || question_this_tick {
+    if awaiting_input || has_choice_prompt || question_this_tick {
         return None;
     }
     crate::output_parser::ink_dialog_footer(screen).map(|footer| ParsedEvent::Question {
@@ -4405,11 +1232,85 @@ fn rearm_awaiting_for_open_dialog(
     })
 }
 
+/// Only the first, default-No workspace trust picker of a managed Claude child.
+/// Require the question and both choices on the rendered screen so ordinary
+/// permission prompts, chat text and a manually changed selection stay intact.
+fn managed_claude_trust_dialog(screen: &[String]) -> bool {
+    let text = screen.join(" ");
+    if !text.contains("Quick safety check:")
+        || !text.contains("Is this a project you created or one you trust?")
+    {
+        return false;
+    }
+    let yes = screen
+        .iter()
+        .position(|row| row.trim_start().starts_with("Yes,"));
+    let selected_no = screen.iter().position(|row| {
+        let row = row.trim_start();
+        let choice = row
+            .strip_prefix('❯')
+            .or_else(|| row.strip_prefix('›'))
+            .or_else(|| row.strip_prefix('>'));
+        choice.is_some_and(|choice| choice.trim_start().contains("No, exit"))
+    });
+    matches!((yes, selected_no), (Some(yes), Some(no)) if no < yes)
+}
+
+#[cfg(test)]
+mod managed_claude_trust_tests {
+    use super::managed_claude_trust_dialog;
+
+    #[test]
+    fn leaves_other_questions_and_changed_selections_untouched() {
+        for rows in [
+            vec!["Allow this command?", "  Yes, allow", "❯ No, exit"],
+            vec![
+                "Quick safety check: Is this a project you created or one you trust?",
+                "❯ Yes, I trust this folder",
+                "  No, exit",
+            ],
+            vec![
+                "Quick safety check: Is this a project you created or one you trust?",
+                "❯ No, exit",
+            ],
+        ] {
+            assert!(
+                !managed_claude_trust_dialog(
+                    &rows.into_iter().map(str::to_string).collect::<Vec<_>>()
+                ),
+                "must not answer a different or manually changed choice"
+            );
+        }
+    }
+}
+
+fn accept_managed_claude_trust_dialog(state: &AppState, session_id: &str) -> Result<(), String> {
+    let writer = state
+        .pty_writer(session_id)
+        .ok_or_else(|| "Session not found".to_string())?;
+    let mut writer = writer.lock();
+    state.retire_turn_interrupt(session_id);
+    writer
+        .write_all(b"\x1b[B")
+        .and_then(|()| writer.flush())
+        .map_err(|error| format!("Trust selection failed: {error}"))?;
+    std::thread::sleep(INJECT_ENTER_GAP);
+    writer
+        .write_all(b"\r")
+        .and_then(|()| writer.flush())
+        .map_err(|error| format!("Trust confirmation failed: {error}"))
+}
+
 /// Per-session mutable state for processing PTY output chunks.
 /// Holds dedup state, parser, and session CWD for PlanFile resolution.
 /// Used by `spawn_reader_thread`.
 struct ChunkProcessor {
+    secret_mask: crate::secrets::StreamMask,
+    masked_data: Option<String>,
+    /// An explicit idle marker asks the reader to flush after publishing this chunk.
+    queued_idle_flush: bool,
     parser: OutputParser,
+    intent_break_parser: vte::Parser,
     /// Dedup: only emit StatusLine when task_name actually changes *within a
     /// turn*, stored as `(turn_epoch, task_name)`. The epoch is part of the key
     /// because agents may name every turn identically — Codex always reports
@@ -4432,6 +1333,11 @@ struct ChunkProcessor {
     /// Dedup: last emitted ChoicePrompt signature (title + option keys).
     /// Prevents re-emit on repaint while the dialog stays on screen.
     last_choice_prompt_sig: Option<String>,
+    /// Whether a published slash menu still needs an explicit retraction.
+    slash_menu_visible: bool,
+    /// A busy hook cleared the choice; wait for a dialog-row repaint before
+    /// admitting the same signature again, so stale screen cells cannot re-arm it.
+    choice_prompt_needs_repaint: bool,
     /// Session CWD for resolving relative plan-file paths
     session_cwd: Option<String>,
     /// Plan files awaiting creation on disk (agent announces before writing).
@@ -4449,22 +1355,20 @@ struct ChunkProcessor {
     pub(crate) in_alt_buffer: bool,
     /// Structured terminal mode with nesting depth and app detection.
     terminal_mode: crate::ai_agent::tui_detect::TerminalMode,
-    /// One-shot flag: inject ESC[2J before the next ESC[H cursor-home.
-    /// Set on alt-buffer entry and when content may have shrunk (detected via
-    /// cursor-up ESC[nA with n > previous). Consumed after inject fires.
-    alt_buffer_needs_clear: bool,
-    /// Tracks the largest cursor-up (ESC[nA) value seen since last clear.
-    /// When a new ESC[nA arrives with n < last_cursor_up_n, content has shrunk
-    /// and we need a clear to prevent ghost artifacts.
-    last_cursor_up_n: u16,
+    /// FastAF engine: command text captured on OSC 133 `C`, recorded as a
+    /// `CommandOutcome` on the matching `D` (session knowledge for the AI chat).
+    pending_command: Option<String>,
+    /// When the pending OSC 133 command started, for its duration.
+    pending_command_started: Option<std::time::Instant>,
     /// Last VtLogBuffer total_lines observed — distinguishes a chunk that
     /// scrolled in new output from one that only repainted existing rows.
     last_vt_log_total: usize,
-    /// Command text captured on OSC 133 C — used when the matching D arrives
-    /// to build a `CommandOutcome`. Cleared after D.
-    pending_command: Option<String>,
-    /// `Instant` when OSC 133 C arrived; used for `duration_ms`.
-    pending_command_started: Option<std::time::Instant>,
+    /// Report a TUIC-managed agent entering alternate screen only once per PTY.
+    alt_screen_warned: bool,
+    /// The startup toast fires only for an alternate-screen entry before this instant.
+    startup_deadline: std::time::Instant,
+    /// The startup toast is shown once per PTY.
+    alt_screen_toasted: bool,
     /// TUIC_SESSION UUID for this PTY — used to create flag files that
     /// signal the shell wrapper to stop injecting `--session-id`.
     tuic_session: Option<String>,
@@ -4481,31 +1385,128 @@ struct ChunkProcessor {
     /// (grok, Codex, …) drives this. True while the last title signalled
     /// awaiting-approval.
     title_awaiting: bool,
+    /// Question raised by Codex's approval title. A later cancellation may
+    /// clear only this question, even if another confident question arrived.
+    codex_approval_question: Option<String>,
+    /// A cancellation row painted since the current Codex approval began.
+    codex_approval_canceled: bool,
+    /// Reusable screen snapshot handed to the post-lock consumers
+    /// (`parse_slash_menu`, `parse_choice_prompt`, the question-dedup absence
+    /// check and `rearm_awaiting_for_open_dialog`). Retained across chunks so
+    /// the snapshot reuses the row `String` allocations instead of allocating
+    /// one per visible row on every chunk that moved anything.
+    screen_buf: Vec<String>,
+    /// Deterministically interleave foreground retirement after reader sampling.
+    #[cfg(test)]
+    after_identity_sample: Option<Box<dyn FnOnce() + Send>>,
+}
+
+/// A terminal that enters the alternate screen this soon after spawn is treated
+/// as starting there; later entries are ordinary full-screen apps (vim, less).
+const ALT_SCREEN_STARTUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Toast attributed to `session_id`, on the desktop window and the event bus.
+fn emit_session_toast(
+    state: &AppState,
+    session_id: &str,
+    title: &str,
+    message: String,
+    level: &str,
+) {
+    #[cfg(feature = "desktop")]
+    if let Some(ref app) = *state.app_handle.read() {
+        let _ = app.emit(
+            "mcp-toast",
+            serde_json::json!({
+                "title": title,
+                "message": message,
+                "level": level,
+                "sound": null,
+                "urgency": "normal",
+                "origin_session_id": session_id,
+            }),
+        );
+    }
+    let _ = state.event_bus.send(crate::state::AppEvent::McpToast {
+        title: title.into(),
+        message: Some(message),
+        level: level.into(),
+        sound: None,
+        urgency: "normal".into(),
+        origin_repo_path: None,
+        origin_session_id: Some(session_id.into()),
+    });
+}
+
+fn alt_screen_toast_message(label: &str, agent_type: Option<&str>) -> String {
+    let fix = match agent_type {
+        Some("claude") => {
+            "Set CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 and CLAUDE_CODE_DISABLE_AGENT_VIEW=1 (or disableAgentView in settings)."
+        }
+        Some("codex" | "grok") => "Start it with --no-alt-screen.",
+        Some("opencode") => "Start it with --mini.",
+        _ => "Check the program for a no-alternate-screen option.",
+    };
+    format!(
+        "{label} switched to the alternate screen at startup. This breaks native scrollback and TUIC agent state detection. {fix}"
+    )
 }
 
 impl ChunkProcessor {
+    fn should_warn_alt_screen(&mut self, agent_type: Option<&str>, alt_screen: bool) -> bool {
+        if agent_type.is_none() || !alt_screen || self.alt_screen_warned {
+            return false;
+        }
+        self.alt_screen_warned = true;
+        true
+    }
+
+    /// True once per PTY, when the screen is alternate on the first startup-window chunk that shows it.
+    fn should_toast_alt_screen(&mut self, alt_screen: bool) -> bool {
+        if !alt_screen
+            || self.alt_screen_toasted
+            || std::time::Instant::now() > self.startup_deadline
+        {
+            return false;
+        }
+        self.alt_screen_toasted = true;
+        true
+    }
+
     fn new(session_cwd: Option<String>, tuic_session: Option<String>) -> Self {
         Self {
+            queued_idle_flush: false,
+            secret_mask: crate::secrets::StreamMask::default(),
+            masked_data: None,
             parser: OutputParser::new(),
+            intent_break_parser: vte::Parser::new(),
             last_status_task: None,
             last_question_text: None,
             raw_carry: String::new(),
             last_choice_prompt_sig: None,
+            slash_menu_visible: false,
+            choice_prompt_needs_repaint: false,
             session_cwd,
             pending_planfiles: Vec::new(),
             emitted_planfiles: std::collections::HashSet::new(),
             gaveup_planfiles: std::collections::HashSet::new(),
             in_alt_buffer: false,
             terminal_mode: crate::ai_agent::tui_detect::TerminalMode::Shell,
-            alt_buffer_needs_clear: false,
-            last_cursor_up_n: 0,
-            last_vt_log_total: 0,
             pending_command: None,
             pending_command_started: None,
+            last_vt_log_total: 0,
+            alt_screen_warned: false,
+            startup_deadline: std::time::Instant::now() + ALT_SCREEN_STARTUP_WINDOW,
+            alt_screen_toasted: false,
             tuic_session,
             last_session_conflict_mark: None,
             last_agent_block_line: None,
             title_awaiting: false,
+            codex_approval_question: None,
+            codex_approval_canceled: false,
+            screen_buf: Vec::new(),
+            #[cfg(test)]
+            after_identity_sample: None,
         }
     }
 
@@ -4513,14 +1514,24 @@ impl ChunkProcessor {
     fn handle_tuic_state(&self, payload: &str, session_id: &str, state: &AppState) {
         let (target, label) = match payload {
             "idle" => (SHELL_IDLE, "idle"),
-            "busy" => (SHELL_BUSY, "busy"),
+            "busy" | "prompt" => (SHELL_BUSY, "busy"),
             _ => return,
         };
+        // Native busy is evidence that the harness really started work. A
+        // submitted prompt (or idle after a failed turn) is not recovery.
+        // ego has no spinner StatusLine, so relying on that event alone leaves
+        // its successful later turns permanently red.
+        if payload == "busy"
+            && let Some(mut session) = state.session_maps.session_states.get_mut(session_id)
+        {
+            session.last_error = None;
+        }
         transition_explicit_shell_state(state, session_id, target, label, true);
     }
 
-    /// Handle a single OSC 133 event from the VTE handler.
-    /// On 'C' captures the command text; on 'D' builds a `CommandOutcome`.
+    /// Apply shell activity transitions from OSC 133 markers, and record each
+    /// finished command into FastAF's session knowledge (`C` captures the
+    /// command text, `D` records its outcome).
     fn handle_osc133_event(
         &mut self,
         command: char,
@@ -4528,18 +1539,15 @@ impl ChunkProcessor {
         session_id: &str,
         state: &AppState,
     ) {
-        use crate::ai_agent::knowledge::{CommandOutcome, OutcomeClass, classify_error};
-
-        // Deterministic state transitions from shell integration markers.
-        // A = prompt shown (idle), C = command execution started (busy).
-        // These bypass the silence timer entirely when OSC 133 is available.
         match command {
             'A' => {
+                crate::codex_binding::revoke(state, session_id);
                 transition_explicit_shell_state(state, session_id, SHELL_IDLE, "idle", false);
             }
             'C' => {
                 transition_explicit_shell_state(state, session_id, SHELL_BUSY, "busy", false);
                 let cmd = state
+                    .session_maps
                     .input_buffers
                     .get(session_id)
                     .map(|b| b.lock().content())
@@ -4547,72 +1555,62 @@ impl ChunkProcessor {
                 self.pending_command = Some(cmd);
                 self.pending_command_started = Some(std::time::Instant::now());
             }
-            'D' => {
-                // A 'D' (command finished) with no preceding 'C' (command
-                // started) means no command actually ran — e.g. Enter on an
-                // empty prompt, where the shell still emits D carrying the
-                // previous command's exit code. Recording it would create a
-                // phantom outcome with an empty command and "unknown" error
-                // type, polluting both the knowledge panel and the agent's
-                // injected prompt. Skip it.
-                if self.pending_command_started.is_none() {
-                    self.pending_command = None;
-                    return;
-                }
-                let exit_code = params.parse::<i32>().unwrap_or(0);
-                let command = self.pending_command.take().unwrap_or_default();
-                let duration_ms = self
-                    .pending_command_started
-                    .take()
-                    .map(|t| t.elapsed().as_millis() as u64)
-                    .unwrap_or(0);
-                let cwd = self.session_cwd.clone().unwrap_or_default();
-                let output_snippet = state
-                    .vt_log_buffers
-                    .get(session_id)
-                    .map(|b| {
-                        let buf = b.lock();
-                        buf.screen_rows().join("\n")
-                    })
-                    .unwrap_or_default();
-                let mut tail_start = output_snippet.len().saturating_sub(500);
-                while tail_start > 0 && !output_snippet.is_char_boundary(tail_start) {
-                    tail_start += 1;
-                }
-                let output_snippet = output_snippet[tail_start..].to_string();
-
-                let classification = if exit_code == 0 {
-                    OutcomeClass::Success
-                } else if let Some(error_type) = classify_error(&output_snippet) {
-                    OutcomeClass::Error { error_type }
-                } else {
-                    OutcomeClass::Error {
-                        error_type: "unknown".into(),
-                    }
-                };
-
-                let outcome = CommandOutcome {
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
-                    command,
-                    cwd,
-                    exit_code: Some(exit_code),
-                    output_snippet,
-                    classification,
-                    duration_ms,
-                    id: 0,
-                };
-                state.knowledge_entry(session_id).lock().terminal_mode = self.terminal_mode.clone();
-                state.record_outcome(session_id, outcome);
-            }
+            'D' => self.record_osc133_outcome(params, session_id, state),
             _ => {}
         }
     }
 
+    /// Record the command an OSC 133 `D` just finished (FastAF engine).
+    ///
+    /// A `D` with no preceding `C` means no command actually ran — Enter on an
+    /// empty prompt still emits `D` with the previous exit code — so it is
+    /// skipped rather than recorded as a phantom outcome.
+    fn record_osc133_outcome(&mut self, params: &str, session_id: &str, state: &AppState) {
+        use crate::ai_agent::knowledge::{CommandOutcome, OutcomeClass, classify_error};
+
+        let Some(started) = self.pending_command_started.take() else {
+            self.pending_command = None;
+            return;
+        };
+        let exit_code = params.parse::<i32>().unwrap_or(0);
+        let command = self.pending_command.take().unwrap_or_default();
+        let output_snippet = state
+            .grid
+            .vt_log_buffers
+            .get(session_id)
+            .map(|b| b.lock().screen_rows().join("\n"))
+            .unwrap_or_default();
+        let mut tail_start = output_snippet.len().saturating_sub(500);
+        while tail_start > 0 && !output_snippet.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let output_snippet = output_snippet[tail_start..].to_string();
+        let classification = if exit_code == 0 {
+            OutcomeClass::Success
+        } else {
+            OutcomeClass::Error {
+                error_type: classify_error(&output_snippet).unwrap_or_else(|| "unknown".into()),
+            }
+        };
+        let outcome = CommandOutcome {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            command,
+            cwd: self.session_cwd.clone().unwrap_or_default(),
+            exit_code: Some(exit_code),
+            output_snippet,
+            classification,
+            duration_ms: started.elapsed().as_millis() as u64,
+            id: 0,
+        };
+        state.knowledge_entry(session_id).lock().terminal_mode = self.terminal_mode.clone();
+        state.record_outcome(session_id, outcome);
+    }
+
     /// Classify an inline TUI (mouse reporting on the primary screen) the same
-    /// way `transform_xterm` classifies `1049h`. Alt-screen nesting still owns
+    /// way `observe_alt_buffer` classifies `1049h`. Alt-screen nesting still owns
     /// `terminal_mode` once `1049h` has been seen; this only covers the
     /// `grok --no-alt-screen` case that never sends it.
     fn apply_inline_tui_mode(
@@ -4641,66 +1639,25 @@ impl ChunkProcessor {
         }
     }
 
-    /// Colorize `intent:` tokens and apply alternate-buffer fixes on the xterm
-    /// stream. Suggest tokens are NOT concealed here — the frontend's
-    /// `eraseSuggestFromBuffer()` handles that via rAF after xterm renders.
-    fn transform_xterm(&mut self, data: String) -> Option<String> {
-        // Track alternate screen buffer state for the clear-before-home fix below.
+    /// Track terminal mode without changing the bytes sent to output watchers.
+    fn observe_alt_buffer(&mut self, data: &str) {
         if data.contains("\x1b[?1049h") {
             self.in_alt_buffer = true;
-            self.alt_buffer_needs_clear = true;
             self.terminal_mode = self.terminal_mode.on_alt_enter();
         } else if data.contains("\x1b[?1049l") {
             self.in_alt_buffer = false;
-            self.alt_buffer_needs_clear = false;
             self.terminal_mode = self.terminal_mode.on_alt_exit();
         }
-
-        // Detect render-height change in alternate buffer: when Ink's cursor-up
-        // (ESC[nA) value changes, the chrome area may have shifted vertically.
-        // Ink never sends ESC[K (erase to end of line), so rows that were chrome
-        // in the previous render but aren't overwritten in the new one persist as
-        // ghost artifacts — starting from the bottom and expanding upward.
-        if self.in_alt_buffer
-            && let Some(n) = extract_largest_cursor_up(&data)
-        {
-            if n != self.last_cursor_up_n && self.last_cursor_up_n > 0 {
-                self.alt_buffer_needs_clear = true;
-            }
-            self.last_cursor_up_n = n;
-        }
-
-        // Inject ESC[2J (clear screen) before the first positioning sequence when
-        // needed. Tries cursor-home (ESC[H) first, then falls back to cursor-up
-        // (ESC[nA). Ink re-renders use cursor-up for repositioning, not cursor-home,
-        // so the fallback is essential — without it the flag accumulates forever.
-        let data = if self.alt_buffer_needs_clear {
-            let injected = inject_clear_before_cursor_home(&data);
-            if injected.len() != data.len() {
-                self.alt_buffer_needs_clear = false;
-                injected
-            } else {
-                let injected = inject_clear_before_cursor_up(&data);
-                if injected.len() != data.len() {
-                    self.alt_buffer_needs_clear = false;
-                }
-                injected
-            }
-        } else {
-            data
-        };
-
-        if data.is_empty() {
-            return Some(String::new());
-        }
-
-        Some(data)
     }
 
     /// Resolve a relative plan-file path to absolute using session CWD.
     /// Returns None if the path is relative and no CWD is available.
     fn resolve_planfile_path(&self, path: &str) -> Option<String> {
-        if path.starts_with('/') {
+        // Both shapes of absolute: `Path::is_absolute` covers `C:\…` on Windows
+        // but not a leading `/`, and the agents that emit these lines write
+        // either one there. Joining an absolute path onto the session cwd would
+        // produce a path that does not exist.
+        if path.starts_with('/') || std::path::Path::new(path).is_absolute() {
             Some(path.to_string())
         } else if let Some(ref cwd) = self.session_cwd {
             let joined = std::path::PathBuf::from(cwd).join(path);
@@ -4800,7 +1757,10 @@ impl ChunkProcessor {
     /// dedup, resize-grace filtering, PlanFile resolution, event emission,
     /// silence state, last_output_ms, and shell state transitions.
     ///
-    /// Returns the data string if non-empty (for callers that need to emit raw output to xterm).
+    /// Returns true when the chunk was non-empty, i.e. the caller should hand
+    /// the SAME borrowed bytes to the output watchers. It used to return an owned
+    /// copy of the chunk, which allocated and memcpy'd up to 64 KB per PTY read
+    /// for a value the caller already held.
     /// `app` is Some for desktop mode (emits Tauri IPC), None for headless.
     fn process_chunk(
         &mut self,
@@ -4808,9 +1768,32 @@ impl ChunkProcessor {
         silence: &Arc<Mutex<SilenceState>>,
         session_id: &str,
         state: &AppState,
-    ) -> Option<String> {
+    ) -> bool {
+        self.masked_data = self
+            .secret_mask
+            .push(data, state.secrets.pty_needles(session_id));
+        // Own the sanitized bytes locally while mutating the parser. Restore
+        // them for watcher/diagnostic consumers after processing.
+        let masked = self.masked_data.take();
+        let processed = self.process_safe_chunk(
+            masked.as_deref().unwrap_or(data),
+            silence,
+            session_id,
+            state,
+        );
+        self.masked_data = masked;
+        processed
+    }
+
+    fn process_safe_chunk(
+        &mut self,
+        data: &str,
+        silence: &Arc<Mutex<SilenceState>>,
+        session_id: &str,
+        state: &AppState,
+    ) -> bool {
         if data.is_empty() {
-            return None;
+            return false;
         }
 
         // Check pending plan files: emit if file appeared, drop if deadline expired.
@@ -4820,34 +1803,73 @@ impl ChunkProcessor {
         // that lock, and taking a session_states shard while holding the vt_log
         // mutex would introduce a lock order this file does not otherwise have.
         let agent_type = state
+            .session_maps
             .session_states
             .get(session_id)
             .and_then(|s| s.agent_type.clone());
+
+        #[cfg(test)]
+        if let Some(after_sample) = self.after_identity_sample.take() {
+            after_sample();
+        }
+
+        // The screen snapshot is refilled in place: `screen_rows()` is
+        // `prev_rows.clone()`, one allocation per visible row per chunk. Taking
+        // the buffer out of `self` keeps the later `&mut self` uses (parser,
+        // dedup markers) borrow-checkable; it is put back at the end.
+        let mut screen_buf = std::mem::take(&mut self.screen_buf);
+        let mut ego_question_rows = None;
+        let mut unexpected_alt_screen = false;
+        let mut startup_alt_screen = false;
+        let mut choice_changed_rows = Vec::new();
 
         // Feed raw data (post-kitty-strip) into VT100 log buffer.
         // `total_lines` comes back with it: a chunk that grew the buffer produced
         // real output, a chunk that did not merely repainted the screen.
         let (
             changed_rows,
-            vt_log_total,
+            vt_output_grew,
             term_events,
-            screen_cache,
+            screen_present,
             screen_activity,
             cursor_row,
             logical_prefix,
             physical_prefix,
             history_size,
-        ): VtProcessResult = if let Some(vt_log) = state.vt_log_buffers.get(session_id) {
+            intent_origin,
+            intent_candidate,
+        ): VtProcessResult = if let Some(vt_log) = state.grid.vt_log_buffers.get(session_id) {
             let mut vt = vt_log.lock();
-            let changed = vt.process(data.as_bytes());
+            let mut changed = vt.process(data.as_bytes());
             // Publish the real sync state (a nested BSU keeps it open) so the
             // frame ticker knows whether this session can have a stalled
             // synchronized update worth taking the lock for.
-            if let Some(flag) = state.sync_update_active.get(session_id) {
+            if let Some(flag) = state.grid.sync_update_active.get(session_id) {
                 flag.store(vt.is_sync_update_active(), Ordering::Relaxed);
             }
             let total = vt.total_lines();
+            unexpected_alt_screen =
+                self.should_warn_alt_screen(agent_type.as_deref(), vt.is_alternate_screen());
+            startup_alt_screen = self.should_toast_alt_screen(vt.is_alternate_screen());
             let hist = vt.grid_history_size();
+            let intent_origin = vt.grid_screen_origin();
+            // Did this chunk produce real output, or merely repaint rows that were
+            // already there (SIGWINCH reflow, cursor blink, statusline)? In the
+            // PRIMARY screen a repaint never grows the durable log while real work
+            // scrolls new lines into it, so the total answers the question.
+            //
+            // In the ALTERNATE screen it cannot: `VtLogBuffer::process` skips log
+            // capture entirely while alt is active, so the total is frozen however
+            // much the agent writes, and "did not grow" is not evidence of a
+            // repaint. Nothing is lost by reporting growth there — the only reader
+            // is the resize-grace extension below, which covers a reflow, and the
+            // grid performs no reflow in alt (`VtLogBuffer::resize` picks
+            // `ReflowMode::None`). Reading a frozen total as a repaint instead
+            // re-armed the grace on every chunk, so a single resize suppressed
+            // low-confidence questions, rate-limit and API-error events and the
+            // BUSY transition until the agent paused for a full second.
+            let vt_output_grew = vt.is_alternate_screen() || total > self.last_vt_log_total;
+            self.last_vt_log_total = self.last_vt_log_total.max(total);
             // Grid is the source of truth for mouse DECSET (including combined
             // `?1000;1002;1006h`). String-matching the chunk would miss grok.
             self.apply_inline_tui_mode(
@@ -4859,88 +1881,300 @@ impl ChunkProcessor {
             // Did ANYTHING on screen move? Taken before the chrome filter below,
             // because that filter drops rows under the input-area border and a
             // choice dialog can render there.
+            //
+            // DEFERRED (2026-09-06) — moving this AFTER the chrome filter was
+            // proposed to stop a 1 Hz status line paying for the snapshot, and
+            // it is wrong: Claude Code renders its slash menu BELOW the input
+            // box, so on a slash-menu tick every changed row is under the
+            // cutoff and the menu would never be parsed. Reproduced — flipping
+            // the two lines turns `chunk_path_scenarios_emit_the_same_events`
+            // from `["slash-menu"]` into `[]`. Any future attempt needs a
+            // per-consumer gate, not one shared flag.
             let any_row_changed = !changed.is_empty();
+            if self.last_choice_prompt_sig.is_some() {
+                choice_changed_rows.extend(changed.iter().map(|row| row.row_index));
+            }
+
+            // ONE borrow of the rendered screen, shared by all three consumers
+            // below (chrome cutoff, screen classification, snapshot refill).
+            // They used to take three independent `screen_rows_ref()` borrows
+            // and the last one cloned.
+            let screen_ref = vt.screen_rows_ref();
 
             // Filter out changed rows below the input area border (horizontal rule).
             // Claude Code (and similar agents) render a quota/budget status bar below
             // the input box separator. Those rows are cosmetic chrome — processing them
             // resets the silence timer and causes false busy→idle→question transitions.
             //
-            // Use screen_rows_ref() to avoid cloning prev_rows for the chrome cutoff
-            // check. The owned snapshot is captured once below for slash-menu/choice-prompt
-            // parsing that happens after the lock is released.
-            let changed = if !changed.is_empty() {
-                if let Some(screen) = vt.screen_rows_ref() {
-                    let refs: Vec<&str> = screen.iter().map(|s| s.as_str()).collect();
-                    if let Some(cutoff) = crate::chrome::find_chrome_cutoff(&refs) {
-                        changed
-                            .into_iter()
-                            .filter(|r| r.row_index < cutoff)
-                            .collect()
-                    } else {
-                        changed
-                    }
-                } else {
-                    changed
-                }
+            // `retain` in place: the filter used to rebuild the whole Vec even
+            // when the cutoff dropped nothing.
+            // Goose appends the reply BELOW their submitted `> prompt`;
+            // it has no fixed input-area border. Trimming there erases the
+            // reply's activity evidence and strands user-submit BUSY
+            // (#1812-022d).
+            let chrome_cutoff = if !matches!(agent_type.as_deref(), Some("goose"))
+                && let Some(screen) = screen_ref
+                && !changed.is_empty()
+            {
+                let refs: Vec<&str> = screen.iter().map(String::as_str).collect();
+                // Fails OPEN by contract: no anchor found is `None`, and `None`
+                // must mean "parse everything", never "parse nothing".
+                crate::chrome::find_agent_chrome_cutoff(&refs, agent_type.as_deref())
             } else {
-                changed
+                None
             };
+            if let Some(cutoff) = chrome_cutoff {
+                changed.retain(|r| r.row_index < cutoff);
+            }
+            let changed = changed;
 
             // Screen classification runs on EVERY chunk, borrowed, never cloned: a
             // repaint that is byte-identical produces no changed rows, and holding
             // BUSY through exactly that case (a frozen spinner, DEC 2026 frame
             // coalescing) is the point of `detect_agent_screen_activity`.
-            let screen_activity = vt
-                .screen_rows_ref()
-                .map(|rows| detect_agent_screen_activity(agent_type.as_deref(), rows))
+            let screen_activity = screen_ref
+                .map(|rows| {
+                    detect_agent_screen_activity_at(
+                        agent_type.as_deref(),
+                        rows,
+                        Some(vt.grid_columns()),
+                    )
+                })
                 .unwrap_or(AgentScreenActivity::Unknown);
 
-            // The two screen PARSERS are different: a slash menu or a choice
-            // dialog cannot have appeared on a screen where nothing moved, so
-            // skip them — and skip the full-screen clone they need — on a chunk
-            // that changed no row. This is the per-chunk hot path.
-            let screen = if any_row_changed {
-                Some(vt.screen_rows())
-            } else {
-                None
+            // ONE snapshot per tick, cloned into the retained buffer and handed
+            // to every post-lock consumer. A slash menu or a choice dialog
+            // cannot have appeared on a screen where nothing moved, so a chunk
+            // that changed no row skips the snapshot entirely — that is the
+            // per-chunk hot path.
+            //
+            // `any_row_changed` is deliberately the PRE-cutoff answer: Claude
+            // Code renders its slash menu BELOW the input-box chrome, so gating
+            // on the trimmed rows would stop the menu being seen at all
+            // (proved by `chunk_path_scenarios_emit_the_same_events`).
+            let screen_present = match screen_ref.filter(|_| any_row_changed) {
+                Some(rows) => {
+                    screen_buf.truncate(rows.len());
+                    for (slot, row) in screen_buf.iter_mut().zip(rows) {
+                        slot.clear();
+                        slot.push_str(row);
+                    }
+                    screen_buf.extend(rows[screen_buf.len().min(rows.len())..].iter().cloned());
+                    true
+                }
+                None => false,
             };
+            // Ego selectors are terminal-soft-wrapped, not prose paragraphs.
+            // Join from grid metadata before the parser loses the boundary.
+            if screen_present && agent_type.as_deref() == Some("ego") {
+                ego_question_rows = Some(
+                    crate::redaction::join_wrapped_rows(
+                        screen_buf.iter().zip(vt.screen_row_wraps()),
+                    )
+                    .split('\n')
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                );
+            }
             let cursor_row = vt.cursor_point().0;
             let logical_prefix = vt.logical_prefix_at_cursor();
             let physical_prefix = vt.physical_prefix_at_cursor();
+            let intent_candidate = agent_type.as_ref().and_then(|_| {
+                // A repaint can change many rows below the same anchor. Cache
+                // its result for this tick, including rejected candidates.
+                let mut cache = std::collections::HashMap::new();
+                changed.iter().rev().find_map(|row| {
+                    // A later read may update only an indented continuation.
+                    // Search its bounded predecessors for the unchanged anchor.
+                    (row.row_index
+                        .saturating_sub(crate::output_parser::MAX_INTENT_CONTINUATION_ROWS)
+                        ..=row.row_index)
+                        .rev()
+                        .find_map(|anchor_row| {
+                            if screen_ref.is_some_and(|screen| {
+                                !screen
+                                    .get(anchor_row)
+                                    .is_some_and(|text| text.contains("intent:"))
+                            }) {
+                                return None;
+                            }
+                            let cached = cache.entry(anchor_row).or_insert_with(|| {
+                                #[cfg(test)]
+                                INTENT_CANDIDATE_GRID_READS
+                                    .with(|reads| reads.set(reads.get() + 1));
+                                let mut line = vt.logical_line_at_row(anchor_row)?;
+                                if chrome_cutoff.is_some_and(|cutoff| line.end_row >= cutoff) {
+                                    return None;
+                                }
+                                if crate::output_parser::structured_token_anchor(&line.text)
+                                    != Some(crate::output_parser::StructuredTokenAnchor::Intent)
+                                {
+                                    return None;
+                                }
+                                let anchor_text = line.text.clone();
+                                let mut block = anchor_text.clone();
+                                let mut continuation_ends = Vec::new();
+                                let mut physical_widths = Vec::new();
+                                physical_widths.push(
+                                    screen_ref
+                                        .and_then(|screen| screen.get(line.end_row))
+                                        .map_or_else(
+                                            || {
+                                                unicode_width::UnicodeWidthStr::width(
+                                                    anchor_text.as_str(),
+                                                )
+                                            },
+                                            |row| {
+                                                unicode_width::UnicodeWidthStr::width(
+                                                    row.trim_end(),
+                                                )
+                                            },
+                                        ),
+                                );
+                                let mut next = line.end_row + 1;
+                                // DEFERRED (2026-09-25) — Stop at the chrome cutoff once a
+                                // production-path test captures a task panel under an intent.
+                                for _ in 0..crate::output_parser::MAX_INTENT_CONTINUATION_ROWS {
+                                    if crate::output_parser::intent_row_is_complete(&block) {
+                                        break;
+                                    }
+                                    if chrome_cutoff.is_some_and(|cutoff| next >= cutoff) {
+                                        break;
+                                    }
+                                    #[cfg(test)]
+                                    INTENT_CONTINUATION_GRID_READS
+                                        .with(|reads| reads.set(reads.get() + 1));
+                                    let Some(continuation) = vt.logical_line_at_row(next) else {
+                                        break;
+                                    };
+                                    if continuation.start_row != next {
+                                        break;
+                                    }
+                                    block.push('\n');
+                                    block.push_str(&continuation.text);
+                                    continuation_ends.push(continuation.end_row);
+                                    physical_widths.push(
+                                        screen_ref
+                                            .and_then(|screen| screen.get(continuation.end_row))
+                                            .map_or_else(
+                                                || {
+                                                    unicode_width::UnicodeWidthStr::width(
+                                                        continuation.text.as_str(),
+                                                    )
+                                                },
+                                                |row| {
+                                                    unicode_width::UnicodeWidthStr::width(
+                                                        row.trim_end(),
+                                                    )
+                                                },
+                                            ),
+                                    );
+                                    let (joined, absorbed) =
+                                        crate::output_parser::dewrap_intent_continuation_with_rows(
+                                            &block,
+                                            Some((vt.grid_columns(), &physical_widths)),
+                                        );
+                                    if absorbed != continuation_ends.len() {
+                                        break;
+                                    }
+                                    if crate::output_parser::intent_row_is_complete(
+                                        joined.lines().next().unwrap_or_default(),
+                                    ) {
+                                        break;
+                                    }
+                                    next = continuation.end_row + 1;
+                                }
+                                let (dewrapped, absorbed) =
+                                    crate::output_parser::dewrap_intent_continuation_with_rows(
+                                        &block,
+                                        Some((vt.grid_columns(), &physical_widths)),
+                                    );
+                                line.text =
+                                    dewrapped.lines().next().unwrap_or_default().to_string();
+                                if absorbed > 0 {
+                                    line.end_row = continuation_ends[absorbed - 1];
+                                }
+                                Some((line, anchor_text))
+                            });
+                            let (line, anchor_text) = cached.as_ref()?;
+                            (line.start_row..=line.end_row)
+                                .contains(&row.row_index)
+                                .then(|| (line.clone(), anchor_text.clone()))
+                        })
+                })
+            });
 
             (
                 changed,
-                Some(total),
+                vt_output_grew,
                 tevts,
-                screen,
+                screen_present,
                 screen_activity,
                 Some(cursor_row),
                 logical_prefix,
                 physical_prefix,
                 hist,
+                intent_origin,
+                intent_candidate,
             )
         } else {
             (
                 Vec::new(),
-                None,
+                false,
                 Vec::new(),
-                None,
+                false,
                 AgentScreenActivity::Unknown,
                 None,
                 None,
                 None,
                 0,
+                0,
+                None,
             )
         };
 
-        // Did this chunk grow the scrollback (genuine new output) or merely
-        // repaint existing rows (SIGWINCH reflow, cursor blink, statusline)?
-        // Captured BEFORE `last_vt_log_total` is updated below. A pure reflow
-        // never grows the buffer; real agent work scrolls in new lines.
-        let vt_log_grew = vt_log_total
-            .map(|t| t > self.last_vt_log_total)
-            .unwrap_or(false);
+        if screen_present
+            && agent_type.as_deref() == Some("claude")
+            && state.managed_trust_dialogs.contains(session_id)
+            && managed_claude_trust_dialog(&screen_buf)
+            && state.managed_trust_dialogs.remove(session_id).is_some()
+            && let Err(error) = accept_managed_claude_trust_dialog(state, session_id)
+        {
+            tracing::warn!(source = "terminal", session_id, %error, "Could not accept managed Claude workspace trust dialog");
+        }
+
+        if startup_alt_screen {
+            let label = state
+                .session_maps
+                .sessions
+                .get(session_id)
+                .and_then(|entry| entry.lock().display_name.clone())
+                .unwrap_or_else(|| session_id.to_string());
+            emit_session_toast(
+                state,
+                session_id,
+                "Terminal is on the alternate screen",
+                alt_screen_toast_message(&label, agent_type.as_deref()),
+                "warn",
+            );
+        }
+
+        if unexpected_alt_screen {
+            let agent = agent_type.as_deref().unwrap_or("unknown").to_string();
+            let session_id = session_id.to_string();
+            std::thread::spawn(move || {
+                let version = crate::agent::detect_agent_binary_sync(agent.clone())
+                    .version
+                    .unwrap_or_else(|| "unknown".to_string());
+                tracing::warn!(
+                    source = "terminal",
+                    session_id,
+                    agent,
+                    version,
+                    "Agent entered alternate screen despite native scrollback default"
+                );
+            });
+        }
 
         // Nothing is emitted for scrollback growth. There was a throttled
         // `pty-vt-log-total-{session_id}` here whose comment claimed the frontend
@@ -4950,23 +2184,39 @@ impl ChunkProcessor {
         // not free — and a comment describing a consumer that is not there costs
         // more, because the next reader builds the frontend half rather than
         // deleting the emit. The overlay reads the totals when it fetches a
-        // chunk. `last_vt_log_total` stays: `vt_log_grew` above is a real reader.
-        if let Some(new_total) = vt_log_total {
-            self.last_vt_log_total = self.last_vt_log_total.max(new_total);
-        }
+        // chunk. `last_vt_log_total` stays: `vt_output_grew` is a real reader.
 
         // Handle terminal events from alacritty (title, clipboard, PTY writes, OSC 133, TUIC)
         let mut tuic_events: Vec<ParsedEvent> = Vec::new();
+        // Lifecycle markers retract recovery; they do not announce it. Track the
+        // pending snapshot too, since these events are published after this loop.
+        let mut recovery_active = state
+            .session_maps
+            .session_states
+            .get(session_id)
+            .is_some_and(|session| session.provider_recovery.is_some());
         let mut explicit_idle_in_chunk = false;
         if !term_events.is_empty() {
             use crate::terminal_grid::{Osc133Event, TermEvent};
             for evt in term_events {
                 match evt {
+                    TermEvent::Bell => {
+                        state.emit_pty_event(crate::state::AppEvent::PtyBell {
+                            session_id: session_id.to_string(),
+                        });
+                        #[cfg(feature = "desktop")]
+                        if let Some(a) = state.app_handle.read().as_ref() {
+                            let _ = a.emit(&format!("pty-bell-{session_id}"), ());
+                        }
+                    }
                     TermEvent::PtyWrite(response) => {
-                        if response.contains("\x1b[?1049")
-                            || response.contains("\x1b[?1047")
-                            || response.contains("\x1b[?47l")
-                            || response.contains("\x1b[?25h")
+                        // Four substring scans of a terminal reply, for a
+                        // diagnostic error line only. Behind the toggle.
+                        if crate::cpu_watchdog::diagnostic_mode()
+                            && (response.contains("\x1b[?1049")
+                                || response.contains("\x1b[?1047")
+                                || response.contains("\x1b[?47l")
+                                || response.contains("\x1b[?25h"))
                         {
                             tracing::error!(source = "terminal", session_id = %session_id,
                                 "PtyWrite contains DEC private mode sequences! response={:?}",
@@ -4975,6 +2225,10 @@ impl ChunkProcessor {
                         write_terminal_reply(state, session_id, response.as_bytes(), "PtyWrite");
                     }
                     TermEvent::Title(title) => {
+                        state.emit_pty_event(crate::state::AppEvent::PtyTitle {
+                            session_id: session_id.to_string(),
+                            title: title.clone(),
+                        });
                         #[cfg(feature = "desktop")]
                         if let Some(a) = state.app_handle.read().as_ref() {
                             let _ = a.emit(&format!("pty-title-{session_id}"), &title);
@@ -4994,14 +2248,23 @@ impl ChunkProcessor {
                         // grok's title in default (non-always-approve) mode before removing.
                         let title_awaiting = title.contains("Action Required");
                         if title_awaiting && !self.title_awaiting {
+                            let prompt_text = clean_action_required_title(&title);
+                            if agent_type.as_deref() == Some("codex") {
+                                self.codex_approval_question = Some(prompt_text.clone());
+                                self.codex_approval_canceled = false;
+                            }
                             tuic_events.push(ParsedEvent::Question {
-                                prompt_text: clean_action_required_title(&title),
+                                prompt_text,
                                 confident: true,
                             });
                         }
                         self.title_awaiting = title_awaiting;
                     }
                     TermEvent::ResetTitle => {
+                        state.emit_pty_event(crate::state::AppEvent::PtyTitle {
+                            session_id: session_id.to_string(),
+                            title: String::new(),
+                        });
                         #[cfg(feature = "desktop")]
                         if let Some(a) = state.app_handle.read().as_ref() {
                             let _ = a.emit(&format!("pty-title-{session_id}"), "");
@@ -5020,7 +2283,12 @@ impl ChunkProcessor {
                         line,
                     } => {
                         explicit_idle_in_chunk |= command == 'A';
+                        if command == 'A' && recovery_active {
+                            recovery_active = false;
+                            tuic_events.push(ParsedEvent::ProviderRecovery { recovery: None });
+                        }
                         state
+                            .session_maps
                             .has_osc133_integration
                             .insert(session_id.to_string(), ());
                         self.handle_osc133_event(command, &params, session_id, state);
@@ -5051,7 +2319,7 @@ impl ChunkProcessor {
                     TermEvent::Osc7(url) => {
                         #[allow(clippy::collapsible_if)]
                         if let Ok(cwd) = parse_osc7_cwd(&url) {
-                            if let Some(entry) = state.sessions.get(session_id) {
+                            if let Some(entry) = state.session_maps.sessions.get(session_id) {
                                 entry.lock().cwd = Some(cwd.clone());
                             }
                             // `{ cwd }` rather than a bare string so this payload
@@ -5077,12 +2345,59 @@ impl ChunkProcessor {
                         payload,
                         line,
                     } => match verb.as_str() {
+                        "ego-recovery" if agent_type.as_deref() == Some("ego") => {
+                            if let Some(event) =
+                                crate::output_parser::parse_provider_recovery(&payload)
+                            {
+                                if let ParsedEvent::ProviderRecovery { recovery } = &event {
+                                    recovery_active = recovery.is_some();
+                                }
+                                tuic_events.push(event);
+                            }
+                        }
+                        "codex-session" => crate::codex_binding::receive(
+                            state,
+                            session_id,
+                            self.tuic_session.as_deref(),
+                            &payload,
+                        ),
                         "state" => {
+                            // Codex can emit completion while an approval or /plan
+                            // question is still unanswered. Require the same currently
+                            // rendered dialog and its active controls. Real answer input
+                            // retires the controls before subsequent idle is accepted.
+                            let open_codex_dialog = payload == "idle"
+                                && agent_type.as_deref() == Some("codex")
+                                && state
+                                    .session_maps
+                                    .session_states
+                                    .get(session_id)
+                                    .is_some_and(|session| {
+                                        session.awaiting_input
+                                            && session.choice_prompt.as_ref().is_some_and(|prompt| {
+                                                matches!(
+                                                    crate::output_parser::parse_choice_prompt(&screen_buf),
+                                                    Some(ParsedEvent::ChoicePrompt { title, .. })
+                                                        if title == prompt.title
+                                                )
+                                            })
+                                    });
+                            if open_codex_dialog {
+                                tracing::warn!(
+                                    session_id,
+                                    "Ignoring delayed idle while native Codex dialog is unanswered"
+                                );
+                                continue;
+                            }
                             // idle/busy drive the shell-state machine; awaiting is
                             // ignored here (it's a separate field). The awaiting_input
                             // field is driven by Question/UserInput events instead.
                             explicit_idle_in_chunk |= payload == "idle";
                             self.handle_tuic_state(&payload, session_id, state);
+                            if matches!(payload.as_str(), "busy" | "idle") && recovery_active {
+                                recovery_active = false;
+                                tuic_events.push(ParsedEvent::ProviderRecovery { recovery: None });
+                            }
                             if let Some(evt) = tuic_state_awaiting_event(&payload, line as i64) {
                                 tuic_events.push(evt);
                             }
@@ -5114,7 +2429,9 @@ impl ChunkProcessor {
                             } else {
                                 (payload.clone(), None)
                             };
-                            tuic_events.push(ParsedEvent::Intent { text, title });
+                            if let Some(event) = silence.lock().accept_intent(text, title) {
+                                tuic_events.push(event);
+                            }
                         }
                         "block" => {
                             let (action, exit_code) =
@@ -5145,45 +2462,165 @@ impl ChunkProcessor {
         // is in the ring but also still queued for live delivery, which
         // would cause the catch-up and the live stream to replay the same
         // bytes to the client.
-        if let Some(ring) = state.output_buffers.get(session_id) {
+        let mut output_offset_after_chunk = 0;
+        if let Some(ring) = state.session_maps.output_buffers.get(session_id) {
             let mut ring_guard = ring.lock();
             ring_guard.write(data.as_bytes());
+            output_offset_after_chunk = ring_guard.total_written;
             crate::state::broadcast_to_ws_clients(&state.ws_clients, session_id, data);
             drop(ring_guard);
         }
 
         // Parse events: OSC 9;4 progress from raw stream, others from clean rows.
-        let (in_resize_grace, in_startup_grace) = {
-            let sl = silence.lock();
-            (sl.is_resize_grace(), sl.is_startup_grace())
+        // One critical section for every flag this chunk reads out of
+        // SilenceState — `hook_state_seen` used to take the lock a second time
+        // a few lines below, for a single bool.
+        let (in_resize_grace, in_startup_grace, parser_dedup_reset, hook_state_seen) = {
+            let mut sl = silence.lock();
+            (
+                sl.is_resize_grace(),
+                sl.is_startup_grace(),
+                sl.take_parser_dedup_reset(),
+                sl.hook_state_seen,
+            )
         };
+        // A line was submitted since the last chunk: the same API error or
+        // session conflict recurring now is a new failure, not a repaint.
+        if parser_dedup_reset {
+            self.parser.reset_input_dedup();
+        }
         let suppress_notifications = in_resize_grace || in_startup_grace;
         let mut events = tuic_events;
         // Hook-instrumented sessions get awaiting from OSC 7770; drop heuristic
         // (regex) Question events from the parser so they don't double-fire.
         let hook_instrumented = state
+            .session_maps
             .session_states
             .get(session_id)
             .map(|s| s.hook_instrumented)
             .unwrap_or(false)
-            && silence.lock().hook_state_seen;
+            && hook_state_seen;
         // Capture tap: off by default, one relaxed atomic load when it is.
         // Recorded before any parsing so a fixture replays exactly the bytes
         // the detectors saw, chunk boundaries included — those boundaries are
         // themselves a failure mode (a split OSC matches nothing).
-        crate::pty_capture::record(session_id, data.as_bytes());
+        if crate::pty_capture::is_enabled() {
+            let capture_geometry = state.grid.vt_log_buffers.get(session_id).map(|vt| {
+                let vt = vt.lock();
+                (vt.grid_screen_lines() as u16, vt.grid_columns() as u16)
+            });
+            crate::pty_capture::record_with_geometry(session_id, data.as_bytes(), capture_geometry);
+        }
 
         raw_stream_events(&mut self.raw_carry, data, &mut events);
         let agent_active_for_parse = state
+            .session_maps
             .session_states
             .get(session_id)
             .map(|s| s.agent_type.is_some())
             .unwrap_or(false);
+        let mut breaks = IntentBreaks::default();
+        if agent_active_for_parse
+            && (intent_candidate.is_some() || silence.lock().open_intent.is_some())
+        {
+            self.intent_break_parser
+                .advance(&mut breaks, data.as_bytes());
+        }
+        let mut intent_events = Vec::new();
+        if agent_active_for_parse {
+            let candidate = intent_candidate.and_then(|(line, anchor_text)| {
+                let ParsedEvent::Intent { text, title } =
+                    crate::output_parser::parse_intent(&line.text, true)?
+                else {
+                    return None;
+                };
+                Some((line, anchor_text, text, title))
+            });
+            let mut sl = silence.lock();
+            let mut candidate_grew = false;
+            let mut same_anchor_repaint = false;
+            if let Some((line, anchor_text, text, title)) = candidate {
+                candidate_grew = sl.open_intent.as_ref().map_or(!breaks.strong, |open| {
+                    text.starts_with(&open.text) && text.len() > open.text.len()
+                });
+                same_anchor_repaint = sl
+                    .open_intent
+                    .as_ref()
+                    .is_some_and(|open| open.anchor_text == anchor_text);
+                let compatible = sl.open_intent.as_ref().is_some_and(|open| {
+                    text.starts_with(&open.text)
+                        || open.text.starts_with(&text)
+                        || same_anchor_repaint
+                });
+                if sl.open_intent.is_some()
+                    && !compatible
+                    && let Some(event) = sl.close_open_intent()
+                {
+                    intent_events.push(event);
+                }
+                // Ink can erase the continuation row, briefly paint the next
+                // paragraph there, then move the intact anchor up one row and
+                // finish its title. Keep the longer candidate during that gap.
+                if let Some(title) = title {
+                    sl.open_intent = None;
+                    if let Some(event) = sl.accept_intent(text, Some(title)) {
+                        intent_events.push(event);
+                    }
+                } else if sl.last_intent.as_ref() != Some(&(text.clone(), None))
+                    && !(same_anchor_repaint
+                        && sl
+                            .open_intent
+                            .as_ref()
+                            .is_some_and(|open| !text.starts_with(&open.text)))
+                {
+                    let start_row = if same_anchor_repaint {
+                        sl.open_intent
+                            .as_ref()
+                            .map_or(intent_origin + line.start_row, |open| open.start_row)
+                    } else {
+                        intent_origin + line.start_row
+                    };
+                    sl.open_intent = Some(OpenIntent {
+                        text,
+                        anchor_text,
+                        start_row,
+                        end_row: start_row + line.end_row.saturating_sub(line.start_row),
+                    });
+                }
+            }
+            let close = sl.open_intent.as_ref().is_some_and(|open| {
+                let end_row = open.end_row.saturating_sub(intent_origin);
+                let prose_below = !candidate_grew
+                    && !same_anchor_repaint
+                    && changed_rows.iter().any(|row| {
+                        row.row_index > end_row
+                            && !row.text.trim().is_empty()
+                            && !is_chrome_row(&row.text)
+                            && crate::output_parser::structured_token_anchor(&row.text).is_none()
+                    });
+                let broken_line = breaks.any
+                    && !candidate_grew
+                    && !same_anchor_repaint
+                    && cursor_row.is_some_and(|row| row > end_row);
+                let replaced = !same_anchor_repaint
+                    && changed_rows.iter().any(|row| {
+                        intent_origin + row.row_index == open.start_row
+                            && crate::output_parser::structured_token_anchor(&row.text)
+                                != Some(crate::output_parser::StructuredTokenAnchor::Intent)
+                    });
+                (prose_below || broken_line || replaced) && !incomplete_intent_title(&open.text)
+                    || explicit_idle_in_chunk
+            });
+            if close && let Some(event) = sl.close_open_intent() {
+                intent_events.push(event);
+            }
+        }
         // Cursor-completeness guard: parse a suggest token from the bounded grid
         // prefix through the cursor, never from stale cells to its right. When a
         // soft-wrapped continuation changes in a later chunk, replace its whole
         // physical range with one synthetic logical row so the unchanged anchor
-        // remains available to the existing parser. Intent deferral is unchanged.
+        // remains available to the existing parser. Intent capture is handled
+        // by the open state above.
         let mut structured_rows = None;
         let structured_prefix = logical_prefix
             .filter(|prefix| crate::output_parser::structured_token_anchor(&prefix.text).is_some())
@@ -5234,12 +2671,27 @@ impl ChunkProcessor {
             );
         }
         let rows = structured_rows.as_deref().unwrap_or(&changed_rows);
+        // Claude redraws earlier responses while submitting the next composer.
+        // Only suggestions below the latest submitted prompt belong to this
+        // turn. Exclude the live input box so an unsent draft is not a boundary.
+        let suggest_floor = if agent_type.as_deref() == Some("claude") && screen_present {
+            let refs: Vec<&str> = screen_buf.iter().map(String::as_str).collect();
+            let end = crate::chrome::find_agent_chrome_cutoff(&refs, Some("claude"))
+                .unwrap_or(refs.len());
+            refs[..end].iter().rposition(|row| {
+                row.strip_prefix('❯')
+                    .is_some_and(|draft| !draft.trim().is_empty())
+            })
+        } else {
+            None
+        };
         events.extend(
             self.parser
-                .parse_clean_lines(rows, agent_active_for_parse)
+                .parse_clean_lines_with_suggest_floor(rows, agent_active_for_parse, suggest_floor)
                 .into_iter()
                 .filter(|e| !suppress_heuristic_question(hook_instrumented, e)),
         );
+        events.extend(intent_events);
 
         // Heuristic agent-block detection for Claude Code tool calls.
         // CC renders tool calls as `⏺ ToolName(args)` — detect these and
@@ -5276,7 +2728,9 @@ impl ChunkProcessor {
             }
         }
 
-        // screen_cache was computed once inside the vt_log lock scope above.
+        // The snapshot was refilled once inside the vt_log lock scope above and
+        // is handed to every consumer below as one borrowed slice.
+        let screen_cache: Option<&[String]> = screen_present.then_some(screen_buf.as_slice());
 
         // Slash menu detection — use full screen rows (not chrome-trimmed).
         // Claude Code v2.1+ renders autocomplete items BELOW the prompt chrome,
@@ -5284,16 +2738,22 @@ impl ChunkProcessor {
         // scans bottom-up, skips empty rows, and stops at the first non-matching
         // row (separator/chrome), so it safely finds items regardless of position.
         let slash_on = state
+            .session_maps
             .slash_mode
             .get(session_id)
             .is_some_and(|v| v.load(std::sync::atomic::Ordering::Relaxed));
-        if slash_on && let Some(screen) = &screen_cache {
-            // This runs in the per-PTY-chunk hot path. Do not log each parse:
-            // a stale slash-mode flag during sustained output previously sent
-            // thousands of identical records through the application logger,
-            // adding avoidable lock/contention pressure to terminal delivery.
-            if let Some(evt) = crate::output_parser::parse_slash_menu(screen) {
-                events.push(evt);
+        if let Some(screen) = screen_cache {
+            let menu = slash_on
+                .then(|| crate::output_parser::parse_slash_menu(screen))
+                .flatten();
+            if let Some(event) = menu {
+                self.slash_menu_visible = true;
+                events.push(event);
+            } else if self.slash_menu_visible {
+                // Exact commands and zero matches close completion without a
+                // submitted line. Retract once, not on every busy output chunk.
+                self.slash_menu_visible = false;
+                events.push(ParsedEvent::SlashMenu { items: Vec::new() });
             }
         }
 
@@ -5304,15 +2764,71 @@ impl ChunkProcessor {
         // Parser uses a strict shape (title with ?/verb + ≥2 numbered options)
         // so false-positive cost is low. Dedup via last_choice_prompt_sig
         // guards against repaint re-emission.
-        if let Some(screen) = &screen_cache {
-            match crate::output_parser::parse_choice_prompt(screen) {
+        if events
+            .iter()
+            .any(|event| matches!(event, ParsedEvent::UserInput { .. }))
+        {
+            self.choice_prompt_needs_repaint = true;
+        }
+        if let Some(screen) = screen_cache {
+            let choice = if agent_type.as_deref() == Some("claude") {
+                crate::output_parser::parse_claude_ask_user_question(screen)
+                    .or_else(|| crate::output_parser::parse_choice_prompt(screen))
+            } else if agent_type.as_deref() == Some("ego") {
+                let rows = ego_question_rows.as_deref().unwrap_or(screen);
+                crate::output_parser::parse_ego_question(rows)
+                    .or_else(|| crate::output_parser::parse_ego_approval(rows))
+            } else if agent_type.as_deref() == Some("grok") {
+                crate::output_parser::parse_grok_question(screen)
+                    .or_else(|| crate::output_parser::parse_choice_prompt(screen))
+            } else {
+                crate::output_parser::parse_choice_prompt(screen)
+            };
+            // A native radio form can switch to free text without leaving the
+            // question. Retire old buttons before publishing the text-only wait.
+            if matches!(choice, Some(ParsedEvent::Question { .. }))
+                && self.last_choice_prompt_sig.take().is_some()
+            {
+                events.push(ParsedEvent::ChoiceCleared);
+            }
+            match choice {
                 Some(evt) => events.push(evt),
                 // Dialog is no longer on screen — retire its dedup signature so the
                 // same dialog is detected again the next time it appears, instead of
                 // being swallowed for the rest of the session.
                 None => {
+                    self.choice_prompt_needs_repaint = false;
                     if self.last_choice_prompt_sig.take().is_some() {
                         events.push(ParsedEvent::ChoiceCleared);
+                    }
+                    // A ready composer shares the empty `>` shape. Only enrich
+                    // an existing confident ego wait, after retiring an old selector.
+                    if agent_type.as_deref() == Some("ego") {
+                        let confident_wait = events
+                            .iter()
+                            .rev()
+                            .find_map(|event| match event {
+                                ParsedEvent::Question { confident, .. } => Some(*confident),
+                                ParsedEvent::UserInput { .. } => Some(false),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| {
+                                state
+                                    .session_maps
+                                    .session_states
+                                    .get(session_id)
+                                    .is_some_and(|session| {
+                                        session.awaiting_input
+                                            && session.question_confident
+                                            && session.choice_prompt.is_none()
+                                    })
+                            });
+                        if confident_wait
+                            && let Some(question) =
+                                crate::output_parser::parse_ego_free_text_question(screen)
+                        {
+                            events.push(question);
+                        }
                     }
                 }
             }
@@ -5327,7 +2843,7 @@ impl ChunkProcessor {
         // one-shot per session. Screen absence is the real end-of-prompt signal:
         // the user answering, the agent withdrawing the prompt, and a repaint that
         // scrolls it away all collapse into it.
-        if let Some(screen) = &screen_cache {
+        if let Some(screen) = screen_cache {
             let prompt_gone = self
                 .last_question_text
                 .as_deref()
@@ -5349,29 +2865,33 @@ impl ChunkProcessor {
         // Presence of the footer is the whole signal — no title, option or tab-bar
         // parsing, none of which survives the wizard advancing. It re-arms only
         // when the badge is actually off, so a repaint cannot storm: one event per
-        // spurious clear, never one per frame. Hook-instrumented sessions are
-        // excluded for the same reason `suppress_heuristic_question` excludes them
-        // — OSC 7770 owns their state.
-        //
-        // DEFERRED (2026-08-21) — hook-instrumented agents keep the same gap: a
-        // multi-question AskUserQuestion fires PreToolUse once, so sub-questions 2+
-        // have no hook signal either. Needs a capture with hooks ON to confirm
-        // before widening this to them.
-        if let Some(screen) = &screen_cache {
+        // spurious clear, never one per frame. This applies to hooked sessions
+        // too: later busy hooks can clear awaiting while the dialog stays open,
+        // and a multi-question tool emits its awaiting hook only once.
+        // A returned shell can retain the agent's footer above its prompt. Only
+        // a live agent identity makes those retained rows an open agent dialog.
+        if agent_type.is_some()
+            && let Some(screen) = screen_cache
+        {
             let (awaiting, has_choice) = state
+                .session_maps
                 .session_states
                 .get(session_id)
                 .map(|s| (s.awaiting_input, s.choice_prompt.is_some()))
                 .unwrap_or((false, false));
-            let question_this_tick = events
-                .iter()
-                .any(|e| matches!(e, ParsedEvent::Question { .. }));
+            // The accumulator has not seen this chunk yet. Respect its LAST
+            // awaiting mutation: an earlier Question or ChoicePrompt followed
+            // by hook-busy's UserInput no longer protects the badge from being cleared.
+            let pending_awaiting = events.iter().rev().find_map(|event| match event {
+                ParsedEvent::Question { .. } | ParsedEvent::ChoicePrompt { .. } => Some(true),
+                ParsedEvent::UserInput { .. } | ParsedEvent::ChoiceCleared => Some(false),
+                _ => None,
+            });
             if let Some(evt) = rearm_awaiting_for_open_dialog(
                 screen,
-                hook_instrumented,
-                awaiting,
+                pending_awaiting.unwrap_or(awaiting),
                 has_choice,
-                question_this_tick,
+                pending_awaiting == Some(true),
             ) {
                 // Clear the dedup: the badge is off, so this event must reach state.
                 self.last_question_text = None;
@@ -5390,6 +2910,7 @@ impl ChunkProcessor {
         // Read the turn epoch once so every event in this chunk is attributed to
         // the same turn, and per-turn dedup cannot straddle a boundary mid-chunk.
         let turn_epoch = state
+            .session_maps
             .session_states
             .get(session_id)
             .map(|session| session.turn_epoch)
@@ -5406,6 +2927,13 @@ impl ChunkProcessor {
             let suppress_this = suppress_notifications
                 && match event {
                     ParsedEvent::Question { confident, .. } => !*confident,
+                    // Native ego provider termination is a lifecycle receipt,
+                    // not retained screen text resurrected by startup/resize.
+                    ParsedEvent::ApiError { pattern_name, .. }
+                        if pattern_name == "ego-provider-failure" =>
+                    {
+                        false
+                    }
                     ParsedEvent::RateLimit { .. } | ParsedEvent::ApiError { .. } => true,
                     _ => false,
                 };
@@ -5419,7 +2947,8 @@ impl ChunkProcessor {
             // agent produced (#4421).
             match event {
                 ParsedEvent::Intent { .. } => {
-                    state.note_marker(session_id, crate::state::MarkerKind::Intent)
+                    publish_intent_event(state, session_id, event, turn_epoch);
+                    continue;
                 }
                 ParsedEvent::Suggest { .. } => {
                     state.note_marker(session_id, crate::state::MarkerKind::Suggest)
@@ -5461,18 +2990,29 @@ impl ChunkProcessor {
             // soon as the prompt leaves the screen (see the screen-absence reset
             // above), so this guards one pending prompt, not the whole session.
             if let ParsedEvent::Question { prompt_text, .. } = event {
-                if self.last_question_text.as_deref() == Some(prompt_text.as_str()) {
+                // Ego's empty title is a native awaiting marker, not screen
+                // content. Each marker establishes a wait independently of the
+                // previous dialog's presence, shape or repaint bookkeeping.
+                if self.last_question_text.as_deref() == Some(prompt_text.as_str())
+                    && !(agent_type.as_deref() == Some("ego") && prompt_text.is_empty())
+                {
                     continue;
                 }
                 self.last_question_text = Some(prompt_text.clone());
             }
 
             // Dedup choice-prompt: skip if same (title + option keys) already emitted.
-            // Signature keeps option order but ignores highlighted drift so cursor
+            // Signature keeps option order and checkbox labels, but ignores highlighted drift so cursor
             // movement within the dialog doesn't re-fire. Retired when the dialog
             // leaves the screen (see the parse site above).
-            if let ParsedEvent::ChoicePrompt { title, options, .. } = event {
-                let sig = format!(
+            if let ParsedEvent::ChoicePrompt {
+                title,
+                options,
+                selection_mode,
+                ..
+            } = event
+            {
+                let mut sig = format!(
                     "{}|{}",
                     title,
                     options
@@ -5481,10 +3021,49 @@ impl ChunkProcessor {
                         .collect::<Vec<_>>()
                         .join(","),
                 );
-                if self.last_choice_prompt_sig.as_deref() == Some(sig.as_str()) {
+                if *selection_mode == Some(crate::output_parser::ChoiceSelectionMode::ToggleEnter) {
+                    sig.push('|');
+                    sig.push_str(
+                        &options
+                            .iter()
+                            .map(|o| o.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|"),
+                    );
+                }
+                let dialog_row_repainted = choice_changed_rows.iter().any(|&row_index| {
+                    screen_cache
+                        .and_then(|screen| screen.get(row_index))
+                        .is_some_and(|row| {
+                            row.contains(title)
+                                || options.iter().any(|option| row.contains(&option.label))
+                        })
+                });
+                // Ego emits awaiting for each native question. After busy has
+                // retired an answer, scrolling its retained rows is not a new
+                // wait. A fresh protocol question can still restore the same
+                // signature; other agents retain their screen-only recovery.
+                let repaint_can_rearm = agent_type.as_deref() != Some("ego")
+                    || events
+                        .iter()
+                        .rev()
+                        .find_map(|event| match event {
+                            ParsedEvent::Question { confident, .. } => Some(*confident),
+                            ParsedEvent::UserInput { .. } => Some(false),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| {
+                            silence.lock().awaiting_rank() == Some(EvidenceRank::Protocol)
+                        });
+                if self.last_choice_prompt_sig.as_deref() == Some(sig.as_str())
+                    && !(self.choice_prompt_needs_repaint
+                        && dialog_row_repainted
+                        && repaint_can_rearm)
+                {
                     continue;
                 }
                 self.last_choice_prompt_sig = Some(sig);
+                self.choice_prompt_needs_repaint = false;
             }
 
             // Resolve relative plan-file paths to absolute using session CWD.
@@ -5532,6 +3111,26 @@ impl ChunkProcessor {
 
             let emit_event = resolved.as_ref().unwrap_or(event);
 
+            // Serialize agent-owned waits against foreground retirement. Parsing
+            // uses a pre-grid identity snapshot; shell return may revoke it while
+            // this chunk is being processed. Enqueue under the same identity lock
+            // as exit withdrawal so neither transport can re-arm a retired agent.
+            let _identity_guard = if agent_type.is_some()
+                && matches!(
+                    emit_event,
+                    ParsedEvent::Question { .. } | ParsedEvent::ChoicePrompt { .. }
+                ) {
+                let Some(session) = state.session_maps.session_states.get(session_id) else {
+                    continue;
+                };
+                if session.agent_type != agent_type {
+                    continue;
+                }
+                Some(session)
+            } else {
+                None
+            };
+
             // Serialize once, reuse for both broadcast and Tauri IPC
             if let Ok(mut json) = serde_json::to_value(emit_event) {
                 if let Some(object) = json.as_object_mut() {
@@ -5548,6 +3147,120 @@ impl ChunkProcessor {
             }
         }
 
+        // Codex can cancel an approval with Esc without emitting a typed line
+        // or protocol busy marker. The title has left Action Required and the
+        // recorded screen shows the cancellation above its ready composer.
+        // Carry the originating prompt so a later, different question cannot
+        // be cleared. Require a newly painted cancellation as well: old ones
+        // remain in the transcript when another approval opens.
+        if agent_type.as_deref() == Some("codex")
+            && self.codex_approval_question.is_some()
+            && changed_rows
+                .iter()
+                .any(|row| row.text.contains("You canceled the request"))
+        {
+            self.codex_approval_canceled = true;
+        }
+        let canceled_codex_approval = if agent_type.as_deref() == Some("codex")
+            && !self.title_awaiting
+            && self.codex_approval_canceled
+            && matches!(
+                screen_activity,
+                AgentScreenActivity::Ready | AgentScreenActivity::Interrupted
+            )
+            && screen_cache.is_some_and(|screen| {
+                screen
+                    .iter()
+                    .any(|row| row.contains("You canceled the request"))
+            })
+            && !events.iter().any(|event| {
+                matches!(
+                    event,
+                    ParsedEvent::Question { .. } | ParsedEvent::ChoicePrompt { .. }
+                )
+            }) {
+            self.codex_approval_question
+                .as_deref()
+                .and_then(|expected| {
+                    state
+                        .session_maps
+                        .session_states
+                        .get(session_id)
+                        .and_then(|session| {
+                            (session.awaiting_input
+                                && session.question_confident
+                                && session.question_text.as_deref() == Some(expected))
+                            .then(|| (expected.to_string(), session.turn_epoch))
+                        })
+                })
+        } else {
+            None
+        };
+        if let Some((expected_question_text, turn_epoch)) = canceled_codex_approval {
+            self.codex_approval_question = None;
+            self.codex_approval_canceled = false;
+            state.emit_pty_event(crate::state::AppEvent::PtyParsed {
+                session_id: session_id.to_string(),
+                parsed: serde_json::json!({
+                    "type": "protocol-question-cleared",
+                    "expected_question_text": expected_question_text,
+                    "_turn_epoch": turn_epoch,
+                })
+                .into(),
+            });
+        }
+
+        // Claude prints this tool result when Esc dismisses AskUserQuestion.
+        // A bare Esc has no line-input event, so its confident notification
+        // otherwise stays latched after the completed turn. Require the newly
+        // painted result and a ready composer; a dialog still on screen must
+        // retain its badge, including while Claude repaints its status line.
+        let declined_screen = agent_type.as_deref() == Some("claude")
+            && screen_activity == AgentScreenActivity::Ready
+            && changed_rows.iter().any(|row| {
+                row.text.contains("User declined") && row.text.contains("answer questions")
+            })
+            && screen_cache
+                .is_some_and(|screen| crate::output_parser::ink_dialog_footer(screen).is_none())
+            && !events.iter().any(|event| {
+                matches!(
+                    event,
+                    ParsedEvent::Question { .. } | ParsedEvent::ChoicePrompt { .. }
+                )
+            });
+        let declined_session = declined_screen
+            .then(|| state.session_maps.session_states.get(session_id))
+            .flatten()
+            .filter(|session| session.awaiting_input && session.question_confident)
+            .map(|session| {
+                // A live choice overlay owns its own clear; only the shell
+                // state below is ours then.
+                let question = if session.choice_prompt.is_none() {
+                    session.question_text.clone()
+                } else {
+                    None
+                };
+                (question, session.turn_epoch)
+            });
+        if let Some((question, turn_epoch)) = declined_session {
+            if let Some(expected_question_text) = question {
+                state.emit_pty_event(crate::state::AppEvent::PtyParsed {
+                    session_id: session_id.to_string(),
+                    parsed: serde_json::json!({
+                        "type": "protocol-question-cleared",
+                        "expected_question_text": expected_question_text,
+                        "_turn_epoch": turn_epoch,
+                    })
+                    .into(),
+                });
+            }
+            // Esc ends the turn without a Stop hook (live capture: busy, busy,
+            // awaiting, then nothing), so the hook-driven BUSY would stay latched
+            // with the queue stuck until the next input. The ready composer under
+            // the fresh cancellation is the Stop it never sent.
+            transition_explicit_shell_state(state, session_id, SHELL_IDLE, "idle", true);
+        }
+
         // Update silence state for fallback question detection.
         let has_status_line = events
             .iter()
@@ -5560,7 +3273,7 @@ impl ChunkProcessor {
         //   state to busy forever during genuine idle.
         // Path 1: every row has a chrome marker (is_chrome_row).
         // Path 2: parse_status_line detected a spinner pattern (Gemini braille,
-        //   Aider Knight Rider) AND no row contains real agent output. A row is
+        //   Goose status text) AND no row contains real agent output. A row is
         //   "real output" if it is not chrome and not blank — this prevents
         //   has_status_line from suppressing chunks that mix spinner + output.
         let all_chrome_markers = changed_rows.iter().all(|r| is_chrome_row(&r.text));
@@ -5592,8 +3305,31 @@ impl ChunkProcessor {
             && last_q_line.is_none()
             && !has_status_line
             && no_real_output;
+        // Tool-error detection: scan visible rows for `Error: Exit code N`
+        // emitted by Claude Code / Codex at the end of a failing tool call.
+        // Fires playError() via silence_timer when followed only by chrome
+        // until SILENCE_TOOL_ERROR_THRESHOLD elapses (= turn ended on error).
+        //
+        // The scan is two regexes per changed row and it used to run INSIDE the
+        // SilenceState critical section, holding the lock the silence timer and
+        // every sibling reader contend for while it matched. Only its verdict
+        // needs the lock.
+        let mut error_line: Option<String> = None;
+        let mut retry_seen = false;
+        for row in changed_rows.iter() {
+            if is_retry_line(&row.text) {
+                retry_seen = true;
+            } else if is_tool_error_line(&row.text) {
+                error_line = Some(row.text.trim().to_string());
+            }
+        }
         {
             let mut sl = silence.lock();
+            // Shared with the silence timer (#744-138c): the screen has not
+            // changed since this classification unless a later chunk arrives
+            // to overwrite it, so the timer reuses this instead of calling
+            // `detect_agent_screen_activity` itself — see `cached_screen_activity`.
+            sl.record_screen_activity(screen_activity, output_offset_after_chunk);
             sl.on_chunk(
                 regex_found_question,
                 last_q_line,
@@ -5602,19 +3338,6 @@ impl ChunkProcessor {
                 suggest_only,
             );
 
-            // Tool-error detection: scan visible rows for `Error: Exit code N`
-            // emitted by Claude Code / Codex at the end of a failing tool call.
-            // Fires playError() via silence_timer when followed only by chrome
-            // until SILENCE_TOOL_ERROR_THRESHOLD elapses (= turn ended on error).
-            let mut error_line: Option<String> = None;
-            let mut retry_seen = false;
-            for row in changed_rows.iter() {
-                if is_retry_line(&row.text) {
-                    retry_seen = true;
-                } else if is_tool_error_line(&row.text) {
-                    error_line = Some(row.text.trim().to_string());
-                }
-            }
             if retry_seen {
                 // Agent is auto-retrying a failed API call — hold BUSY across the
                 // frozen gap between attempts. Takes precedence over the recovery
@@ -5637,22 +3360,31 @@ impl ChunkProcessor {
         let working_status_moved = changed_rows
             .iter()
             .any(|row| crate::chrome::is_working_status_row(&row.text));
-        if screen_activity == AgentScreenActivity::Working && !explicit_idle_in_chunk {
-            let source = if working_status_moved {
-                "working-screen-movement"
-            } else {
-                "working-screen"
-            };
-            apply_working_evidence(state, silence, session_id, now_epoch_ms(), source);
-        }
+        let apply_working =
+            screen_activity == AgentScreenActivity::Working && !explicit_idle_in_chunk;
+        let working_source = if working_status_moved {
+            "working-screen-movement"
+        } else {
+            "working-screen"
+        };
+        let can_reopen_completed = apply_working && {
+            let working_agent_type = state
+                .session_maps
+                .session_states
+                .get(session_id)
+                .and_then(|session| session.agent_type.clone());
+            working_agent_type.as_deref() == Some("claude")
+                || (working_agent_type.as_deref() == Some("codex")
+                    && working_source == "working-screen-movement")
+        };
 
         // Stamp last_output_ms for real output and for active spinner repaints.
-        // Spinner rows (dingbats ✻, braille ⠋, Aider ░█) prove the agent is
+        // Spinner rows (dingbats ✻, braille ⠋) prove the agent is
         // alive even though they are chrome-only — keeping the timestamp fresh
         // prevents should_transition_idle from firing mid-think.
         //
         // Spinner detection runs on the SAME post-cutoff `changed_rows` as
-        // everything else. Real spinners (Gemini braille, Aider Knight Rider,
+        // everything else. Real spinners (Gemini braille,
         // Claude `✻ Thinking…`) all render ABOVE the input separator and LEAD
         // their row, so they survive the chrome cutoff and still keep the agent
         // alive here. A status-line HUD's `█░` progress bar or a `·`-bearing
@@ -5663,9 +3395,70 @@ impl ChunkProcessor {
             && changed_rows
                 .iter()
                 .any(|r| crate::chrome::is_spinner_row(&r.text));
-        if (!chrome_only || has_spinner) && !explicit_idle_in_chunk {
+        //
+        // This, the resize-grace re-arm and the BUSY gate below all read or
+        // write the same SilenceState, and each used to take the lock for
+        // itself. They are one critical section now; nothing between them
+        // touches SilenceState (`stamp_last_output_now` writes an AppState
+        // atomic, `begin_suggest_working_turn` the parser), and the ordering
+        // inside the section is the ordering the three had.
+        let real_activity = (!chrome_only || has_spinner) && !explicit_idle_in_chunk;
+        // The working-evidence gate (turn_completed/explicit_idle blocking a
+        // stale Working row, unless `can_reopen_completed`) folded in here so
+        // this is the ONLY SilenceState lock in the chunk path — previously
+        // `apply_working_evidence` took its own separate lock ahead of this
+        // one (DEFERRED 2026-09-06). Working evidence and real/spinner
+        // activity are both one-shot busy evidence (see the comment on
+        // `apply_working_evidence`): recorded to win THIS chunk's CAS via
+        // `decide()`, then cleared so they cannot block a later, unrelated
+        // idle-evidence recording (e.g. the silence-timeout fallback for a
+        // plain shell or an agent with no OSC133/hook integration).
+        let (in_resize_grace_after, evidence_snapshot, working_applied, reopened_completion) = {
+            let mut sl = silence.lock();
+            let mut working_applied = false;
+            let mut reopened_completion = false;
+            if apply_working {
+                let turn_completed = state
+                    .session_maps
+                    .session_states
+                    .get(session_id)
+                    .is_some_and(|session| sl.completion_settled_for_epoch(session.turn_epoch));
+                let blocked = (turn_completed || sl.explicit_idle()) && !can_reopen_completed;
+                if !blocked {
+                    let reopen = can_reopen_completed && (turn_completed || sl.explicit_idle());
+                    if reopen {
+                        // Claude can emit Stop/suggest before a blocking Stop hook
+                        // finishes; Codex can start an internal continuation
+                        // without a PTY submission. Current semantic movement is
+                        // stronger than either stale boundary.
+                        sl.reopen_suggest_completion();
+                        reopened_completion = true;
+                    }
+                    sl.note_working_screen();
+                    invalidate_background_probe_boundary_locked(state, session_id);
+                    let rank = if reopen {
+                        EvidenceRank::Protocol
+                    } else {
+                        EvidenceRank::Screen
+                    };
+                    sl.evidence.record_busy(rank, working_source);
+                    working_applied = true;
+                }
+            }
+            let activity_source = if has_spinner {
+                "spinner-active"
+            } else {
+                "real-activity"
+            };
+            // Arbitrate BEFORE updating activity metadata: those updates clear
+            // idle evidence. Doing them first bypasses record_busy's rank gate
+            // and lets decorative repaints reopen a hook-completed turn.
+            if real_activity
+                && (sl.evidence.busy.is_some()
+                    || sl
+                        .evidence
+                        .record_busy(EvidenceRank::Screen, activity_source))
             {
-                let mut sl = silence.lock();
                 if has_spinner {
                     sl.note_working_screen();
                 } else {
@@ -5673,6 +3466,38 @@ impl ChunkProcessor {
                 }
                 invalidate_background_probe_boundary_locked(state, session_id);
             }
+            // SIGWINCH reflow repaints content rows for longer than the initial 1s
+            // resize grace, but a reflow never grows the buffer — it only repaints
+            // existing rows. While such pure-repaint chunks keep arriving within the
+            // grace window, re-arm the grace so a resize never flips an idle agent to
+            // busy. A growing chunk (genuine new output) is NOT extended, so real work
+            // started right after a resize still registers as busy. An already-busy
+            // session is unaffected (idle transitions are silence-timer only).
+            //
+            // The extension has no stop condition of its own — each qualifying chunk
+            // pushes the deadline a full RESIZE_GRACE forward — so `vt_output_grew`
+            // is the ONLY thing that ends it. It must stay a signal that a working
+            // agent actually trips; see its definition for why the alternate screen
+            // needs its own answer rather than the durable-log total.
+            if !vt_output_grew && sl.is_resize_grace() {
+                sl.on_resize();
+            }
+            (
+                sl.is_resize_grace(),
+                sl.evidence.clone(),
+                working_applied,
+                reopened_completion,
+            )
+        };
+        if working_applied {
+            stamp_last_output_now(state, session_id, now_epoch_ms());
+        }
+        if reopened_completion
+            && let Some(mut session) = state.session_maps.session_states.get_mut(session_id)
+        {
+            session.suggested_actions = None;
+        }
+        if real_activity {
             stamp_last_output_now(state, session_id, now_epoch_ms());
         }
 
@@ -5684,25 +3509,12 @@ impl ChunkProcessor {
         if !explicit_idle_in_chunk
             && (screen_activity == AgentScreenActivity::Working || !chrome_only || has_spinner)
             && let Some(turn_epoch) = state
+                .session_maps
                 .session_states
                 .get(session_id)
                 .map(|session| session.turn_epoch)
         {
             self.parser.begin_suggest_working_turn(turn_epoch);
-        }
-
-        // SIGWINCH reflow repaints content rows for longer than the initial 1s
-        // resize grace, but a reflow never grows the buffer — it only repaints
-        // existing rows. While such pure-repaint chunks keep arriving within the
-        // grace window, re-arm the grace so a resize never flips an idle agent to
-        // busy. A growing chunk (genuine new output) is NOT extended, so real work
-        // started right after a resize still registers as busy. An already-busy
-        // session is unaffected (idle transitions are silence-timer only).
-        if !vt_log_grew {
-            let mut sl = silence.lock();
-            if sl.is_resize_grace() {
-                sl.on_resize();
-            }
         }
 
         // Shell state: reader transitions → BUSY on real output OR active spinner.
@@ -5711,11 +3523,13 @@ impl ChunkProcessor {
         // Load `prev` and drop the shell_states Ref before try_shell_transition (which
         // re-gets the same key): holding a Ref across that second get risks the CONC-C
         // re-entrant-read deadlock (story 099-6526).
-        let prev = if (!chrome_only || has_spinner)
-            && !explicit_idle_in_chunk
-            && !silence.lock().is_resize_grace()
-        {
+        //
+        // Working-evidence's CAS is unconditional once recorded (matching the
+        // old `apply_working_evidence`, which was never gated by resize grace);
+        // real/spinner activity's CAS keeps its own resize-grace gate.
+        let prev = if working_applied || (real_activity && !in_resize_grace_after) {
             state
+                .session_maps
                 .shell_states
                 .get(session_id)
                 .map(|atom| atom.load(std::sync::atomic::Ordering::Acquire))
@@ -5723,10 +3537,27 @@ impl ChunkProcessor {
             None
         };
         if let Some(prev) = prev
-            && prev != SHELL_BUSY
+            && let Some(Transition::ToBusy) = decide(
+                &evidence_snapshot,
+                prev == SHELL_BUSY,
+                std::time::Instant::now(),
+            )
             && try_shell_transition(state, session_id, prev, SHELL_BUSY, true)
         {
             emit_shell_state(state, session_id, "busy");
+        }
+        if working_applied || real_activity {
+            // One-shot: this evidence must not persist to block a later,
+            // unrelated idle-evidence recording (silence-timeout fallback,
+            // ready-screen confirmation) — see the comment above.
+            let mut silence = silence.lock();
+            if silence.evidence.busy.is_some_and(|busy| {
+                busy.source == working_source
+                    || busy.source == "spinner-active"
+                    || busy.source == "real-activity"
+            }) {
+                silence.evidence.busy = None;
+            }
         }
 
         // Update terminal mode in SessionState when it changes.
@@ -5737,7 +3568,7 @@ impl ChunkProcessor {
                 self.terminal_mode = self.terminal_mode.with_app_hint(app.to_string());
             }
         }
-        if let Some(mut entry) = state.session_states.get_mut(session_id) {
+        if let Some(mut entry) = state.session_maps.session_states.get_mut(session_id) {
             let new_mode = if self.terminal_mode.is_fullscreen() {
                 Some(self.terminal_mode.clone())
             } else {
@@ -5748,7 +3579,9 @@ impl ChunkProcessor {
             }
         }
 
-        Some(data.to_owned())
+        self.screen_buf = screen_buf;
+        self.queued_idle_flush |= explicit_idle_in_chunk;
+        true
     }
 }
 
@@ -5758,6 +3591,7 @@ fn process_kitty_actions(kitty_actions: &[KittyAction], session_id: &str, state:
         return;
     }
     let entry = state
+        .session_maps
         .kitty_states
         .entry(session_id.to_string())
         .or_insert_with(|| Mutex::new(KittyKeyboardState::new()));
@@ -5781,24 +3615,82 @@ fn process_kitty_actions(kitty_actions: &[KittyAction], session_id: &str, state:
     }
 }
 
+/// Whether the session's line discipline would swallow a reply written now.
+///
+/// **Measured 2026-09-07** (capture `f2bddfb0`, frames 25-35): Claude Code
+/// emits `ESC[c` *before* it switches the tty out of cooked mode, so our
+/// `ESC[?6c` was painted as the literal text `^[[?6c` at the top of the startup
+/// banner and never delivered. Claude, having received nothing, re-queried
+/// 100ms later from raw mode and got a clean answer. Withholding the premature
+/// reply therefore costs no information: the querier retries once it can read.
+///
+/// **The predicate is `ICANON`, not `ECHO`, and the difference is load-bearing.**
+/// `ECHO` decides whether the bytes are *also* painted on screen; `ICANON`
+/// decides whether they are *delivered at all*, because a canonical-mode read
+/// blocks until a newline that a terminal reply never contains. In cbreak
+/// (`ICANON` off, `ECHO` on) the reply reaches the querier immediately — ugly,
+/// but read. Gating on `ECHO` there would withhold a reply nothing else will
+/// resend and hang the querier, trading a cosmetic defect for a hang.
+///
+/// A failure to look the tty up answers "no": the old behaviour was to always
+/// write, and a reply we cannot prove is undeliverable is better sent than lost.
+#[cfg(not(windows))]
+fn tty_would_swallow_reply(state: &AppState, session_id: &str) -> bool {
+    let Some(entry) = state.session_maps.sessions.get(session_id) else {
+        return false;
+    };
+    let Some(fd) = entry.value().lock().master.as_raw_fd() else {
+        return false;
+    };
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `fd` is the live PTY master owned by the session we just locked,
+    // and `tcgetattr` only writes through the pointer when it returns 0.
+    if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    unsafe { termios.assume_init() }.c_lflag & libc::ICANON != 0
+}
+
 /// Serialize a terminal-generated protocol reply with every other PTY write.
 ///
 /// The writer has its own mutex, separate from the session metadata. Waiting
 /// here is safe: the reader remains able to drain PTY output even when another
 /// thread is blocked in a kernel write, so the old session-lock deadlock cannot
 /// occur and mandatory replies are never discarded merely due to contention.
+///
+/// Replies are withheld while the tty is canonical — see
+/// [`tty_would_swallow_reply`].
 fn write_terminal_reply(state: &AppState, session_id: &str, response: &[u8], kind: &str) {
-    if let Err(error) = state.write_pty_parts(session_id, &[response]) {
+    #[cfg(not(windows))]
+    if tty_would_swallow_reply(state, session_id) {
+        tracing::debug!(source = "terminal", session_id = %session_id, %kind,
+            "Terminal reply withheld: tty is canonical, the querier cannot read it yet");
+        return;
+    }
+    // Terminal protocol replies are not replacement user input.
+    let result = state
+        .pty_writer(session_id)
+        .ok_or_else(|| "Session not found".to_string())
+        .and_then(|writer| {
+            let mut writer = writer.lock();
+            writer
+                .write_all(response)
+                .and_then(|()| writer.flush())
+                .map_err(|error| format!("Write failed: {error}"))
+        });
+    if let Err(error) = result {
         tracing::warn!(source = "terminal", session_id = %session_id, %kind, %error,
             "Terminal reply failed");
     }
 }
 
-/// Flush remaining bytes at EOF and write to ring buffer + WebSocket.
+/// Flush remaining bytes at EOF through the normal publication sanitizer.
 /// Returns the flushed data (may be empty).
 fn flush_eof(
     utf8_buf: &mut Utf8ReadBuffer,
     esc_buf: &mut EscapeAwareBuffer,
+    processor: &mut ChunkProcessor,
+    silence: &Arc<Mutex<SilenceState>>,
     session_id: &str,
     state: &AppState,
 ) -> String {
@@ -5810,1677 +3702,27 @@ fn flush_eof(
         flushed.push_str(&esc_buf.flush());
         flushed
     };
-    if !esc_remaining.is_empty()
-        && let Some(ring) = state.output_buffers.get(session_id)
-    {
-        let mut ring_guard = ring.lock();
-        ring_guard.write(esc_remaining.as_bytes());
-        crate::state::broadcast_to_ws_clients(&state.ws_clients, session_id, &esc_remaining);
-        drop(ring_guard);
-    }
-    esc_remaining
-}
-
-/// Drop every trace of a peer identity nobody can reach any more, and tell
-/// subscribers the address is gone.
-///
-/// Two callers below retire an identity for different reasons — the PTY backing
-/// it died, or the last child naming it as parent did — and both must clear the
-/// same maps. Keeping one list here is the same discipline
-/// [`remove_live_session_state`] enforces for per-session state: a new
-/// peer-keyed map belongs in this function and nowhere else.
-fn retire_peer_identity(state: &AppState, tuic_session: &str) {
-    state.peer_agents.remove(tuic_session);
-    state.orchestrator_peers.remove(tuic_session);
-    state.agent_inbox.remove(tuic_session);
-    state.agent_inbox_evictions.remove(tuic_session);
-    state.agent_read_cursor.remove(tuic_session);
-    state.active_agent_waiters.remove(tuic_session);
-    state.pending_injections.remove(tuic_session);
-    let _ = state
-        .event_bus
-        .send(crate::state::AppEvent::PeerUnregistered {
-            tuic_session: tuic_session.to_string(),
-        });
-}
-
-/// Per-session state owned by the running process: streams, input, shell status,
-/// and the swarm identities the PTY was backing. Reaped the moment the process
-/// dies, whether or not a readable tombstone outlives it.
-///
-/// This and [`remove_post_mortem_session_state`] are the *only* two enumerations
-/// of per-session maps. Three call sites compose them — `cleanup_session` runs
-/// both, `tombstone_transient_cleanup` runs this one, `spawn_tombstone_sweeper`
-/// runs the other. Each used to keep its own hand-written list, and the three had
-/// drifted: an explicit close left every peer identity behind, and a session that
-/// exited normally leaked its terminal alias for the life of the process.
-/// **A new per-session map belongs in one of these two functions and nowhere else.**
-fn remove_live_session_state(session_id: &str, state: &AppState) {
-    state.ws_clients.remove(session_id);
-    // Drop the per-session PTY event channel alongside ws_clients. Any final
-    // SessionClosed already emitted stays buffered for live subscribers (broadcast
-    // drains buffered messages before signalling Closed), so no close frame is lost.
-    state.pty_event_channels.remove(session_id);
-    #[cfg(feature = "desktop")]
-    state.grid_channels.remove(session_id);
-    state.grid_watch.remove(session_id);
-    state.grid_gates.remove(session_id);
-    state.pending_scroll.remove(session_id);
-    state.kitty_states.remove(session_id);
-    state.input_buffers.remove(session_id);
-    state.silence_states.remove(session_id);
-    state.shell_states.remove(session_id);
-    state.last_prompts.remove(session_id);
-    state.pty_descriptions.remove(session_id);
-    state.terminal_rows.remove(session_id);
-    state.resize_locks.remove(session_id);
-    // Input mode and shell integration describe the process that just died.
-    state.slash_mode.remove(session_id);
-    state.last_input_ms.remove(session_id);
-    state.has_osc133_integration.remove(session_id);
-    // Swarm maps — inserted at spawn/register time, must be cleaned on exit.
-    state.shell_state_since_ms.remove(session_id);
-    // A peer that announced its own `$TUIC_SESSION` is filed under that identity,
-    // not under the PTY key — so the `peer_agents.remove(session_id)` below has
-    // never matched it, and its registration outlived the terminal for the whole
-    // process lifetime. Retire the identities this PTY was backing as well.
-    for orphaned in state.unbind_live_pty(session_id) {
-        retire_peer_identity(state, &orphaned);
-    }
-    state.pending_injections.remove(session_id);
-    state.pending_initial_prompts.remove(session_id);
-    state.active_agent_waiters.remove(session_id);
-    state.peer_agents.remove(session_id);
-    state.orchestrator_peers.remove(session_id);
-    state.agent_inbox.remove(session_id);
-    state.agent_inbox_evictions.remove(session_id);
-    // The inbox read position is meaningless once the inbox is gone.
-    state.agent_read_cursor.remove(session_id);
-    #[cfg(unix)]
-    state.standby_sessions.remove(session_id);
-    // DEFERRED (2026-08-25) — a parent identity retained ONLY because this child
-    // named it (`peer_identity_is_reapable`) is never re-examined once the child
-    // goes: the reaper walks the peers of the MCP session it is collecting, and the
-    // parent's was collected long ago. The address then survives for the life of
-    // the process as the phantom `retire_repaired_phantom_identity` describes —
-    // advertised by `list_peers`, swallowing every message sent to it.
-    //
-    // Retiring it HERE was tried and is wrong twice over: `mark_session_exited` has
-    // just pushed this child's `state_change` into that inbox, and a headerless
-    // orchestrator can still reclaim the identity later with `register
-    // replaces=<old_uuid>` to collect exactly that mail. Both make "no live PTY, no
-    // live MCP session, no child" too weak a test for deletion. The real fix is a
-    // periodic sweep over ALL peers with a mail-retention rule, which is a policy
-    // decision, not a cleanup tweak.
-    state.session_parent.remove(session_id);
-    // mcp_to_session maps mcp_session_id → tuic_session. The reverse index
-    // session_to_mcp lets us drop O(k) entries (k = mcp sessions for this
-    // tuic_session, typically 1) instead of scanning every entry.
-    if let Some((_, mcp_sids)) = state.session_to_mcp.remove(session_id) {
-        for sid in &mcp_sids {
-            state.mcp_to_session.remove(sid);
-        }
-    }
-}
-
-/// Per-session state a tombstone keeps readable after the process is gone: the
-/// buffers, the exit code, the alias the tab still shows, and the accumulated
-/// knowledge a background task has yet to flush. Reaped when the tombstone ages
-/// out — or immediately, when the session is closed outright.
-///
-/// See [`remove_live_session_state`] for why these are the only two lists.
-fn remove_post_mortem_session_state(session_id: &str, state: &AppState) {
-    state.output_buffers.remove(session_id);
-    state.vt_log_buffers.remove(session_id);
-    state.pty_raw_rings.remove(session_id);
-    state.last_output_ms.remove(session_id);
-    state.exit_codes.remove(session_id);
-    state.term_aliases.remove(session_id);
-    state.marker_stats.remove(session_id);
-    state.session_visibility.remove(session_id);
-    state.ai_suggestions_enabled.remove(session_id);
-}
-
-// NOT A DEFERRAL — four session-keyed maps are deliberately NOT reaped by
-// either half, because the session is not what owns them:
-//   * `file_sandboxes` / `unrestricted_sessions` belong to the L2 conversation,
-//     which registers in ACTIVE_CONVERSATIONS and removes both when its task
-//     exits (`ai_agent::conversation_engine`). A conversation outlives its PTY —
-//     it can sit in an approval wait with no deadline — so a session-lifetime
-//     reap pulls the sandbox out from under a running file tool.
-//   * `session_knowledge` / `knowledge_dirty` ARE the cross-session memory:
-//     `knowledge::summarize_for_repo` and the agent prompt builder read the live
-//     map, never the files, so reaping a closed session removes knowledge the
-//     next session in that repo is supposed to inherit. Residency is bounded at
-//     startup (40 newest), not during a run.
-// Both need an owner-scoped lifetime, not a session-scoped one. Tie them to
-// ACTIVE_CONVERSATIONS and to a running residency bound respectively.
-
-/// Fully remove session state from all DashMaps.
-/// Called on explicit close/kill — caller has already consumed any output they need.
-pub(crate) fn cleanup_session(session_id: &str, state: &AppState) {
-    if state.sessions.remove(session_id).is_some() {
-        state
-            .metrics
-            .active_sessions
-            .fetch_sub(1, Ordering::Relaxed);
-    }
-    remove_live_session_state(session_id, state);
-    remove_post_mortem_session_state(session_id, state);
-}
-
-/// Reap the state the dead process owned, and stamp `last_output_ms` so the
-/// tombstone sweeper can age the entry out. What a post-mortem read needs stays —
-/// see [`remove_post_mortem_session_state`].
-fn tombstone_transient_cleanup(session_id: &str, state: &AppState) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    state
-        .last_output_ms
-        .entry(session_id.to_string())
-        .or_insert_with(|| AtomicU64::new(0))
-        .store(now_ms, Ordering::Relaxed);
-    remove_live_session_state(session_id, state);
-}
-
-struct ParentLifecycleDispatch {
-    parent_id: String,
-    message_id: String,
-    message_timestamp: u64,
-    framed: String,
+    processor.process_chunk(&esc_remaining, silence, session_id, state);
+    processor.masked_data.take().unwrap_or(esc_remaining)
 }
 
 type VtProcessResult = (
     Vec<crate::state::ChangedRow>,
-    Option<usize>,
+    bool,
     Vec<crate::terminal_grid::TermEvent>,
-    Option<Vec<String>>,
+    // Whether the reusable screen snapshot was refilled this tick.
+    bool,
     AgentScreenActivity,
     Option<usize>,
     Option<crate::terminal_grid::LogicalPrefix>,
     Option<crate::terminal_grid::LogicalPrefix>,
     usize,
+    usize,
+    Option<(crate::terminal_grid::LogicalPrefix, String)>,
 );
 
-/// Render one lifecycle payload as a single human-facing line, without the
-/// `[TUIC] ` marker so it also composes into a multi-event summary.
-///
-/// Shared by the direct framed delivery and the orchestrator summary notice:
-/// the two describe the same events from different sources (the payload being
-/// enqueued vs. the copy read back out of the inbox) and must never word them
-/// differently.
-///
-/// The result is injected into an agent's composer, so it MUST stay one short
-/// line — a multi-line paste submits itself halfway through.
-fn describe_lifecycle_payload(child_session: &str, payload: &serde_json::Value) -> String {
-    let child = short_session(child_session);
-    if payload.get("type").and_then(|t| t.as_str()) == Some("prompt_delivery_failed") {
-        return format!("child agent {child} initial prompt delivery timed out");
-    }
-    let state_desc = payload
-        .get("state")
-        .and_then(|s| s.as_str())
-        .unwrap_or("changed");
-    let prompt_excerpt = payload
-        .get("prompt")
-        .and_then(|p| p.as_str())
-        .map(|p| {
-            let flat = p.split_whitespace().collect::<Vec<_>>().join(" ");
-            if flat.chars().count() > 120 {
-                format!("{}…", flat.chars().take(120).collect::<String>())
-            } else {
-                flat
-            }
-        })
-        .filter(|p| !p.is_empty());
-    match (
-        payload.get("exit_code").and_then(|c| c.as_i64()),
-        prompt_excerpt,
-    ) {
-        (Some(code), _) => format!("child agent {child} {state_desc} (exit {code})"),
-        (None, Some(prompt)) => format!(
-            "child agent {child} is now {state_desc} — answer it with session action=input: {prompt}"
-        ),
-        (None, None) => format!("child agent {child} is now {state_desc}"),
-    }
-}
-
-/// Enqueue the authoritative parent lifecycle message without touching the
-/// parent's PTY lifecycle lock. BUSY→IDLE and completed paths call this while
-/// holding the child's SilenceState transaction lock.
-fn enqueue_state_change_to_parent(
-    state: &AppState,
-    session_id: &str,
-    payload: serde_json::Value,
-) -> Option<ParentLifecycleDispatch> {
-    let parent_id = state
-        .session_parent
-        .get(session_id)
-        .map(|e| e.value().clone())?;
-    if parent_id == session_id {
-        return None;
-    }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let msg = crate::state::AgentMessage {
-        id: format!("tuic-auto-{}-{}", session_id, now_ms),
-        from_tuic_session: session_id.to_string(),
-        from_name: "tuic".to_string(),
-        content: serde_json::to_string(&payload).unwrap_or_default(),
-        timestamp: now_ms,
-        delivered_via_channel: false,
-    };
-    let message_id = msg.id.clone();
-    // DEFERRED (2026-08-05) — this push does not take PEER_IDENTITY_BIND_LOCK, so a
-    // lifecycle notice resolved against a parent that is being retired
-    // (retire_repaired_phantom_identity) can still land in a drained inbox. The
-    // peer-to-peer `send` path was serialized against the retire in story 546-33cb;
-    // this one needs the resolution of `parent_id` and the push to share that guard
-    // too. Left out of that story's scope deliberately — it needs its own repro,
-    // since the parent id here comes from session_parent rather than a caller.
-    let message_timestamp = state.push_agent_inbox(&parent_id, msg);
-    let framed = format!(
-        "[TUIC] {}",
-        describe_lifecycle_payload(session_id, &payload)
-    );
-    let dispatch = ParentLifecycleDispatch {
-        parent_id: parent_id.clone(),
-        message_id: message_id.clone(),
-        message_timestamp,
-        framed,
-    };
-    // Role selection and ownership are deliberately deferred together until
-    // after the child lifecycle lock is released. Splitting those decisions
-    // allowed a concurrent orchestrator-role removal to create a generic wake
-    // and an ordinary payload delivery for the same buffered notification.
-    Some(dispatch)
-}
-
-/// Wake/dispatch only after the child lifecycle lock has been released. This
-/// may acquire the parent's SilenceState lock through terminal delivery.
-fn dispatch_parent_lifecycle(state: &AppState, dispatch: ParentLifecycleDispatch) {
-    if route_registered_orchestrator_mail(
-        state,
-        &dispatch.parent_id,
-        &dispatch.message_id,
-        dispatch.message_timestamp,
-    )
-    .is_some()
-    {
-        return;
-    }
-    if state.assign_agent_delivery(
-        &dispatch.parent_id,
-        &dispatch.message_id,
-        state.live_pty_for_peer(&dispatch.parent_id).is_some(),
-    ) != crate::state::AgentDeliveryAssignment::Terminal
-    {
-        return;
-    }
-    let outcome = deliver_message_to_managed_pty(state, &dispatch.parent_id, &dispatch.framed);
-    settle_terminal_delivery(state, &dispatch.parent_id, &dispatch.message_id, outcome);
-}
-
-/// Push a state_change message and wake the parent when no child lifecycle
-/// transaction is active (for example, process exit and direct test helpers).
-pub(crate) fn push_state_change_to_parent(
-    state: &AppState,
-    session_id: &str,
-    payload: serde_json::Value,
-) {
-    if let Some(dispatch) = enqueue_state_change_to_parent(state, session_id, payload) {
-        dispatch_parent_lifecycle(state, dispatch);
-    }
-}
-
-/// Emit the single exceptional-path notification for an initial prompt that
-/// never completed PTY submission. Removing the marker first makes the
-/// operation idempotent: a watchdog can fire at most once per spawned child.
-pub(crate) fn notify_initial_prompt_timeout_if_pending(state: &AppState, session_id: &str) -> bool {
-    if state.pending_initial_prompts.remove(session_id).is_none() {
-        return false;
-    }
-    let Some(parent_id) = state
-        .session_parent
-        .get(session_id)
-        .map(|entry| entry.value().clone())
-    else {
-        tracing::warn!(session = %session_id, "Initial prompt delivery timed out without a registered parent");
-        return false;
-    };
-    let now_ms = now_epoch_ms();
-    let payload = serde_json::json!({
-        "type": "prompt_delivery_failed",
-        "reason": "timeout",
-        "session_id": session_id,
-    });
-    let message_id = format!("tuic-auto-prompt-{session_id}-{now_ms}");
-    let message_timestamp = state.push_agent_inbox(
-        &parent_id,
-        crate::state::AgentMessage {
-            id: message_id.clone(),
-            from_tuic_session: session_id.to_string(),
-            from_name: "tuic".to_string(),
-            content: serde_json::to_string(&payload).unwrap_or_default(),
-            timestamp: now_ms,
-            delivered_via_channel: false,
-        },
-    );
-    if route_registered_orchestrator_mail(state, &parent_id, &message_id, message_timestamp)
-        .is_some()
-    {
-        return true;
-    }
-    if state.assign_agent_delivery(
-        &parent_id,
-        &message_id,
-        state.sessions.contains_key(&parent_id),
-    ) != crate::state::AgentDeliveryAssignment::Terminal
-    {
-        return true;
-    }
-    let outcome = deliver_message_to_managed_pty(
-        state,
-        &parent_id,
-        &format!(
-            "[TUIC] {}",
-            describe_lifecycle_payload(session_id, &payload)
-        ),
-    );
-    settle_terminal_delivery(state, &parent_id, &message_id, outcome);
-    true
-}
-
-/// First 8 chars of a session UUID, for compact human-facing labels.
-fn short_session(session_id: &str) -> &str {
-    session_id.get(..8).unwrap_or(session_id)
-}
-
-/// Whether a framed peer message should be typed into `session_id` right now
-/// rather than queued. True only for an agent session that is idle and not
-/// blocked on a *confident* user-facing question — writing into a busy Ink TUI
-/// can corrupt its render, and writing into a plain shell would execute the
-/// message as a command.
-///
-/// The gate is `question_confident`, NOT `awaiting_input`: agents that idle at
-/// a ready prompt (codex) sit permanently at `awaiting_input=true` via the
-/// low-confidence silence heuristic, which would starve delivery forever
-/// (story 091). Confident questions (Ink footer, cliclack `◆ …?`, "Action
-/// Required" titles) still block injection so a peer message never answers a
-/// real approval prompt.
-fn idle_is_confirmed(state: &AppState, session_id: &str) -> bool {
-    let confirmed = state
-        .silence_states
-        .get(session_id)
-        .map(|sl| sl.lock().idle_confirmed)
-        .unwrap_or(false);
-    if confirmed {
-        return true;
-    }
-    let agent_type = state
-        .session_states
-        .get(session_id)
-        .and_then(|s| s.agent_type.clone());
-    // Preserve legacy behavior for agents without a verified ready-screen
-    // adapter. Hook-enabled variants become confirmed via explicit Stop; the
-    // remaining heuristics cannot yet provide a stronger proof.
-    !has_ready_screen_adapter(agent_type.as_deref())
-}
-
-/// Whether an agent owns this session's composer. Injection is agent-only: in a
-/// plain shell the idle atom says nothing about what holds stdin, so typed text
-/// would reach whatever program is running rather than the shell.
-fn session_is_agent(state: &AppState, session_id: &str) -> bool {
-    state
-        .session_states
-        .get(session_id)
-        .map(|s| s.agent_type.is_some())
-        .unwrap_or(false)
-}
-
-pub(crate) fn should_inject_now(state: &AppState, session_id: &str) -> bool {
-    if !session_is_agent(state, session_id) {
-        return false;
-    }
-    let idle = state
-        .shell_states
-        .get(session_id)
-        .map(|a| a.load(std::sync::atomic::Ordering::Relaxed) == SHELL_IDLE)
-        .unwrap_or(false);
-    let blocked_on_question = state
-        .session_states
-        .get(session_id)
-        .map(|s| s.question_confident)
-        .unwrap_or(false);
-    idle && idle_is_confirmed(state, session_id)
-        && !blocked_on_question
-        && !has_partial_user_input(state, session_id)
-}
-
-/// True while the user has characters sitting in the composer. Injecting then
-/// would splice our text into what they are typing.
-fn has_partial_user_input(state: &AppState, session_id: &str) -> bool {
-    state
-        .input_buffers
-        .get(session_id)
-        .is_some_and(|buffer| !buffer.lock().content().is_empty())
-}
-
-/// Reserve an idle agent composer for one injected command.
-///
-/// `should_inject_now` is only a snapshot. The agent may become busy between
-/// that read and the PTY write, so the final IDLE→BUSY transition must be an
-/// atomic compare-exchange. A lost race leaves the message queued instead of
-/// typing it into an active composer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InjectionClaim {
-    token: u64,
-}
-
-fn claim_idle_for_injection(state: &AppState, session_id: &str) -> Option<InjectionClaim> {
-    if !should_inject_now(state, session_id) {
-        return None;
-    }
-    let prior_idle_confirmed = state
-        .silence_states
-        .get(session_id)
-        .map(|silence| silence.lock().idle_confirmed)
-        .unwrap_or(false);
-    if !try_shell_transition(state, session_id, SHELL_IDLE, SHELL_BUSY, true) {
-        return None;
-    }
-    // The composer is re-read after the atom is ours: `should_inject_now` was a
-    // snapshot, and the user can start typing in between. Revert before the
-    // claim exists so no spurious busy/idle pair reaches the UI.
-    if has_partial_user_input(state, session_id) {
-        try_shell_transition(state, session_id, SHELL_BUSY, SHELL_IDLE, true);
-        return None;
-    }
-    let token = state
-        .silence_states
-        .get(session_id)
-        .map(|silence| silence.lock().begin_injection_claim(prior_idle_confirmed))
-        .unwrap_or(0);
-    emit_shell_state(state, session_id, "busy");
-    Some(InjectionClaim { token })
-}
-
-fn rollback_injection_claim(state: &AppState, session_id: &str, claim: InjectionClaim) -> bool {
-    let owns_claim = state
-        .silence_states
-        .get(session_id)
-        .and_then(|silence| silence.lock().rollback_injection_claim(claim.token))
-        .is_some();
-    if !owns_claim {
-        return false;
-    }
-    if try_shell_transition(state, session_id, SHELL_BUSY, SHELL_IDLE, true) {
-        emit_shell_state(state, session_id, "idle");
-        true
-    } else {
-        false
-    }
-}
-
-fn mark_injection_uncertain(state: &AppState, session_id: &str, claim: InjectionClaim) {
-    if let Some(silence) = state.silence_states.get(session_id) {
-        silence.lock().mark_injection_uncertain(claim.token);
-    }
-}
-
-fn mark_orchestrator_notice_uncertain(state: &AppState, session_id: &str, claim: InjectionClaim) {
-    if let Some(silence) = state.silence_states.get(session_id) {
-        silence
-            .lock()
-            .mark_orchestrator_notice_uncertain(claim.token);
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AgentSubmissionWrite {
-    Complete {
-        acknowledgement_offset: u64,
-    },
-    Rejected {
-        reason: &'static str,
-        composer_state: &'static str,
-    },
-    Failed(String),
-    Uncertain(String),
-}
-
-fn agent_submission_rejection(
-    state: &AppState,
-    session_id: &str,
-) -> Option<(&'static str, &'static str)> {
-    if !state.sessions.contains_key(session_id) {
-        return Some(("session_not_found", "unknown"));
-    }
-    if !session_is_agent(state, session_id) {
-        return Some(("not_managed_agent", "unknown"));
-    }
-    if has_partial_user_input(state, session_id) {
-        return Some(("partial_composer", "partial"));
-    }
-    if state
-        .pending_injections
-        .get(session_id)
-        .is_some_and(|queue| !queue.is_empty())
-    {
-        return Some(("queued_commands_pending", "empty"));
-    }
-    if state
-        .session_states
-        .get(session_id)
-        .is_some_and(|session| session.question_confident)
-    {
-        return Some(("awaiting_input", "empty"));
-    }
-    if !should_inject_now(state, session_id) {
-        return Some(("agent_not_ready", "empty"));
-    }
-    None
-}
-
-/// Claim and write one MCP-managed agent command without queueing it.
-///
-/// This is the ordering half of `session action=submit`. The caller owns the
-/// existing input-bookkeeping FSM and the bounded acknowledgement wait after a
-/// complete write. Rejections happen before the first byte. Once the claim is
-/// held, concurrent peer delivery observes BUSY and queues behind this command.
-pub(crate) fn write_agent_submission_to_pty(
-    state: &AppState,
-    session_id: &str,
-    text: &str,
-) -> AgentSubmissionWrite {
-    if let Some((reason, composer_state)) = agent_submission_rejection(state, session_id) {
-        return AgentSubmissionWrite::Rejected {
-            reason,
-            composer_state,
-        };
-    }
-    let Some(claim) = claim_idle_for_injection(state, session_id) else {
-        let (reason, composer_state) =
-            agent_submission_rejection(state, session_id).unwrap_or(("claim_lost", "unknown"));
-        return AgentSubmissionWrite::Rejected {
-            reason,
-            composer_state,
-        };
-    };
-
-    let (outcome, acknowledgement_offset) =
-        write_agent_command_with_boundary(state, session_id, text);
-    match outcome {
-        InjectionOutcome::Submitted => {
-            // Terminal movement during the split write can invalidate the claim;
-            // that is independent evidence, not a reason to discard a completed
-            // write. Clear the token when it is still ours. The MCP caller advances
-            // the turn through InputLineBuffer exactly once.
-            if let Some(silence) = state.silence_states.get(session_id) {
-                silence.lock().commit_injection_claim(claim.token);
-            }
-            AgentSubmissionWrite::Complete {
-                acknowledgement_offset,
-            }
-        }
-        InjectionOutcome::NotStarted(error) => {
-            rollback_injection_claim(state, session_id, claim);
-            AgentSubmissionWrite::Failed(error)
-        }
-        InjectionOutcome::Uncertain(error) => {
-            mark_injection_uncertain(state, session_id, claim);
-            AgentSubmissionWrite::Uncertain(error)
-        }
-    }
-}
-
-/// Build the first write of an injection: Ctrl-U clears any pending input, and
-/// multiline text rides inside a bracketed paste (ESC[200~ … ESC[201~) so the
-/// TUI keeps embedded newlines as paste content and the trailing CR (sent as a
-/// separate write) lands as a real Enter keypress. Mirrors the frontend
-/// `sendCommand.ts` recipe exactly — raw multiline text merely PREFILLS
-/// codex/claude without submitting (verified live, story 091).
-fn injection_payload(text: &str) -> String {
-    if text.contains('\n') {
-        format!("\x15\x1b[200~{text}\x1b[201~")
-    } else {
-        format!("\x15{text}")
-    }
-}
-
-/// Real-time gap inserted between the payload write and the Enter write of an
-/// injection. Ink/raw-mode agents (Codex, Claude Code) only treat the trailing
-/// CR as a submit when it arrives in a SEPARATE `read()` from the text; a
-/// microsecond-apart back-to-back write — even with a flush in between — is
-/// coalesced into one read and the CR is swallowed as part of the typed buffer,
-/// so the message just sits at the prompt unsubmitted (verified live against
-/// Codex: back-to-back hangs, CR after a gap submits).
-/// 50ms comfortably clears the child's read-scheduling latency while staying
-/// imperceptible for a wake message.
-///
-/// This comment used to claim the frontend `sendCommand.ts` recipe "gets this
-/// gap for free — its two `writeFn` calls are separate IPC round-trips". It does
-/// NOT: a Tauri IPC round-trip completes well inside the child's read latency,
-/// so both writes land in one `read()` and a clicked suggestion renders as a
-/// newline instead of submitting. `sendCommand.ts` now waits the same 50ms
-/// (`AGENT_ENTER_GAP_MS`) whenever an agent is attached. Keep the two constants
-/// in step — separate flushes never guaranteed separate reads, only time does.
-const INJECT_ENTER_GAP: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// Write prompt text and a submitting Enter to an agent PTY using the exact
-/// framing and timing required by raw-mode TUIs. The caller owns bookkeeping:
-/// peer delivery records a synthetic submission, while MCP session input feeds
-/// the original text and Enter through its input-state FSM. One writer guard
-/// spans the real scheduling gap, so another producer cannot splice the line.
-pub(crate) fn write_agent_command_to_pty(
-    state: &AppState,
-    session_id: &str,
-    text: &str,
-) -> Result<(), String> {
-    match write_agent_command_with_boundary(state, session_id, text).0 {
-        InjectionOutcome::Submitted => Ok(()),
-        InjectionOutcome::NotStarted(error) | InjectionOutcome::Uncertain(error) => Err(error),
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum InjectionOutcome {
-    Submitted,
-    NotStarted(String),
-    Uncertain(String),
-}
-
-fn write_all_with_progress(
-    writer: &mut dyn Write,
-    bytes: &[u8],
-    prior_bytes_written: usize,
-) -> Result<(), (usize, String)> {
-    let mut written = 0usize;
-    while written < bytes.len() {
-        match writer.write(&bytes[written..]) {
-            Ok(0) => {
-                return Err((
-                    prior_bytes_written + written,
-                    "Write failed: writer returned zero bytes".to_string(),
-                ));
-            }
-            Ok(n) => written += n,
-            Err(error) => {
-                return Err((
-                    prior_bytes_written + written,
-                    format!("Write failed: {error}"),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_agent_command_with_boundary(
-    state: &AppState,
-    session_id: &str,
-    text: &str,
-) -> (InjectionOutcome, u64) {
-    let payload = injection_payload(text);
-    let writer = match state.pty_writer(session_id) {
-        Some(writer) => writer,
-        None => {
-            return (
-                InjectionOutcome::NotStarted("Session not found".to_string()),
-                0,
-            );
-        }
-    };
-    // One writer guard spans payload, scheduling gap, and Enter. The injection
-    // claim orders managed peers; this mutex also keeps raw/UI writers from
-    // splicing bytes into the command while the child is allowed to consume the
-    // payload as a separate read.
-    let mut writer = writer.lock();
-    if let Err((written, error)) = write_all_with_progress(writer.as_mut(), payload.as_bytes(), 0) {
-        return (
-            if written == 0 {
-                InjectionOutcome::NotStarted(error)
-            } else {
-                InjectionOutcome::Uncertain(error)
-            },
-            0,
-        );
-    }
-    if let Err(error) = writer.flush() {
-        return (
-            InjectionOutcome::Uncertain(format!("Flush failed: {error}")),
-            0,
-        );
-    }
-
-    // DEFERRED (2026-07-17) — this blocks the calling thread (sometimes a tokio
-    // worker: session-state accumulator / agent-send dispatch) for INJECT_ENTER_GAP.
-    // Acceptable because injection is low-frequency (peer messages, idle-transition
-    // wakes). If a hot path ever calls this, move the sequence onto a detached
-    // thread — that needs Arc<AppState> threaded through deliver/flush (wider refactor).
-    std::thread::sleep(INJECT_ENTER_GAP);
-
-    // Exclude payload echo already observable before Enter. The async handler
-    // checks this boundary only after the complete Enter write returns; movement
-    // beyond it is child PTY output, never FastAF's own turn bookkeeping.
-    let acknowledgement_offset = state
-        .output_buffers
-        .get(session_id)
-        .map(|buffer| buffer.lock().total_written)
-        .unwrap_or(0);
-    if let Err((_, error)) = write_all_with_progress(writer.as_mut(), b"\r", payload.len()) {
-        return (InjectionOutcome::Uncertain(error), acknowledgement_offset);
-    }
-    if let Err(error) = writer.flush() {
-        return (
-            InjectionOutcome::Uncertain(format!("Flush failed: {error}")),
-            acknowledgement_offset,
-        );
-    }
-
-    (InjectionOutcome::Submitted, acknowledgement_offset)
-}
-
-fn write_claimed_agent_command(state: &AppState, session_id: &str, text: &str) -> InjectionOutcome {
-    write_agent_command_with_boundary(state, session_id, text).0
-}
-
-fn commit_injection_claim(state: &AppState, session_id: &str, claim: InjectionClaim) {
-    let committed = state
-        .silence_states
-        .get(session_id)
-        .map(|silence| silence.lock().commit_injection_claim(claim.token))
-        .unwrap_or(false);
-    if committed {
-        note_submitted_input(state, session_id);
-    }
-}
-
-/// What an ambiguous write is allowed to do next.
-///
-/// Retrying a peer message risks typing it twice; an orchestrator notice is
-/// either payload-free or a re-derivable state summary, so it is idempotent
-/// enough to retry. This used to be inferred by comparing the text against
-/// `ORCHESTRATOR_MAIL_WAKE` — which silently stopped covering the notice once
-/// it could also be a lifecycle summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaimedInjectionKind {
-    Message,
-    OrchestratorNotice,
-}
-
-fn run_claimed_injection(
-    state: &AppState,
-    session_id: &str,
-    text: &str,
-    claim: InjectionClaim,
-    kind: ClaimedInjectionKind,
-) -> InjectionOutcome {
-    let outcome = write_claimed_agent_command(state, session_id, text);
-    apply_claimed_injection_outcome(state, session_id, text, claim, outcome, kind)
-}
-
-const ORCHESTRATOR_MAIL_WAKE: &str = "[TUIC] message available — read it with: agent action=inbox";
-
-/// Longest self-acknowledging summary we are willing to type into a composer.
-/// Past this the notice stops being a cheap one-liner, so we fall back to the
-/// generic wake — which is always correct, just one `inbox` call more expensive.
-const ORCHESTRATOR_SUMMARY_MAX_CHARS: usize = 240;
-
-/// Render the reserved wake group as a self-contained notice, or `None` when
-/// the recipient must be sent to its inbox instead.
-///
-/// Why this exists: an orchestrator's inbox is dominated by server-authored
-/// lifecycle notifications (`idle`, `completed`, `exited`) whose entire payload
-/// is a state name. Making the orchestrator spend a tool call to discover
-/// "child 8c26 went idle, then exited(0)" is pure round-trip with no
-/// information gain, and it happens once per finished child.
-///
-/// Why it is conditional — the group must be lifecycle-only:
-///   1. Peer `send` payloads are agent-authored, arbitrary length and
-///      arbitrary content. They stay out of the composer, full stop (that is
-///      the invariant `assign_orchestrator_delivery_with_wake_outcome` exists
-///      to protect).
-///   2. A partial summary would be worse than none: the recipient, satisfied
-///      by what it read, would never call `inbox` and would silently lose the
-///      messages the summary omitted. So a single non-lifecycle message in the
-///      window disqualifies the whole group rather than being skipped.
-fn summarize_lifecycle_group(
-    state: &AppState,
-    recipient: &str,
-    group: crate::state::OrchestratorWakeGroup,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    {
-        let inbox = state.agent_inbox.get(recipient)?;
-        for message in inbox.iter().filter(|message| {
-            message.timestamp > group.observed_through && message.timestamp <= group.wake_through
-        }) {
-            if !message
-                .id
-                .starts_with(crate::state::LIFECYCLE_MSG_ID_PREFIX)
-            {
-                return None;
-            }
-            let payload = serde_json::from_str::<serde_json::Value>(&message.content).ok()?;
-            parts.push(describe_lifecycle_payload(
-                &message.from_tuic_session,
-                &payload,
-            ));
-        }
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    let summary = format!("[TUIC] {}", parts.join("; "));
-    (summary.chars().count() <= ORCHESTRATOR_SUMMARY_MAX_CHARS).then_some(summary)
-}
-
-/// Submit one notification only when the registered parent's canonical
-/// lifecycle still says idle/completed. Unlike ordinary managed-peer delivery,
-/// a lost idle race is never queued: working and unknown lifecycle states
-/// remain inbox-only and are not steered on a later transition.
-///
-/// The line is either a self-acknowledging lifecycle summary (see
-/// `summarize_lifecycle_group`) or the payload-free generic wake.
-fn submit_orchestrator_mail_wake(
-    state: &AppState,
-    session_id: &str,
-    recipient: &str,
-    group: crate::state::OrchestratorWakeGroup,
-) -> crate::state::OrchestratorWakeAttemptOutcome {
-    use crate::state::OrchestratorWakeAttemptOutcome;
-
-    let wake_allowed = state
-        .session_state_with_shell(session_id)
-        .and_then(|session| session.agent_state)
-        .is_some_and(|agent_state| matches!(agent_state.as_str(), "idle" | "completed"));
-    if !wake_allowed {
-        return OrchestratorWakeAttemptOutcome::NotStarted;
-    }
-    #[cfg(unix)]
-    if let Err(error) = wake_session(state, session_id) {
-        tracing::debug!(session = %session_id, error, "Orchestrator mail wake failed");
-    }
-    let Some(claim) = claim_idle_for_injection(state, session_id) else {
-        return OrchestratorWakeAttemptOutcome::NotStarted;
-    };
-    let summary = summarize_lifecycle_group(state, recipient, group);
-    let text = summary.as_deref().unwrap_or(ORCHESTRATOR_MAIL_WAKE);
-    match run_claimed_injection(
-        state,
-        session_id,
-        text,
-        claim,
-        ClaimedInjectionKind::OrchestratorNotice,
-    ) {
-        // An uncertain write must NOT acknowledge: the cursor may only advance
-        // behind a line we know reached the composer.
-        InjectionOutcome::Submitted if summary.is_some() => {
-            OrchestratorWakeAttemptOutcome::SummarySubmitted
-        }
-        InjectionOutcome::Submitted => OrchestratorWakeAttemptOutcome::Submitted,
-        InjectionOutcome::NotStarted(_) => OrchestratorWakeAttemptOutcome::NotStarted,
-        InjectionOutcome::Uncertain(_) => OrchestratorWakeAttemptOutcome::Uncertain,
-    }
-}
-
-/// Route mail for a peer that has authoritatively acted as an orchestrator by
-/// spawning a managed child. Returns `None` for ordinary managed agents so their
-/// existing direct payload/channel delivery remains unchanged.
-pub(crate) fn route_registered_orchestrator_mail(
-    state: &AppState,
-    recipient: &str,
-    message_id: &str,
-    message_timestamp: u64,
-) -> Option<crate::state::OrchestratorDeliveryAssignment> {
-    if !state.orchestrator_peers.contains(recipient) {
-        return None;
-    }
-    let pty_session = state.live_pty_for_peer(recipient);
-    let wake_allowed = pty_session
-        .as_deref()
-        .and_then(|session_id| state.session_state_with_shell(session_id))
-        .and_then(|session| session.agent_state)
-        .is_some_and(|agent_state| matches!(agent_state.as_str(), "idle" | "completed"));
-    let assignment = state.assign_orchestrator_delivery_with_wake_outcome(
-        recipient,
-        message_id,
-        message_timestamp,
-        wake_allowed,
-        |group| match pty_session.as_deref() {
-            Some(session_id) => submit_orchestrator_mail_wake(state, session_id, recipient, group),
-            None => crate::state::OrchestratorWakeAttemptOutcome::NotStarted,
-        },
-    );
-    // A self-acknowledging notice covers only the window it reserved. Mail that
-    // landed while it was being typed keeps `orchestrator_wake_needed_through`
-    // set, and nothing else would surface it: the idle/completed transition that
-    // normally drives `reevaluate_orchestrator_mail_wake` has already happened.
-    // Chase it here instead. Bounded: each pass spends one of
-    // ORCHESTRATOR_WAKE_ATTEMPT_LIMIT attempts, and the budget is not reset while
-    // a need is outstanding, so the recursion stops at the limit.
-    if assignment == crate::state::OrchestratorDeliveryAssignment::WakeSummarySubmitted
-        && let Some(pty_session) = pty_session.as_deref()
-    {
-        reevaluate_orchestrator_mail_wake(state, pty_session);
-    }
-    Some(assignment)
-}
-
-/// Retry buffered orchestrator mail when the managed PTY has reached a
-/// canonical idle/completed lifecycle. Busy and unknown states remain inbox-only.
-fn orchestrator_recipient_for_pty(state: &AppState, pty_session: &str) -> Option<String> {
-    if state.orchestrator_peers.contains(pty_session) {
-        Some(pty_session.to_string())
-    } else {
-        state.orchestrator_peers.iter().find_map(|peer| {
-            let peer_id = peer.key();
-            (state.live_pty_for_peer(peer_id).as_deref() == Some(pty_session))
-                .then(|| peer_id.clone())
-        })
-    }
-}
-
-fn reevaluate_orchestrator_mail_wake(state: &AppState, pty_session: &str) {
-    let Some(recipient) = orchestrator_recipient_for_pty(state, pty_session) else {
-        return;
-    };
-    let Some(needed_through) = state.orchestrator_wake_needed_through(&recipient) else {
-        return;
-    };
-    let _ = route_registered_orchestrator_mail(
-        state,
-        &recipient,
-        "tuic-orchestrator-mail-notice",
-        needed_through,
-    );
-}
-
-fn apply_claimed_injection_outcome(
-    state: &AppState,
-    session_id: &str,
-    text: &str,
-    claim: InjectionClaim,
-    outcome: InjectionOutcome,
-    kind: ClaimedInjectionKind,
-) -> InjectionOutcome {
-    match &outcome {
-        InjectionOutcome::Submitted => {
-            commit_injection_claim(state, session_id, claim);
-            if state
-                .pending_initial_prompts
-                .get(session_id)
-                .is_some_and(|prompt| prompt.as_str() == text)
-            {
-                state.pending_initial_prompts.remove(session_id);
-            }
-        }
-        InjectionOutcome::NotStarted(error) => {
-            tracing::debug!(session = %session_id, error, "agent command injection did not start");
-            rollback_injection_claim(state, session_id, claim);
-        }
-        InjectionOutcome::Uncertain(error) => {
-            tracing::warn!(session = %session_id, error, "agent command injection outcome uncertain; preserving busy state");
-            match kind {
-                ClaimedInjectionKind::OrchestratorNotice => {
-                    mark_orchestrator_notice_uncertain(state, session_id, claim)
-                }
-                ClaimedInjectionKind::Message => mark_injection_uncertain(state, session_id, claim),
-            }
-        }
-    }
-    outcome
-}
-
-fn requeue_injection_front(
-    state: &AppState,
-    session_id: &str,
-    injection: crate::state::PendingInjection,
-) {
-    state
-        .pending_injections
-        .entry(session_id.to_string())
-        .or_default()
-        .push_front(injection);
-}
-
-/// What actually became of a peer message handed to the terminal path.
-///
-/// The distinction is the whole point: `Queued` is NOT delivery. The composer was
-/// busy, so the message only sits in `pending_injections` until the next BUSY→IDLE
-/// transition — and a teardown before that flush drops the queue (see the tombstone
-/// cleanup). Collapsing this into "the session still exists" is what let a caller
-/// mark a never-typed message `TerminalDispatched`, which the waiter filter then
-/// hides, stranding it in the inbox with nothing left to surface it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PtyDelivery {
-    /// Written into the composer and submitted, or written ambiguously enough that
-    /// a retry would risk duplicating it. Either way the terminal owns it.
-    Typed,
-    /// Parked in `pending_injections`; nothing reached the terminal yet.
-    Queued,
-    /// Not an agent, or the session is gone — the terminal path cannot take it.
-    Unavailable,
-}
-
-/// Deliver a framed peer message into a recipient's terminal, waking it. Injects
-/// immediately when the recipient is an idle agent; otherwise queues it to flush
-/// on the recipient's next BUSY→IDLE transition. No-op for non-agent sessions.
-/// The caller has already buffered the authoritative copy in the inbox.
-pub(crate) fn deliver_message_to_pty(
-    state: &AppState,
-    session_id: &str,
-    framed: &str,
-) -> PtyDelivery {
-    // Never queue for a non-agent — shells and dead sessions have no wake path.
-    if !session_is_agent(state, session_id) {
-        return PtyDelivery::Unavailable;
-    }
-    if let Some(claim) = claim_idle_for_injection(state, session_id) {
-        if matches!(
-            run_claimed_injection(
-                state,
-                session_id,
-                framed,
-                claim,
-                ClaimedInjectionKind::Message
-            ),
-            InjectionOutcome::NotStarted(_)
-        ) {
-            requeue_injection_front(
-                state,
-                session_id,
-                crate::state::PendingInjection::peer_message(framed),
-            );
-            return PtyDelivery::Queued;
-        }
-        // Submitted, or Uncertain — an ambiguous write must not be retried, so the
-        // terminal keeps ownership either way.
-        PtyDelivery::Typed
-    } else {
-        state
-            .pending_injections
-            .entry(session_id.to_string())
-            .or_default()
-            .push_back(crate::state::PendingInjection::peer_message(framed));
-        // CONC-A (story 101-20e3): the should_inject_now read above and this push are
-        // not atomic vs a concurrent BUSY→IDLE flush. If the silence timer transitions
-        // the session to idle and drains the (still-empty) queue in the window between
-        // them, our message would sit queued until the NEXT idle cycle — exactly the
-        // auto-wake this feature exists to deliver. Re-flush after enqueuing: if the
-        // session went idle during the window, flush_pending_injections (self-guarded
-        // by should_inject_now) delivers it ourselves. A double flush is harmless — it
-        // drains under a get_mut write lock, so the racing flush that loses just finds
-        // an empty queue.
-        flush_pending_injections(state, session_id);
-        // That flush drains the whole queue under a write lock, so an empty queue
-        // means everything — ours included — reached the composer. A non-empty
-        // queue may still hold this message, and reporting Queued in the ambiguous
-        // case is the safe direction: the worst outcome is that teardown later
-        // hands a message the waiter can still see, instead of losing it.
-        if state
-            .pending_injections
-            .get(session_id)
-            .is_some_and(|queue| !queue.is_empty())
-        {
-            PtyDelivery::Queued
-        } else {
-            PtyDelivery::Typed
-        }
-    }
-}
-
-/// Settle wake ownership from what the terminal path actually did.
-///
-/// `Queued` deliberately does nothing, and that is the fix: the message stays
-/// `TerminalPending`, which is the truthful state — the terminal owns it and will
-/// type it on the next idle transition, but nothing has been typed yet. Marking it
-/// `TerminalDispatched` here (as every call site used to, because the old boolean
-/// only meant "the session exists") claimed a delivery that had not happened.
-pub(crate) fn settle_terminal_delivery(
-    state: &AppState,
-    tuic_session: &str,
-    message_id: &str,
-    outcome: PtyDelivery,
-) {
-    match outcome {
-        PtyDelivery::Typed => state.mark_terminal_delivery_dispatched(tuic_session, message_id),
-        PtyDelivery::Queued => {}
-        PtyDelivery::Unavailable => state.release_terminal_delivery(tuic_session, message_id),
-    }
-}
-
-/// Deliver only while the recipient still has a managed PTY and agent state.
-/// Reports what the terminal path actually did, so the caller can keep wake
-/// ownership only for a message that truly reached the composer. `Unavailable`
-/// means teardown won the race and the authoritative inbox copy must stay
-/// available to `agent wait`.
-pub(crate) fn deliver_message_to_managed_pty(
-    state: &AppState,
-    session_id: &str,
-    framed: &str,
-) -> PtyDelivery {
-    let available = state.sessions.contains_key(session_id)
-        && state
-            .session_states
-            .get(session_id)
-            .is_some_and(|session| session.agent_type.is_some());
-    if !available {
-        return PtyDelivery::Unavailable;
-    }
-    let outcome = deliver_message_to_pty(state, session_id, framed);
-    // Teardown can still win between the check above and the write.
-    if state.sessions.contains_key(session_id) {
-        outcome
-    } else {
-        PtyDelivery::Unavailable
-    }
-}
-
-/// Drain and inject any messages queued for a session that can receive them now.
-/// Self-guarded by `should_inject_now`: skips (leaves queued) unless the session
-/// is an idle agent not blocked on a confident question, so a peer message never
-/// answers a user-facing approval prompt and never corrupts a busy TUI. Called
-/// from the BUSY→IDLE transition, the post-enqueue race re-check, and the
-/// unblock path when a confident question clears while the agent is idle.
-pub(crate) fn flush_pending_injections(state: &AppState, session_id: &str) {
-    if state
-        .pending_injections
-        .get(session_id)
-        .is_none_or(|pending| pending.is_empty())
-    {
-        return;
-    }
-    let claim = match claim_idle_for_injection(state, session_id) {
-        Some(claim) => claim,
-        None => return,
-    };
-    let pending = match state.pending_injections.get_mut(session_id) {
-        Some(mut q) => q.pop_front(),
-        None => return,
-    };
-    if let Some(injection) = pending
-        && matches!(
-            run_claimed_injection(
-                state,
-                session_id,
-                injection.text(),
-                claim,
-                ClaimedInjectionKind::Message
-            ),
-            InjectionOutcome::NotStarted(_)
-        )
-    {
-        requeue_injection_front(state, session_id, injection);
-    }
-}
-
-/// User-composed commands still parked for a session. Peer wake entries share
-/// the FIFO but are deliberately excluded from this Compose-facing count.
-pub(crate) fn queued_command_count(state: &AppState, session_id: &str) -> usize {
-    state
-        .pending_injections
-        .get(session_id)
-        .map(|queue| queue.iter().filter(|entry| entry.is_user_command()).count())
-        .unwrap_or(0)
-}
-
-/// One user-composed command still parked, as the Compose panel lists it.
-/// Peer wake entries are excluded for the same reason they are excluded from
-/// the count: they are not the user's to read or delete.
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct QueuedCommand {
-    pub id: u64,
-    pub text: String,
-}
-
-/// User-composed commands still parked, in delivery order.
-pub(crate) fn list_queued_commands(state: &AppState, session_id: &str) -> Vec<QueuedCommand> {
-    state
-        .pending_injections
-        .get(session_id)
-        .map(|queue| {
-            queue
-                .iter()
-                .filter_map(|entry| match entry {
-                    crate::state::PendingInjection::UserCommand { id, text } => {
-                        Some(QueuedCommand {
-                            id: *id,
-                            text: text.clone(),
-                        })
-                    }
-                    crate::state::PendingInjection::PeerMessage(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Drop a single queued user command. Returns false when the id is unknown —
-/// the entry may have been typed already, which is not an error for the caller.
-pub(crate) fn remove_queued_command(state: &AppState, session_id: &str, id: u64) -> bool {
-    state
-        .pending_injections
-        .get_mut(session_id)
-        .map(|mut queue| {
-            let before = queue.len();
-            queue.retain(|entry| !matches!(entry, crate::state::PendingInjection::UserCommand { id: entry_id, .. } if *entry_id == id));
-            before != queue.len()
-        })
-        .unwrap_or(false)
-}
-
-/// What the idle gate did with a user-composed command.
-#[derive(Clone, Copy, Debug, Serialize)]
-pub(crate) struct EnqueuedCommand {
-    /// The agent was already idle, so the text was typed and submitted at once.
-    pub typed: bool,
-    /// Commands still waiting, this one included when `typed` is false.
-    pub queued: usize,
-}
-
-/// Route a user-composed command through the same idle gate peer messages use:
-/// typed immediately when the agent is idle, otherwise parked until the next
-/// BUSY→IDLE transition. This is the whole point of the Compose panel's enqueue
-/// action — the user wants the text delivered *without* steering a running turn.
-///
-/// The command is always appended before the flush, never handed straight to
-/// `deliver_message_to_pty`: injecting ahead of any accepted peer message or
-/// Compose command would reorder delivery. `flush_pending_injections` pops one
-/// typed entry and leaves the session BUSY, so the shared queue drains one item
-/// per idle transition and stays FIFO across both producers.
-///
-/// Agent sessions only (see `session_is_agent`).
-pub(crate) fn enqueue_user_command(
-    state: &AppState,
-    session_id: &str,
-    text: &str,
-) -> Result<EnqueuedCommand, String> {
-    if text.trim().is_empty() {
-        return Err("Command text is empty".to_string());
-    }
-    if !state.sessions.contains_key(session_id) {
-        return Err("Session not found".to_string());
-    }
-    if !session_is_agent(state, session_id) {
-        return Err("Session is not running an agent".to_string());
-    }
-    state
-        .pending_injections
-        .entry(session_id.to_string())
-        .or_default()
-        .push_back(crate::state::PendingInjection::user_command(text));
-    flush_pending_injections(state, session_id);
-    let queued = queued_command_count(state, session_id);
-    // An empty queue after the flush means our command was the only one waiting
-    // and reached the composer; any remaining entry means it is still parked.
-    Ok(EnqueuedCommand {
-        typed: queued == 0,
-        queued,
-    })
-}
-
-/// Drop only user-composed commands still waiting for this session. Peer wake
-/// entries remain in the same relative order. Returns the user-command count removed.
-pub(crate) fn clear_queued_commands(state: &AppState, session_id: &str) -> usize {
-    state
-        .pending_injections
-        .get_mut(session_id)
-        .map(|mut queue| {
-            let before = queue.len();
-            queue.retain(|entry| !entry.is_user_command());
-            before - queue.len()
-        })
-        .unwrap_or(0)
-}
-
-/// Keeps `output_buffers`, `vt_log_buffers`, `last_output_ms`, and `exit_codes`
-/// alive so MCP consumers can read final output + exit status post-mortem.
-/// Tombstones are reaped by `spawn_tombstone_sweeper` after `TOMBSTONE_TTL_MS`.
-/// Drive any task tracking `session_id` to its terminal state. This is what makes
-/// a task handle worth polling: the outcome is recorded even if no client was
-/// waiting when the agent finished.
-///
-/// A missing exit code is read as success — the session is gone and we have no
-/// evidence of failure, so an orchestrator should collect a result rather than
-/// see a phantom error.
-fn finish_session_tasks(state: &AppState, session_id: &str, exit_code: Option<i32>) {
-    let failed = exit_code.is_some_and(|code| code != 0);
-    for task_id in state.tasks.live_ids_for_session(session_id) {
-        let (status, update) = if failed {
-            (
-                crate::tasks::TaskStatus::Failed,
-                crate::tasks::TaskUpdate {
-                    error: Some(format!(
-                        "agent session exited with code {}",
-                        exit_code.unwrap_or_default()
-                    )),
-                    ..Default::default()
-                },
-            )
-        } else {
-            (
-                crate::tasks::TaskStatus::Completed,
-                crate::tasks::TaskUpdate {
-                    result: Some(serde_json::json!({
-                        "session_id": session_id,
-                        "exit_code": exit_code,
-                    })),
-                    ..Default::default()
-                },
-            )
-        };
-        if let Err(e) = state.tasks.set_status(&task_id, status, update) {
-            // Terminal already (a cancel that raced the exit) is expected, not an
-            // error worth a warning — `live_ids_for_session` just read it as live.
-            tracing::debug!(source = "tasks", task_id = %task_id, error = %e, "Task not finished on session exit");
-        }
-    }
-}
-
-pub(crate) fn mark_session_exited(session_id: &str, state: &AppState) {
-    // Capture exit code before dropping the session entry.
-    // portable_pty::ExitStatus carries both exit_code() and signal().
-    // Signal-killed processes get 128+signum (shell convention) so the
-    // caller can distinguish SIGKILL (137) from normal exit(1).
-    if let Some(entry) = state.sessions.get(session_id)
-        && let Ok(Some(status)) = entry.value().lock()._child.try_wait()
-    {
-        let code = if let Some(sig) = status.signal() {
-            let signum = parse_signal_number(sig);
-            128 + signum
-        } else {
-            status.exit_code() as i32
-        };
-        state.exit_codes.insert(session_id.to_string(), code);
-    }
-    if state.sessions.remove(session_id).is_some() {
-        state
-            .metrics
-            .active_sessions
-            .fetch_sub(1, Ordering::Relaxed);
-    }
-
-    // Notify orchestrator (if any) that this agent has exited.
-    let exit_code = state.exit_codes.get(session_id).map(|e| *e.value());
-    finish_session_tasks(state, session_id, exit_code);
-    push_state_change_to_parent(
-        state,
-        session_id,
-        serde_json::json!({
-            "type": "state_change",
-            "state": "exited",
-            "session_id": session_id,
-            "exit_code": exit_code,
-        }),
-    );
-
-    // SIMP-1: drain HTML tabs registered by this session and emit close.
-    // Same helper used by `session(close)` and `session(kill)` so all three
-    // exit paths drain `session_html_tabs` identically (no orphan tabs).
-    crate::mcp_http::mcp_transport::emit_close_html_tabs(state, session_id);
-
-    tombstone_transient_cleanup(session_id, state);
-}
-
-/// Time a tombstoned session's buffers remain readable after process exit.
-pub(crate) const TOMBSTONE_TTL_MS: u64 = 5 * 60 * 1000; // 5 minutes
-
-/// Session ids whose tombstone has aged past the TTL.
-///
-/// Discovery walks `last_output_ms`, not `output_buffers`: an explicit close runs
-/// the full cleanup, and the reader thread can afterwards reach EOF and re-stamp
-/// the timestamp through the tombstone path. That leaves a lone entry with no
-/// buffers — invisible to a buffer-driven walk, and so never reaped at all. The
-/// stamp is the one thing every tombstone has.
-fn aged_out_tombstones(state: &AppState, now_ms: u64) -> Vec<String> {
-    // A tombstone is: a stamp present, session entry absent, aged past TTL.
-    state
-        .last_output_ms
-        .iter()
-        .filter_map(|entry| {
-            let id = entry.key();
-            if state.sessions.contains_key(id) {
-                return None;
-            }
-            let last_ms = entry.value().load(Ordering::Relaxed);
-            if last_ms == 0 || now_ms.saturating_sub(last_ms) < TOMBSTONE_TTL_MS {
-                return None;
-            }
-            Some(id.clone())
-        })
-        .collect()
-}
-
-/// Reap each candidate's post-mortem state.
-///
-/// Liveness is re-checked here, not only at selection: the HTTP spawn path accepts
-/// a caller-supplied id, so an aged id can be reclaimed by a live session between
-/// the two. Reaping it then would delete that session's buffers and alias.
-///
-/// DEFERRED (2026-08-18) — the re-check narrows the window, it does not close it:
-/// a reclaim landing between this load and the removal still loses. Closing it
-/// needs a per-id generation stamped at insert and compared at removal, which is
-/// a `sessions` API change; not worth it while ids are random UUIDs in practice.
-fn reap_tombstones(state: &AppState, candidates: &[String]) {
-    for id in candidates {
-        if state.sessions.contains_key(id) {
-            continue;
-        }
-        remove_post_mortem_session_state(id, state);
-        tracing::debug!(source = "pty", session_id = %id, "Tombstone reaped");
-    }
-}
-
-/// Background sweeper that reaps tombstoned session buffers once they age out.
-/// Started once at boot from the HTTP server runtime.
-pub(crate) fn spawn_tombstone_sweeper(state: Arc<AppState>) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            reap_tombstones(&state, &aged_out_tombstones(&state, now_ms));
-        }
-    });
-}
-
-/// Detect anomalous ANSI sequences that may cause scroll-jump-to-top or viewport resets.
-/// Returns a list of human-readable labels for each detected sequence.
-/// These are logged as warnings for diagnostic purposes — data is never modified.
-fn detect_anomalous_sequences(data: &str) -> Vec<&'static str> {
-    let bytes = data.as_bytes();
-    let len = bytes.len();
-    let mut found = Vec::new();
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'[' {
-            i += 2; // skip ESC[
-
-            // Check for ESC[? private mode sequences (alt screen)
-            if i < len && bytes[i] == b'?' {
-                i += 1;
-                let num_start = i;
-                while i < len && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i < len {
-                    let num_str = std::str::from_utf8(&bytes[num_start..i]).unwrap_or("");
-                    match (num_str, bytes[i]) {
-                        ("1049", b'h') => found.push("ESC[?1049h (Alt Screen Enter)"),
-                        ("1049", b'l') => found.push("ESC[?1049l (Alt Screen Exit)"),
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                // No continue — let the outer while loop re-evaluate i < len
-            } else {
-                // Parse numeric params: n or n;m
-                let num_start = i;
-                while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b';') {
-                    i += 1;
-                }
-                if i < len {
-                    let params = std::str::from_utf8(&bytes[num_start..i]).unwrap_or("");
-                    match bytes[i] {
-                        b'J' => match params {
-                            "2" => found.push("ESC[2J (Clear Screen)"),
-                            "3" => found.push("ESC[3J (Clear Scrollback)"),
-                            _ => {}
-                        },
-                        b'H' => {
-                            // ESC[H or ESC[1;1H = Cursor Home
-                            if params.is_empty() {
-                                found.push("ESC[H (Cursor Home)");
-                            } else if params == "1;1" {
-                                found.push("ESC[1;1H (Cursor Home)");
-                            }
-                            // Other ESC[n;mH = regular cursor position, not anomalous
-                        }
-                        _ => {}
-                    }
-                    i += 1;
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    found
-}
-
-/// Extract the largest ESC[nA (cursor-up) value from `data`.
-/// Ink emits ESC[nA where n equals the previous render height before redrawing.
-/// A decrease in n between consecutive redraws signals content shrinkage.
-fn extract_largest_cursor_up(data: &str) -> Option<u16> {
-    let bytes = data.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut max_n: Option<u16> = None;
-
-    while i < len {
-        if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'[' {
-            i += 2;
-            let num_start = i;
-            while i < len && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < len
-                && bytes[i] == b'A'
-                && i > num_start
-                && let Ok(n) = std::str::from_utf8(&bytes[num_start..i])
-                    .unwrap_or("")
-                    .parse::<u16>()
-            {
-                max_n = Some(max_n.map_or(n, |prev: u16| prev.max(n)));
-            }
-            if i < len {
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    max_n
-}
-
-/// Inject ESC[2J (clear screen) before the first ESC[H or ESC[1;1H (cursor home) in `data`.
-///
-/// Ink-based TUIs render differentially: they position the cursor at home and overwrite
-/// changed cells but never send ESC[K (erase to end of line). When output shrinks between
-/// redraws, old characters — especially box-drawing separators — persist as ghost artifacts.
-///
-/// Injecting a single ESC[2J before the cursor-home ensures the screen is blank before
-/// the redraw starts. Because xterm.js processes the entire write() atomically (clear +
-/// cursor home + new content happen before the next paint), no intermediate blank frame
-/// is ever rendered to the user.
-///
-/// Only injects once per call (before the first cursor-home) to avoid unnecessary clears
-/// for chunks that contain multiple ESC[H sequences (common in Ink's rapid redraws).
-fn inject_clear_before_cursor_home(data: &str) -> String {
-    let bytes = data.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'[' {
-            let seq_start = i;
-            i += 2; // skip ESC[
-            // Parse optional numeric parameters
-            let num_start = i;
-            while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b';') {
-                i += 1;
-            }
-            if i < len && bytes[i] == b'H' {
-                let params = std::str::from_utf8(&bytes[num_start..i]).unwrap_or("");
-                // ESC[H (no params) or ESC[1;1H — both mean cursor home
-                if params.is_empty() || params == "1;1" {
-                    // Inject ESC[2J before this cursor-home sequence
-                    let mut result = String::with_capacity(len + 4);
-                    result.push_str(&data[..seq_start]);
-                    result.push_str("\x1b[2J");
-                    result.push_str(&data[seq_start..]);
-                    return result;
-                }
-            }
-            if i < len {
-                i += 1; // skip command byte
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    // No cursor-home found — return as-is
-    data.to_string()
-}
-
-/// Inject ESC[2J before the first ESC[nA (cursor-up, n > 0) in `data`.
-///
-/// Fallback for `inject_clear_before_cursor_home`: Ink re-renders reposition via
-/// cursor-up (ESC[nA), not cursor-home (ESC[H). Without this path the
-/// `alt_buffer_needs_clear` flag is set but never consumed, and ghost rows
-/// from previous renders accumulate from the bottom upward.
-fn inject_clear_before_cursor_up(data: &str) -> String {
-    let bytes = data.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'[' {
-            let seq_start = i;
-            i += 2; // skip ESC[
-            let num_start = i;
-            while i < len && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < len && bytes[i] == b'A' && i > num_start {
-                // ESC[nA with n > 0 — inject ESC[2J before it
-                let mut result = String::with_capacity(len + 4);
-                result.push_str(&data[..seq_start]);
-                result.push_str("\x1b[2J");
-                result.push_str(&data[seq_start..]);
-                return result;
-            }
-            if i < len {
-                i += 1; // skip command byte
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    data.to_string()
-}
+#[cfg(feature = "dictation")]
+pub use tuic_dictation::continuous::{VoiceHold, VoiceWrite};
 
 /// Spawn a reader thread that reads from a PTY, processes output, and emits events.
 /// Unified for both desktop (Tauri IPC) and headless (event_bus only) modes.
@@ -7529,17 +3771,42 @@ fn grid_send_min_interval_ms(input_recent: bool, dirty_run: u32) -> u64 {
     }
 }
 
+/// The ticker's rate policy, separate from OS thread scheduling. A ready
+/// reader-applied input hint may bypass a floor or wake between periodic ticks;
+/// synchronized-update expiry is a protocol deadline and never waits either.
+fn grid_send_must_wait(
+    sync_timeout_flush: bool,
+    floor_pending: bool,
+    periodic_tick: bool,
+    priority_due: bool,
+) -> bool {
+    !sync_timeout_flush && (floor_pending || !periodic_tick) && !priority_due
+}
+
 /// Stamp the per-session last-input timestamp (epoch ms). Read by the grid
 /// ticker to throttle frame sends while the user types under CPU saturation,
 /// keeping the WebView/browser main thread free for keystroke dispatch + echo.
-/// Called from every interactive input entry point (desktop `write_pty` +
-/// HTTP/PWA `write_to_session`).
+/// Called before an interactive PTY write (desktop and HTTP/PWA), so a fast
+/// echo cannot beat priority arming. Only reader-applied output wakes the ticker.
 pub(crate) fn stamp_input_ms(state: &AppState, session_id: &str) {
+    record_input_ms(state, session_id);
+    if let Some(priority) = state.grid.input_frame_priority.get(session_id) {
+        priority.arm(std::time::Instant::now());
+    }
+}
+
+/// Timestamp-only bookkeeping after successful writes, including automated input.
+/// It must not re-arm priority after the reader already applied a fast echo.
+pub(crate) fn record_input_ms(state: &AppState, session_id: &str) {
+    if let Some(silence) = state.session_maps.silence_states.get(session_id) {
+        silence.lock().last_input_at = Some(std::time::Instant::now());
+    }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     state
+        .session_maps
         .last_input_ms
         .entry(session_id.to_string())
         .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
@@ -7559,6 +3826,7 @@ pub(crate) fn record_submitted_line(
     note_submitted_input(state, session_id);
     if content.split_whitespace().count() >= 10 {
         state
+            .session_maps
             .last_prompts
             .insert(session_id.to_string(), content.clone());
     }
@@ -7573,8 +3841,12 @@ pub(crate) fn record_submitted_line(
             let _ = app.emit(&format!("pty-parsed-{session_id}"), &*json);
         }
     }
-    if let Some(ss) = state.silence_states.get(session_id) {
-        ss.lock().suppress_user_input();
+    if let Some(ss) = state.session_maps.silence_states.get(session_id) {
+        let mut sl = ss.lock();
+        sl.suppress_user_input();
+        // The parser's api-error / session-conflict dedup lives in the reader
+        // thread and cannot observe this event; park the reset for it.
+        sl.request_parser_dedup_reset();
     }
 }
 
@@ -7585,13 +3857,21 @@ pub(crate) fn spawn_reader_thread(
     state: Arc<AppState>,
     tuic_session: Option<String>,
 ) {
+    // HTTP/MCP and generic shell spawns already bind the child's inherited
+    // TUIC_SESSION before starting this reader. Use that same live identity
+    // when the caller has no explicit one, including restored stable identities
+    // that differ from the PTY key. Native hook ownership stays fail-closed.
+    let tuic_session = tuic_session.or_else(|| {
+        crate::mcp_http::session::live_tuic_sessions_by_pty(&state).remove(&session_id)
+    });
     let silence = Arc::new(Mutex::new(SilenceState::new()));
     let running = Arc::new(AtomicBool::new(true));
 
     state
+        .session_maps
         .silence_states
         .insert(session_id.clone(), silence.clone());
-    state.shell_states.insert(
+    state.session_maps.shell_states.insert(
         session_id.clone(),
         std::sync::atomic::AtomicU8::new(SHELL_NULL),
     );
@@ -7604,14 +3884,31 @@ pub(crate) fn spawn_reader_thread(
     );
 
     // Frame ticker: decouples PTY read() from frame serialization.
-    // Reader sets dirty flag; ticker serializes+sends at fixed interval.
+    // Reader sets dirty flag; ticker serializes+sends on paced or input wakes.
     // Coalesces rapid writes (spinner erase+rewrite) into a single frame.
     let frame_dirty = Arc::new(AtomicBool::new(false));
     state
-        .grid_frame_dirty
+        .grid
+        .frame_dirty
         .insert(session_id.clone(), frame_dirty.clone());
+    // Scroll target the ticker consumes, created alongside the dirty flag the
+    // same handler sets. It belongs to the session, not to one of its front
+    // ends: when the desktop `subscribe_terminal_grid` owned it, a session only
+    // a browser had ever rendered had nowhere to record a scroll, and closing
+    // the desktop terminal took the entry away from an attached browser.
+    state
+        .grid
+        .pending_scroll
+        .insert(session_id.clone(), Arc::new(AtomicI64::new(-1)));
+    let input_priority = Arc::new(frame_priority::InputFramePriority::default());
+    state
+        .grid
+        .input_frame_priority
+        .insert(session_id.clone(), input_priority.clone());
+    let ticker_priority = input_priority.clone();
     let sync_active = Arc::new(AtomicBool::new(false));
     state
+        .grid
         .sync_update_active
         .insert(session_id.clone(), sync_active.clone());
     // Shared by the PTY reader (which batches lines) and the frame ticker (which
@@ -7634,29 +3931,35 @@ pub(crate) fn spawn_reader_thread(
         // Safety net: if in_flight stays true for this long (~500 ms),
         // force-reset it so frame delivery resumes. Prevents permanent blank
         // terminal when the frontend fails to ack (crash, corrupt frame, etc.).
+        //
+        // Hidden desktop subscriptions are excluded before this gate. Only a
+        // visible viewport (or a frame already queued before hide) can time out.
         const MAX_IN_FLIGHT_MS: u64 = 500;
-        // After this many consecutive force-resets, back off for STUCK_PAUSE_MS
-        // to let the JS event loop drain the Tauri channel backlog before
-        // sending more frames. Kept short (1s, chunked) so a transient JS stall
-        // — e.g. a repo-changed git/IPC burst that blocks the WebView thread for
-        // ~1-2s — doesn't freeze an otherwise-healthy terminal for the full
-        // pause. The loop re-applies the back-off if the frontend is still
-        // behind, so persistent saturation still gets cumulative backpressure.
-        const MAX_STUCK_BEFORE_PAUSE: u32 = 3;
-        const STUCK_PAUSE_MS: u64 = 1_000;
         // Send-rate floors live in grid_send_min_interval_ms() (unit-tested).
         // How long after a keystroke the typing-throttle stays armed.
         const INPUT_THROTTLE_WINDOW_MS: u64 = 150;
         const LOAD_SATURATION_RATIO: f64 = 1.0; // 1-min load >= cores
         const LOAD_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         let mut stuck_since: Option<std::time::Instant> = None;
-        let mut stuck_count: u32 = 0;
         let mut dirty_run: u32 = 0;
         let mut last_sent: Option<std::time::Instant> = None;
         let mut last_load_check: Option<std::time::Instant> = None;
         let mut system_saturated = false;
+        ticker_priority.bind_ticker();
+        let mut next_tick = std::time::Instant::now() + TICK;
+        let mut priority_retry: Option<std::time::Instant> = None;
         while ticker_running.load(Ordering::Relaxed) {
-            std::thread::sleep(TICK);
+            let wake_at = priority_retry.map_or(next_tick, |retry| retry.min(next_tick));
+            std::thread::park_timeout(wake_at.saturating_duration_since(std::time::Instant::now()));
+            let now = std::time::Instant::now();
+            let periodic_tick = now >= next_tick;
+            priority_retry = None;
+            if periodic_tick {
+                next_tick = now + TICK;
+            } else if ticker_priority.request(now, last_sent).is_none() {
+                // Spurious/late notifications do not accelerate background output.
+                continue;
+            }
             // Drain a watcher-line tail the reader left batched. read() blocks, so
             // without this the last line of a burst waits for output that may
             // never arrive and a rare-line watcher matches minutes late. It must
@@ -7683,7 +3986,7 @@ pub(crate) fn spawn_reader_thread(
             if ticker_sync_active
                 .as_ref()
                 .is_some_and(|f| f.load(Ordering::Relaxed))
-                && let Some(vt) = ticker_state.vt_log_buffers.get(&ticker_sid)
+                && let Some(vt) = ticker_state.grid.vt_log_buffers.get(&ticker_sid)
             {
                 let mut g = vt.lock();
                 if g.flush_sync_timeout_if_needed() {
@@ -7714,69 +4017,86 @@ pub(crate) fn spawn_reader_thread(
             // (mcp_http/session.rs full_frame_for_single_client) forces it twice
             // and re-arms this ticker.
             //
-            // No pending scroll can be stranded either: pending_scroll is only
-            // ever inserted alongside a desktop channel (subscribe_terminal_grid)
-            // and removed with it (unsubscribe_terminal_grid, cleanup_session), so
-            // no subscriber means no entry for terminal_scroll_to_offset to write.
+            // A pending scroll is the one thing that must NOT be skipped with the
+            // frame: it is session state, not pixels. `/terminal/scroll-info`,
+            // the row reads and the next full frame all answer from the grid's
+            // display offset, so a target dropped here would silently disagree
+            // with every later read — and an HTTP client that scrolls without
+            // holding a grid WebSocket is exactly the browser/PWA case. It costs
+            // the vt lock only when a client actually asked for a scroll.
             //
-            // DEFERRED (2026-08-20) — parking the THREAD itself, which is what
-            // F28 asked for. What is left after the skip above is timer churn, not
-            // work: ~62.5 wakeups/s per session, each an atomic load and two
-            // checks, and macOS coalesces them. Parking needs a condvar the PTY
-            // writer signals, plus a `wait_timeout` for the DEC 2026 sync flush
-            // above, which must keep running headlessly — and a missed notify
-            // shows up as a terminal that silently stops painting. Small win,
-            // worst failure mode of the group.
             if !grid_has_subscriber(&ticker_state, &ticker_sid) {
+                if let Some(target) = take_pending_scroll(&ticker_state, &ticker_sid)
+                    && let Some(vt) = ticker_state.grid.vt_log_buffers.get(&ticker_sid)
+                {
+                    apply_scroll_target(&mut vt.lock(), target);
+                }
                 dirty_run = 0;
                 continue;
             }
             dirty_run = dirty_run.saturating_add(1);
-            // Clone the Arc out: the guard below would otherwise hold a DashMap
-            // shard read lock across the stuck back-off sleep, blocking every
-            // writer on that shard for up to a second.
+            // Clone the Arc out so recovery never retains a DashMap shard guard.
             let gate = ticker_state
-                .grid_gates
+                .grid
+                .gates
                 .get(&ticker_sid)
+                .filter(|_| {
+                    #[cfg(feature = "desktop")]
+                    {
+                        desktop_grid_visible(&ticker_state, &ticker_sid)
+                    }
+                    #[cfg(not(feature = "desktop"))]
+                    {
+                        false
+                    }
+                })
                 .map(|g| Arc::clone(g.value()));
-            if gate.as_ref().is_some_and(|g| !g.is_open()) {
+            // The gate belongs to the desktop WebView and to nothing else. It used
+            // to stop this tick outright, which is correct only while the desktop
+            // is the sole consumer: a browser/PWA client rides a different
+            // transport with its own flow control, and a stalled WebView is not
+            // its problem. So the stall accounting below still runs — the gate is
+            // still what decides whether the desktop CHANNEL gets this frame, in
+            // `send_grid_frame` — but it may only stop the tick when there is
+            // nobody else to serve.
+            let watchers = grid_has_watcher(&ticker_state, &ticker_sid);
+            if gate.as_ref().is_some_and(|g| g.is_paused()) {
+                stuck_since = None;
+                if !watchers {
+                    // Keep real damage/debt pending for a late receipt. ACKs
+                    // only reopen the gate; they must not manufacture damage.
+                    ticker_dirty.store(true, Ordering::Relaxed);
+                    if let Some(target) = take_pending_scroll(&ticker_state, &ticker_sid)
+                        && let Some(vt) = ticker_state.grid.vt_log_buffers.get(&ticker_sid)
+                    {
+                        apply_scroll_target(&mut vt.lock(), target);
+                    }
+                    continue;
+                }
+            } else if gate.as_ref().is_some_and(|g| !g.is_open()) {
                 let now = std::time::Instant::now();
                 let since = stuck_since.get_or_insert(now);
                 let elapsed = now.duration_since(*since).as_millis() as u64;
                 if elapsed > MAX_IN_FLIGHT_MS {
-                    stuck_count += 1;
-                    tracing::warn!(
-                        session_id = %ticker_sid,
-                        elapsed_ms = elapsed,
-                        stuck_count,
-                        outstanding = gate.as_ref().map_or(0, |g| g.outstanding()),
-                        "grid frame gate stuck, abandoning the outstanding frame"
-                    );
                     if let Some(g) = gate.as_ref() {
                         g.abandon();
+                        tracing::warn!(
+                            session_id = %ticker_sid,
+                            elapsed_ms = elapsed,
+                            stuck_count = g.abandoned_count(),
+                            watchers,
+                            paused = g.is_paused(),
+                            "grid frame gate stuck, abandoning the outstanding frame"
+                        );
                     }
                     stuck_since = None;
-                    if stuck_count >= MAX_STUCK_BEFORE_PAUSE {
-                        // Back off to let JS drain the channel backlog before retrying.
-                        // Sleep in short chunks so (a) a recovered frontend resumes
-                        // within ~one chunk rather than the full pause, and (b) session
-                        // close isn't delayed up to the full pause on shutdown.
-                        stuck_count = 0;
-                        let mut waited = 0u64;
-                        while waited < STUCK_PAUSE_MS && ticker_running.load(Ordering::Relaxed) {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            waited += 100;
-                        }
-                    }
-                    ticker_dirty.store(true, Ordering::Relaxed);
-                    continue;
-                } else {
+                }
+                if !watchers {
                     ticker_dirty.store(true, Ordering::Relaxed);
                     continue;
                 }
             } else {
                 stuck_since = None;
-                stuck_count = 0;
             }
             // Adaptive frame-rate floor: a TUI that animates continuously (e.g.
             // grok's spinner repaints its whole bordered UI and walks the cursor
@@ -7800,6 +4120,7 @@ pub(crate) fn spawn_reader_thread(
                     .unwrap_or_default()
                     .as_millis() as u64;
                 ticker_state
+                    .session_maps
                     .last_input_ms
                     .get(&ticker_sid)
                     .map(|ts| {
@@ -7807,6 +4128,10 @@ pub(crate) fn spawn_reader_thread(
                     })
                     .unwrap_or(false)
             };
+            // DEFERRED (2026-10-23) — native echo still exceeds one frame when
+            // the rolling input budget is spent. Receipt/repair and retry fixes
+            // preserve the deliberate bulk-protection floors; changing that
+            // budget needs a separate latency/throughput/heartbeat trade-off.
             // Pick the send-rate floor: typing-under-load (~20 fps) wins, else the
             // sustained-animation floor (~30 fps), else full 60 fps for short bursts.
             // A sync-timeout flush is a protocol deadline, not animation — the
@@ -7816,25 +4141,58 @@ pub(crate) fn spawn_reader_thread(
             } else {
                 grid_send_min_interval_ms(input_recent, dirty_run)
             };
-            if min_interval > 0
-                && let Some(last) = last_sent
-                && (now.duration_since(last).as_millis() as u64) < min_interval
-            {
-                ticker_dirty.store(true, Ordering::Relaxed); // keep pending for a later tick
+            let floor_pending = min_interval > 0
+                && last_sent.is_some_and(|last| {
+                    now.duration_since(last).as_millis() < min_interval as u128
+                });
+            let priority_request = ticker_priority.request(now, last_sent);
+            let priority_due = priority_request.is_some_and(|request| request.ready_at <= now);
+            if grid_send_must_wait(
+                sync_timeout_flush,
+                floor_pending,
+                periodic_tick,
+                priority_due,
+            ) {
+                // Retry only a coalescing deadline, never a closed gate. The
+                // periodic tick still owns gate/sync maintenance and background frames.
+                priority_retry = priority_request.map(|request| request.ready_at);
+                ticker_dirty.store(true, Ordering::Relaxed);
                 continue;
             }
-            if let Some(vt) = ticker_state.vt_log_buffers.get(&ticker_sid) {
+            let priority_bypass = !sync_timeout_flush && (floor_pending || !periodic_tick);
+            // The WebView missed frames while its gate was closed and has caught
+            // up: those rows went to the WebSocket subscribers and left the shared
+            // damage, so a delta now would land on a row map with holes in it.
+            // The private repair makes the desktop current for this snapshot.
+            // Publish its delta to browser watchers only: offering it to desktop
+            // again would close on the repair and recreate the same debt.
+            let desktop_owed_full_frame = gate
+                .as_ref()
+                .is_some_and(|g| g.is_open() && g.take_missed());
+            if let Some(vt) = ticker_state.grid.vt_log_buffers.get(&ticker_sid) {
                 let mut g = vt.lock();
-                if let Some(p) = ticker_state.pending_scroll.get(&ticker_sid) {
-                    let target = p.swap(-1, Ordering::Relaxed);
-                    if target >= 0 {
-                        g.grid_scroll_to_offset(target as usize);
-                    }
+                if let Some(target) = take_pending_scroll(&ticker_state, &ticker_sid) {
+                    apply_scroll_target(&mut g, target);
                 }
+                let repair = desktop_owed_full_frame.then(|| g.serialize_full_frame());
                 let frame = g.serialize_dirty_rows();
                 drop(g);
-                send_grid_frame(&ticker_state, &ticker_sid, frame);
+                #[cfg(feature = "desktop")]
+                if let Some(repair) = repair {
+                    send_desktop_grid_frame(&ticker_state, &ticker_sid, repair);
+                }
+                #[cfg(not(feature = "desktop"))]
+                let _ = repair;
+                send_grid_frame_to_consumers(
+                    &ticker_state,
+                    &ticker_sid,
+                    frame,
+                    !desktop_owed_full_frame,
+                );
                 last_sent = Some(now);
+                if let Some(request) = priority_request {
+                    priority_retry = ticker_priority.sent(request, now, priority_bypass);
+                }
             }
         }
         // Final flush after reader exits. Session teardown is the other "no more
@@ -7844,15 +4202,16 @@ pub(crate) fn spawn_reader_thread(
         // the reader's EOF path, which assembles the flush_eof remainder and
         // drains whatever is still batched, in order. A second drain racing from
         // this thread could deliver the older tail after it.
-        if let Some(vt) = ticker_state.vt_log_buffers.get(&ticker_sid) {
+        if let Some(vt) = ticker_state.grid.vt_log_buffers.get(&ticker_sid) {
             let mut g = vt.lock();
             g.force_stop_sync_if_buffered();
             let frame = g.serialize_dirty_rows();
             drop(g);
             send_grid_frame(&ticker_state, &ticker_sid, frame);
         }
-        ticker_state.grid_frame_dirty.remove(&ticker_sid);
-        ticker_state.sync_update_active.remove(&ticker_sid);
+        ticker_state.grid.frame_dirty.remove(&ticker_sid);
+        ticker_state.grid.sync_update_active.remove(&ticker_sid);
+        ticker_state.grid.input_frame_priority.remove(&ticker_sid);
     });
 
     std::thread::spawn(move || {
@@ -7865,6 +4224,7 @@ pub(crate) fn spawn_reader_thread(
             let mut utf8_buf = Utf8ReadBuffer::new();
             let mut esc_buf = EscapeAwareBuffer::new();
             let session_cwd: Option<String> = state
+                .session_maps
                 .sessions
                 .get(&session_id)
                 .and_then(|s| s.lock().cwd.clone());
@@ -7881,12 +4241,21 @@ pub(crate) fn spawn_reader_thread(
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        // A chunk already being processed before input cannot
+                        // consume the new input's wake hint.
+                        let input_generation = input_priority.generation();
                         state.metrics.bytes_emitted.fetch_add(n, Ordering::Relaxed);
+                        let has_secret_mask = processor.secret_mask.active()
+                            || state.secrets.has_pty_secrets(&session_id);
                         // Flight recorder: keep the last PTY_RAW_RING_CAP raw bytes
                         // (pre-transform) so a wild rendering corruption can be
                         // dumped and replayed offline (story 056-7545).
-                        {
-                            let ring = state.pty_raw_rings.entry(session_id.clone()).or_default();
+                        if !has_secret_mask {
+                            let ring = state
+                                .grid
+                                .pty_raw_rings
+                                .entry(session_id.clone())
+                                .or_default();
                             let mut ring = ring.lock();
                             ring.extend(&buf[..n]);
                             if ring.len() > PTY_RAW_RING_CAP {
@@ -7897,7 +4266,16 @@ pub(crate) fn spawn_reader_thread(
                         let utf8_data = utf8_buf.push(&buf[..n]);
                         let esc_data = esc_buf.push(&utf8_data);
                         let (kitty_clean, kitty_actions) = strip_kitty_sequences(&esc_data);
-                        if kitty_clean.contains("1049l") && !kitty_clean.contains("\x1b[?1049l") {
+                        // Diagnostic-only substring scan over the whole chunk. It ran
+                        // on every PTY read to catch a DECRST leak that has not been
+                        // seen since; behind the Diagnostics toggle it costs one
+                        // relaxed atomic load instead of two passes over 64 KB.
+                        // Enable with POST /diagnostics {"enabled":true} to get it back.
+                        if !has_secret_mask
+                            && crate::cpu_watchdog::diagnostic_mode()
+                            && kitty_clean.contains("1049l")
+                            && !kitty_clean.contains("\x1b[?1049l")
+                        {
                             tracing::error!(source = "terminal", session_id = %session_id,
                             "DECRST leak: kitty_clean has bare '1049l' without ESC[? prefix. \
                              esc_data({} bytes)={:?}, kitty_clean({} bytes)={:?}, actions={:?}",
@@ -7909,26 +4287,25 @@ pub(crate) fn spawn_reader_thread(
 
                         process_kitty_actions(&kitty_actions, &session_id, &state);
 
-                        if let Some(processed) =
-                            processor.process_chunk(&data, &silence, &session_id, &state)
-                            && let Some(xterm_data) = processor.transform_xterm(processed)
-                        {
-                            let clamped_data = xterm_data;
-
-                            let agent_active = state
-                                .session_states
-                                .get(&session_id)
-                                .map(|s| s.agent_type.is_some())
-                                .unwrap_or(false);
-                            if !processor.in_alt_buffer
-                                && !agent_active
-                                && clamped_data.as_bytes().contains(&0x1b)
-                            {
-                                let anomalies = detect_anomalous_sequences(&clamped_data);
-                                for label in &anomalies {
-                                    tracing::warn!(source = "terminal", session_id = %session_id, "Anomalous ANSI sequence: {label}");
+                        if processor.process_chunk(&data, &silence, &session_id, &state) {
+                            // The diagnostic ring and watchers must consume the same
+                            // sanitized bytes as the terminal and network streams.
+                            let safe_data = processor.masked_data.take();
+                            let data = safe_data.as_deref().unwrap_or(&data);
+                            if has_secret_mask {
+                                let ring = state
+                                    .grid
+                                    .pty_raw_rings
+                                    .entry(session_id.clone())
+                                    .or_default();
+                                let mut ring = ring.lock();
+                                ring.extend(data.as_bytes());
+                                if ring.len() > PTY_RAW_RING_CAP {
+                                    let excess = ring.len() - PTY_RAW_RING_CAP;
+                                    ring.drain(..excess);
                                 }
                             }
+                            processor.observe_alt_buffer(data);
 
                             // Plugin OutputWatcher matching. The canvas renders
                             // from grid frames and never read this text; the only
@@ -7944,7 +4321,7 @@ pub(crate) fn spawn_reader_thread(
                             assemble_watcher_lines(
                                 &state,
                                 &session_id,
-                                &clamped_data,
+                                data,
                                 &mut watcher_lines,
                                 &watcher_batcher,
                                 false,
@@ -7958,7 +4335,17 @@ pub(crate) fn spawn_reader_thread(
                             activity_pulse.pulse(&state, &session_id);
                         }
 
+                        if std::mem::take(&mut processor.queued_idle_flush)
+                            && state
+                                .pending_injections
+                                .get(&session_id)
+                                .is_some_and(|queue| !queue.is_empty())
+                        {
+                            flush_pending_injections(&state, &session_id);
+                        }
+
                         frame_dirty.store(true, Ordering::Relaxed);
+                        input_priority.applied(input_generation, std::time::Instant::now());
                     }
                     Err(e) => {
                         tracing::error!(session_id = %session_id, "PTY reader error: {e}");
@@ -7974,6 +4361,7 @@ pub(crate) fn spawn_reader_thread(
                 // active_sub_tasks to avoid leaving the frontend notification gate
                 // in an inconsistent state after process crash/exit.
                 let needs_clear = state
+                    .session_maps
                     .session_states
                     .get_mut(&session_id)
                     .filter(|e| e.active_sub_tasks > 0)
@@ -7986,7 +4374,14 @@ pub(crate) fn spawn_reader_thread(
                 }
             }
 
-            let remaining = flush_eof(&mut utf8_buf, &mut esc_buf, &session_id, &state);
+            let remaining = flush_eof(
+                &mut utf8_buf,
+                &mut esc_buf,
+                &mut processor,
+                &silence,
+                &session_id,
+                &state,
+            );
             // The remainder goes through the assembler, not straight out: it may
             // close a line the last read left partial. Then drain unconditionally
             // — teardown has no later tick to flush the batch.
@@ -8027,6 +4422,7 @@ pub(crate) fn spawn_reader_thread(
             #[cfg(feature = "desktop")]
             if let Some(app) = state.app_handle.read().as_ref() {
                 let agent_type = state
+                    .session_maps
                     .session_states
                     .get(&session_id)
                     .and_then(|s| s.agent_type.clone());
@@ -8051,2434 +4447,62 @@ pub(crate) fn spawn_reader_thread(
                 "unknown panic payload".to_string()
             };
             tracing::error!(session_id = %sid_for_panic, "READER THREAD PANICKED: {msg}");
+            // The store that ends the frame ticker and the 1 Hz silence timer
+            // lives inside the closure above, so a panic skips it: without this
+            // the ticker keeps waking ~62 times a second and the tokio timer
+            // keeps ticking for the life of the process, and the ticker never
+            // reaches the code after its loop that removes this session's
+            // grid_frame_dirty / sync_update_active entries.
+            running.store(false, Ordering::Relaxed);
             mark_session_exited(&sid_for_panic, &state_for_panic);
         }
     });
 }
 
-/// Create a new PTY session with optional worktree
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn create_pty(
-    _app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    config: PtyConfig,
-) -> Result<String, String> {
-    let session_id = Uuid::new_v4().to_string();
-
-    let shell = resolve_shell(config.shell.clone());
-
-    // Guard against invalid dimensions from zero-sized windows
-    let rows = config.rows.max(24);
-    let cols = config.cols.max(80);
-
-    let spawn_config = config.clone();
-    let spawn_shell = shell.clone();
-    let data_dir = state.data_dir.clone();
-    let state_for_env = state.inner().clone();
-    let session_id_for_env = session_id.clone();
-    let (pair, child) = spawn_pty_pair_with_retry_async(
-        PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-        move || {
-            let mut cmd = build_shell_command(&spawn_shell);
-
-            if let Some(ref cwd) = spawn_config.cwd {
-                let cwd = crate::cli::expand_tilde(cwd);
-                // Don't convert drive paths for WSL — cmd.cwd() sets the Windows
-                // process CWD via CreateProcessW, which can't resolve Linux paths.
-                // Windows translates drive paths to /mnt/... automatically when
-                // spawning wsl.exe. (GitHub #27)
-                cmd.cwd(cwd);
-            }
-
-            // Inject OSC 133 shell integration (command block markers)
-            crate::shell_integration::inject(&data_dir, &spawn_shell, &mut cmd);
-
-            // Inject stable session UUID so agents can use it for session binding
-            // (e.g. `claude --session-id $TUIC_SESSION`, then `claude --resume $TUIC_SESSION`)
-            bind_pty_identity(
-                &state_for_env,
-                &mut cmd,
-                &session_id_for_env,
-                spawn_config.tuic_session.as_deref(),
-            );
-
-            // Inject env flags (feature flags configured in Settings → Agents)
-            for (key, value) in &spawn_config.env {
-                cmd.env(key, value);
-            }
-
-            cmd
-        },
-    )
-    .await?;
-    lower_pty_child_priority(child.process_id());
-
-    let tuic_session = config.tuic_session.clone();
-
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("Failed to get PTY writer: {e}"))?;
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("Failed to get PTY reader: {e}"))?;
-
-    // Store session (master handle kept for resize support)
-    let paused = Arc::new(AtomicBool::new(false));
-    state.sessions.insert(
-        session_id.clone(),
-        Mutex::new(PtySession {
-            writer: Arc::new(Mutex::new(writer)),
-            master: pair.master,
-            _child: child,
-            paused: paused.clone(),
-            worktree: None,
-            cwd: config.cwd,
-            display_name: None,
-            display_name_is_custom: false,
-            is_remote: false,
-            shell: shell.clone(),
-        }),
-    );
-    state.assign_term_alias(&session_id);
-    state.metrics.total_spawned.fetch_add(1, Ordering::Relaxed);
-    state
-        .metrics
-        .active_sessions
-        .fetch_add(1, Ordering::Relaxed);
-
-    // Create ring buffer and VT log buffer for this session
-    state.output_buffers.insert(
-        session_id.clone(),
-        Mutex::new(OutputRingBuffer::new(OUTPUT_RING_BUFFER_CAPACITY)),
-    );
-    let mut vt_log = VtLogBuffer::new(24, 220, VT_LOG_BUFFER_CAPACITY);
-    if let Some(colors) = state.ansi_colors.read().as_ref() {
-        vt_log.set_ansi_colors(colors);
-    }
-    state
-        .vt_log_buffers
-        .insert(session_id.clone(), Mutex::new(vt_log));
-    let grid_watch_tx = crate::grid_gate::new_grid_watch();
-    state.grid_watch.insert(session_id.clone(), grid_watch_tx);
-    state
-        .last_output_ms
-        .insert(session_id.clone(), std::sync::atomic::AtomicU64::new(0));
-    state
-        .terminal_rows
-        .insert(session_id.clone(), std::sync::atomic::AtomicU16::new(rows));
-    let mut ss = crate::state::SessionState::default();
-    if config.agent_type.is_some() {
-        ss.agent_type = config.agent_type;
-        ss.hook_instrumented = hook_instrumented_for(
-            &crate::config::load_agents_config(),
-            ss.agent_type.as_deref(),
-        );
-    }
-    state.session_states.insert(session_id.clone(), ss);
-
-    spawn_reader_thread(
-        reader,
-        paused,
-        session_id.clone(),
-        state.inner().clone(),
-        tuic_session,
-    );
-
-    Ok(session_id)
+/// Consume the coalesced scroll target a client left for this session.
+///
+/// Both transports write it (`terminal_scroll_to_offset` as a Tauri command and
+/// as an HTTP route) without taking the vt lock, and the frame ticker is the only
+/// reader — so the swap here is what makes "latest wins" true: whatever arrived
+/// since the last tick is applied once, and `-1` means nothing is pending.
+/// Nonnegative values are display offsets; <= -2 encodes an all-time row anchor.
+fn take_pending_scroll(state: &AppState, session_id: &str) -> Option<i64> {
+    let target = state
+        .grid
+        .pending_scroll
+        .get(session_id)?
+        .swap(-1, Ordering::Relaxed);
+    (target != -1).then_some(target)
 }
 
-/// Spawn a headless PTY session for agent orchestration (no Tauri command context).
-/// Extracts AppHandle from `state.app_handle` and creates a minimal session.
-pub(crate) async fn spawn_session_for_agent(
-    state: &Arc<AppState>,
-    cwd: Option<String>,
-    display_name: Option<String>,
-) -> Result<String, String> {
-    let session_id = Uuid::new_v4().to_string();
-    let rows: u16 = 24;
-    let cols: u16 = 80;
-
-    let shell = resolve_shell(None);
-
-    let spawn_cwd = cwd.clone();
-    let spawn_shell = shell.clone();
-    let data_dir = state.data_dir.clone();
-    let state_for_env = state.clone();
-    let session_id_for_env = session_id.clone();
-    let (pair, child) = spawn_pty_pair_with_retry_async(
-        PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-        move || {
-            let mut cmd = build_shell_command(&spawn_shell);
-
-            if let Some(ref dir) = spawn_cwd {
-                let expanded = crate::cli::expand_tilde(dir);
-                cmd.cwd(expanded);
-            }
-
-            crate::shell_integration::inject(&data_dir, &spawn_shell, &mut cmd);
-            // No caller-supplied identity on this path, so the PTY key is the
-            // identity — see bind_pty_identity.
-            bind_pty_identity(&state_for_env, &mut cmd, &session_id_for_env, None);
-            cmd
-        },
-    )
-    .await?;
-    lower_pty_child_priority(child.process_id());
-
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("Failed to get PTY writer: {e}"))?;
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("Failed to get PTY reader: {e}"))?;
-
-    let paused = Arc::new(AtomicBool::new(false));
-    state.sessions.insert(
-        session_id.clone(),
-        Mutex::new(PtySession {
-            writer: Arc::new(Mutex::new(writer)),
-            master: pair.master,
-            _child: child,
-            paused: paused.clone(),
-            worktree: None,
-            cwd,
-            display_name: display_name.clone(),
-            display_name_is_custom: false,
-            is_remote: true,
-            shell: shell.clone(),
-        }),
-    );
-    state.assign_term_alias(&session_id);
-    state.metrics.total_spawned.fetch_add(1, Ordering::Relaxed);
-    state
-        .metrics
-        .active_sessions
-        .fetch_add(1, Ordering::Relaxed);
-
-    state.output_buffers.insert(
-        session_id.clone(),
-        Mutex::new(OutputRingBuffer::new(OUTPUT_RING_BUFFER_CAPACITY)),
-    );
-    let mut vt_log = VtLogBuffer::new(rows, cols, VT_LOG_BUFFER_CAPACITY);
-    if let Some(colors) = state.ansi_colors.read().as_ref() {
-        vt_log.set_ansi_colors(colors);
+/// Enqueue an anchored target in the same latest-wins slot as offset requests.
+/// -1 is empty, nonnegative values are offsets, <= -2 encode all-time anchors.
+/// None follows the tail. Saturation keeps untrusted usize values in range.
+pub(crate) fn queue_scroll_anchor(state: &AppState, session_id: &str, anchor: Option<usize>) {
+    let target = anchor.map_or(0, |row| -2 - row.min((i64::MAX - 1) as usize) as i64);
+    if let Some(pending) = state.grid.pending_scroll.get(session_id) {
+        pending.store(target, Ordering::Relaxed);
     }
-    state
-        .vt_log_buffers
-        .insert(session_id.clone(), Mutex::new(vt_log));
-    let grid_watch_tx = crate::grid_gate::new_grid_watch();
-    state.grid_watch.insert(session_id.clone(), grid_watch_tx);
-    state
-        .last_output_ms
-        .insert(session_id.clone(), AtomicU64::new(0));
-    state
-        .terminal_rows
-        .insert(session_id.clone(), std::sync::atomic::AtomicU16::new(rows));
-    state
-        .session_states
-        .insert(session_id.clone(), crate::state::SessionState::default());
-
-    state.emit_pty_event(crate::state::AppEvent::SessionCreated {
-        session_id: session_id.clone(),
-        cwd: state
-            .sessions
-            .get(&session_id)
-            .and_then(|s| s.lock().cwd.clone()),
-        agent_type: None,
-        display_name: display_name.clone(),
-    });
-    #[cfg(feature = "desktop")]
-    if let Some(ref a) = *state.app_handle.read() {
-        let _ = a.emit(
-            "session-created",
-            serde_json::json!({
-                "session_id": session_id,
-                "display_name": display_name,
-            }),
-        );
+    if let Some(dirty) = state.grid.frame_dirty.get(session_id) {
+        dirty.store(true, Ordering::Relaxed);
     }
-
-    spawn_reader_thread(reader, paused, session_id.clone(), state.clone(), None);
-
-    Ok(session_id)
 }
 
-/// Create a PTY session with a dedicated git worktree
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn create_pty_with_worktree(
-    _app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    pty_config: PtyConfig,
-    worktree_config: WorktreeConfig,
-) -> Result<WorktreeResult, String> {
-    let pty_rows = pty_config.rows.max(24);
-    let _pty_cols = pty_config.cols.max(80);
-    // Create the worktree first
-    let worktrees_dir = crate::worktree::resolve_worktree_dir_for_repo(
-        std::path::Path::new(&worktree_config.base_repo),
-        &state.worktrees_dir,
-    );
-    // Run the blocking git worktree calls off the async executor so a slow
-    // checkout (LFS, large repo) doesn't stall other Tauri commands.
-    // Uses the stale-recovery wrapper so orphaned directories are cleaned up
-    // and retried automatically (single retry, no background task — PTY
-    // creation is synchronous from the caller's perspective).
-    let worktree = {
-        let d = worktrees_dir.clone();
-        let c = worktree_config.clone();
-        tokio::task::spawn_blocking(move || create_worktree_with_stale_recovery(&d, &c, None))
-            .await
-            .map_err(|e| format!("create_worktree task panic: {e}"))??
-    };
-    let worktree_path = worktree.path.clone();
-
-    // Wrap PTY creation so we can clean up the worktree on failure.
-    let session_id = Uuid::new_v4().to_string();
-    let rows = pty_config.rows.max(24);
-    let cols = pty_config.cols.max(80);
-    let shell = resolve_shell(pty_config.shell.clone());
-    let spawn_shell = shell.clone();
-    let spawn_worktree_path = worktree_path.clone();
-    let spawn_env = pty_config.env.clone();
-    let data_dir = state.data_dir.clone();
-    let state_for_env = state.inner().clone();
-    let session_id_for_env = session_id.clone();
-    let spawn_tuic_session = pty_config.tuic_session.clone();
-    let pty_result = spawn_pty_pair_with_retry_async(
-        PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-        move || {
-            let mut cmd = build_shell_command(&spawn_shell);
-            cmd.cwd(&spawn_worktree_path);
-            crate::shell_integration::inject(&data_dir, &spawn_shell, &mut cmd);
-            bind_pty_identity(
-                &state_for_env,
-                &mut cmd,
-                &session_id_for_env,
-                spawn_tuic_session.as_deref(),
-            );
-            for (key, value) in &spawn_env {
-                cmd.env(key, value);
-            }
-            cmd
-        },
-    )
-    .await
-    .and_then(|(pair, child)| {
-        lower_pty_child_priority(child.process_id());
-
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| format!("Failed to get PTY writer: {e}"))?;
-
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("Failed to get PTY reader: {e}"))?;
-
-        Ok((session_id, pair.master, child, writer, reader, shell))
-    });
-
-    let (session_id, master, child, writer, reader, shell) = match pty_result {
-        Ok(result) => result,
-        Err(e) => {
-            // Clean up the worktree since PTY creation failed
-            if let Err(cleanup_err) = remove_worktree_internal(&worktree, false) {
-                tracing::warn!("Failed to cleanup worktree after PTY failure: {cleanup_err}");
-            }
-            return Err(e);
-        }
-    };
-
-    let branch = worktree.branch.clone();
-    let worktree_cwd = Some(worktree.path.to_string_lossy().to_string());
-
-    // Store session with worktree info (master handle kept for resize support)
-    let paused = Arc::new(AtomicBool::new(false));
-    state.sessions.insert(
-        session_id.clone(),
-        Mutex::new(PtySession {
-            writer: Arc::new(Mutex::new(writer)),
-            master,
-            _child: child,
-            paused: paused.clone(),
-            worktree: Some(worktree),
-            cwd: worktree_cwd,
-            display_name: None,
-            display_name_is_custom: false,
-            is_remote: false,
-            shell,
-        }),
-    );
-    state.assign_term_alias(&session_id);
-    state.metrics.total_spawned.fetch_add(1, Ordering::Relaxed);
-    state
-        .metrics
-        .active_sessions
-        .fetch_add(1, Ordering::Relaxed);
-
-    // Create ring buffer, VT log buffer, and diff renderer for this session
-    state.output_buffers.insert(
-        session_id.clone(),
-        Mutex::new(OutputRingBuffer::new(OUTPUT_RING_BUFFER_CAPACITY)),
-    );
-    let mut vt_log = VtLogBuffer::new(24, 220, VT_LOG_BUFFER_CAPACITY);
-    if let Some(colors) = state.ansi_colors.read().as_ref() {
-        vt_log.set_ansi_colors(colors);
-    }
-    state
-        .vt_log_buffers
-        .insert(session_id.clone(), Mutex::new(vt_log));
-    let grid_watch_tx = crate::grid_gate::new_grid_watch();
-    state.grid_watch.insert(session_id.clone(), grid_watch_tx);
-    state
-        .last_output_ms
-        .insert(session_id.clone(), std::sync::atomic::AtomicU64::new(0));
-    state.terminal_rows.insert(
-        session_id.clone(),
-        std::sync::atomic::AtomicU16::new(pty_rows),
-    );
-    let mut ss = crate::state::SessionState::default();
-    if pty_config.agent_type.is_some() {
-        ss.agent_type = pty_config.agent_type;
-        ss.hook_instrumented = hook_instrumented_for(
-            &crate::config::load_agents_config(),
-            ss.agent_type.as_deref(),
-        );
-    }
-    state.session_states.insert(session_id.clone(), ss);
-
-    spawn_reader_thread(
-        reader,
-        paused,
-        session_id.clone(),
-        state.inner().clone(),
-        None,
-    );
-
-    Ok(WorktreeResult {
-        session_id,
-        worktree_path: worktree_path.to_string_lossy().to_string(),
-        branch,
-    })
-}
-
-/// List all active worktrees
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn list_worktrees(state: State<'_, Arc<AppState>>) -> Vec<serde_json::Value> {
-    state
-        .sessions
-        .iter()
-        .filter_map(|entry| {
-            let session = entry.value().lock();
-            session.worktree.as_ref().map(|wt| {
-                serde_json::json!({
-                    "session_id": entry.key(),
-                    "name": wt.name,
-                    "path": wt.path.to_string_lossy(),
-                    "branch": wt.branch,
-                    "base_repo": wt.base_repo.to_string_lossy(),
-                })
-            })
-        })
-        .collect()
-}
-
-/// Write data to a PTY session.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn write_pty(
-    _app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    data: String,
-) -> Result<(), String> {
-    write_pty_parts_off_thread(Arc::clone(&state), session_id, vec![data]).await
-}
-
-/// Write multiple input requests atomically while preserving their bookkeeping
-/// boundaries.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn write_pty_parts(
-    _app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    parts: Vec<String>,
-) -> Result<(), String> {
-    write_pty_parts_off_thread(Arc::clone(&state), session_id, parts).await
-}
-
-#[cfg(feature = "desktop")]
-async fn write_pty_parts_off_thread(
-    state: Arc<AppState>,
-    session_id: String,
-    parts: Vec<String>,
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || write_pty_parts_blocking(&state, &session_id, &parts))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
-}
-
-#[cfg(feature = "desktop")]
-fn write_pty_parts_blocking(
-    state: &Arc<AppState>,
-    session_id: &str,
-    parts: &[String],
-) -> Result<(), String> {
-    // Keystroke delivery to the PTY: run on the high QoS band so the write (and
-    // thus the echo round-trip) isn't starved by a saturating build. Scoped, not
-    // a bare raise: this thread comes from the shared blocking pool and goes back
-    // into it, so an unrestored bump would promote the pool the terminal is
-    // trying to out-schedule.
-    let _qos = interactive_io_boost();
-    // Restore cursor if hidden — Ink-based agents send DECTCEM hide for
-    // spinners but may not send CNORM when returning to the prompt.
-    // Best-effort try_lock: this is cosmetic (touches the local grid, not the PTY)
-    // and MUST NOT block input delivery. Under an output flood the ticker
-    // (serialize_dirty_rows) and reader thrash this same vt lock; a blocking lock
-    // here would starve input. If contended, skip — the next frame restores the
-    // cursor anyway.
-    if let Some(vt) = state.vt_log_buffers.get(session_id)
-        && let Some(mut vt) = vt.try_lock()
-        && !vt.is_cursor_visible()
-    {
-        vt.process(b"\x1b[?25h");
-    }
-
-    let data_len: usize = parts.iter().map(String::len).sum();
-    tracing::trace!(session_id = %session_id, data_len, part_count = parts.len(), "write_pty");
-    for data in parts {
-        if data.contains("\x1b[?1049")
-            || data.contains("\x1b[?1047")
-            || data.contains("\x1b[?47l")
-            || data.contains("\x1b[?25h")
-        {
-            tracing::error!(source = "terminal", session_id = %session_id,
-                "write_pty received DEC private mode sequences! data({} bytes)={:?}",
-                data.len(), data.as_bytes().iter().take(200).collect::<Vec<_>>());
-        }
-    }
-
-    let byte_parts: Vec<&[u8]> = parts.iter().map(|part| part.as_bytes()).collect();
-    let t0 = std::time::Instant::now();
-    state.write_pty_parts(session_id, &byte_parts)?;
-    let total_ms = t0.elapsed().as_millis();
-    if total_ms > 100 {
-        tracing::warn!(session_id = %session_id, total_ms = %total_ms,
-            data_len, part_count = parts.len(), "write_pty SLOW — lock or write blocked");
-    }
-
-    for data in parts {
-        crate::pty_capture::record_input(session_id, data.as_bytes());
-        apply_desktop_input_bookkeeping(state, session_id, data);
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "desktop")]
-fn apply_desktop_input_bookkeeping(state: &Arc<AppState>, session_id: &str, data: &str) {
-    // Stamp last-input time so the grid ticker can throttle frame sends while
-    // the user types under CPU saturation (keeps the WebView thread free for
-    // keystroke dispatch + echo).
-    stamp_input_ms(state, session_id);
-    crate::state::resolve_choice_prompt_input(state, session_id, data);
-
-    // Feed input through the line buffer to reconstruct user-typed lines.
-    // Release both the inner mutex and DashMap entry guard before callbacks
-    // below. In particular, flush_pending_injections -> should_inject_now
-    // reads input_buffers again; retaining input_entry there self-deadlocks
-    // this shard and can park the entire IPC Tokio runtime under load.
-    let (actions, buffer_empty, buffer_is_slash) = {
-        let input_entry = state
-            .input_buffers
-            .entry(session_id.to_string())
-            .or_insert_with(|| parking_lot::Mutex::new(InputLineBuffer::new()));
-        let mut buf = input_entry.lock();
-        let actions = buf.feed(data);
-        // Two bits, not the line: `content()` here collected the whole typed
-        // line into a fresh String on every keystroke, to be dropped below.
-        (actions, buf.is_empty(), buf.starts_with('/'))
-    };
-    let mut line_submitted = false;
-    for action in actions {
-        match action {
-            InputAction::Line(content) => {
-                line_submitted = true;
-                // Keystroke-reconstructed: no grid context, so no prompt row
-                // (line = -1). The OSC 7770 busy path supplies an absolute
-                // scrollbar marker when available.
-                record_submitted_line(state, session_id, content, -1);
-            }
-            InputAction::Interrupt => {
-                line_submitted = true;
-                if let Some(ss) = state.silence_states.get(session_id) {
-                    ss.lock().note_interrupt_requested();
-                }
-            }
-        }
-    }
-    // Codex advertises Escape as its normal interrupt key. A bare Escape is
-    // only intent evidence; it never flips idle until the agent redraws an
-    // interrupted/ready prompt. CSI-prefixed navigation keys are excluded.
-    if data == "\x1b"
-        && let Some(ss) = state.silence_states.get(session_id)
-    {
-        ss.lock().note_interrupt_requested();
-    }
-
-    // On any line submit (Enter or Ctrl+C) reset the tool-error dedup
-    // memory: the user is explicitly engaging again, so a recurrence of
-    // the same failure in a later turn must be allowed to notify.
-    // Mirrors `OutputParser`'s reset of `last_api_error_match` on UserInput.
-    if line_submitted && let Some(ss) = state.silence_states.get(session_id) {
-        let mut sl = ss.lock();
-        sl.reset_tool_error_memory();
-        sl.reset_suggest_memory();
-    }
-
-    // Track slash command mode: true when the input buffer starts with /
-    // Fallback: when ESC is sent before "/" (TerminalKeybar's handleSlash),
-    // the InputLineBuffer consumes "/" as an unknown escape-sequence suffix
-    // and never inserts it. Detect bare "/" writes that the buffer missed.
-    let in_slash = if line_submitted {
-        false
+fn apply_scroll_target(vt: &mut crate::state::VtLogBuffer, target: i64) {
+    if target <= -2 {
+        vt.grid_scroll_to_anchor(Some((-2 - target) as usize));
     } else {
-        buffer_is_slash || (buffer_empty && data == "/")
-    };
-    // Look up before inserting: `entry` needs an owned key, so the allocation is
-    // paid only when the map entry does not already exist.
-    match state.slash_mode.get(session_id) {
-        Some(flag) => flag.store(in_slash, std::sync::atomic::Ordering::Relaxed),
-        None => {
-            state
-                .slash_mode
-                .entry(session_id.to_string())
-                .or_insert_with(|| std::sync::atomic::AtomicBool::new(false))
-                .store(in_slash, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    if buffer_empty {
-        flush_pending_injections(state, session_id);
+        vt.grid_scroll_to_offset(target as usize);
     }
 }
 
-/// Return the current content of the input line buffer for a PTY session.
-/// Empty string when the user has not started typing.
 #[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_input_buffer_content(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> String {
+fn desktop_grid_visible(state: &AppState, session_id: &str) -> bool {
     state
-        .input_buffers
-        .get(&session_id)
-        .map(|entry| entry.lock().content())
-        .unwrap_or_default()
-}
-
-/// Get the last relevant user prompt (>= 10 words) for a PTY session.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_last_prompt(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Option<String> {
-    state.last_prompts.get(&session_id).map(|v| v.clone())
-}
-
-/// Get the current shell state for a PTY session.
-/// Used by the frontend on remount to sync state missed while unsubscribed.
-/// Returns "busy", "idle", or null (session never produced output / removed).
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_shell_state(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Option<String> {
-    state.shell_states.get(&session_id).and_then(|atom| {
-        shell_state_wire(atom.load(std::sync::atomic::Ordering::Relaxed)).map(str::to_string)
-    })
-}
-
-/// Return the classified shell family for a PTY session.
-/// Lets the frontend pick the correct control sequences (e.g. Ctrl-U as
-/// line-kill for POSIX readline vs. literal-char on cmd.exe/PowerShell)
-/// without re-deriving the classification on every keystroke.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_session_shell_family(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Option<ShellFamily> {
-    state
-        .sessions
-        .get(&session_id)
-        .map(|entry| classify_shell(&entry.lock().shell))
-}
-
-/// Shared resize core for the Tauri command and the HTTP route (story 056-7545).
-///
-/// Order matters: the grid must adopt the new dimensions BEFORE the PTY ioctl
-/// delivers SIGWINCH to the child. With the old PTY-first order the child could
-/// repaint for the new width while the grid still wrapped at the old one (the
-/// window grows with vt-lock contention under bursty output); wide lines then
-/// autowrapped in the narrow grid, breaking Ink's cursor-up arithmetic and
-/// stranding intermediate render rows in scrollback as duplicated blocks.
-///
-/// Same-dims calls are a no-op (returns None): they would otherwise deliver a
-/// gratuitous SIGWINCH (full Ink repaint) per redundant caller (MCP/HTTP/multi
-/// -client — the desktop frontend already guards, others don't).
-///
-/// Returns the post-resize full frame to flush, if the grid was resized.
-/// Which thread last ran the reflow for a session.
-///
-/// Keyed by session, not process-wide: the suite runs tests in parallel, and a
-/// single slot would report some other test's thread. Test-only — it is how a
-/// test proves the reflow left the caller's thread without reaching into tokio.
-#[cfg(test)]
-static RESIZE_THREADS: std::sync::LazyLock<dashmap::DashMap<String, std::thread::ThreadId>> =
-    std::sync::LazyLock::new(dashmap::DashMap::new);
-
-#[cfg(test)]
-pub(crate) fn resize_thread(session_id: &str) -> Option<std::thread::ThreadId> {
-    RESIZE_THREADS.get(session_id).map(|t| *t)
-}
-
-/// [`resize_session_core`] on the blocking pool.
-///
-/// The reflow is the single most expensive thing a terminal does: it rewraps the
-/// whole ring — up to 10,000 rows — and then serializes a full frame, all while
-/// holding the VT mutex the PTY reader wants. Run inline in a `#[tauri::command]`
-/// that is on macOS the main thread, a drag-resize froze the WebView for the
-/// length of every reflow it triggered.
-///
-/// Shared by both transports, like [`vt_try_read`]: the HTTP route is `async` but
-/// its await point is worthless if the body blocks a tokio worker for a whole
-/// rewrap. Neither transport can quietly go back to blocking.
-pub(crate) async fn resize_session_off_thread(
-    state: &Arc<AppState>,
-    session_id: String,
-    rows: u16,
-    cols: u16,
-) -> Result<Option<Vec<u8>>, String> {
-    let state = Arc::clone(state);
-    tokio::task::spawn_blocking(move || resize_session_core(&state, &session_id, rows, cols))
-        .await
-        .map_err(|e| format!("resize failed: {e}"))?
-}
-
-pub(crate) fn resize_session_core(
-    state: &AppState,
-    session_id: &str,
-    rows: u16,
-    cols: u16,
-) -> Result<Option<Vec<u8>>, String> {
-    if rows == 0 || cols == 0 {
-        return Err("Invalid dimensions: rows and cols must be > 0".to_string());
-    }
-    #[cfg(test)]
-    {
-        RESIZE_THREADS.insert(session_id.to_string(), std::thread::current().id());
-    }
-    // Serialize the whole grid+PTY resize for this session under one lock so two
-    // concurrent differing resizes (Tauri `resize_pty` + HTTP route) cannot interleave
-    // their two critical sections and leave the grid and PTY at mismatched dimensions
-    // (CONC-B, story 100-e303). Clone the Arc and drop the DashMap Ref before locking
-    // so we never hold a `resize_locks` shard guard across the resize.
-    let resize_lock = state
-        .resize_locks
-        .entry(session_id.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new((0, 0))))
-        .clone();
-    let mut applied = resize_lock.lock();
-    // Seed the last-applied dims from the live grid the first time we see this session:
-    // at creation the grid and PTY share the openpty size, so a first resize that only
-    // matches the startup dims no-ops instead of firing a gratuitous SIGWINCH. `(0, 0)`
-    // is the never-applied sentinel (real dims are guarded > 0 above).
-    if *applied == (0, 0)
-        && let Some(vt_log) = state.vt_log_buffers.get(session_id)
-    {
-        let vt = vt_log.lock();
-        *applied = (vt.grid_screen_lines() as u16, vt.grid_columns() as u16);
-    }
-    // No-op guard compares against the last dims that actually reached the PTY, not just
-    // the grid: a prior call that resized the grid but then failed `master.resize` leaves
-    // them divergent, and a grid-only guard would skip the PTY forever (CONC-B criterion 2).
-    if *applied == (rows, cols) {
-        return Ok(None);
-    }
-    // Resize the grid and capture a fresh full frame, holding the vt lock so no
-    // PTY chunk can land between the check and the resize. `resize`
-    // marks the grid fully damaged, so `serialize_dirty_rows` yields the whole
-    // viewport. The caller must flush it: the reader thread only sends frames on
-    // PTY data or the ticker, so a resize/zoom over idle or static content would
-    // otherwise leave the viewport blank until a scroll forces
-    // `terminal_request_frame`. If the grid already matches (PTY-only retry after a
-    // prior `master.resize` failure) skip the grid work but still re-apply the PTY.
-    let resize_frame = match state.vt_log_buffers.get(session_id) {
-        Some(vt_log) => {
-            let mut vt = vt_log.lock();
-            if vt.grid_screen_lines() == rows as usize && vt.grid_columns() == cols as usize {
-                None
-            } else {
-                vt.resize(rows, cols);
-                Some(vt.serialize_dirty_rows())
-            }
-        }
-        None => None,
-    };
-    // Update terminal rows for cursor-up clamping in the reader thread.
-    if let Some(r) = state.terminal_rows.get(session_id) {
-        r.store(rows, Ordering::Relaxed);
-    }
-    // Mark resize in silence state so the reader thread suppresses re-parsed events
-    // from the shell's prompt redraw triggered by SIGWINCH.
-    if let Some(ss) = state.silence_states.get(session_id) {
-        ss.lock().on_resize();
-    }
-    // Only now signal the child (TIOCSWINSZ → SIGWINCH): everything it repaints
-    // from here on meets a grid that already wraps at the new width.
-    let entry = state
-        .sessions
+        .grid
+        .channels
         .get(session_id)
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    entry
-        .lock()
-        .master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("Failed to resize PTY: {e}"))?;
-    // Record the dims only now that they've reached the PTY, still under `applied`, so
-    // a racing resize either waits behind this lock or observes a consistent value.
-    // On a `master.resize` failure above we return via `?` WITHOUT updating `applied`,
-    // so a later retry re-applies the PTY instead of no-opping on a grid-only match.
-    *applied = (rows, cols);
-    Ok(resize_frame)
-}
-
-/// Enable or disable VT100 diff rendering for a PTY session.
-/// Resize a PTY session
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn resize_pty(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    rows: u16,
-    cols: u16,
-) -> Result<(), String> {
-    let state = Arc::clone(&state);
-    let resize_frame = resize_session_off_thread(&state, session_id.clone(), rows, cols).await?;
-    // Flush the post-resize frame so the viewport repaints without waiting for the
-    // next PTY data event (fixes blank screen after zoom on static content).
-    if let Some(frame) = resize_frame {
-        send_grid_frame(&state, &session_id, frame);
-    }
-    Ok(())
-}
-
-/// Apply theme ANSI colors (indices 0-15) to all terminal grids.
-/// Each color is a `[r, g, b]` triple. Called by the frontend when the theme changes.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn set_ansi_colors(
-    state: State<'_, Arc<AppState>>,
-    colors: [[u8; 3]; 16],
-) -> Result<(), String> {
-    *state.ansi_colors.write() = Some(colors);
-    for entry in state.vt_log_buffers.iter() {
-        entry.value().lock().set_ansi_colors(&colors);
-    }
-    Ok(())
-}
-
-/// Pause PTY reader thread (flow control: frontend buffer full)
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn pause_pty(state: State<'_, Arc<AppState>>, session_id: String) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    entry.lock().paused.store(true, Ordering::Relaxed);
-    state
-        .metrics
-        .pauses_triggered
-        .fetch_add(1, Ordering::Relaxed);
-    tracing::debug!(session_id = %session_id, "PTY reader paused (flow control)");
-    Ok(())
-}
-
-/// Resume PTY reader thread (flow control: frontend buffer drained)
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn resume_pty(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    entry.lock().paused.store(false, Ordering::Relaxed);
-    #[cfg(unix)]
-    if let Err(e) = wake_session(&state, &session_id) {
-        tracing::debug!(session_id = %session_id, error = %e, "Wake on resume (may not be in standby)");
-    }
-    tracing::debug!(session_id = %session_id, "PTY reader resumed (flow control)");
-    Ok(())
-}
-
-/// Periodically checks all sessions for standby eligibility.
-/// A session enters standby when:
-/// 1. standby_timeout_minutes > 0
-/// 2. session_visibility == false (tab not focused)
-/// 3. shell_state == SHELL_IDLE
-/// 4. idle duration >= timeout
-/// 5. not already in standby
-/// 6. startup_settled == true
-#[cfg(unix)]
-fn background_activity_blocks_standby(state: &AppState, session_id: &str) -> bool {
-    state
-        .session_states
-        .get(session_id)
-        .is_some_and(|session| session.background_work || session.has_pending_background_probe())
-}
-
-#[cfg(unix)]
-pub(crate) fn spawn_standby_checker(state: Arc<AppState>) {
-    use std::time::Duration;
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let timeout_min = state.config.read().standby_timeout_minutes;
-            if timeout_min == 0 {
-                // Standby disabled: wake any sessions still parked (SIGSTOP'd)
-                // from a previous non-zero timeout. Otherwise their stopped
-                // badge persists until the user manually focuses each tab
-                // (to-test.md:236, story 095).
-                wake_all_standby(&state);
-                continue;
-            }
-            let timeout_ms = u64::from(timeout_min) * 60_000;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let vis_count = state.session_visibility.len();
-            let sessions_count = state.sessions.len();
-            tracing::trace!(
-                vis_count,
-                sessions_count,
-                timeout_min,
-                "Standby checker tick"
-            );
-
-            for entry in state.session_visibility.iter() {
-                let session_id = entry.key();
-                let visible = *entry.value();
-                if visible {
-                    continue;
-                }
-                if state.standby_sessions.contains_key(session_id.as_str()) {
-                    continue;
-                }
-
-                let shell_raw = state
-                    .shell_states
-                    .get(session_id.as_str())
-                    .map(|a| a.load(Ordering::Acquire));
-                let is_idle = shell_raw == Some(SHELL_IDLE);
-                if !is_idle {
-                    continue;
-                }
-
-                // For agents with a verified ready-screen adapter, a silence-only
-                // idle is not strong enough to SIGSTOP the process group. Require
-                // explicit Stop/OSC or a stable ready screen. Legacy agents that
-                // lack an adapter retain their prior timeout behavior.
-                let is_agent = state
-                    .session_states
-                    .get(session_id.as_str())
-                    .map(|s| s.agent_type.is_some())
-                    .unwrap_or(false);
-                if is_agent && !idle_is_confirmed(&state, session_id.as_str()) {
-                    tracing::trace!(
-                        session_id = session_id.as_str(),
-                        "Standby skipped: agent idle is heuristic-only"
-                    );
-                    continue;
-                }
-                if background_activity_blocks_standby(&state, session_id.as_str()) {
-                    tracing::trace!(
-                        session_id = session_id.as_str(),
-                        "Standby skipped: background work or probe pending"
-                    );
-                    continue;
-                }
-
-                let idle_since = state
-                    .shell_state_since_ms
-                    .get(session_id.as_str())
-                    .map(|a| a.load(Ordering::Acquire))
-                    .unwrap_or(now_ms);
-                let idle_ms = now_ms.saturating_sub(idle_since);
-                if idle_ms < timeout_ms {
-                    continue;
-                }
-
-                let settled = state
-                    .silence_states
-                    .get(session_id.as_str())
-                    .map(|e| e.lock().startup_settled)
-                    .unwrap_or(false);
-                if !settled {
-                    continue;
-                }
-
-                tracing::debug!(
-                    session_id = session_id.as_str(),
-                    idle_ms,
-                    "Standby: all conditions met, stopping"
-                );
-                if let Err(e) = standby_session(&state, session_id) {
-                    tracing::warn!(session_id, error = %e, "Standby failed");
-                }
-            }
-        }
-    });
-}
-
-/// SIGSTOP the entire process group of a session.
-/// Returns Ok(true) if stopped, Ok(false) if already in standby or session gone.
-#[cfg(unix)]
-pub(crate) fn standby_session(state: &AppState, session_id: &str) -> Result<bool, String> {
-    if state.standby_sessions.contains_key(session_id) {
-        return Ok(false);
-    }
-    // Serialize the final eligibility check with background-work updates. This
-    // closes the gap between the periodic check above and the actual SIGSTOP.
-    let silence = state
-        .silence_states
-        .entry(session_id.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(SilenceState::new())))
-        .clone();
-    let _lifecycle_guard = silence.lock();
-    if background_activity_blocks_standby(state, session_id) {
-        return Ok(false);
-    }
-    let pgid = {
-        let entry = state
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-        let session = entry.value().lock();
-        session
-            .master
-            .process_group_leader()
-            .ok_or_else(|| "No process group leader".to_string())?
-    };
-    if pgid <= 1 || pgid == unsafe { libc::getpgid(0) } {
-        return Err(format!("Unsafe pgid {pgid} — refusing SIGSTOP"));
-    }
-    let ret = unsafe { libc::kill(-pgid, libc::SIGSTOP) };
-    if ret != 0 {
-        return Err(format!(
-            "SIGSTOP failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    state.standby_sessions.insert(session_id.to_string(), now);
-    tracing::info!(session_id, pgid, "Session entered standby (SIGSTOP)");
-    emit_standby_event(state, session_id, true);
-    Ok(true)
-}
-
-/// SIGCONT a session in standby. Returns Ok(true) if woken, Ok(false) if not in standby.
-#[cfg(unix)]
-pub(crate) fn wake_session(state: &AppState, session_id: &str) -> Result<bool, String> {
-    if state.standby_sessions.remove(session_id).is_none() {
-        return Ok(false);
-    }
-    let pgid = {
-        let entry = state
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-        let session = entry.value().lock();
-        session
-            .master
-            .process_group_leader()
-            .ok_or_else(|| "No process group leader".to_string())?
-    };
-    let ret = unsafe { libc::kill(-pgid, libc::SIGCONT) };
-    if ret != 0 {
-        return Err(format!(
-            "SIGCONT failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    tracing::info!(session_id, pgid, "Session woken from standby (SIGCONT)");
-    emit_standby_event(state, session_id, false);
-    Ok(true)
-}
-
-/// Wake every session currently in standby. Used when the user disables standby
-/// (timeout=0) so already-parked sessions resume instead of staying SIGSTOP'd.
-/// Returns the number of sessions for which a wake was attempted.
-///
-/// Keys are collected into a Vec first: `wake_session` calls
-/// `standby_sessions.remove`, and mutating a DashMap while holding an `iter()`
-/// shard guard on the same map deadlocks. A session killed between the snapshot
-/// and the wake is handled by `wake_session` (removes its entry, then returns
-/// Err on the missing session — no panic).
-#[cfg(unix)]
-pub(crate) fn wake_all_standby(state: &AppState) -> usize {
-    let parked: Vec<String> = state
-        .standby_sessions
-        .iter()
-        .map(|e| e.key().clone())
-        .collect();
-    for session_id in &parked {
-        if let Err(e) = wake_session(state, session_id) {
-            tracing::warn!(session_id, error = %e, "Standby wake-all (timeout=0) failed");
-        }
-    }
-    parked.len()
-}
-
-#[cfg(unix)]
-fn emit_standby_event(state: &AppState, session_id: &str, standby: bool) {
-    #[cfg(feature = "desktop")]
-    if let Some(ref app) = *state.app_handle.read() {
-        let _ = app.emit(
-            "session-standby",
-            serde_json::json!({
-                "session_id": session_id,
-                "standby": standby,
-            }),
-        );
-    }
-}
-
-#[cfg(test)]
-mod grid_subscriber_tests {
-    use super::*;
-
-    /// F28. The frame ticker used to take the vt lock and run a full
-    /// `serialize_dirty_rows` on every dirty tick, and only then discover in
-    /// `send_grid_frame` that there was no channel and no watch receiver to hand
-    /// the bytes to. A session whose tab is closed but whose PTY still runs — an
-    /// agent working in an unmounted pane — paid a whole encode per tick for
-    /// nothing. This is the check that now runs first, so it has to agree
-    /// exactly with what `send_grid_frame` treats as a consumer.
-
-    #[test]
-    fn nobody_is_subscribed_to_a_session_with_neither_channel_nor_watch() {
-        let state = crate::state::tests_support::make_test_app_state();
-        assert!(!grid_has_subscriber(&state, "s1"));
-    }
-
-    #[test]
-    fn a_watch_whose_receivers_have_all_gone_is_not_a_subscriber() {
-        let state = crate::state::tests_support::make_test_app_state();
-        // The sender outlives its clients: a browser tab that closed leaves the
-        // entry behind. Counting the entry rather than its receivers would keep
-        // every such session serializing forever.
-        state
-            .grid_watch
-            .insert("s1".to_string(), crate::grid_gate::new_grid_watch());
-        assert!(!grid_has_subscriber(&state, "s1"));
-    }
-
-    #[test]
-    fn a_live_watch_receiver_is_a_subscriber() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let tx = crate::grid_gate::new_grid_watch();
-        let rx = tx.subscribe();
-        state.grid_watch.insert("s1".to_string(), tx);
-
-        assert!(grid_has_subscriber(&state, "s1"));
-
-        drop(rx);
-        assert!(
-            !grid_has_subscriber(&state, "s1"),
-            "the last receiver going away must close the session again"
-        );
-    }
-
-    #[test]
-    fn one_session_having_a_subscriber_says_nothing_about_another() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let tx = crate::grid_gate::new_grid_watch();
-        let _rx = tx.subscribe();
-        state.grid_watch.insert("watched".to_string(), tx);
-
-        assert!(grid_has_subscriber(&state, "watched"));
-        assert!(!grid_has_subscriber(&state, "unwatched"));
-    }
-}
-
-#[cfg(test)]
-mod vt_read_tests {
-    use super::*;
-
-    // Grid reads take the VT mutex, and the PTY reader holds that same mutex
-    // through a whole `serialize_dirty_rows`. Waiting for it inline in the IPC
-    // handler — the macOS main thread — freezes the WebView for the length of
-    // someone else's serialize. `vt_read` is the one door they all go through.
-
-    #[tokio::test]
-    async fn a_read_against_a_live_session_returns_the_buffers_answer() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        state.vt_log_buffers.insert(
-            "s1".to_string(),
-            parking_lot::Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-        );
-
-        let lines = vt_read(&state, "s1".to_string(), |vt| vt.grid_screen_lines())
-            .await
-            .unwrap();
-
-        assert_eq!(lines, 24);
-    }
-
-    // A tab can be closed while a hover or a selection read is in flight. That
-    // is not an error to surface — the caller gets the empty answer it would
-    // have got from an empty grid.
-    #[tokio::test]
-    async fn a_read_against_a_session_that_is_gone_is_the_default() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-
-        let text: String = vt_read(&state, "nope".to_string(), |vt| vt.grid_get_cursor_line())
-            .await
-            .unwrap();
-
-        assert!(text.is_empty());
-    }
-
-    // The lock is taken inside the closure, on the pool thread. If it were taken
-    // before the hop, the caller would wait for it on the thread it is trying to
-    // keep free — so two reads must be able to overlap without deadlocking.
-    #[tokio::test]
-    async fn two_reads_on_the_same_session_do_not_deadlock() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        state.vt_log_buffers.insert(
-            "s1".to_string(),
-            parking_lot::Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-        );
-
-        let (a, b) = tokio::join!(
-            vt_read(&state, "s1".to_string(), |vt| vt.grid_total_lines()),
-            vt_read(&state, "s1".to_string(), |vt| vt.grid_total_lines()),
-        );
-
-        assert_eq!(a.unwrap(), b.unwrap());
-    }
-
-    // The point of the whole change: the closure — and therefore the wait for
-    // the vt mutex — must not run on the thread that called the command. This
-    // is the assertion that fails if someone "simplifies" the helper back into
-    // a direct lock.
-    #[tokio::test]
-    async fn the_read_does_not_run_on_the_calling_thread() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        state.vt_log_buffers.insert(
-            "s1".to_string(),
-            parking_lot::Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-        );
-        let caller = std::thread::current().id();
-
-        let worker = vt_try_read(&state, "s1".to_string(), |_| std::thread::current().id())
-            .await
-            .unwrap();
-
-        assert_ne!(worker, Some(caller));
-        assert!(worker.is_some());
-    }
-
-    // `vt_try_read` keeps the distinction the HTTP routes answer 404 with;
-    // `vt_read` is the same call with the miss folded into the default.
-    #[tokio::test]
-    async fn a_missing_session_is_none_rather_than_an_error() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-
-        let seen = vt_try_read(&state, "nope".to_string(), |vt| vt.grid_screen_lines())
-            .await
-            .unwrap();
-
-        assert_eq!(seen, None);
-    }
-}
-
-#[cfg(all(test, unix))]
-mod standby_tests {
-    use super::*;
-
-    /// timeout=0 must wake ALL parked sessions. Entries with no live session
-    /// (the "killed between listing and wake" case) must not panic — each is
-    /// removed from the map before wake_session errors on the missing session.
-    #[test]
-    fn wake_all_standby_clears_every_parked_session() {
-        let state = crate::state::tests_support::make_test_app_state();
-        state.standby_sessions.insert("gone-1".to_string(), 111);
-        state.standby_sessions.insert("gone-2".to_string(), 222);
-        state.standby_sessions.insert("gone-3".to_string(), 333);
-
-        let attempted = wake_all_standby(&state);
-
-        assert_eq!(attempted, 3, "wake attempted for every parked session");
-        assert!(
-            state.standby_sessions.is_empty(),
-            "standby map must be empty after wake-all even when the sessions are gone"
-        );
-    }
-
-    /// Empty standby map is a no-op — no panic, nothing to wake.
-    #[test]
-    fn wake_all_standby_empty_is_noop() {
-        let state = crate::state::tests_support::make_test_app_state();
-        assert_eq!(wake_all_standby(&state), 0);
-        assert!(state.standby_sessions.is_empty());
-    }
-
-    /// After a timeout=0 wake-all, standby can re-arm normally when the user
-    /// sets a positive timeout again — wake_all_standby sets no persistent
-    /// "disabled" flag, it only clears the current standby set.
-    #[test]
-    fn wake_all_standby_leaves_map_ready_to_rearm() {
-        let state = crate::state::tests_support::make_test_app_state();
-        state.standby_sessions.insert("gone-1".to_string(), 111);
-        wake_all_standby(&state);
-        assert!(state.standby_sessions.is_empty());
-
-        // Re-arming (as the checker would on the next tick with timeout>0) works.
-        state.standby_sessions.insert("re-armed".to_string(), 444);
-        assert_eq!(state.standby_sessions.len(), 1);
-    }
-}
-
-/// Query current kitty keyboard protocol flags for a session.
-/// Returns 0 if the session has no kitty state (protocol not activated).
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_kitty_flags(state: State<'_, Arc<AppState>>, session_id: String) -> u32 {
-    state
-        .kitty_states
-        .get(&session_id)
-        .map(|entry| entry.lock().current_flags())
-        .unwrap_or(0)
-}
-
-/// SIGKILL the foreground process group of a PTY session.
-///
-/// An agent (e.g. claude) runs as a *grandchild* inside the PTY's shell and, under
-/// job control, sits in its own foreground process group. SIGKILL on the shell
-/// alone leaves that group orphaned — the cloned reader fd keeps the pty master
-/// open, so the kernel never delivers SIGHUP to the foreground group, and the
-/// agent is reparented to init and keeps running. killpg nukes the agent plus
-/// every descendant in one shot. The shell (the session leader, in its own
-/// process group) is reaped separately by the caller's `_child.kill()`.
-#[cfg(unix)]
-fn kill_foreground_process_group(session: &PtySession, session_id: &str) {
-    let Some(pgid) = session.master.process_group_leader() else {
-        return;
-    };
-    // Never signal pid <= 1 or our own group — that would take down TUIC itself.
-    if pgid <= 1 || pgid == unsafe { libc::getpgid(0) } {
-        tracing::warn!(session_id, pgid, "Refusing killpg on unsafe pgid");
-        return;
-    }
-    if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
-        let err = std::io::Error::last_os_error();
-        // ESRCH just means the group already exited — not worth a warning.
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!(session_id, pgid, "killpg(SIGKILL) failed: {err}");
-        }
-    }
-}
-
-/// Close a PTY session core: sends Ctrl-C, waits briefly for graceful exit,
-/// captures the exit code for the tombstone, and leaves `output_buffers` +
-/// `vt_log_buffers` + `last_output_ms` + `exit_codes` alive so post-mortem
-/// MCP reads can still return final output and exit status.
-///
-/// Shared between the Tauri `close_pty` command and the MCP `close` action —
-/// both paths must tombstone identically, or post-mortem reads break.
-/// Returns the worktree path when `cleanup_worktree` is true and the session
-/// had one, so the caller can run `remove_worktree_internal` outside this fn.
-pub(crate) fn close_pty_core(
-    state: &AppState,
-    session_id: &str,
-    cleanup_worktree: bool,
-) -> Option<crate::state::WorktreeInfo> {
-    let (_, session_mutex) = state.sessions.remove(session_id)?;
-    state
-        .metrics
-        .active_sessions
-        .fetch_sub(1, Ordering::Relaxed);
-    let mut session = session_mutex.into_inner();
-
-    // Send Ctrl-C (0x03) to give the process a chance to clean up
-    let mut writer = session.writer.lock();
-    let _ = writer.write_all(&[0x03]);
-    let _ = writer.flush();
-    drop(writer);
-
-    // Wait up to 100ms for process to exit gracefully
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-    loop {
-        match session._child.try_wait() {
-            Ok(Some(_)) => break, // Process exited cleanly
-            Ok(None) if std::time::Instant::now() >= deadline => break,
-            _ => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
-    }
-
-    // If the child is still alive after the grace window, force-kill it.
-    // Without this, agents that ignore Ctrl-C (e.g. claude) become orphans —
-    // the cloned reader fd keeps the pty master alive, the slave never sees
-    // EOF, and the reader thread spins forever.
-    if matches!(session._child.try_wait(), Ok(None)) {
-        // Nuke the agent's foreground process group first; SIGKILL on the shell
-        // alone leaves the agent (a grandchild) orphaned. See
-        // kill_foreground_process_group.
-        #[cfg(unix)]
-        kill_foreground_process_group(&session, session_id);
-
-        if let Err(e) = session._child.kill() {
-            tracing::warn!(session_id = %session_id, "close_pty_core SIGKILL fallback failed: {e}");
-        }
-        // Brief wait so try_wait can observe the termination and record the code.
-        let kill_deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-        loop {
-            match session._child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() >= kill_deadline => break,
-                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
-            }
-        }
-    }
-
-    // Capture exit code for the tombstone before dropping the child handle.
-    if let Ok(Some(status)) = session._child.try_wait() {
-        state
-            .exit_codes
-            .insert(session_id.to_string(), status.exit_code() as i32);
-    }
-
-    // Preserve output_buffers, vt_log_buffers, last_output_ms, exit_codes.
-    // Tombstone sweeper reaps them after TOMBSTONE_TTL_MS.
-    tombstone_transient_cleanup(session_id, state);
-
-    let worktree_to_cleanup = if cleanup_worktree {
-        session.worktree.clone()
-    } else {
-        None
-    };
-
-    // Drop session to release file handles (forcibly kills if still running)
-    drop(session);
-
-    worktree_to_cleanup
-}
-
-/// Force-kill a PTY session and tombstone it. Used by the MCP `kill` action.
-/// Unlike `close_pty_core`, skips the Ctrl-C grace period — sends SIGKILL
-/// immediately. The child exits near-instantly so `try_wait` captures the
-/// exit code before the tombstone is stamped.
-pub(crate) fn kill_pty_core(state: &AppState, session_id: &str) -> bool {
-    let Some((_, session_mutex)) = state.sessions.remove(session_id) else {
-        return false;
-    };
-    state
-        .metrics
-        .active_sessions
-        .fetch_sub(1, Ordering::Relaxed);
-    let mut session = session_mutex.into_inner();
-
-    // Nuke the agent's foreground process group first; SIGKILL on the shell
-    // alone leaves the agent (a grandchild) orphaned. See
-    // kill_foreground_process_group.
-    #[cfg(unix)]
-    kill_foreground_process_group(&session, session_id);
-
-    if let Err(e) = session._child.kill() {
-        tracing::warn!(session_id = %session_id, "SIGKILL failed: {e}");
-    }
-
-    // Give the kernel a brief window to reap the child so try_wait sees it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-    loop {
-        match session._child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() >= deadline => break,
-            _ => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
-    }
-
-    if let Ok(Some(status)) = session._child.try_wait() {
-        state
-            .exit_codes
-            .insert(session_id.to_string(), status.exit_code() as i32);
-    }
-
-    tombstone_transient_cleanup(session_id, state);
-    drop(session);
-    true
-}
-
-/// SIGKILL every live session's process group, for app shutdown.
-///
-/// Quitting used to leave every agent running. An agent sits in its own
-/// foreground process group inside the PTY, so nothing signals it when the app
-/// goes away: it is reparented to launchd and keeps its RAM, its API session
-/// and the `tuic-bridge` it spawned, for as long as the machine stays up. They
-/// accumulate across quits — a leftover bridge also makes `install.sh` report
-/// "FastAF is running" long after it is gone.
-///
-/// Deliberately skips `close_pty_core`'s Ctrl-C and its two 100 ms waits: at
-/// exit nothing reads the tombstone, and those waits are per session, on the
-/// main thread, while macOS is waiting to terminate us. The session cannot
-/// outlive the app usefully anyway — its PTY master dies with the process.
-pub(crate) fn kill_all_sessions_on_exit(state: &AppState) {
-    let ids: Vec<String> = state.sessions.iter().map(|e| e.key().clone()).collect();
-    let mut killed = 0usize;
-    for id in ids {
-        let Some((_, session_mutex)) = state.sessions.remove(&id) else {
-            continue;
-        };
-        let mut session = session_mutex.into_inner();
-        // The shell is the session leader in its own group; the agent is a
-        // grandchild in the foreground group. Both have to be signalled.
-        #[cfg(unix)]
-        kill_foreground_process_group(&session, &id);
-        let _ = session._child.kill();
-        killed += 1;
-    }
-    if killed > 0 {
-        tracing::info!(source = "pty", killed, "Killed live sessions on exit");
-    }
-}
-
-/// Close a PTY session with graceful shutdown and optional worktree cleanup.
-/// Sends Ctrl-C (0x03) and waits briefly for the process to exit cleanly
-/// before forcibly dropping handles.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn close_pty(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    cleanup_worktree: bool,
-) -> Result<(), String> {
-    if let Some(worktree) = close_pty_core(&state, &session_id, cleanup_worktree)
-        && let Err(e) = remove_worktree_internal(&worktree, false)
-    {
-        tracing::warn!("Failed to cleanup worktree: {e}");
-    }
-    Ok(())
-}
-
-/// Script interpreters that execute an agent CLI in their own process image.
-/// For these the executable path names the interpreter, not the tool the user
-/// launched, so the real identity has to come from argv[0]. Windows exposes no
-/// argv in its process snapshot, so only the macOS and Linux arms use this.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn is_script_interpreter(name: &str) -> bool {
-    matches!(
-        name,
-        "node" | "bun" | "deno" | "python" | "python3" | "ruby" | "perl"
-    )
-}
-
-/// Look up the process name for a given PID using OS-native syscalls.
-/// On macOS uses `proc_pidpath`, on Linux reads `/proc/{pid}/comm`.
-/// Returns None if the lookup fails.
-#[cfg(target_os = "macos")]
-pub(crate) fn process_name_from_pid(pid: u32) -> Option<String> {
-    let mut buf = [0u8; libc::MAXPATHLEN as usize];
-    // SAFETY: proc_pidpath writes into the provided buffer up to buffersize bytes.
-    // The buffer is stack-allocated with known size. pid is a valid u32 cast to i32.
-    let ret = unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr().cast(), buf.len() as u32) };
-    if ret <= 0 {
-        return None;
-    }
-    let path = std::str::from_utf8(&buf[..ret as usize]).ok()?;
-    if let Some(agent_type) = classify_agent_name_or_path(path) {
-        return Some(agent_type.to_string());
-    }
-    let basename = normalized_process_name(path);
-    // An npm-installed agent CLI (pi ships as a node script) reports the node
-    // binary here, so classify_agent would never see the tool's own name and the
-    // session stayed an unclassified shell — no ready-screen adapter, stuck BUSY.
-    // Only interpreters pay the extra syscall; every native binary returns above.
-    if is_script_interpreter(basename)
-        && let Some(argv0) = crate::process_env::read_process_argv0(pid)
-    {
-        if let Some(agent_type) = classify_agent_name_or_path(&argv0) {
-            return Some(agent_type.to_string());
-        }
-        return Some(normalized_process_name(&argv0).to_string());
-    }
-    Some(basename.to_string())
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn process_name_from_pid(pid: u32) -> Option<String> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    // See the macOS arm: an npm-installed agent CLI reports its interpreter here,
-    // so fall back to argv[0] to recover the tool's own name.
-    if is_script_interpreter(&comm)
-        && let Some(argv0) = crate::process_env::read_process_argv0(pid)
-    {
-        return Some(normalized_process_name(&argv0).to_string());
-    }
-    Some(comm)
-}
-
-#[cfg(windows)]
-pub(crate) fn process_name_from_pid(pid: u32) -> Option<String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
-    };
-
-    // SAFETY: CreateToolhelp32Snapshot/Process32First/Process32Next are Windows API
-    // functions that operate on a process snapshot handle. We zero-initialize the
-    // PROCESSENTRY32 struct and set dwSize before use (required by the API). The
-    // snapshot handle is closed via CloseHandle before returning. All pointer
-    // arguments point to stack-local owned memory with valid lifetimes.
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            return None;
-        }
-
-        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-
-        let mut found = None;
-        if Process32First(snapshot, &mut entry) != 0 {
-            loop {
-                if entry.th32ProcessID == pid {
-                    // szExeFile is a [i8; 260] (MAX_PATH) null-terminated C string
-                    let name_bytes: Vec<u8> = entry
-                        .szExeFile
-                        .iter()
-                        .take_while(|&&b| b != 0)
-                        .map(|&b| b as u8)
-                        .collect();
-                    // Use from_utf8_lossy to handle non-ASCII process names
-                    // (e.g. apps with accented characters) instead of silently dropping them
-                    let name = String::from_utf8_lossy(&name_bytes);
-                    // Strip .exe suffix for consistent matching with classify_agent
-                    let name = name.strip_suffix(".exe").unwrap_or(&name).to_string();
-                    found = Some(name);
-                    break;
-                }
-                if Process32Next(snapshot, &mut entry) == 0 {
-                    break;
-                }
-            }
-        }
-
-        CloseHandle(snapshot);
-        found
-    }
-}
-
-/// Walk the process tree from `root_pid` and return the deepest descendant PID.
-/// On Windows, this finds the "foreground" process in a PTY session by following
-/// Normalize a path by resolving `.` and `..` components logically
-/// (without requiring the path to exist on disk).
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    let mut result = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                result.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => result.push(other),
-        }
-    }
-    result
-}
-
-#[cfg(test)]
-mod normalize_path_tests {
-    use super::normalize_path;
-    use std::path::Path;
-
-    #[test]
-    fn resolves_parent_segments() {
-        let p = normalize_path(Path::new("/a/b/../../c/d"));
-        assert_eq!(p, Path::new("/c/d"));
-    }
-
-    #[test]
-    fn resolves_worktree_relative_plan() {
-        let p = normalize_path(Path::new(
-            "/home/user/repo__wt/feat/../../repo/plans/foo.md",
-        ));
-        assert_eq!(p, Path::new("/home/user/repo/plans/foo.md"));
-    }
-
-    #[test]
-    fn strips_dot_segments() {
-        let p = normalize_path(Path::new("/a/./b/./c"));
-        assert_eq!(p, Path::new("/a/b/c"));
-    }
-
-    #[test]
-    fn preserves_clean_path() {
-        let p = normalize_path(Path::new("/home/user/plans/bar.md"));
-        assert_eq!(p, Path::new("/home/user/plans/bar.md"));
-    }
-}
-
-/// the chain: shell → agent CLI (e.g. claude.exe).
-#[cfg(windows)]
-pub(crate) fn deepest_descendant_pid(root_pid: u32) -> Option<u32> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
-    };
-
-    // SAFETY: Same API contract as process_name_from_pid above. We take a full
-    // process snapshot, iterate it to collect (pid, parent_pid) pairs into owned
-    // Vecs, then close the handle. The PROCESSENTRY32 struct is zero-initialized
-    // with dwSize set before the first call, satisfying the API precondition.
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            return None;
-        }
-
-        // Collect all (pid, parent_pid) pairs and build parent->children map
-        let mut children_map: std::collections::HashMap<u32, Vec<u32>> =
-            std::collections::HashMap::new();
-        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-
-        if Process32First(snapshot, &mut entry) != 0 {
-            loop {
-                children_map
-                    .entry(entry.th32ParentProcessID)
-                    .or_default()
-                    .push(entry.th32ProcessID);
-                if Process32Next(snapshot, &mut entry) == 0 {
-                    break;
-                }
-            }
-        }
-        CloseHandle(snapshot);
-
-        // Walk from root_pid to the deepest single child — O(depth) via HashMap
-        let mut current = root_pid;
-        while let Some([only_child]) = children_map.get(&current).map(Vec::as_slice) {
-            current = *only_child;
-        }
-
-        Some(current)
-    }
-}
-
-/// Map a process name to a known agent type, or None for non-agent processes.
-///
-/// A versioned basename counts as the tool. grok 1.0.5 installs
-/// `~/.grok/bin/grok` as a symlink to `grok-1.0.5`, and `proc_pidpath` resolves
-/// the link, so the foreground process reads `grok-1.0.5`. Against an
-/// exact-match table that is None: the session gets no `agent_type`, so
-/// `has_ready_screen_adapter` is false and the OSC 133 busy bit set once by the
-/// long-lived `grok` command is never cleared — the tab stays working for the
-/// whole process. An agent that renames its binary per release must not be able
-/// to un-detect itself.
-pub(crate) fn classify_agent(process_name: &str) -> Option<&'static str> {
-    exact_agent_name(process_name).or_else(|| exact_agent_name(strip_version_suffix(process_name)))
-}
-
-/// Drop a trailing `-<version>` from an executable basename (`grok-1.0.5` →
-/// `grok`). The suffix must start with a digit, so a hyphenated tool name
-/// (`cursor-agent`) keeps its own identity.
-fn strip_version_suffix(name: &str) -> &str {
-    match name.rsplit_once('-') {
-        Some((base, suffix)) if suffix.starts_with(|c: char| c.is_ascii_digit()) => base,
-        _ => name,
-    }
-}
-
-fn exact_agent_name(process_name: &str) -> Option<&'static str> {
-    match process_name {
-        "claude" => Some("claude"),
-        "gemini" => Some("gemini"),
-        "opencode" => Some("opencode"),
-        "aider" => Some("aider"),
-        "codex" => Some("codex"),
-        "amp" => Some("amp"),
-        "cursor-agent" => Some("cursor"),
-        "goose" => Some("goose"),
-        "grok" => Some("grok"),
-        "droid" => Some("droid"),
-        "pi" => Some("pi"),
-        _ => None,
-    }
-}
-
-/// Get the foreground process of a PTY session and classify it as a known agent.
-/// Returns the agent name (e.g. "claude") or None if the foreground process is
-/// not a recognized agent or the session doesn't exist.
-///
-/// When the foreground is a non-shell process that `classify_agent` doesn't
-/// recognise (custom aliases, symlinks, wrapper scripts like "C2"), falls back
-/// to the pre-set `session_states.agent_type` so run-config launches are
-/// detected correctly without hardcoding every possible alias.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_session_foreground_process(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Option<String> {
-    const SHELLS: &[&str] = &[
-        "zsh",
-        "bash",
-        "fish",
-        "sh",
-        "dash",
-        "ksh",
-        "csh",
-        "tcsh",
-        "nushell",
-        "nu",
-        "powershell",
-        "pwsh",
-        "cmd",
-    ];
-
-    let (detected, fg_is_shell) = {
-        let entry = state.sessions.get(&session_id)?;
-        let session = entry.value().lock();
-        #[cfg(not(windows))]
-        {
-            let pgid = session.master.process_group_leader()?;
-            let name = process_name_from_pid(pgid as u32)?;
-            let is_shell = SHELLS.contains(&name.as_str());
-            (classify_agent(&name).map(|s| s.to_string()), is_shell)
-        }
-        #[cfg(windows)]
-        {
-            let child_pid = session._child.process_id()?;
-            let leaf = deepest_descendant_pid(child_pid)?;
-            let name = process_name_from_pid(leaf)?;
-            let is_shell = SHELLS.contains(&name.as_str());
-            (classify_agent(&name).map(|s| s.to_string()), is_shell)
-        }
-    };
-
-    // Fallback: unrecognised non-shell foreground + pre-set agent type → use preset.
-    // Covers custom commands (aliases, symlinks, wrappers) from run configs.
-    let effective = detected.clone().or_else(|| {
-        if fg_is_shell {
-            return None;
-        }
-        state
-            .session_states
-            .get(&session_id)
-            .and_then(|s| s.agent_type.clone())
-    });
-
-    // Mirror the detected agent type into session_states so the PTY reader's
-    // `agent_active_for_parse` check flips on and plain-prefix structured
-    // tokens (`intent:`, `action:`, `suggest:`) start being parsed. Without
-    // this sync, sessions started by running `claude` inside a plain shell
-    // (as opposed to via the /agent spawn route) never enable plain-prefix
-    // parsing, so intents never rename the tab.
-    //
-    // Sticky: only set on Some, never clear on None. Foreground-pgid sampling
-    // is inherently flaky during subprocess transitions — when claude spawns a
-    // short-lived grandchild (git, sed, rg) the pgid leader briefly points to
-    // that unrecognized binary and classify_agent returns None. Writing that
-    // None back would flip agent_active off and drop the very next
-    // `suggest:`/`intent:` token even though claude is still the live agent.
-    // Frontend useAgentPolling.ts applies the same stickiness (streak +
-    // source=idle) on its store mirror; backend must match or the parser
-    // gates off while the UI still shows the agent active. Session teardown
-    // clears session_states entirely, so no explicit reset is needed here.
-    if let Some(mut entry) = state.session_states.get_mut(&session_id)
-        && effective.is_some()
-        && entry.agent_type != effective
-    {
-        entry.agent_type = effective.clone();
-        entry.hook_instrumented = hook_instrumented_for(
-            &crate::config::load_agents_config(),
-            entry.agent_type.as_deref(),
-        );
-    }
-
-    effective
-}
-
-/// Get the PID of the deepest foreground process in a PTY session.
-///
-/// On Unix: uses the process group leader to find the foreground process.
-/// On Windows: walks the process tree from the child PID to the deepest descendant.
-///
-/// Returns `None` if the session doesn't exist or the process has exited.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_session_leaf_pid(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Option<u32> {
-    let entry = state.sessions.get(&session_id)?;
-    let session = entry.value().lock();
-    #[cfg(not(windows))]
-    {
-        let pgid = session.master.process_group_leader()?;
-        Some(pgid as u32)
-    }
-    #[cfg(windows)]
-    {
-        let child_pid = session._child.process_id()?;
-        deepest_descendant_pid(child_pid)
-    }
-}
-
-/// Check if a PTY session has a non-shell foreground process running.
-/// Returns the process name (e.g. "htop", "node", "claude") or None if
-/// the foreground is the shell itself (zsh, bash, fish, etc.).
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn has_foreground_process(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Option<String> {
-    const SHELLS: &[&str] = &[
-        "zsh",
-        "bash",
-        "fish",
-        "sh",
-        "dash",
-        "ksh",
-        "csh",
-        "tcsh",
-        "nushell",
-        "nu",
-        "powershell",
-        "pwsh",
-        "cmd",
-    ];
-    let entry = state.sessions.get(&session_id)?;
-    // Extract pid under lock, then drop before the blocking syscall
-    #[cfg(not(windows))]
-    let pid = {
-        let session = entry.value().lock();
-        let pgid = session.master.process_group_leader()?;
-        u32::try_from(pgid).ok()?
-    };
-    #[cfg(windows)]
-    let pid = {
-        let session = entry.value().lock();
-        let child_pid = session._child.process_id()?;
-        deepest_descendant_pid(child_pid)?
-    };
-    let name = process_name_from_pid(pid)?;
-    if SHELLS.contains(&name.as_str()) {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-/// Debug: diagnose agent detection for a PTY session.
-/// Returns each step of the detection pipeline so failures can be pinpointed.
-/// Diagnostic-only command — no frontend caller; kept as a debug escape hatch
-/// for investigating agent classification mismatches in production.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn debug_agent_detection(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> serde_json::Value {
-    let entry = match state.sessions.get(&session_id) {
-        Some(e) => e,
-        None => {
-            return serde_json::json!({ "error": "session not found", "session_id": session_id });
-        }
-    };
-    let session = entry.value().lock();
-
-    #[cfg(not(windows))]
-    {
-        let raw_fd = session.master.as_raw_fd();
-        let pgid = session.master.process_group_leader();
-        let name = pgid.and_then(|p| process_name_from_pid(p as u32));
-        let classified = name.as_deref().and_then(classify_agent);
-        serde_json::json!({
-            "session_id": session_id,
-            "master_raw_fd": raw_fd,
-            "process_group_leader": pgid,
-            "process_name": name,
-            "classified_agent": classified,
-            "child_pid": session._child.process_id(),
-        })
-    }
-    #[cfg(windows)]
-    {
-        let child_pid = session._child.process_id();
-        let leaf = child_pid.and_then(deepest_descendant_pid);
-        let name = leaf.and_then(process_name_from_pid);
-        let classified = name.as_deref().and_then(classify_agent);
-        serde_json::json!({
-            "session_id": session_id,
-            "child_pid": child_pid,
-            "leaf_pid": leaf,
-            "process_name": name,
-            "classified_agent": classified,
-        })
-    }
-}
-
-/// Get orchestrator stats
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_orchestrator_stats(state: State<'_, Arc<AppState>>) -> OrchestratorStats {
-    state.orchestrator_stats()
-}
-
-/// Get PTY session metrics for observability
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_session_metrics(state: State<'_, Arc<AppState>>) -> serde_json::Value {
-    state.session_metrics_json()
-}
-
-/// Check if we can spawn a new session
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn can_spawn_session(state: State<'_, Arc<AppState>>) -> bool {
-    state.sessions.len() < MAX_CONCURRENT_SESSIONS
-}
-
-/// Info about an active PTY session for frontend reconnection
-#[derive(Clone, Serialize)]
-pub(crate) struct ActiveSessionInfo {
-    session_id: String,
-    cwd: Option<String>,
-    worktree_path: Option<String>,
-    worktree_branch: Option<String>,
-    display_name: Option<String>,
-    display_name_is_custom: bool,
-    is_remote: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pty_description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<crate::state::SessionState>,
-}
-
-/// Set the display name of a PTY session (syncs tab title to backend for PWA visibility).
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn set_session_name(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    name: Option<String>,
-    is_custom: Option<bool>,
-) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    let mut session = entry.lock();
-    session.display_name = name;
-    session.display_name_is_custom = is_custom.unwrap_or(true);
-    Ok(())
-}
-
-/// Queue a user-composed command for an agent session (Compose panel enqueue).
-/// Typed at once when the agent is idle, otherwise delivered on its next
-/// BUSY→IDLE transition so a running turn is never steered.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn enqueue_agent_command(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    text: String,
-) -> Result<EnqueuedCommand, String> {
-    enqueue_user_command(&state, &session_id, &text)
-}
-
-/// Discard every command still queued for a session. Returns how many were dropped.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn clear_queued_agent_commands(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> usize {
-    clear_queued_commands(&state, &session_id)
-}
-
-/// The queued commands themselves, so the Compose panel can show what waits.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn list_queued_agent_commands(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Vec<QueuedCommand> {
-    list_queued_commands(&state, &session_id)
-}
-
-/// Drop one queued command by id. Returns false when it is already gone.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn remove_queued_agent_command(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    command_id: u64,
-) -> bool {
-    remove_queued_command(&state, &session_id, command_id)
-}
-
-/// List all active PTY sessions for reconnection after frontend reload
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn list_active_sessions(state: State<'_, Arc<AppState>>) -> Vec<ActiveSessionInfo> {
-    state
-        .sessions
-        .iter()
-        .map(|entry| {
-            let session_id = entry.key().clone();
-            let session = entry.value().lock();
-            ActiveSessionInfo {
-                session_id,
-                cwd: session.cwd.clone(),
-                worktree_path: session
-                    .worktree
-                    .as_ref()
-                    .map(|w| w.path.to_string_lossy().to_string()),
-                worktree_branch: session.worktree.as_ref().and_then(|w| w.branch.clone()),
-                display_name: session.display_name.clone(),
-                display_name_is_custom: session.display_name_is_custom,
-                is_remote: session.is_remote,
-                pty_description: state
-                    .pty_descriptions
-                    .get(entry.key())
-                    .map(|value| value.value().clone()),
-                state: state.session_state_with_shell(entry.key()),
-            }
-        })
-        .collect()
-}
-
-/// Per-process resource usage for the process manager modal.
-#[derive(Clone, Serialize)]
-pub(crate) struct ProcessStats {
-    pub(crate) session_id: Option<String>,
-    pub(crate) name: String,
-    pub(crate) pid: u32,
-    pub(crate) rss_kb: u64,
-    pub(crate) cpu_pct: f32,
-}
-
-/// Collect CPU/memory stats for TUIC itself and all PTY child process trees.
-pub(crate) fn collect_process_stats(state: &AppState) -> Vec<ProcessStats> {
-    let mut pids: Vec<(Option<String>, String, u32)> = Vec::new();
-
-    // TUIC's own process
-    let own_pid = std::process::id();
-    pids.push((None, "FastAF".to_string(), own_pid));
-
-    // Collect child PIDs from all PTY sessions
-    for entry in state.sessions.iter() {
-        let session_id = entry.key().clone();
-        let session = entry.value().lock();
-        let display = session
-            .display_name
-            .clone()
-            .unwrap_or_else(|| session_id.chars().take(8).collect());
-
-        #[cfg(not(windows))]
-        let child_pid = session.master.process_group_leader().map(|p| p as u32);
-        #[cfg(windows)]
-        let child_pid = session._child.process_id();
-
-        if let Some(pid) = child_pid {
-            pids.push((Some(session_id.clone()), display.clone(), pid));
-            // Walk descendants
-            if let Some(descendants) = collect_descendant_pids(pid) {
-                for dpid in descendants {
-                    let name = process_name_from_pid(dpid).unwrap_or_else(|| format!("pid:{dpid}"));
-                    pids.push((Some(session_id.clone()), name, dpid));
-                }
-            }
-        }
-    }
-
-    if pids.is_empty() {
-        return vec![];
-    }
-
-    let pid_list: Vec<u32> = pids.iter().map(|(_, _, p)| *p).collect();
-    let stats_map = query_process_stats(&pid_list);
-
-    pids.into_iter()
-        .map(|(sid, name, pid)| {
-            let (rss_kb, cpu_pct) = stats_map.get(&pid).copied().unwrap_or((0, 0.0));
-            ProcessStats {
-                session_id: sid,
-                name,
-                pid,
-                rss_kb,
-                cpu_pct,
-            }
-        })
-        .collect()
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_process_stats(state: State<'_, Arc<AppState>>) -> Vec<ProcessStats> {
-    collect_process_stats(&state)
-}
-
-/// Collect all descendant PIDs of a process (excluding the root itself).
-fn collect_descendant_pids(root: u32) -> Option<Vec<u32>> {
-    #[cfg(not(windows))]
-    {
-        let output = std::process::Command::new("ps")
-            .args(["-eo", "pid,ppid"])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut parent_map: std::collections::HashMap<u32, Vec<u32>> =
-            std::collections::HashMap::new();
-        for line in text.lines().skip(1) {
-            let mut parts = line.split_whitespace();
-            let pid: u32 = parts.next()?.parse().ok()?;
-            let ppid: u32 = parts.next()?.parse().ok()?;
-            parent_map.entry(ppid).or_default().push(pid);
-        }
-        let mut result = Vec::new();
-        let mut stack = vec![root];
-        while let Some(p) = stack.pop() {
-            if let Some(children) = parent_map.get(&p) {
-                for &child in children {
-                    result.push(child);
-                    stack.push(child);
-                }
-            }
-        }
-        Some(result)
-    }
-    #[cfg(windows)]
-    {
-        // On Windows, deepest_descendant_pid already walks the tree.
-        // Reuse the snapshot logic to collect all descendants.
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
-        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-        if snap.is_null() {
-            return None;
-        }
-        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        let mut parent_map: std::collections::HashMap<u32, Vec<u32>> =
-            std::collections::HashMap::new();
-        if unsafe { Process32FirstW(snap, &mut entry) } != 0 {
-            loop {
-                parent_map
-                    .entry(entry.th32ParentProcessID)
-                    .or_default()
-                    .push(entry.th32ProcessID);
-                if unsafe { Process32NextW(snap, &mut entry) } == 0 {
-                    break;
-                }
-            }
-        }
-        let _ = unsafe { CloseHandle(snap) };
-        let mut result = Vec::new();
-        let mut stack = vec![root];
-        while let Some(p) = stack.pop() {
-            if let Some(children) = parent_map.get(&p) {
-                for &child in children {
-                    result.push(child);
-                    stack.push(child);
-                }
-            }
-        }
-        Some(result)
-    }
-}
-
-/// Query RSS (KB) and CPU% for a batch of PIDs using `ps` on Unix.
-#[cfg(not(windows))]
-fn query_process_stats(pids: &[u32]) -> std::collections::HashMap<u32, (u64, f32)> {
-    let mut map = std::collections::HashMap::new();
-    if pids.is_empty() {
-        return map;
-    }
-    let pid_args: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-o", "pid,rss,%cpu", "-p"])
-        .arg(pid_args.join(","))
-        .output()
-    else {
-        return map;
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3
-            && let (Ok(pid), Ok(rss), Ok(cpu)) = (
-                parts[0].parse::<u32>(),
-                parts[1].parse::<u64>(),
-                parts[2].parse::<f32>(),
-            )
-        {
-            map.insert(pid, (rss, cpu));
-        }
-    }
-    map
-}
-
-/// Query RSS (KB) and CPU% for a batch of PIDs on Windows.
-#[cfg(windows)]
-fn query_process_stats(pids: &[u32]) -> std::collections::HashMap<u32, (u64, f32)> {
-    let mut map = std::collections::HashMap::new();
-    for &pid in pids {
-        if let Some((rss, cpu)) = query_single_process_windows(pid) {
-            map.insert(pid, (rss, cpu));
-        }
-    }
-    map
-}
-
-#[cfg(windows)]
-fn query_single_process_windows(pid: u32) -> Option<(u64, f32)> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
-    };
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-    let mut mem_info: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
-    mem_info.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    let ok = unsafe {
-        GetProcessMemoryInfo(
-            handle,
-            &mut mem_info,
-            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        )
-    };
-    let _ = unsafe { CloseHandle(handle) };
-    if ok == 0 {
-        return None;
-    }
-    let rss_kb = mem_info.WorkingSetSize / 1024;
-    Some((rss_kb as u64, 0.0))
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct VtLogChunk {
-    pub lines: Vec<crate::state::LogLine>,
-    pub screen: Vec<crate::state::LogLine>,
-    pub total_lines: usize,
-    pub oldest: usize,
-}
-
-/// Returns scrollback log lines and current screen rows for a session.
-///
-/// This is the desktop IPC equivalent of the PWA WebSocket `format=log` path.
-/// `lines` are finalized scrollback lines (each appears once, oldest first).
-/// `screen` is the current visible screen with agent chrome trimmed.
-/// Desktop IPC equivalent of PWA WebSocket format=log — no frontend caller yet.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn read_vt_log(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
-) -> Result<VtLogChunk, String> {
-    let limit = limit.unwrap_or(200);
-    // Everything that needs the lock is gathered in one pass on the pool
-    // thread; the chrome trim below works on the copies it hands back.
-    let gathered = vt_try_read(&state, session_id, move |buf| {
-        let off = offset.unwrap_or_else(|| buf.total_lines().saturating_sub(limit));
-        let (lines, _) = buf.lines_since_owned(off, limit);
-        (
-            lines,
-            buf.screen_rows(),
-            buf.screen_log_lines(),
-            buf.total_lines(),
-            buf.oldest_offset(),
-        )
-    })
-    .await?;
-    let Some((lines, raw_rows, screen_log, total_lines, oldest)) = gathered else {
-        return Ok(VtLogChunk {
-            lines: vec![],
-            screen: vec![],
-            total_lines: 0,
-            oldest: 0,
-        });
-    };
-    // Chrome cutoff runs outside the lock — no contention with PTY reader.
-    let refs: Vec<&str> = raw_rows.iter().map(|s| s.as_str()).collect();
-    let cutoff = crate::chrome::find_chrome_cutoff(&refs).unwrap_or(raw_rows.len());
-    let screen: Vec<crate::state::LogLine> = screen_log.into_iter().take(cutoff).collect();
-
-    Ok(VtLogChunk {
-        lines,
-        screen,
-        total_lines,
-        oldest,
-    })
+        .is_some_and(|ch| ch.visible.load(Ordering::Relaxed))
 }
 
 /// Is anyone waiting for this session's grid frames?
@@ -10492,186 +4516,179 @@ pub(crate) async fn read_vt_log(
 /// a consumer this misses is a client that stops repainting.
 pub(crate) fn grid_has_subscriber(state: &AppState, session_id: &str) -> bool {
     #[cfg(feature = "desktop")]
-    if state.grid_channels.contains_key(session_id) {
+    if desktop_grid_visible(state, session_id) {
         return true;
     }
+    grid_has_watcher(state, session_id)
+}
+
+/// Does this session have a browser/PWA client on the grid WebSocket?
+///
+/// Narrower than [`grid_has_subscriber`] on purpose: the frame ticker uses this
+/// one to decide whether a stalled *desktop* WebView may stop the frames, and a
+/// desktop channel is exactly what must not count towards that answer.
+fn grid_has_watcher(state: &AppState, session_id: &str) -> bool {
     state
-        .grid_watch
+        .grid
+        .watch
         .get(session_id)
         .is_some_and(|tx| tx.receiver_count() > 0)
 }
 
+/// Repair after a frame lost the ordering race.
+///
+/// The frame that was dropped carries rows the delivered one does not: the
+/// damage behind them was consumed when it was serialized, so nothing will ever
+/// send them again. Dropping it silently leaves those rows stale on every client
+/// until something else happens to repaint them. Damage the grid again and wake
+/// the ticker instead — the next frame is a full one and every transport is
+/// whole. Unlike a per-subscriber resync (`serialize_full_frame`), re-damaging is
+/// the *right* answer here: the loss is shared, so the repair has to be.
+fn repaint_after_reorder(state: &AppState, session_id: &str) {
+    tracing::debug!(session_id = %session_id, "grid frame arrived out of order, forcing a full repaint");
+    if let Some(vt) = state.grid.vt_log_buffers.get(session_id) {
+        vt.lock().grid_force_full_damage();
+    }
+    if let Some(dirty) = state.grid.frame_dirty.get(session_id) {
+        dirty.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Send a grid frame through the session's channel and close the delivery gate.
 /// Also publishes to the watch channel for WebSocket subscribers.
-pub(crate) fn send_grid_frame(state: &AppState, session_id: &str, frame: Vec<u8>) {
+///
+/// Frames are serialized under the vt lock and arrive here after it was
+/// released, so two producers can reach this point in the opposite order. The
+/// `order` the frame carries was stamped inside that critical section and is the
+/// only record of which one is newer; a frame that lost the race is dropped here
+/// and repaired with a full repaint rather than painted over a newer screen.
+pub(crate) fn send_grid_frame(
+    state: &AppState,
+    session_id: &str,
+    frame: crate::grid_gate::GridFrame,
+) {
+    send_grid_frame_to_consumers(state, session_id, frame, true);
+}
+
+/// A private repair already contains this delta's desktop snapshot. Publishing
+/// that delta must still advance the browser stream, but cannot create a second
+/// desktop delivery or missed-frame debt for content it has just received.
+fn send_grid_frame_to_consumers(
+    state: &AppState,
+    session_id: &str,
+    frame: crate::grid_gate::GridFrame,
+    send_desktop: bool,
+) {
     if frame.is_empty() {
         return;
     }
+    let crate::grid_gate::GridFrame { order, bytes } = frame;
     // Clone only when both consumers want the frame. A browser-only session has
     // no desktop channel, so the watch can take the original; cloning first and
     // then finding nothing to hand the original to was pure copy.
     #[cfg(feature = "desktop")]
-    let desktop_wants_it = state.grid_channels.contains_key(session_id);
+    let desktop_wants_it = send_desktop && desktop_grid_visible(state, session_id);
     #[cfg(not(feature = "desktop"))]
     let desktop_wants_it = false;
 
-    let frame = match state.grid_watch.get(session_id) {
-        Some(watch_tx) if watch_tx.receiver_count() > 0 => {
-            if desktop_wants_it {
-                crate::grid_gate::publish_grid_frame(&watch_tx, frame.clone());
-                frame
-            } else {
-                crate::grid_gate::publish_grid_frame(&watch_tx, frame);
+    let frame = match state.grid.watch.get(session_id) {
+        Some(watch_tx) => {
+            let watched = watch_tx.receiver_count() > 0;
+            let (for_watch, for_desktop) = match (watched, desktop_wants_it) {
+                (true, true) => (Some(bytes.clone()), Some(bytes)),
+                (true, false) => (Some(bytes), None),
+                (false, _) => (None, Some(bytes)),
+            };
+            // The claim and the publish share one critical section: claiming
+            // first and publishing after would let two producers claim in the
+            // order they serialized and then publish in the other one.
+            if crate::grid_watch::claim_grid_frame(&watch_tx, order, for_watch)
+                == crate::grid_gate::FrameOrder::Stale
+            {
+                repaint_after_reorder(state, session_id);
                 return;
             }
+            match for_desktop {
+                Some(bytes) => bytes,
+                None => return,
+            }
         }
-        _ => frame,
+        None => bytes,
     };
 
     #[cfg(feature = "desktop")]
-    if let Some(ch) = state.grid_channels.get(session_id) {
-        let gate = state.grid_gates.get(session_id);
-        if let Some(gate) = gate.as_deref() {
-            gate.mark_sent();
+    {
+        if !send_desktop {
+            return;
         }
-        // `tauri::ipc::Response` is what keeps this binary. A `Vec<u8>` matches
-        // only the blanket `IpcResponse` impl, i.e. `serde_json::to_string`, so a
-        // 110 KB frame left Rust as a ~280 KB string of decimal numbers, took the
-        // over-threshold path (one extra IPC round trip per frame) and arrived in
-        // JS as a `number[]` to be walked back into bytes. `Response` carries the
-        // bytes as `Raw` and the frontend already accepts an ArrayBuffer.
-        if let Err(error) = ch.send(tauri::ipc::Response::new(frame)) {
-            // A frame that never reached the webview will never be acked, and the
-            // counters are absolute: leaving this one counted would put the gate one
-            // frame behind for the rest of the session, i.e. every later frame would
-            // travel at the ticker's 500 ms give-up rate. Give up on it now instead.
-            tracing::debug!(session_id = %session_id, %error, "grid frame send failed");
-            if let Some(gate) = gate.as_deref() {
-                gate.abandon();
+
+        // A closed gate means the WebView has not painted the frame before this
+        // one. The ticker used to stop entirely here, which held the damage on
+        // the vt but starved every browser subscriber; they keep receiving now,
+        // so the rows in this frame have already left the shared damage without
+        // reaching this channel. Record the debt and let the ticker pay it with a
+        // full frame once the gate reopens — sending the delta now would only
+        // deepen the backlog this gate exists to drain.
+        let stalled = desktop_wants_it && {
+            let gate = state.grid.gates.get(session_id);
+            match gate.as_deref() {
+                Some(gate) if !gate.is_open() => {
+                    gate.note_missed();
+                    true
+                }
+                _ => false,
             }
-        }
-    }
-}
-
-/// Register a Tauri Channel for binary grid frame streaming on a session.
-/// The frontend calls this once per terminal; subsequent PTY output triggers
-/// `serialize_dirty_rows()` on the session's TerminalGrid and sends the result
-/// via the channel. Replaces any previously registered channel for the session.
-///
-/// Returns the subscription epoch. The frontend must carry it back on every
-/// `ack_terminal_frame` and on `unsubscribe_terminal_grid`: a terminal that
-/// remounts subscribes again before the old instance has finished tearing down,
-/// and without the epoch the late ack of the dead instance credits the fresh
-/// gate (opening it for frames nobody received) while its late unsubscribe
-/// deletes the fresh channel (blanking a mounted terminal).
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn subscribe_terminal_grid(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    channel: tauri::ipc::Channel<tauri::ipc::Response>,
-) -> u64 {
-    // A fresh gate, counting from zero — the frontend resets its receipt counter
-    // on the same call.
-    let gate = Arc::new(crate::grid_gate::GridGate::new());
-    let epoch = gate.epoch();
-    state.grid_gates.insert(session_id.clone(), gate);
-    state
-        .pending_scroll
-        .insert(session_id.clone(), Arc::new(AtomicI64::new(-1)));
-    state.grid_channels.insert(session_id, channel);
-    epoch
-}
-
-/// Report how many grid frames the frontend has received in total, which opens
-/// the delivery gate once it has caught up with what was sent.
-///
-/// The ticker (16 ms interval) is the sole normal damage-driven frame sender; this
-/// path only releases the gate. That caps the frame rate at ~60 Hz and prevents
-/// the tight ack→flush→ack loop that saturated the main thread.
-///
-/// `received` is a total, not a delta, so a duplicated or reordered ack is
-/// idempotent — and an ack for a frame the ticker already abandoned is a number
-/// in the past, which is what stops the burst-when-behind of story 601-82ef.
-///
-/// `epoch` is the value `subscribe_terminal_grid` returned; an ack that carries
-/// any other epoch belongs to a previous subscription and is dropped.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn ack_terminal_frame(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    epoch: u64,
-    received: u64,
-) {
-    if let Some(gate) = state.grid_gates.get(&session_id) {
-        gate.ack(epoch, received);
-    }
-}
-
-/// Request a full frame for a session (used after subscribe to get initial state).
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn terminal_request_frame(state: State<'_, Arc<AppState>>, session_id: String) {
-    if let Some(vt) = state.vt_log_buffers.get(&session_id) {
-        let frame = {
-            let mut vt = vt.lock();
-            vt.grid_force_full_damage();
-            vt.serialize_dirty_rows()
         };
-        send_grid_frame(&state, &session_id, frame);
+        if stalled {
+            // Arm the ticker so the debt is paid even if the session falls silent
+            // the instant the WebView recovers: the repair rides a tick, and an
+            // undirty session never takes one.
+            if let Some(dirty) = state.grid.frame_dirty.get(session_id) {
+                dirty.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        send_desktop_grid_frame(state, session_id, frame);
     }
 }
 
-/// Unregister the grid channel for a session (called by the frontend on unmount).
+/// Hand `bytes` to the desktop IPC channel and count the frame against the
+/// delivery gate. No-op when the session has no desktop channel.
 ///
-/// Only the subscription that owns `epoch` may tear the channel down. A terminal
-/// that remounts subscribes before the outgoing instance unsubscribes, so
-/// honouring a stale call would delete the live channel and leave a mounted
-/// terminal with no frames at all.
+/// The broadcast path publishes to browser watchers before handing the desktop
+/// copy here. A private recovery frame uses this channel without the browser
+/// stream; its matching delta is then published only to browser watchers.
 #[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn unsubscribe_terminal_grid(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    epoch: u64,
-) {
-    let is_current = state
-        .grid_gates
-        .get(&session_id)
-        .is_some_and(|gate| gate.epoch() == epoch);
-    if !is_current {
+fn send_desktop_grid_frame(state: &AppState, session_id: &str, bytes: Vec<u8>) {
+    let Some(ch) = state.grid.channels.get(session_id) else {
+        return;
+    };
+    if !ch.visible.load(Ordering::Relaxed) {
         return;
     }
-    state.grid_channels.remove(&session_id);
-    state.grid_gates.remove(&session_id);
-    state.pending_scroll.remove(&session_id);
-}
-
-/// Exit alternate screen via the terminal grid (display side only, never touches PTY stdin).
-/// Only injects the exit sequences when the grid is actually in alternate-screen mode,
-/// preventing escape leaks into the shell when the agent already cleaned up normally.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn terminal_exit_alt_screen(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> bool {
-    if let Some(vt) = state.vt_log_buffers.get(&session_id) {
-        let (was_alt, frame) = {
-            let mut vt = vt.lock();
-            if !vt.is_alternate_screen() {
-                return false;
-            }
-            vt.process(b"\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?25h\x1b[0m");
-            (true, vt.serialize_dirty_rows())
-        };
-        if was_alt {
-            send_grid_frame(&state, &session_id, frame);
+    let gate = state.grid.gates.get(session_id);
+    if let Some(gate) = gate.as_deref() {
+        if gate.is_paused() {
+            gate.note_missed();
+            return;
         }
-        was_alt
-    } else {
-        false
+        gate.mark_sent();
+    }
+    // `tauri::ipc::Response` is what keeps this binary. A `Vec<u8>` matches
+    // only the blanket `IpcResponse` impl, i.e. `serde_json::to_string`, so a
+    // 110 KB frame left Rust as a ~280 KB string of decimal numbers, took the
+    // over-threshold path (one extra IPC round trip per frame) and arrived in
+    // JS as a `number[]` to be walked back into bytes. `Response` carries the
+    // bytes as `Raw` and the frontend already accepts an ArrayBuffer.
+    if let Err(error) = ch.channel.send(tauri::ipc::Response::new(bytes)) {
+        // A frame that never reached the webview will never be acked, and the
+        // counters are absolute: leaving this one counted would put the gate one
+        // frame behind for the rest of the session, i.e. every later frame would
+        // travel at the ticker's 500 ms give-up rate. Give up on it now instead.
+        tracing::debug!(session_id = %session_id, %error, "grid frame send failed");
+        if let Some(gate) = gate.as_deref() {
+            gate.abandon();
+        }
     }
 }
 
@@ -10692,19 +4709,6 @@ pub(crate) fn terminal_exit_alt_screen(
 // these need the coalescing `terminal_scroll_to_offset` already has, which is
 // also why they are the low-frequency path: the wheel and the scrollbar drag go
 // through the offset command and never touch this lock.
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn terminal_scroll(state: State<'_, Arc<AppState>>, session_id: String, delta: i32) {
-    if let Some(vt) = state.vt_log_buffers.get(&session_id) {
-        let frame = {
-            let mut vt = vt.lock();
-            vt.grid_scroll(delta);
-            vt.serialize_dirty_rows()
-        };
-        send_grid_frame(&state, &session_id, frame);
-    }
-}
 
 /// Run a read against a session's VT buffer on the blocking pool.
 ///
@@ -10741,6 +4745,7 @@ where
     let state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         state
+            .grid
             .vt_log_buffers
             .get(&session_id)
             .map(|vt| f(&mut vt.lock()))
@@ -10768,12166 +4773,19 @@ where
         .map(Option::unwrap_or_default)
 }
 
-/// Coalesced scroll: record the target absolute display offset and mark the grid
-/// dirty so the frame ticker applies it under the lock it already holds. Crucially
-/// takes NO vt lock here, so scrolling never contends with the PTY output processor.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn terminal_scroll_to_offset(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    offset: usize,
-) {
-    if let Some(p) = state.pending_scroll.get(&session_id) {
-        p.store(offset as i64, std::sync::atomic::Ordering::Relaxed);
-    }
-    if let Some(d) = state.grid_frame_dirty.get(&session_id) {
-        d.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Fetch a range of styled rows by absolute index, to fill the frontend's
-/// client-side row cache for smooth local scroll rendering. Read-only; called in
-/// background chunks as the viewport approaches uncached rows, not per frame.
-///
-/// Returns `tauri::ipc::Response` — a bare `Vec<u8>` would take the blanket
-/// `IpcResponse` impl and cross the IPC as a JSON array of decimal numbers
-/// (~140 KB of bytes becoming a ~350 KB string per chunk, plus a `number[]` for
-/// the JS engine to build and walk). `Response` marks the body raw, so the
-/// webview receives the bytes as an ArrayBuffer.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_styled_rows(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    start: usize,
-    count: usize,
-) -> Result<tauri::ipc::Response, String> {
-    let bytes = vt_read(&state, session_id, move |vt| {
-        vt.grid_serialize_styled_range(start, count)
-    })
-    .await?;
-    Ok(tauri::ipc::Response::new(bytes))
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn terminal_scroll_to(state: State<'_, Arc<AppState>>, session_id: String, line: usize) {
-    if let Some(vt) = state.vt_log_buffers.get(&session_id) {
-        let frame = {
-            let mut vt = vt.lock();
-            vt.grid_scroll_to_line(line);
-            vt.serialize_dirty_rows()
-        };
-        send_grid_frame(&state, &session_id, frame);
-    }
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_get_block_rows(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    start_line: usize,
-    end_line: usize,
-) -> Result<Vec<String>, String> {
-    vt_read(&state, session_id, move |vt| {
-        vt.read_rows_in_range(start_line, end_line)
-    })
-    .await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_scroll_info(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<(usize, usize, usize), String> {
-    vt_read(&state, session_id, |vt| {
-        (
-            vt.grid_display_offset(),
-            vt.grid_total_lines(),
-            vt.grid_screen_lines(),
-        )
-    })
-    .await
-}
-
 // --- Search command ---
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_search(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    query: String,
-) -> Result<Vec<crate::terminal_grid::SearchMatch>, String> {
-    let sid = session_id.clone();
-    let q = query.clone();
-    let found = vt_try_read(&state, session_id.clone(), move |buf| {
-        let is_alt = buf.is_alternate_screen();
-        let results = buf.grid_search(&q);
-        tracing::info!(
-            session_id = %sid,
-            query = %q,
-            is_alt_screen = is_alt,
-            result_count = results.len(),
-            history_size = buf.grid_history_size(),
-            screen_lines = buf.grid_screen_lines(),
-            "terminal_search"
-        );
-        results
-    })
-    .await?;
-    Ok(found.unwrap_or_else(|| {
-        tracing::warn!(session_id = %session_id, query = %query, "terminal_search: session not found in vt_log_buffers");
-        Vec::new()
-    }))
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_search_buffer(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    query: String,
-) -> Result<Vec<crate::terminal_grid::BufferSearchMatch>, String> {
-    vt_read(&state, session_id, move |vt| vt.grid_search_buffer(&query)).await
-}
 
 // --- Row text command ---
 
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_get_row_text(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    row: usize,
-) -> Result<String, String> {
-    vt_read(&state, session_id, move |vt| vt.grid_get_row_text(row)).await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_get_logical_line(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    row: usize,
-) -> Result<(usize, String), String> {
-    // Not `vt_read`: the fallback for a gone session is the requested row with
-    // no text, not row zero.
-    Ok(
-        vt_try_read(&state, session_id, move |vt| vt.grid_get_logical_line(row))
-            .await?
-            .unwrap_or((row, String::new())),
-    )
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_get_selection_text(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    start_row: usize,
-    start_col: usize,
-    end_row: usize,
-    end_col: usize,
-) -> Result<String, String> {
-    vt_read(&state, session_id, move |vt| {
-        vt.grid_get_selection_text(start_row, start_col, end_row, end_col)
-    })
-    .await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_get_lines(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    start: usize,
-    end: usize,
-) -> Result<Vec<String>, String> {
-    vt_read(&state, session_id, move |vt| vt.grid_get_lines(start, end)).await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_get_cursor_line(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<String, String> {
-    vt_read(&state, session_id, |vt| vt.grid_get_cursor_line()).await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_hyperlink_at(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    row: usize,
-    col: usize,
-) -> Result<Option<String>, String> {
-    vt_read(&state, session_id, move |vt| vt.grid_hyperlink_at(row, col)).await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn terminal_hyperlink_span(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    row: usize,
-    col: usize,
-) -> Result<Option<(usize, usize, String)>, String> {
-    vt_read(&state, session_id, move |vt| {
-        vt.grid_hyperlink_span(row, col)
-    })
-    .await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn set_session_visible(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    visible: bool,
-) -> Result<(), String> {
-    state.session_visibility.insert(session_id.clone(), visible);
-    #[cfg(unix)]
-    if visible && let Err(e) = wake_session(&state, &session_id) {
-        tracing::warn!(session_id, error = %e, "Wake on focus failed");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture_rows(fixture: &str) -> Vec<String> {
-        fixture
-            .trim_end_matches('\n')
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// The interactive-path threads raise their QoS to USER_INTERACTIVE. Verify
-    /// the syscall actually takes effect by reading the class back on the same
-    /// thread (default QoS for a fresh test thread is *not* USER_INTERACTIVE).
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn raises_thread_to_user_interactive_qos() {
-        // Run on a dedicated thread so we don't leave the test runner's worker
-        // permanently bumped.
-        let observed = std::thread::spawn(|| {
-            raise_thread_for_interactive_io();
-            thread_qos::current_qos_class()
-        })
-        .join()
-        .expect("qos probe thread panicked");
-        // QOS_CLASS_USER_INTERACTIVE == 0x21.
-        assert_eq!(
-            observed, 0x21,
-            "thread QoS was not raised to USER_INTERACTIVE"
-        );
-    }
-
-    /// A keystroke borrows a thread from the shared tokio blocking pool and gives
-    /// it back. Bumping that thread's QoS without putting it back promotes the
-    /// pool itself: the next git walk, content-index build, or config write to
-    /// land on that thread runs in the interactive band forever after — the one
-    /// band the keystroke path needs kept clear.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_keystroke_gives_the_shared_blocking_thread_back_at_its_original_qos() {
-        // The whole pair, not just the class: restoring the band while dropping
-        // the relative priority is still handing back a thread that is not the
-        // one we borrowed, and a class-only assertion cannot see it.
-        let (before, during, after) = std::thread::spawn(|| {
-            let before = thread_qos::current_qos_pair();
-            let during = {
-                let _boost = interactive_io_boost();
-                thread_qos::current_qos_pair()
-            };
-            (before, during, thread_qos::current_qos_pair())
-        })
-        .join()
-        .expect("qos probe thread panicked");
-        // QOS_CLASS_USER_INTERACTIVE == 0x21.
-        assert_eq!(
-            during.0, 0x21,
-            "keystroke did not run in the interactive band"
-        );
-        assert_ne!(before.0, 0x21, "probe thread started already bumped");
-        assert_eq!(
-            after, before,
-            "the blocking-pool thread stayed promoted after the keystroke"
-        );
-    }
-
-    /// The restore is a `Drop`, so the path that matters most is the one nobody
-    /// writes on purpose: a panic inside the write. `spawn_blocking` catches it
-    /// and returns the thread to the pool either way, so a boost that only
-    /// unwound on the happy path would promote the pool exactly when something
-    /// is already going wrong.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_panicking_keystroke_still_gives_the_thread_back_at_its_original_qos() {
-        let (before, after) = std::thread::spawn(|| {
-            let before = thread_qos::current_qos_pair();
-            let panicked = std::panic::catch_unwind(|| {
-                let _boost = interactive_io_boost();
-                panic!("write failed mid-keystroke");
-            });
-            assert!(panicked.is_err(), "the probe did not actually panic");
-            (before, thread_qos::current_qos_pair())
-        })
-        .join()
-        .expect("qos probe thread panicked");
-        assert_ne!(before.0, 0x21, "probe thread started already bumped");
-        assert_eq!(
-            after, before,
-            "a panicking keystroke left the blocking-pool thread promoted"
-        );
-    }
-
-    #[test]
-    fn grid_send_min_interval_policy() {
-        // Short burst, no typing → no floor: full-speed for low latency.
-        assert_eq!(grid_send_min_interval_ms(false, 0), 0);
-        assert_eq!(grid_send_min_interval_ms(false, 5), 0);
-        // Sustained animation (dirty ≥ 6 ticks), no typing → ~30 fps floor.
-        assert_eq!(grid_send_min_interval_ms(false, 6), 33);
-        assert_eq!(grid_send_min_interval_ms(false, 1000), 33);
-        // Typing under load → ~20 fps floor, regardless of dirty_run (even a
-        // short burst), because keystroke latency is what we protect.
-        assert_eq!(grid_send_min_interval_ms(true, 0), 50);
-        assert_eq!(grid_send_min_interval_ms(true, 1000), 50);
-        // Typing floor must be the more aggressive (larger interval) of the two.
-        assert!(grid_send_min_interval_ms(true, 1000) > grid_send_min_interval_ms(false, 1000));
-    }
-
-    #[test]
-    fn system_load_per_core_is_non_negative_and_finite() {
-        // Links libc getloadavg/sysconf on Unix; returns 0.0 elsewhere. Either
-        // way it must be a sane, non-negative, finite ratio.
-        let v = system_load_per_core();
-        assert!(v.is_finite());
-        assert!(v >= 0.0);
-    }
-
-    #[test]
-    fn clean_action_required_title_strips_marker_spinner_and_separators() {
-        // Real grok permission-prompt title (captured live).
-        assert_eq!(
-            clean_action_required_title(
-                "⚠ Action Required - ⠙ - Running: echo hello - Execute Shell Command"
-            ),
-            "Running: echo hello - Execute Shell Command"
-        );
-    }
-
-    #[test]
-    fn clean_action_required_title_handles_each_spinner_frame() {
-        // Title repaints with a different braille frame each tick; cleaned output is stable.
-        for frame in ["⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"] {
-            assert_eq!(
-                clean_action_required_title(&format!("⚠ Action Required - {frame} - Running: ls")),
-                "Running: ls"
-            );
-        }
-    }
-
-    #[test]
-    fn clean_action_required_title_fallback_when_empty() {
-        assert_eq!(
-            clean_action_required_title("⚠ Action Required - ⠙ - "),
-            "grok is awaiting approval"
-        );
-    }
-
-    #[test]
-    fn test_parse_signal_number_killed() {
-        assert_eq!(parse_signal_number("Killed: 9"), 9);
-    }
-
-    #[test]
-    fn test_parse_signal_number_interrupt() {
-        assert_eq!(parse_signal_number("Interrupt: 2"), 2);
-    }
-
-    #[test]
-    fn test_parse_signal_number_format_variant() {
-        assert_eq!(parse_signal_number("Signal 15"), 15);
-    }
-
-    #[test]
-    fn test_parse_signal_number_unknown() {
-        assert_eq!(parse_signal_number("unknown signal"), 0);
-    }
-
-    #[test]
-    fn test_parse_osc133_exit_code() {
-        assert_eq!(parse_osc133_exit_code('D', "0"), Some(0));
-        assert_eq!(parse_osc133_exit_code('D', "127"), Some(127));
-        assert_eq!(parse_osc133_exit_code('D', ""), None);
-        assert_eq!(parse_osc133_exit_code('A', "0"), None);
-    }
-
-    #[test]
-    fn test_classify_agent_claude() {
-        assert_eq!(classify_agent("claude"), Some("claude"));
-    }
-
-    #[test]
-    fn test_classify_agent_gemini() {
-        assert_eq!(classify_agent("gemini"), Some("gemini"));
-    }
-
-    #[test]
-    fn test_classify_agent_aider() {
-        assert_eq!(classify_agent("aider"), Some("aider"));
-    }
-
-    #[test]
-    fn test_classify_agent_codex() {
-        assert_eq!(classify_agent("codex"), Some("codex"));
-    }
-
-    #[test]
-    fn test_classify_agent_opencode() {
-        assert_eq!(classify_agent("opencode"), Some("opencode"));
-    }
-
-    #[test]
-    fn test_classify_agent_goose() {
-        assert_eq!(classify_agent("goose"), Some("goose"));
-    }
-
-    #[test]
-    fn test_classify_agent_droid() {
-        assert_eq!(classify_agent("droid"), Some("droid"));
-    }
-
-    #[test]
-    fn test_classify_agent_unknown_returns_none() {
-        assert_eq!(classify_agent("bash"), None);
-        assert_eq!(classify_agent("zsh"), None);
-        assert_eq!(classify_agent("node"), None);
-        assert_eq!(classify_agent("python"), None);
-        assert_eq!(classify_agent("vim"), None);
-    }
-
-    /// grok 1.0.5 ships `~/.grok/bin/grok` as a symlink to `grok-1.0.5`, and
-    /// `proc_pidpath` resolves the link. Missing the versioned basename left the
-    /// session with no `agent_type`, hence no ready-screen adapter, hence a tab
-    /// that never left BUSY.
-    #[test]
-    fn test_classify_agent_versioned_basename() {
-        assert_eq!(classify_agent("grok-1.0.5"), Some("grok"));
-        assert_eq!(classify_agent("claude-2.1.81"), Some("claude"));
-        assert_eq!(classify_agent("codex-0.116"), Some("codex"));
-        assert_eq!(
-            classify_agent_name_or_path("/Users/me/.grok/bin/grok-1.0.5"),
-            Some("grok")
-        );
-    }
-
-    /// The suffix must start with a digit, so a hyphenated tool name keeps its
-    /// own identity and an unrelated binary is not promoted to an agent.
-    #[test]
-    fn test_classify_agent_version_strip_does_not_overreach() {
-        assert_eq!(classify_agent("cursor-agent"), Some("cursor"));
-        assert_eq!(classify_agent("grok-wrapper"), None);
-        assert_eq!(classify_agent("not-grok"), None);
-        assert_eq!(classify_agent("postgres-16"), None);
-    }
-
-    /// The ready-screen adapter is the whole point of detecting the agent: grok
-    /// runs as one long-lived foreground command, so OSC 133 marks the shell busy
-    /// once and only the screen can take it back to idle.
-    #[test]
-    fn test_grok_minimal_screen_is_ready_once_classified() {
-        assert!(has_ready_screen_adapter(classify_agent("grok-1.0.5")));
-        // Captured live from `grok --minimal` 1.0.5: no composer box, no
-        // separators — a bare prompt glyph above the model status row.
-        let rows: Vec<String> = vec![
-            "Abbiamo scritto l’analisi completa in `grok-report.md`.".to_string(),
-            "minimal · /help".to_string(),
-            "\u{276F}".to_string(),
-            "Grok 4.6 (high) · always-approve · 186K / 500K (37%) · ctrl+o transcript".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("grok"), &rows),
-            AgentScreenActivity::Ready
-        );
-    }
-
-    // --- parse_osc7_cwd tests (story 1558-81bb) ---
-
-    #[test]
-    fn osc7_simple_path() {
-        assert_eq!(
-            parse_osc7_cwd("file://hostname/Users/me"),
-            Ok("/Users/me".into())
-        );
-    }
-
-    #[test]
-    fn osc7_empty_hostname() {
-        assert_eq!(parse_osc7_cwd("file:///home/user"), Ok("/home/user".into()));
-    }
-
-    #[test]
-    fn osc7_localhost() {
-        assert_eq!(
-            parse_osc7_cwd("file://localhost/tmp/foo"),
-            Ok("/tmp/foo".into())
-        );
-    }
-
-    #[test]
-    fn osc7_trailing_slash_stripped() {
-        assert_eq!(
-            parse_osc7_cwd("file:///home/user/"),
-            Ok("/home/user".into())
-        );
-    }
-
-    #[test]
-    fn osc7_root_path_preserved() {
-        assert_eq!(parse_osc7_cwd("file:///"), Ok("/".into()));
-    }
-
-    #[test]
-    fn osc7_percent_encoded_space() {
-        assert_eq!(
-            parse_osc7_cwd("file:///home/user/my%20project"),
-            Ok("/home/user/my project".into()),
-        );
-    }
-
-    #[test]
-    fn osc7_percent_encoded_special_chars() {
-        assert_eq!(
-            parse_osc7_cwd("file:///tmp/%E2%9C%93"),
-            Ok("/tmp/\u{2713}".into()),
-        );
-    }
-
-    #[test]
-    fn osc7_missing_scheme() {
-        assert!(parse_osc7_cwd("/home/user").is_err());
-    }
-
-    #[test]
-    fn osc7_wrong_scheme() {
-        assert!(parse_osc7_cwd("http://localhost/foo").is_err());
-    }
-
-    #[test]
-    fn osc7_invalid_percent_encoding() {
-        assert!(parse_osc7_cwd("file:///home/%GG").is_err());
-    }
-
-    // --- classify_shell tests (story 1274-2e38) ---
-
-    #[test]
-    fn classify_shell_bare_posix_basenames() {
-        for s in [
-            "sh", "bash", "zsh", "fish", "dash", "ksh", "ash", "tcsh", "csh", "mksh",
-        ] {
-            assert_eq!(classify_shell(s), ShellFamily::Posix, "{s}");
-        }
-    }
-
-    #[test]
-    fn classify_shell_absolute_posix_paths() {
-        for s in [
-            "/bin/bash",
-            "/usr/bin/zsh",
-            "/opt/homebrew/bin/fish",
-            "/usr/local/bin/sh",
-        ] {
-            assert_eq!(classify_shell(s), ShellFamily::Posix, "{s}");
-        }
-    }
-
-    #[test]
-    fn classify_shell_windows_native() {
-        for s in [
-            "cmd",
-            "cmd.exe",
-            "C:\\Windows\\System32\\cmd.exe",
-            "powershell",
-            "powershell.exe",
-            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-            "pwsh",
-            "pwsh.exe",
-        ] {
-            assert_eq!(classify_shell(s), ShellFamily::WindowsNative, "{s}");
-        }
-    }
-
-    /// Critical regression case for story 1274-2e38: Git Bash / Cygwin / MSYS
-    /// ship `bash.exe` on Windows and DO support Ctrl-U. Classifying by host
-    /// OS would wrongly skip the prefix here; classifying by shell basename
-    /// correctly keeps them in the Posix family.
-    #[test]
-    fn classify_shell_git_bash_on_windows_is_posix() {
-        for s in [
-            "bash.exe",
-            "C:\\Program Files\\Git\\bin\\bash.exe",
-            "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-            "C:/Program Files/Git/bin/bash.exe",
-            "C:\\cygwin64\\bin\\bash.exe",
-            "C:\\msys64\\usr\\bin\\bash.exe",
-        ] {
-            assert_eq!(classify_shell(s), ShellFamily::Posix, "{s}");
-        }
-    }
-
-    #[test]
-    fn classify_shell_wsl_is_posix() {
-        for s in [
-            "wsl",
-            "wsl.exe",
-            "wsl.exe -d Ubuntu",
-            "C:\\Windows\\System32\\wsl.exe",
-        ] {
-            assert_eq!(classify_shell(s), ShellFamily::Posix, "{s}");
-        }
-    }
-
-    #[test]
-    fn classify_shell_case_insensitive() {
-        assert_eq!(classify_shell("BASH.EXE"), ShellFamily::Posix);
-        assert_eq!(classify_shell("Cmd.Exe"), ShellFamily::WindowsNative);
-        assert_eq!(classify_shell("PowerShell.exe"), ShellFamily::WindowsNative);
-    }
-
-    #[test]
-    fn classify_shell_ignores_trailing_arguments() {
-        // Arguments after the first whitespace must not affect classification.
-        assert_eq!(classify_shell("bash --login"), ShellFamily::Posix);
-        assert_eq!(
-            classify_shell("powershell.exe -NoProfile"),
-            ShellFamily::WindowsNative
-        );
-    }
-
-    #[test]
-    fn classify_shell_unknown_for_other_binaries() {
-        // Intentionally unknown — callers should fall back to a safe default.
-        for s in ["python", "node", "/usr/bin/env", "", "   "] {
-            assert_eq!(classify_shell(s), ShellFamily::Unknown, "{s:?}");
-        }
-    }
-
-    // --- SilenceState tests ---
-
-    #[test]
-    fn test_silence_state_no_pending_returns_none() {
-        let mut s = SilenceState::new();
-        assert!(s.check_silence().is_none());
-    }
-
-    #[test]
-    fn test_tool_error_no_candidate_returns_none() {
-        let mut s = SilenceState::new();
-        assert!(s.check_tool_error().is_none());
-    }
-
-    #[test]
-    fn test_tool_error_fires_after_silence_threshold() {
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 128".to_string());
-        // Force last_output_at past the threshold to simulate silence.
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_tool_error(),
-            Some("Error: Exit code 128".to_string())
-        );
-        // Dedup: second call returns None (already emitted).
-        assert!(s.check_tool_error().is_none());
-    }
-
-    #[test]
-    fn test_tool_error_recovery_clears_candidate() {
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.clear_tool_error_on_recovery();
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(
-            s.check_tool_error().is_none(),
-            "recovery must clear pending tool error"
-        );
-    }
-
-    #[test]
-    fn test_tool_error_does_not_refire_same_line_after_recovery() {
-        // Reproduces the scroll-induced re-fire bug: once an error has been
-        // surfaced, scrolling the Ink TUI viewport re-introduces the error line
-        // in `changed_rows`. `clear_tool_error_on_recovery` must NOT re-enable
-        // notification for a line the user already saw.
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_tool_error(),
-            Some("Error: Exit code 1".to_string()),
-            "first occurrence must fire"
-        );
-
-        // Agent produced real output → recovery.
-        s.clear_tool_error_on_recovery();
-
-        // Viewport scrolls, same error line reappears in changed_rows.
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(
-            s.check_tool_error().is_none(),
-            "same error line must not refire after recovery (scroll-induced)"
-        );
-    }
-
-    #[test]
-    fn test_tool_error_different_line_fires_after_first() {
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        let _ = s.check_tool_error();
-        s.clear_tool_error_on_recovery();
-
-        // A different error appears in a later turn — must still fire.
-        s.mark_tool_error_candidate("Error: Exit code 128".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_tool_error(),
-            Some("Error: Exit code 128".to_string()),
-            "distinct error text must not be suppressed by prior surface"
-        );
-    }
-
-    #[test]
-    fn test_tool_error_refires_after_memory_reset() {
-        // After the user submits a line (explicit re-engagement), a recurrence
-        // of the same failure in a new turn must notify again.
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(s.check_tool_error().is_some());
-
-        s.reset_tool_error_memory();
-
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_tool_error(),
-            Some("Error: Exit code 1".to_string()),
-            "after user input, same error text must be allowed to notify again"
-        );
-    }
-
-    #[test]
-    fn test_is_retry_line_matches_connection_retries() {
-        // Claude subagent SDK retry loop (the reported false-idle scenario).
-        assert!(is_retry_line(
-            "  Unable to connect to API (ECONNRESET) · Retrying in 0s · attempt 6/10"
-        ));
-        assert!(is_retry_line(
-            "Teammate @spinach-mail-validate failed: API Error: Unable to connect to API (ConnectionRefused)"
-        ));
-        // Goose/Aider stream-error retry form.
-        assert!(is_retry_line(
-            "⚠  stream error: exceeded retry limit, last status: 401; retrying 5/5 in 3s…"
-        ));
-        // Non-retry prose / code must NOT latch busy — the N/M counter is required.
-        assert!(!is_retry_line(
-            "I'll be retrying the request in a moment if it fails."
-        ));
-        assert!(!is_retry_line(
-            "let retrying = true; // attempt to reconnect"
-        ));
-        assert!(!is_retry_line(
-            "Successfully connected to the API endpoint."
-        ));
-    }
-
-    #[test]
-    fn test_api_retry_hold_active_then_expires() {
-        let mut s = SilenceState::new();
-        assert!(!s.is_api_retry_active(), "no hold armed initially");
-        s.mark_api_retry();
-        assert!(s.is_api_retry_active(), "hold active right after arming");
-        // Simulate the hold window elapsing.
-        s.api_retry_hold_until =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
-        assert!(
-            !s.is_api_retry_active(),
-            "hold self-expires after AGENT_RETRY_HOLD"
-        );
-    }
-
-    #[test]
-    fn test_api_retry_blocks_ready_screen_confirm() {
-        // Claude Code keeps its `❯` prompt visible while auto-retrying, so a stable
-        // ready screen would otherwise confirm idle after AGENT_READY_CONFIRM. The
-        // retry hold must refuse that confirmation.
-        let mut s = SilenceState::new();
-        s.mark_api_retry();
-        // Force the ready prompt to look long-stable.
-        s.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM * 2);
-        assert!(
-            !s.note_ready_screen(),
-            "ready screen must not confirm idle while an API retry is in flight"
-        );
-
-        // Once the hold expires, the same stable ready prompt confirms idle.
-        s.api_retry_hold_until =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
-        s.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM * 2);
-        assert!(
-            s.note_ready_screen(),
-            "ready screen confirms idle after the retry hold expires"
-        );
-    }
-
-    #[test]
-    fn test_api_retry_hold_cleared_on_recovery_and_user_input() {
-        let mut s = SilenceState::new();
-        s.mark_api_retry();
-        // Real non-error output → agent recovered.
-        s.clear_tool_error_on_recovery();
-        assert!(!s.is_api_retry_active(), "recovery releases the retry hold");
-
-        s.mark_api_retry();
-        // User re-engages (submitted a line / Ctrl+C).
-        s.reset_tool_error_memory();
-        assert!(
-            !s.is_api_retry_active(),
-            "user input releases the retry hold"
-        );
-    }
-
-    #[test]
-    fn test_tool_error_mark_is_idempotent_while_pending() {
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        // Second mark for the same line while still pending → no-op.
-        s.mark_tool_error_candidate("Error: Exit code 1".to_string());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(s.check_tool_error(), Some("Error: Exit code 1".to_string()));
-    }
-
-    // --- is_tool_error_line tests ---
-
-    #[test]
-    fn test_tool_error_matches_claude_code_format() {
-        // Claude Code prefixes tool-result rows with `⎿ `.
-        assert!(is_tool_error_line("⎿  Error: Exit code 1"));
-        assert!(is_tool_error_line("  ⎿  Error: Exit code 127"));
-    }
-
-    #[test]
-    fn test_tool_error_matches_bare_format() {
-        assert!(is_tool_error_line("Error: Exit code 1"));
-        assert!(is_tool_error_line("  Error: Exit code 128"));
-    }
-
-    #[test]
-    fn test_tool_error_rejects_source_code_literal() {
-        // Exact string that triggered the false-positive in Boss's session:
-        // the test file's own content displayed in a terminal armed a red
-        // notification because the unanchored regex matched inside a string
-        // literal. These must never fire.
-        assert!(!is_tool_error_line(
-            r#"s.mark_tool_error_candidate("Error: Exit code 2".to_string());"#
-        ));
-        assert!(!is_tool_error_line(
-            r#"assert_eq!(s.check_tool_error(), Some("Error: Exit code 1".to_string()));"#
-        ));
-        assert!(!is_tool_error_line(
-            r#"3895          s.mark_tool_error_candidate("Error: Exit code 2".to_string"#
-        ));
-    }
-
-    #[test]
-    fn test_tool_error_rejects_markdown_mention() {
-        // Commit messages, docs, release notes that quote the error text.
-        assert!(!is_tool_error_line(
-            r#"fix: resolve "Error: Exit code 1" in claude tool pipeline"#
-        ));
-    }
-
-    #[test]
-    fn test_tool_error_allows_box_drawing_variations() {
-        // Other box-drawing chars Claude uses for tool-call hierarchy rows.
-        assert!(is_tool_error_line("╰  Error: Exit code 2"));
-        assert!(is_tool_error_line("│  Error: Exit code 5"));
-    }
-
-    // --- Suggest backend-gating tests ---
-
-    #[test]
-    fn test_suggest_drain_returns_parked_items() {
-        let mut s = SilenceState::new();
-        s.mark_suggest_candidate(vec!["alpha".to_string(), "beta".to_string()], 0);
-        assert_eq!(
-            s.drain_pending_suggest(),
-            Some(vec!["alpha".to_string(), "beta".to_string()])
-        );
-    }
-
-    #[test]
-    fn test_suggest_drain_consumes_items() {
-        let mut s = SilenceState::new();
-        s.mark_suggest_candidate(vec!["a".to_string()], 0);
-        let _ = s.drain_pending_suggest();
-        assert!(
-            s.drain_pending_suggest().is_none(),
-            "second drain must return None — single-shot semantics"
-        );
-    }
-
-    #[test]
-    fn test_suggest_drain_none_when_nothing_parked() {
-        let mut s = SilenceState::new();
-        assert!(s.drain_pending_suggest().is_none());
-    }
-
-    #[test]
-    fn test_suggest_newer_items_overwrite_older() {
-        let mut s = SilenceState::new();
-        s.mark_suggest_candidate(vec!["old".to_string()], 0);
-        s.mark_suggest_candidate(vec!["new1".to_string(), "new2".to_string()], 0);
-        assert_eq!(
-            s.drain_pending_suggest(),
-            Some(vec!["new1".to_string(), "new2".to_string()]),
-            "latest parked set must win (agent updated suggestions mid-turn)"
-        );
-    }
-
-    #[test]
-    fn test_suggest_reset_on_user_input() {
-        let mut s = SilenceState::new();
-        s.mark_suggest_candidate(vec!["stale".to_string()], 0);
-        s.reset_suggest_memory();
-        assert!(
-            s.drain_pending_suggest().is_none(),
-            "user input must drop pending suggest so it doesn't fire across turns"
-        );
-    }
-
-    #[test]
-    fn test_suggest_empty_items_ignored() {
-        let mut s = SilenceState::new();
-        s.mark_suggest_candidate(vec![], 0);
-        assert!(
-            s.pending_suggest_items.is_none(),
-            "empty items must not park"
-        );
-        assert!(s.drain_pending_suggest().is_none());
-    }
-
-    #[test]
-    fn test_tool_error_suppressed_while_spinner_active() {
-        let mut s = SilenceState::new();
-        s.mark_tool_error_candidate("Error: Exit code 2".to_string());
-        s.last_status_line_at = Some(std::time::Instant::now());
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_TOOL_ERROR_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(
-            s.check_tool_error().is_none(),
-            "spinner active means agent still working — no notification"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_pending_but_too_soon() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // Just set — not enough time has passed
-        assert!(s.check_silence().is_none());
-    }
-
-    #[test]
-    fn test_silence_state_pending_after_threshold() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // Simulate time passing by backdating last_output_at
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(s.check_silence(), Some("Continue?".to_string()));
-    }
-
-    #[test]
-    fn test_silence_state_no_double_emission() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(s.check_silence().is_some());
-        // Second check should return None (already emitted)
-        assert!(s.check_silence().is_none());
-    }
-
-    #[test]
-    fn test_silence_state_regex_suppresses_timer() {
-        let mut s = SilenceState::new();
-        // regex_found_question = true means instant detection already fired
-        s.on_chunk(
-            true,
-            Some("Would you like to proceed?".to_string()),
-            false,
-            false,
-            false,
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(s.check_silence().is_none());
-    }
-
-    #[test]
-    fn test_silence_state_regex_clears_prior_pending() {
-        let mut s = SilenceState::new();
-        // Silence detector has a pending question from an earlier chunk
-        s.on_chunk(
-            false,
-            Some("Earlier question?".to_string()),
-            false,
-            false,
-            false,
-        );
-        assert!(s.pending_question_line.is_some());
-        // Regex fires on a different event — no question line in this chunk
-        s.on_chunk(true, None, false, false, false);
-        assert!(
-            s.pending_question_line.is_none(),
-            "prior pending should be cleared when regex fires"
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(s.check_silence().is_none());
-    }
-
-    #[test]
-    fn test_silence_state_non_question_output_preserves_pending() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // Non-`?` output (spinners, prompts, decorations) must NOT clear pending.
-        s.on_chunk(false, None, false, false, false);
-        s.on_chunk(false, None, false, false, false);
-        s.on_chunk(false, None, false, false, false);
-        // Standard 10s threshold fires normally
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(s.check_silence(), Some("Continue?".to_string()));
-    }
-
-    #[test]
-    fn test_silence_state_new_question_replaces_old() {
-        let mut s = SilenceState::new();
-        s.on_chunk(
-            false,
-            Some("First question?".to_string()),
-            false,
-            false,
-            false,
-        );
-        s.on_chunk(
-            false,
-            Some("Second question?".to_string()),
-            false,
-            false,
-            false,
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(s.check_silence(), Some("Second question?".to_string()));
-    }
-
-    #[test]
-    fn test_silence_state_suppress_user_input() {
-        let mut s = SilenceState::new();
-        // User types a line ending with `?` — PTY will echo it back
-        s.on_chunk(
-            false,
-            Some("c'è ancora una storia?".to_string()),
-            false,
-            false,
-            false,
-        );
-        // write_pty detects user input and suppresses
-        s.suppress_user_input();
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Should NOT fire — the question was typed by the user
-        assert!(s.check_silence().is_none());
-    }
-
-    #[test]
-    fn test_silence_state_suppress_echo_after_user_input() {
-        let mut s = SilenceState::new();
-        // write_pty detects user input and suppresses BEFORE the echo arrives
-        s.suppress_user_input();
-        // PTY echoes the user's text back — this should NOT re-enable detection
-        s.on_chunk(
-            false,
-            Some("lo hai mai provato?".to_string()),
-            false,
-            false,
-            false,
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Should NOT fire — the echo window blocks re-enabling
-        assert!(
-            s.check_silence().is_none(),
-            "PTY echo after suppress should not trigger question detection"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_suppress_echo_expires() {
-        let mut s = SilenceState::new();
-        s.suppress_user_input();
-        // Expire the echo suppress window with a past deadline (not None,
-        // which means "never suppressed" — a different code path).
-        s.suppress_echo_until =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
-        // Agent asks a genuine question after the window expires
-        s.on_chunk(
-            false,
-            Some("Would you like to proceed?".to_string()),
-            false,
-            false,
-            false,
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Should fire — this is a real agent question
-        assert_eq!(
-            s.check_silence(),
-            Some("Would you like to proceed?".to_string())
-        );
-    }
-
-    #[test]
-    fn test_silence_state_spinner_suppresses_question() {
-        let mut s = SilenceState::new();
-        // Agent prints a `?`-line alongside a status-line/spinner in the same chunk
-        s.on_chunk(
-            false,
-            Some("Want me to proceed?".to_string()),
-            true,
-            false,
-            false,
-        );
-        // Simulate 10s+ of silence
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Should NOT emit question — spinner was recently active
-        assert_eq!(s.check_silence(), None, "spinner active → no question");
-    }
-
-    #[test]
-    fn test_silence_state_spinner_expired_allows_question() {
-        let mut s = SilenceState::new();
-        s.on_chunk(
-            false,
-            Some("Want me to proceed?".to_string()),
-            true,
-            false,
-            false,
-        );
-        // Spinner was active but long ago (>10s, matching SILENCE_QUESTION_THRESHOLD)
-        s.last_status_line_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Spinner expired, question should fire
-        assert_eq!(s.check_silence(), Some("Want me to proceed?".to_string()));
-    }
-
-    #[test]
-    fn test_silence_state_spinner_within_10s_suppresses() {
-        let mut s = SilenceState::new();
-        s.on_chunk(
-            false,
-            Some("Want me to proceed?".to_string()),
-            true,
-            false,
-            false,
-        );
-        // Spinner was 8s ago — still within the 10s window
-        s.last_status_line_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(8));
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_silence(),
-            None,
-            "spinner within 10s should suppress question"
-        );
-    }
-
-    // --- Status-line-only chunk tests ---
-
-    #[test]
-    fn test_silence_state_status_line_only_does_not_reset_silence() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // Backdate last_output_at to simulate 10s of silence
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Mode-line timer tick: status_line_only = true, should NOT reset last_output_at
-        s.on_chunk(false, None, true, true, false);
-        // The silence threshold should still be met
-        assert_eq!(
-            s.check_silence(),
-            Some("Continue?".to_string()),
-            "status_line_only chunks must not reset the silence timer"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_mode_line_ticks_do_not_suppress_question() {
-        // Reproduces the bug: Claude Code asks a question, then the mode line
-        // keeps updating every ~1s while waiting for input. Status-line-only chunks
-        // were keeping `is_spinner_active()` true forever, preventing question
-        // detection even after 10s of silence.
-        let mut s = SilenceState::new();
-        // Agent outputs question + status line in same chunk (not status-line-only)
-        s.on_chunk(
-            false,
-            Some("Vuoi fare un commit?".to_string()),
-            true,
-            false,
-            false,
-        );
-
-        // Simulate 10s+ passing: both last_output_at and last_status_line_at
-        // age beyond the threshold (in real life, wall-clock time handles this).
-        let past = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        s.last_output_at = past;
-        s.last_status_line_at = Some(past);
-
-        // Mode-line-only ticks keep coming — they must NOT refresh either timer.
-        for _ in 0..10 {
-            s.on_chunk(false, None, true, true, false);
-        }
-
-        // After 10s+ of silence, the question MUST be detected even though
-        // mode-line ticks kept coming in.
-        assert_eq!(
-            s.check_silence(),
-            Some("Vuoi fare un commit?".to_string()),
-            "mode-line-only ticks must not keep is_spinner_active() alive"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_mode_line_ticks_do_not_stale_question() {
-        // Regression: mode-line timer ticks (status_line_only=true) were incrementing
-        // output_chunks_after_question, clearing the pending question as "stale"
-        // before the silence timer could detect it.
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Procedo?".to_string()), true, false, false);
-
-        // Simulate 15 mode-line ticks (> STALE_QUESTION_CHUNKS=10)
-        for _ in 0..15 {
-            s.on_chunk(false, None, true, true, false);
-        }
-
-        // pending_question_line must still be present — mode-line ticks are not real output
-        assert_eq!(
-            s.pending_question_line.as_deref(),
-            Some("Procedo?"),
-            "mode-line-only ticks must not count toward staleness"
-        );
-
-        // Backdate to simulate silence threshold reached
-        let past = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        s.last_output_at = past;
-        s.last_status_line_at = Some(past);
-
-        assert_eq!(
-            s.check_silence(),
-            Some("Procedo?".to_string()),
-            "question must be detectable after mode-line-only ticks"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_regular_chunk_resets_silence() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // Backdate to simulate 10s silence
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Regular (non-status-line) chunk resets the timer
-        s.on_chunk(false, None, false, false, false);
-        // Now we need to wait another 10s — should NOT fire yet
-        assert_eq!(
-            s.check_silence(),
-            None,
-            "regular chunk should reset silence timer"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_suggest_only_does_not_stale_question() {
-        // A suggest-only chunk (protocol token, not real output) must not
-        // increment output_chunks_after_question or reset the silence timer.
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // 15 suggest-only chunks — should NOT stale the pending question
-        for _ in 0..15 {
-            s.on_chunk(false, None, false, false, true);
-        }
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_silence(),
-            Some("Continue?".to_string()),
-            "suggest-only chunks must not count toward question staleness"
-        );
-    }
-
-    // --- is_chrome_row / chrome_only classification tests ---
-
-    #[test]
-    fn test_chrome_only_empty_changed_rows_is_chrome() {
-        // Empty changed_rows means the chunk produced no visible change
-        // (cursor blink, OSC title update, mouse report). It must count as
-        // chrome-only so periodic re-emits don't latch the shell to busy.
-        let rows: Vec<ChangedRow> = vec![];
-        assert!(
-            compute_chrome_only(&rows, false, false, false),
-            "empty changed_rows should be chrome_only (no real output)"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_plain_text_is_not_chrome() {
-        let rows = make_rows(&["I will edit the file for you."]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(
-            !chrome_only,
-            "plain text without chrome markers is not chrome"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_statusline_with_text_rows_is_not_chrome() {
-        let rows = make_rows(&[
-            "\u{23F5}\u{23F5} auto mode",
-            "Here is the code change:",
-            "  fn main() {",
-            "    println!(\"hello\");",
-        ]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(!chrome_only, "mode-line + text rows should not be chrome");
-    }
-
-    #[test]
-    fn test_chrome_only_single_statusline_row_is_chrome() {
-        let rows = make_rows(&["\u{23F5}\u{23F5} auto mode"]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(chrome_only, "single mode-line row should be chrome");
-    }
-
-    #[test]
-    fn test_chrome_only_wrapped_statusline_is_chrome() {
-        let rows = make_rows(&[
-            "\u{23F5}\u{23F5} bypass permissions on",
-            "\u{273B} Cogitated 3m 47s",
-        ]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(chrome_only, "wrapped mode-line rows should all be chrome");
-    }
-
-    #[test]
-    fn test_chrome_only_subtasks_row_is_chrome() {
-        let rows = make_rows(&["\u{203A}\u{203A} bypass permissions on \u{00B7} 1 local agent"]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(chrome_only, "subtask mode-line row should be chrome");
-    }
-
-    #[test]
-    fn test_chrome_only_codex_spinner_is_chrome() {
-        let rows = make_rows(&["\u{2022} Boot"]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(chrome_only, "Codex spinner row should be chrome");
-    }
-
-    #[test]
-    fn test_chrome_only_gemini_braille_spinner_is_chrome() {
-        // Gemini braille spinner chars (U+2800-28FF) are now in is_chrome_row
-        let rows = make_rows(&["\u{280B} Connecting to MCP servers..."]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(chrome_only, "Gemini braille spinner should be chrome");
-    }
-
-    #[test]
-    fn test_chrome_only_tool_progress_spinner_is_chrome() {
-        let rows = make_rows(&["\u{25D0} Bash: .../b... | \u{2713} Bash \u{00D7}9"]);
-        let chrome_only = !rows.is_empty() && rows.iter().all(|r| is_chrome_row(&r.text));
-        assert!(chrome_only, "CC tool progress spinner should be chrome");
-        assert!(
-            crate::chrome::is_spinner_row(&rows[0].text),
-            "CC tool progress spinner should be detected as spinner (keepalive)"
-        );
-    }
-
-    // --- chrome_only full formula tests (mirrors process_chunk logic) ---
-
-    /// Helper: compute chrome_only using the same formula as process_chunk.
-    fn compute_chrome_only(
-        rows: &[ChangedRow],
-        has_status_line: bool,
-        regex_found_question: bool,
-        last_q_line: bool,
-    ) -> bool {
-        let all_chrome_markers = rows.iter().all(|r| is_chrome_row(&r.text));
-        let no_real_output = rows.iter().all(|r| {
-            is_chrome_row(&r.text)
-                || r.text.trim().is_empty()
-                || crate::chrome::is_separator_line(&r.text)
-                || crate::chrome::is_prompt_line(&r.text)
-        });
-        !regex_found_question
-            && !last_q_line
-            && (rows.is_empty() || all_chrome_markers || (has_status_line && no_real_output))
-    }
-
-    #[test]
-    fn test_chrome_only_formula_timer_tick_only() {
-        // CC timer tick: only the timer row changed
-        let rows = make_rows(&["\u{273B} Cogitated 3m 47s"]);
-        assert!(
-            compute_chrome_only(&rows, true, false, false),
-            "timer-only tick should be chrome_only"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_formula_timer_plus_separator() {
-        // CC timer tick + separator repaint (ESC[2J full redraw)
-        let rows = make_rows(&[
-            "────────────────────────────────────",
-            "\u{273B} Cogitated 3m 48s",
-        ]);
-        assert!(
-            compute_chrome_only(&rows, true, false, false),
-            "timer + separator should be chrome_only"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_formula_timer_plus_prompt_and_separator() {
-        // CC timer tick + prompt + separator (full bottom chrome zone)
-        let rows = make_rows(&[
-            "────────────────────────────────────",
-            "❯",
-            "────────────────────────────────────",
-            "\u{23F5}\u{23F5} auto mode",
-            "\u{273B} Cogitated 3m 48s",
-        ]);
-        assert!(
-            compute_chrome_only(&rows, true, false, false),
-            "timer + prompt + separator + mode-line should be chrome_only"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_formula_timer_plus_blank_rows() {
-        // CC timer tick with blank rows (padding in TUI)
-        let rows = make_rows(&["", "\u{273B} Cogitated 3m 48s", ""]);
-        assert!(
-            compute_chrome_only(&rows, true, false, false),
-            "timer + blank rows should be chrome_only"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_formula_real_output_not_chrome() {
-        // Real agent output mixed with status line
-        let rows = make_rows(&["I will edit the file for you.", "\u{273B} Cogitated 3m 48s"]);
-        assert!(
-            !compute_chrome_only(&rows, true, false, false),
-            "real text + timer should NOT be chrome_only"
-        );
-    }
-
-    #[test]
-    fn test_chrome_only_formula_question_line_not_chrome() {
-        // Even if all chrome, a pending question line disables chrome_only
-        let rows = make_rows(&["\u{273B} Cogitated 3m 48s"]);
-        assert!(
-            !compute_chrome_only(&rows, true, false, true),
-            "chrome with pending question should NOT be chrome_only"
-        );
-    }
-
-    // --- Spinner → busy gate tests (mirrors process_chunk transition logic) ---
-
-    /// The busy transition gate `(!chrome_only || has_spinner)` must be true
-    /// when changed_rows contain an active spinner, even when chrome_only is true.
-    #[test]
-    fn test_spinner_only_chunk_can_trigger_busy() {
-        let rows = make_rows(&["\u{2022} Working (1m 31s \u{2022} esc to interrupt)"]);
-        let chrome_only = compute_chrome_only(&rows, false, false, false);
-        let has_spinner =
-            chrome_only && rows.iter().any(|r| crate::chrome::is_spinner_row(&r.text));
-        assert!(chrome_only, "Codex spinner is chrome_only");
-        assert!(has_spinner, "Codex spinner is detected as spinner");
-        assert!(
-            !chrome_only || has_spinner,
-            "spinner-only chunk must pass the busy transition gate"
-        );
-    }
-
-    #[test]
-    fn test_static_chrome_cannot_trigger_busy() {
-        let rows = make_rows(&["\u{23F5}\u{23F5} auto mode"]);
-        let chrome_only = compute_chrome_only(&rows, false, false, false);
-        let has_spinner =
-            chrome_only && rows.iter().any(|r| crate::chrome::is_spinner_row(&r.text));
-        assert!(chrome_only, "mode-line is chrome_only");
-        assert!(!has_spinner, "mode-line is NOT a spinner");
-        assert!(
-            chrome_only && !has_spinner,
-            "static chrome must NOT pass the busy transition gate"
-        );
-    }
-
-    /// Build ChangedRows for a subset of a full screen, mirroring how the VT
-    /// reader reports only the rows a chunk actually repainted (`row_index`
-    /// preserved against the full screen).
-    fn changed_at(screen: &[&str], indices: &[usize]) -> Vec<ChangedRow> {
-        indices
-            .iter()
-            .map(|&i| ChangedRow {
-                row_index: i,
-                text: screen[i].to_string(),
-            })
-            .collect()
-    }
-
-    /// Mirror process_chunk's chrome-cutoff filter (pty.rs ~1996): drop changed
-    /// rows at or below the footer cutoff, keeping only the content zone.
-    fn filter_below_cutoff(screen: &[&str], changed: Vec<ChangedRow>) -> Vec<ChangedRow> {
-        if changed.is_empty() {
-            return changed;
-        }
-        match crate::chrome::find_chrome_cutoff(screen) {
-            Some(cutoff) => changed
-                .into_iter()
-                .filter(|r| r.row_index < cutoff)
-                .collect(),
-            None => changed,
-        }
-    }
-
-    /// Regression for the false-busy "flap" (root cause + agnostic fix,
-    /// 2026-06-17). Claude Code repaints its whole input area periodically.
-    /// Positionally, EVERYTHING below the second separator of the input box is
-    /// chrome — status bar, mode line, usage gauge — regardless of its glyphs.
-    /// The user's custom HUD renders a context gauge (`█░`) and a mode line
-    /// (`·`) there; `is_spinner_row` reads those glyphs as a live spinner.
-    ///
-    /// The fix is positional, not glyph-based: spinner keepalive runs on the
-    /// SAME post-cutoff `changed_rows` as everything else. A repaint that only
-    /// touches footer rows below the cutoff yields an EMPTY post-filter set →
-    /// chrome_only with no spinner → no busy transition. Agnostic to whatever
-    /// the user puts in their status bar. These are the exact rows captured
-    /// from the live flapping instance.
-    #[test]
-    fn test_statusbar_repaint_below_cutoff_does_not_flap_busy() {
-        let sep = "────────────────────────────────────────────────────────────────────────";
-        let screen: Vec<&str> = vec![
-            "Here is the answer to your question.",
-            "",
-            sep,
-            "❯",
-            sep,
-            "[Opus 4.8 (1M) | Team] █░░░░░░░░░ 6% | gh-metrics git:(master)",
-            "5h: 21% (50m) | 7d: 23% | $31.00 | 📅 $199.70 | 13h",
-            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
-        ];
-        // The periodic repaint re-emits only the footer rows (indices 5-7).
-        let changed = changed_at(&screen, &[5, 6, 7]);
-        let filtered = filter_below_cutoff(&screen, changed);
-        assert!(
-            filtered.is_empty(),
-            "all-footer repaint must yield an empty post-cutoff set"
-        );
-        let chrome_only = compute_chrome_only(&filtered, true, false, false);
-        let has_spinner = chrome_only
-            && filtered
-                .iter()
-                .any(|r| crate::chrome::is_spinner_row(&r.text));
-        assert!(chrome_only, "empty post-cutoff set is chrome_only");
-        assert!(
-            chrome_only && !has_spinner,
-            "statusbar repaint must NOT pass the busy transition gate (no flap)"
-        );
-    }
-
-    /// Companion to the flap regression: a REAL working spinner renders ABOVE
-    /// the input separator (in the content zone), so it survives the chrome
-    /// cutoff and the post-filter spinner check fires — keeping the agent alive.
-    /// Otherwise the agent false-idles mid-think (the dangerous direction the
-    /// single-path design prevents). This is what makes the positional fix safe:
-    /// no supported agent renders a genuine working spinner below the separator.
-    #[test]
-    fn test_content_zone_spinner_still_keeps_alive() {
-        let cc_sep = "────────────────────────────────────────────────────────────────────────";
-        let gem_sep =
-            "─────────────────────────────────────────────────────────────────────────────────";
-        let gem_top =
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀";
-        let gem_bot =
-            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▀▀";
-        // (full screen, index of the working spinner row). Spinner is ABOVE the
-        // input separator in every case — verified against the cutoff tests.
-        let cases: Vec<(Vec<&str>, usize)> = vec![
-            // Claude Code: dingbat thinking spinner in the transcript zone.
-            (
-                vec![
-                    "✻ Cogitating… (3m 47s · ↓ 2.2k tokens)",
-                    "",
-                    cc_sep,
-                    "❯",
-                    cc_sep,
-                    "[Opus 4.8 (1M) | Team] █░░░░░░░░░ 6% | gh-metrics git:(master)",
-                ],
-                0,
-            ),
-            // Gemini CLI: braille spinner above the separator (live layout).
-            (
-                vec![
-                    "✦ I will read the package.json file.",
-                    " ⠴ Check tool-specific usage stats… (esc to cancel, 14s)",
-                    gem_sep,
-                    " Shift+Tab to accept edits",
-                    gem_top,
-                    " >   Type your message or @path/to/file",
-                    gem_bot,
-                    " workspace (/directory)          branch          sandbox",
-                ],
-                1,
-            ),
-        ];
-        for (screen, spinner_idx) in &cases {
-            let changed = changed_at(screen, &[*spinner_idx]);
-            let filtered = filter_below_cutoff(screen, changed);
-            assert!(
-                filtered.iter().any(|r| r.row_index == *spinner_idx),
-                "content-zone spinner at row {spinner_idx} must survive the cutoff: {:?}",
-                screen[*spinner_idx]
-            );
-            let chrome_only = compute_chrome_only(&filtered, false, false, false);
-            let has_spinner = chrome_only
-                && filtered
-                    .iter()
-                    .any(|r| crate::chrome::is_spinner_row(&r.text));
-            assert!(
-                !chrome_only || has_spinner,
-                "content-zone spinner {:?} must pass the busy transition gate",
-                screen[*spinner_idx]
-            );
-        }
-    }
-
-    /// Aider during generation has NO bottom input box (prompt_toolkit has
-    /// returned), so `find_chrome_cutoff` finds no separator/prompt and returns
-    /// None → nothing is filtered → the Knight Rider spinner survives and keeps
-    /// the agent alive. This is why the positional fix does not false-idle Aider
-    /// even though its spinner is a bare block run.
-    #[test]
-    fn test_aider_generation_spinner_keeps_alive() {
-        let screen: Vec<&str> = vec![
-            "Applied edit to src/main.rs",
-            "█░  Waiting for openrouter/anthropic/claude-sonnet-4.5",
-        ];
-        assert_eq!(
-            crate::chrome::find_chrome_cutoff(&screen),
-            None,
-            "Aider generation view has no input box → no cutoff"
-        );
-        let changed = changed_at(&screen, &[1]);
-        let filtered = filter_below_cutoff(&screen, changed);
-        assert!(
-            filtered.iter().any(|r| r.row_index == 1),
-            "Knight Rider spinner must survive (no cutoff to drop it)"
-        );
-        let chrome_only = !filtered.is_empty() && filtered.iter().all(|r| is_chrome_row(&r.text));
-        // Aider's Knight Rider bar leads its row, so the structural is_spinner_row
-        // matches it (#446-596f).
-        let has_spinner = chrome_only
-            && filtered
-                .iter()
-                .any(|r| crate::chrome::is_spinner_row(&r.text));
-        assert!(
-            !chrome_only || has_spinner,
-            "Aider Knight Rider spinner must pass the busy transition gate"
-        );
-    }
-
-    // --- Presence-driven working-status keepalive (Codex frozen-TUI false-idle) ---
-
-    /// Codex freezes its TUI during a child subprocess (long `cargo`/`git`): the
-    /// grid stops changing for minutes, so the change-driven spinner keepalive
-    /// cannot refresh `last_output_ms` and the idle timer would falsely flip
-    /// idle. The presence guard must still see the `• Working (… esc to
-    /// interrupt)` line in the content zone and hold the agent busy.
-    #[test]
-    fn test_codex_frozen_working_line_holds_busy() {
-        // Real layout (mirrors the live capture): the working line sits directly
-        // above the `›` input prompt, with the model footer below it.
-        let screen: Vec<String> = vec![
-            "• Ran cargo test -p agent2-transport --locked".into(),
-            "  └     Blocking waiting for file lock on package cache".into(),
-            "    … +30 lines (ctrl + t to view transcript)".into(),
-            "• Working (14m 56s • esc to interrupt)".into(),
-            "› Improve documentation in @filename".into(),
-            "  gpt-5.5 high · ~/Gits/LS/agent2".into(),
-        ];
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Working,
-            "a frozen Codex working line above the prompt must keep the agent busy"
-        );
-    }
-
-    /// When Codex finishes a turn the working line is gone (only the ready
-    /// prompt remains) → the presence guard must NOT hold busy, so the idle
-    /// timer is free to transition busy→idle normally.
-    #[test]
-    fn test_codex_ready_prompt_allows_idle() {
-        let screen: Vec<String> = vec![
-            "• Done. Added deny.toml and updated Cargo.toml.".into(),
-            "› Improve documentation in @filename".into(),
-            "  gpt-5.5 high · ~/Gits/LS/agent2".into(),
-        ];
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Ready,
-            "a ready prompt with no working line must allow the idle transition"
-        );
-    }
-
-    /// Regression: Codex separators divide tool output from the answer; they are
-    /// not prompt-box chrome. The old presence helper applied find_chrome_cutoff,
-    /// chose this separator over the later prompt, and discarded Working.
-    #[test]
-    fn test_codex_working_after_tool_separator_is_detected() {
-        let screen: Vec<String> = vec![
-            "• Ran cargo test --workspace".into(),
-            "────────────────────────────────────────────────────────".into(),
-            "• I am checking the remaining failures.".into(),
-            "• Working (2m 55s • esc to interrupt)".into(),
-            "› Add tests for the activity detector".into(),
-            "  gpt-5.5 high · ~/repo".into(),
-        ];
-        let refs: Vec<&str> = screen.iter().map(String::as_str).collect();
-        assert_eq!(
-            crate::chrome::find_chrome_cutoff(&refs),
-            Some(1),
-            "fixture must reproduce the misleading generic cutoff"
-        );
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// Regression (live capture, session "Native Closure"): while a background
-    /// terminal runs Codex swaps the status verb to `Waiting for background
-    /// terminal`. The turn is still interruptible, but the verb-keyed presence
-    /// check read Ready and the session showed a green idle dot for minutes.
-    #[test]
-    fn test_codex_background_terminal_wait_holds_busy() {
-        let screen: Vec<String> = vec![
-            "• Il secondo pre-push ha già superato nuovamente check, Clippy e audit root/plugin.".into(),
-            String::new(),
-            "• Waiting for background terminal (41s • esc to interrupt) · 1 background terminal running · /ps to view · …".into(),
-            "  └ rtk git fetch origin POC-00002-BLADES-REFINEMENT && rtk git rev-parse origin/POC-00002…".into(),
-            String::new(),
-            String::new(),
-            "› Use /skills to list available skills".into(),
-            "  gpt-5.6-sol medium · ~/Gits/CC_Playground/itview · master · Context 67% left".into(),
-        ];
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Working,
-            "a running background terminal must keep the Codex session busy"
-        );
-    }
-
-    /// Live 2026-07-28 regression: while a background command is running Codex
-    /// v0.145 renders the current composer with `»`, while submitted transcript
-    /// prompts still use `›`. Looking only for `›` selected the historical row,
-    /// missed the later Working marker, and flipped the session idle every few
-    /// seconds until the next user submission.
-    #[test]
-    fn test_codex_guillemet_composer_finds_later_working_status() {
-        let screen = fixture_rows(include_str!(
-            "../../tests/terminal-stress/fixtures/codex-background-working.txt"
-        ));
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Working,
-            "the lowest current composer must anchor the working neighborhood"
-        );
-    }
-
-    /// Live 2026-07-29 regression: Codex may begin an internal continuation
-    /// after the previous task emitted `suggest:`. Its persistent goal HUD still
-    /// says `Goal achieved`, but the interruptible Working row is authoritative.
-    #[test]
-    fn test_codex_goal_achieved_hud_does_not_hide_current_working_status() {
-        let screen = fixture_rows(include_str!(
-            "../../tests/terminal-stress/fixtures/codex-completed-internal-working.txt"
-        ));
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Working
-        );
-    }
-
-    #[test]
-    fn test_codex_historical_working_far_from_prompt_does_not_latch_busy() {
-        let mut screen = vec!["• Working (1m • esc to interrupt)".to_string()];
-        screen.extend((0..8).map(|n| format!("old transcript row {n}")));
-        screen.push("› Ready for the next request".into());
-        screen.push("  gpt-5.5 high · ~/repo".into());
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Ready
-        );
-    }
-
-    #[test]
-    fn historical_codex_prompt_outside_current_chrome_is_not_ready() {
-        let mut screen = vec!["› an old submitted request".to_string()];
-        screen.extend((0..8).map(|n| format!("current output row {n}")));
-
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Unknown
-        );
-    }
-
-    #[test]
-    fn codex_draft_prompt_above_tall_hud_is_current_chrome() {
-        let mut screen = vec![
-            "current output".to_string(),
-            "─".repeat(80),
-            "› Run /review on my current changes".to_string(),
-            "─".repeat(80),
-        ];
-        screen.extend((0..30).map(|n| format!("custom HUD row {n}")));
-
-        assert_eq!(
-            detect_codex_screen_activity(&screen),
-            AgentScreenActivity::Ready
-        );
-    }
-
-    #[test]
-    fn gemini_markdown_quote_in_history_is_not_a_ready_prompt() {
-        let mut screen = vec!["> quoted user prose".to_string()];
-        screen.extend((0..8).map(|n| format!("current output row {n}")));
-
-        assert_eq!(
-            detect_gemini_screen_activity(&screen),
-            AgentScreenActivity::Unknown
-        );
-    }
-
-    #[test]
-    fn gemini_prompt_above_tall_hud_is_current_chrome() {
-        let mut screen = vec![
-            "current output".to_string(),
-            "─".repeat(80),
-            "> Type your message".to_string(),
-            "─".repeat(80),
-        ];
-        screen.extend((0..30).map(|n| format!("custom HUD row {n}")));
-
-        assert_eq!(
-            detect_gemini_screen_activity(&screen),
-            AgentScreenActivity::Ready
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // Stuck-busy battery (#446-596f).
-    //
-    // Symptom history: sessions pinned BUSY forever by STATIC glyphs the screen
-    // classifier read as a live spinner — a completed-turn summary (`✻ Sautéed
-    // for 1m 25s`), a `· run /mcp` hint, a wiz HUD `░░` bar. Each glyph fix
-    // regressed differently (a hash-based liveness gate blocked re-latching but
-    // never demoted the Working classification, so the idle path stayed
-    // unreachable).
-    //
-    // Definitive design: "if the text above the input area moves, the agent is
-    // active — period." BUSY is latched/kept ONLY by movement (post-cutoff
-    // `changed_rows` are text-equality diffed, so a frozen glyph produces no
-    // ChangedRow and is inert by construction), by user submission, and by
-    // hooks. The Claude/Gemini/Aider screen classifiers are PROMPT-based only
-    // (Ready/Unknown, never Working), so a static glyph can never mask the
-    // ready prompt or hold the idle path hostage. Codex is the one deliberate
-    // exception: its presence-based `• Working (… esc to interrupt)` line holds
-    // BUSY while its TUI legitimately freezes during a child process — accepted
-    // policy: for Codex we prefer false-BUSY over false-IDLE.
-    // ---------------------------------------------------------------------
-
-    /// A representative Claude idle screen: assistant output, a summary/spinner
-    /// line, a blank gap, then the input prompt.
-    fn claude_screen_with(mid_line: &str) -> Vec<String> {
-        vec![
-            "⏺ Fixed the bug and ran the tests — all green.".into(),
-            String::new(),
-            "  Searched for 1 pattern, read 1 file (ctrl+o to expand)".into(),
-            String::new(),
-            mid_line.into(),
-            String::new(),
-            "❯ ".into(),
-            String::new(),
-        ]
-    }
-
-    /// Completed summaries and inert decoration above an empty composer remain
-    /// Ready. Active phase names are covered separately because current Claude
-    /// versions can leave the composer visible during long tool calls.
-    #[test]
-    fn claude_completed_decorations_remain_ready() {
-        for mid in [
-            "✻ Sautéed for 1m 25s", // completed-turn summary
-            "✳ Ideated for 2m 9s · 1 local agent still running",
-            "· Proofed for 1m 14s (↓ 1.6k tokens)",
-            "✽ Sautéed for 12s",
-        ] {
-            let screen = claude_screen_with(mid);
-            assert_eq!(
-                detect_claude_screen_activity(&screen),
-                AgentScreenActivity::Ready,
-                "{mid:?}: a visible empty ❯ composer is Ready — no glyph can mask it"
-            );
-        }
-    }
-
-    /// Live capture from session "DB corruption": Claude kept the empty `❯`
-    /// composer on screen throughout a long tool call. The active phase marker
-    /// must outrank that composer even if load/coalescing freezes its text.
-    #[test]
-    fn claude_active_phase_with_visible_composer_holds_busy() {
-        let screen = fixture_rows(include_str!(
-            "../../tests/terminal-stress/fixtures/claude-blocking-stop-hook.txt"
-        ));
-        assert_eq!(
-            detect_claude_screen_activity(&screen),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// A semantic active phase is Working with or without a visible composer.
-    /// This presence fallback is required when repaint movement freezes while a
-    /// long child or blocking hook still owns the turn.
-    #[test]
-    fn claude_active_phase_without_prompt_holds_busy() {
-        let screen: Vec<String> = vec![
-            "⏺ Editing src/main.rs…".into(),
-            String::new(),
-            "✻ Sautéing… (12s · esc to interrupt)".into(),
-            String::new(),
-        ];
-        assert_eq!(
-            detect_claude_screen_activity(&screen),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// Live 2026-07-19 regression: Claude echoes the submitted argv prompt as a
-    /// `❯ task` transcript row. While the turn is still running that historical
-    /// row can remain inside the bottom scan window beside an animated spinner;
-    /// it is not the empty composer and must never confirm idle.
-    #[test]
-    fn claude_submitted_prompt_row_is_not_a_ready_composer() {
-        for prompt in [
-            "❯ Read-only review the Windows native smoke scope",
-            "  ❯ draft text not yet submitted",
-        ] {
-            let screen = vec![
-                prompt.to_string(),
-                "⏺ Reading 1 file…".into(),
-                "✻ Boogieing…".into(),
-            ];
-            assert_eq!(
-                detect_claude_screen_activity(&screen),
-                AgentScreenActivity::Unknown,
-                "only Claude's empty composer is Ready: {prompt:?}"
-            );
-        }
-    }
-
-    /// THE core invariant of the movement design: a byte-identical repaint of a
-    /// frozen "spinner" line produces NO ChangedRow (text-equality diff in
-    /// `TerminalGrid::process`), so it can never pass the reader's busy gate —
-    /// while a genuinely animating frame always does.
-    #[test]
-    fn frozen_summary_repaint_produces_no_movement() {
-        let mut grid = crate::terminal_grid::TerminalGrid::new(24, 80, 1000);
-        let frame = "\x1b[H\x1b[2K\u{273B} Saut\u{00E9}ed for 1m 25s";
-        let first = grid.process(frame.as_bytes());
-        assert!(
-            first.iter().any(|r| crate::chrome::is_spinner_row(&r.text)),
-            "first paint of the line IS movement"
-        );
-        let repaint = grid.process(frame.as_bytes());
-        assert!(
-            repaint.is_empty(),
-            "byte-identical repaint must produce no ChangedRow → no busy evidence"
-        );
-        let animated =
-            grid.process("\x1b[H\x1b[2K\u{273B} Saut\u{00E9}ing\u{2026} (13s)".as_bytes());
-        assert!(
-            animated
-                .iter()
-                .any(|r| crate::chrome::is_spinner_row(&r.text)),
-            "an animating spinner frame IS movement and keeps/latches BUSY"
-        );
-    }
-
-    /// A real captured Claude idle screen: the `▐▛███▜▌` welcome banner (█ art),
-    /// the empty `❯` input box framed by separators, and a wiz status-line HUD
-    /// whose progress bar is a run of `░`/`█` block glyphs. Nothing here is an
-    /// animated spinner — the turn is over and Claude waits for input.
-    fn claude_idle_with_banner_and_hud() -> Vec<String> {
-        vec![
-            "╭─── Claude Code v2.1.202 ──────────────────────────────╮".into(),
-            "│                   ▐▛███▜▌                   │ What's new".into(),
-            "│                  ▝▜█████▛▘                  │ Forked subagents".into(),
-            "│      Opus 4.8 (1M context) · Claude Team    │           ".into(),
-            "╰───────────────────────────────────────────────────────╯".into(),
-            String::new(),
-            " ⚠ 2 MCP servers need authentication · run /mcp".into(),
-            String::new(),
-            "───────────────────────────────────────────────────────────".into(),
-            "❯ ".into(),
-            "───────────────────────────────────────────────────────────".into(),
-            "  [Opus 4.8 (1M) | Team] ░░░░░░░░░░ 0% | cerebro | [C1 S33]".into(),
-            "  5h: 52% (52m) | 7d: 18% (22h) | $0 | 📅 $124.01 | 13m".into(),
-            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents".into(),
-        ]
-    }
-
-    /// #446-596f regression: block-glyph art (the welcome banner) and a status-
-    /// line HUD progress bar (`░░░░`) are NOT Claude's animated spinner. Claude's
-    /// spinner is dingbats (✻ ✳ ✶) / middle-dot `·`; solid blocks appear only in
-    /// static art. Before the fix, `is_spinner_row` matched `█`/`░`, so an idle
-    /// Claude prompt read Working and the session never returned to idle.
-    #[test]
-    fn claude_idle_with_wiz_hud_is_ready_not_working() {
-        let screen = claude_idle_with_banner_and_hud();
-        assert_eq!(
-            detect_claude_screen_activity(&screen),
-            AgentScreenActivity::Ready,
-            "an idle Claude prompt under banner art, a `· run /mcp` hint and a \
-             live wiz HUD is Ready, not Working"
-        );
-    }
-
-    /// The wiz HUD ticks every second (elapsed timer, token counts), so the old
-    /// frozen-signature liveness gate could not save us — the bar is genuinely
-    /// changing. The only robust cut is that block glyphs are not a spinner.
-    #[test]
-    fn wiz_hud_progress_bar_is_not_a_claude_spinner() {
-        let hud = "  [Opus 4.8 (1M) | Team] ██░░░░░░░░ 17% | cerebro".to_string();
-        assert!(
-            !crate::chrome::is_spinner_row(&hud),
-            "a status-line progress bar is not an animated spinner"
-        );
-    }
-
-    /// Guardrail: the fix must NOT break Aider, whose real "Knight Rider" spinner
-    /// IS a run of block glyphs that LEADS its row, so the structural
-    /// `is_spinner_row` still matches it — its movement latches/keeps BUSY via
-    /// the reader gate. Classification stays prompt-based: mid-generation Aider
-    /// has no input box, so the screen is Unknown (never a false Ready).
-    #[test]
-    fn aider_knight_rider_block_spinner_still_movement_evidence() {
-        assert!(
-            crate::chrome::is_spinner_row("░░░█░░░░░░"),
-            "Aider's Knight Rider block spinner leads the row → still a spinner"
-        );
-        let generating: Vec<String> =
-            vec!["Applied edit to src/main.rs".into(), "░░░█░░░░░░".into()];
-        assert_eq!(
-            detect_aider_screen_activity(&generating),
-            AgentScreenActivity::Unknown,
-            "no input box during generation → Unknown, BUSY held by movement"
-        );
-    }
-
-    #[test]
-    fn codex_working_is_presence_based_by_policy() {
-        // Codex Working comes from the "esc to interrupt" status line presence,
-        // NOT from movement: its TUI legitimately freezes for minutes while a
-        // child process (cargo, git) runs. Accepted policy: prefer false-BUSY
-        // over false-IDLE for Codex.
-        let working = vec![
-            "• Ran cargo test --workspace".to_string(),
-            "• Working (2m 55s • esc to interrupt)".into(),
-            "› Add tests".into(),
-            "  gpt-5.6 high · ~/repo".into(),
-        ];
-        assert_eq!(
-            detect_codex_screen_activity(&working),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// Codex v0.146.0 grew its status row from `<model> <effort> · <N>% left · <dir>` to
-    /// `<model> <effort> · <dir> · <branch> · Context <N>% left · <N>K window`. The adapter
-    /// must stay blind to that row: it anchors on the `›` prompt plus the interrupt hint,
-    /// both branch- and gauge-independent. Rows transcribed from a live v0.146.0 session
-    /// captured 2026-08-02.
-    #[test]
-    fn test_codex_v0_146_status_row_with_git_branch_does_not_change_detection() {
-        const STATUS_ROW: &str = "  gpt-5.6-luna xhigh \u{00B7} ~/Gits/personal/tuicommander \u{00B7} main \u{00B7} Context 96% left \u{00B7} 247K window";
-
-        let working = vec![
-            "\u{203A} Run this shell command with your tool: sleep 25 && echo hello".to_string(),
-            "\u{2022} Boss, eseguo il comando richiesto.".to_string(),
-            "\u{2022} Working (3s \u{2022} esc to interrupt) \u{00B7} 1 background terminal running \u{00B7} /ps to view".to_string(),
-            "\u{203A} Explain this codebase".to_string(),
-            STATUS_ROW.to_string(),
-        ];
-        assert_eq!(
-            detect_codex_screen_activity(&working),
-            AgentScreenActivity::Working
-        );
-
-        // Finished turn: separators and `• Output:` sit in the prompt neighborhood, and the
-        // status row still carries the branch. Nothing there is an interrupt hint.
-        let finished = vec![
-            "\u{2022} Ran sleep 25 && echo hello".to_string(),
-            "  \u{2514} hello".to_string(),
-            "\u{2500}".repeat(120),
-            "\u{2022} Output:".to_string(),
-            "  hello".to_string(),
-            "\u{2500}".repeat(120),
-            "\u{203A} Explain this codebase".to_string(),
-            STATUS_ROW.to_string(),
-        ];
-        assert_eq!(
-            detect_codex_screen_activity(&finished),
-            AgentScreenActivity::Ready
-        );
-
-        // The branch field itself must never be mistaken for chrome that holds BUSY.
-        assert!(!crate::chrome::is_working_status_row(STATUS_ROW));
-    }
-
-    #[test]
-    fn test_agent_ready_requires_stable_observation() {
-        let mut silence = SilenceState::new();
-        assert!(!silence.note_ready_screen());
-        assert!(!silence.idle_confirmed);
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(silence.note_ready_screen());
-        assert!(silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_grok_ready_composer_recovers_long_lived_shell_busy() {
-        let rows = vec![
-            "Finished the response.".to_string(),
-            "❯ Ask anything".to_string(),
-            "⌘ Grok 4.3 OpenRouter · Medium effort".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("grok"), &rows),
-            AgentScreenActivity::Ready
-        );
-
-        let mut silence = SilenceState::new();
-        // OSC 133 marks the long-lived `grok` shell command busy. Without a
-        // Grok ready-screen adapter this bit survived for the whole process.
-        silence.note_explicit_state(SHELL_BUSY, false);
-        silence.note_real_activity();
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(silence.note_ready_screen());
-        assert!(!silence.explicit_busy);
-        assert!(silence.idle_confirmed);
-    }
-
-    /// Captured live from grok 0.2.114: the composer moved inside a rounded box, so the old
-    /// bare-`❯` match never fired and the tab stayed BUSY minutes after the turn finished.
-    #[test]
-    fn test_grok_boxed_composer_is_ready_and_spinner_still_wins() {
-        let finished = vec![
-            "     ❯ List the numbers 1 to 60, one per line.                    5:42 PM".to_string(),
-            "     1 2 3 4 5 6 7 8 9 10                                                ".to_string(),
-            "     Worked for 2.6s                                   stop  [hooks: 1]  ".to_string(),
-            "  ╭────────────────────────────────────────────────────────────────────╮".to_string(),
-            "  │ ❯                                                                  │".to_string(),
-            "  ╰─────────────────────────────── Grok 4.5 (high) · always-approve ───╯".to_string(),
-            "  Shift+Tab:mode  │  Ctrl+.:shortcuts".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("grok"), &finished),
-            AgentScreenActivity::Ready
-        );
-
-        // Mid-turn grok keeps the same composer box on screen, so the spinner must outrank it.
-        let mut running = finished.clone();
-        running.insert(
-            2,
-            "    ⠋ Waiting for response… 1.1s                     1.1s ⇣6.98k [stop]".to_string(),
-        );
-        assert_eq!(
-            detect_agent_screen_activity(Some("grok"), &running),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// Captured live from pi 0.83.0. pi's composer is a bare reverse-video cursor block with
-    /// no prompt glyph, so readiness rests on the status row plus the absence of a spinner.
-    #[test]
-    fn test_pi_finished_turn_is_ready_and_working_row_wins() {
-        let separator = "─".repeat(100);
-        let finished = vec![
-            " Count from 1 to 40, one number per line, no tools, no commentary.".to_string(),
-            " 1".to_string(),
-            " 2".to_string(),
-            separator.clone(),
-            "                                                                  ".to_string(),
-            separator.clone(),
-            "~/Gits/personal/tuicommander (main)".to_string(),
-            "↑1.3k ↓1.8k R15k W6.0k CH88.5% $0.104 3.4%/272k (auto)      (openai) gpt-5.6-sol • medium".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("pi"), &finished),
-            AgentScreenActivity::Ready
-        );
-
-        // Mid-turn pi keeps the same separators and status row; only the composer row swaps.
-        let mut running = finished.clone();
-        running[4] = " ⠏ Working...".to_string();
-        assert_eq!(
-            detect_agent_screen_activity(Some("pi"), &running),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// A pi screen must be identified by its own status row, not by any bottom row: without
-    /// this the adapter would report Ready for whatever happens to be on screen after pi exits.
-    #[test]
-    fn test_pi_screen_without_status_row_is_unknown() {
-        let rows = vec![
-            "$ ls".to_string(),
-            "README.md  src".to_string(),
-            "$ ".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("pi"), &rows),
-            AgentScreenActivity::Unknown
-        );
-    }
-
-    #[test]
-    fn test_pi_status_row_needs_the_context_gauge_and_model_separator() {
-        assert!(is_pi_status_row(
-            "0.0%/272k (auto)                          (openai) gpt-5.6-sol • medium"
-        ));
-        // Prose carrying a bullet but no context gauge is not chrome.
-        assert!(!is_pi_status_row("read the file • then summarise it"));
-        // A percentage that is not the context gauge must not qualify.
-        assert!(!is_pi_status_row("coverage 88.5% • done"));
-        assert!(!is_pi_status_row(""));
-    }
-
-    #[test]
-    fn test_pi_is_recognised_as_an_agent() {
-        assert_eq!(classify_agent("pi"), Some("pi"));
-        assert!(has_ready_screen_adapter(Some("pi")));
-    }
-
-    /// Rows below are transcribed from live opencode v1.18.5 screens captured on
-    /// 2026-08-02 in this repo (welcome, mid-turn, and finished-turn). The frame glyphs
-    /// were confirmed against a `script(1)` byte log: `┃` U+2503, `╹` U+2579, `▀` U+2580.
-    fn opencode_finished_screen() -> Vec<String> {
-        vec![
-            "     VT100 is dead. The terminal it defined will be with us for a long time.".into(),
-            "     \u{25A3}  Build \u{00B7} Big Pickle \u{00B7} 31.3s".into(),
-            "  \u{2503}".into(),
-            "  \u{2503}".into(),
-            "  \u{2503}".into(),
-            "  \u{2503}  Build \u{00B7} Big Pickle OpenCode Zen".into(),
-            format!("  \u{2579}{}", "\u{2580}".repeat(98)),
-            "   /Users/stefano.straus/Gits/personal/tuicommander       18.1K (9%)  ctrl+p commands"
-                .into(),
-        ]
-    }
-
-    #[test]
-    fn test_opencode_finished_turn_is_ready_and_interrupt_hint_wins() {
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &opencode_finished_screen()),
-            AgentScreenActivity::Ready
-        );
-
-        // Mid-turn opencode keeps the very same composer frame on screen; only the status
-        // bar swaps the cwd for a `⬝`/`■` progress bar plus the interrupt hint.
-        let mut working = opencode_finished_screen();
-        let last = working.len() - 1;
-        working[last] = "   \u{2B1D}\u{2B1D}\u{2B1D}\u{2B1D}\u{2B1D}\u{25A0}\u{25A0}\u{25A0}  esc interrupt        18.1K (9%)  ctrl+p commands".into();
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &working),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// The welcome screen (before any turn) carries a different status bar — `tab agents`
-    /// plus a tip row and a `path:branch … version` row — and must still read Ready.
-    #[test]
-    fn test_opencode_welcome_screen_is_ready() {
-        let rows = vec![
-            "                    \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2588}".into(),
-            "                       \u{2503}".into(),
-            "                       \u{2503}  Ask anything... \"Fix a TODO in the codebase\"".into(),
-            "                       \u{2503}".into(),
-            "                       \u{2503}  Build \u{00B7} Big Pickle OpenCode Zen".into(),
-            format!("                       \u{2579}{}", "\u{2580}".repeat(78)),
-            "                       tab agents  ctrl+p commands".into(),
-            "                                \u{25CF} Tip Run /connect to add an AI provider".into(),
-            "  ~/Gits/personal/tuicommander:main                                        1.18.5".into(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &rows),
-            AgentScreenActivity::Ready
-        );
-    }
-
-    /// The interrupt hint survives a tool phase — captured while opencode ran
-    /// `sleep 20 && echo done` — which is precisely when a false idle would let
-    /// auto-standby SIGSTOP the session.
-    #[test]
-    fn test_opencode_tool_phase_is_working() {
-        let mut rows = opencode_finished_screen();
-        rows.insert(2, "  \u{2503}  \u{283C} sleep 20 && echo done".into());
-        rows.insert(3, "     \u{25A3}  Build \u{00B7} Big Pickle".into());
-        let last = rows.len() - 1;
-        rows[last] = "   \u{2B1D}\u{2B1D}\u{2B1D}\u{2B1D}\u{25A0}\u{25A0}\u{25A0}\u{25A0}  esc interrupt        18.1K (9%)  ctrl+p commands".into();
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &rows),
-            AgentScreenActivity::Working
-        );
-    }
-
-    /// Readiness must rest on OpenCode's own frame, not on whatever happens to be on
-    /// screen: a plain shell — and a frame whose status bar has not been painted — are
-    /// both Unknown rather than Ready.
-    #[test]
-    fn test_opencode_requires_its_own_frame_and_status_bar() {
-        let shell = vec![
-            "$ ls".to_string(),
-            "README.md  src".to_string(),
-            "$ ".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &shell),
-            AgentScreenActivity::Unknown
-        );
-
-        // Frame close row without any `┃` frame row above it is not an OpenCode composer.
-        let close_only = vec![
-            format!("  \u{2579}{}", "\u{2580}".repeat(98)),
-            "   /Users/x  ctrl+p commands".to_string(),
-        ];
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &close_only),
-            AgentScreenActivity::Unknown
-        );
-
-        // Half-painted screen: frame present, status bar not yet drawn.
-        let mut unpainted = opencode_finished_screen();
-        unpainted.pop();
-        assert_eq!(
-            detect_agent_screen_activity(Some("opencode"), &unpainted),
-            AgentScreenActivity::Unknown
-        );
-    }
-
-    #[test]
-    fn test_opencode_ready_screen_recovers_long_lived_shell_busy() {
-        assert_eq!(classify_agent("opencode"), Some("opencode"));
-        assert!(has_ready_screen_adapter(Some("opencode")));
-
-        let mut silence = SilenceState::new();
-        // OSC 133 marks the long-lived `opencode` foreground command busy. Without a
-        // ready-screen adapter this bit survived for the whole process (#535-d4f5).
-        silence.note_explicit_state(SHELL_BUSY, false);
-        silence.note_real_activity();
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(silence.note_ready_screen());
-        assert!(!silence.explicit_busy);
-        assert!(silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_only_interpreters_take_the_argv0_detour() {
-        assert!(is_script_interpreter("node"));
-        assert!(is_script_interpreter("bun"));
-        assert!(!is_script_interpreter("claude"));
-        assert!(!is_script_interpreter("zsh"));
-    }
-
-    #[test]
-    fn test_old_ready_prompt_cannot_cancel_new_submission_before_activity() {
-        let mut silence = SilenceState::new();
-        silence.note_user_submission(true);
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(!silence.note_ready_screen());
-        assert!(silence.explicit_busy);
-        assert!(!silence.idle_confirmed);
-
-        silence.note_real_activity();
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(silence.note_ready_screen());
-        assert!(silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_stable_ready_prompt_recovers_missed_hook_idle_after_activity() {
-        let mut silence = SilenceState::new();
-        silence.note_user_submission(true);
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.note_real_activity();
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(silence.note_ready_screen());
-        assert!(!silence.explicit_busy);
-        assert!(!silence.hook_busy);
-        assert!(silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_hook_busy_cannot_be_overridden_before_turn_activity() {
-        let mut silence = SilenceState::new();
-        silence.note_user_submission(true);
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(!silence.note_ready_screen());
-        assert!(silence.explicit_busy);
-        assert!(silence.hook_busy);
-        assert!(!silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_fresh_hook_busy_blocks_ready_after_prior_recovery() {
-        let mut silence = SilenceState::new();
-        silence.note_user_submission(true);
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.note_real_activity();
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(silence.note_ready_screen());
-
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(!silence.note_ready_screen());
-        assert!(silence.explicit_busy);
-        assert!(silence.hook_busy);
-        assert!(!silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_working_row_cannot_relatch_a_declared_completed_turn() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "completed-working-row";
-        state.session_states.insert(
-            session_id.into(),
-            crate::state::SessionState {
-                agent_type: Some("codex".into()),
-                ..Default::default()
-            },
-        );
-        state.shell_states.insert(
-            session_id.into(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        let mut lifecycle = SilenceState::new();
-        lifecycle.confirm_idle();
-        lifecycle.mark_suggest_candidate(vec!["Review diff".into()], 0);
-        let lifecycle = Arc::new(Mutex::new(lifecycle));
-
-        apply_working_evidence(
-            &state,
-            &lifecycle,
-            session_id,
-            now_epoch_ms(),
-            "working-screen",
-        );
-
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(std::sync::atomic::Ordering::Acquire),
-            SHELL_IDLE
-        );
-        assert!(lifecycle.lock().idle_confirmed);
-    }
-
-    #[test]
-    fn test_codex_moving_working_row_reopens_completed_internal_continuation() {
-        use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "codex-completed-internal-continuation";
-        state.session_states.insert(
-            session_id.into(),
-            crate::state::SessionState {
-                agent_type: Some("codex".into()),
-                suggested_actions: Some(vec!["Review diff".into()]),
-                ..Default::default()
-            },
-        );
-        state
-            .shell_states
-            .insert(session_id.into(), AtomicU8::new(SHELL_IDLE));
-        state
-            .last_output_ms
-            .insert(session_id.into(), AtomicU64::new(1));
-        let mut lifecycle = SilenceState::new();
-        lifecycle.confirm_idle();
-        lifecycle.mark_suggest_candidate(vec!["Review diff".into()], 0);
-        let lifecycle = Arc::new(Mutex::new(lifecycle));
-
-        apply_working_evidence(
-            &state,
-            &lifecycle,
-            session_id,
-            now_epoch_ms(),
-            "working-screen-movement",
-        );
-
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-        assert!(
-            state
-                .session_states
-                .get(session_id)
-                .unwrap()
-                .suggested_actions
-                .is_none()
-        );
-        let lifecycle = lifecycle.lock();
-        assert!(!lifecycle.completion_declared_for_epoch(0));
-        assert!(!lifecycle.idle_confirmed);
-    }
-
-    #[test]
-    fn test_claude_active_marker_reopens_premature_stop_hook_completion() {
-        use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "claude-blocking-stop-hook";
-        state.session_states.insert(
-            session_id.into(),
-            crate::state::SessionState {
-                agent_type: Some("claude".into()),
-                suggested_actions: Some(vec!["Premature follow-up".into()]),
-                ..Default::default()
-            },
-        );
-        state
-            .shell_states
-            .insert(session_id.into(), AtomicU8::new(SHELL_IDLE));
-        state
-            .last_output_ms
-            .insert(session_id.into(), AtomicU64::new(1));
-        let mut lifecycle = SilenceState::new();
-        lifecycle.mark_suggest_candidate(vec!["Premature follow-up".into()], 0);
-        lifecycle.note_explicit_state(SHELL_IDLE, true);
-        let lifecycle = Arc::new(Mutex::new(lifecycle));
-        state
-            .silence_states
-            .insert(session_id.into(), lifecycle.clone());
-
-        let screen = vec![
-            "✽ Nucleating… (8m 47s · ↓ 29.0k tokens)".to_string(),
-            "❯".to_string(),
-        ];
-        let activity = detect_agent_screen_activity(Some("claude"), &screen);
-        assert_eq!(activity, AgentScreenActivity::Working);
-        assert_eq!(
-            completion_adjusted_screen_activity(&state, &lifecycle, session_id, activity,),
-            AgentScreenActivity::Working,
-            "premature completion must not downgrade current Claude work"
-        );
-
-        apply_working_evidence(
-            &state,
-            &lifecycle,
-            session_id,
-            now_epoch_ms(),
-            "working-screen",
-        );
-
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-        assert!(
-            state
-                .session_states
-                .get(session_id)
-                .unwrap()
-                .suggested_actions
-                .is_none()
-        );
-        let lifecycle = lifecycle.lock();
-        assert!(!lifecycle.completion_declared_for_epoch(0));
-        assert!(!lifecycle.explicit_idle);
-        assert!(!lifecycle.idle_confirmed);
-    }
-
-    #[test]
-    fn test_declared_completion_turns_stale_working_screen_into_ready_evidence() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "completed-working-timer";
-        agent_session(&state, session_id, SHELL_BUSY);
-        {
-            let mut session = state.session_states.get_mut(session_id).unwrap();
-            session.agent_type = Some("codex".into());
-            session.background_probe_satisfied_turn_epoch = Some(session.turn_epoch);
-        }
-        let lifecycle = state.silence_states.get(session_id).unwrap().clone();
-        {
-            let mut lifecycle = lifecycle.lock();
-            lifecycle.mark_suggest_candidate(vec!["Review diff".into()], 0);
-            lifecycle.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        }
-
-        let screen_activity = completion_adjusted_screen_activity(
-            &state,
-            &lifecycle,
-            session_id,
-            AgentScreenActivity::Working,
-        );
-        let transition = try_timer_idle_transition(
-            &state,
-            &lifecycle,
-            session_id,
-            screen_activity,
-            Some("codex"),
-            Some(0),
-        );
-
-        assert!(transition.screen_confirms_idle);
-        assert!(transition.transitioned);
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(std::sync::atomic::Ordering::Acquire),
-            SHELL_IDLE
-        );
-    }
-
-    #[test]
-    fn test_interrupt_request_plus_interrupted_screen_confirms_idle() {
-        let mut silence = SilenceState::new();
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.note_interrupt_requested();
-        assert!(silence.note_interrupted_screen());
-        assert!(!silence.explicit_busy);
-        assert!(silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_ctrl_c_alone_never_confirms_idle() {
-        let mut silence = SilenceState::new();
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.note_interrupt_requested();
-        assert!(silence.explicit_busy);
-        assert!(!silence.idle_confirmed);
-    }
-
-    #[test]
-    fn test_working_screen_recovers_idle_to_busy() {
-        use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "codex-false-idle";
-        state
-            .shell_states
-            .insert(sid.into(), AtomicU8::new(SHELL_IDLE));
-        state.last_output_ms.insert(sid.into(), AtomicU64::new(1));
-        let silence = Arc::new(Mutex::new(SilenceState::new()));
-        state.silence_states.insert(sid.into(), silence.clone());
-
-        apply_working_evidence(&state, &silence, sid, now_epoch_ms(), "working-screen");
-
-        assert_eq!(
-            state.shell_states.get(sid).unwrap().load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-        assert!(!silence.lock().idle_confirmed);
-    }
-
-    #[test]
-    fn test_explicit_idle_outvotes_stale_working_screen() {
-        use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "codex-stale-working";
-        state
-            .shell_states
-            .insert(sid.into(), AtomicU8::new(SHELL_IDLE));
-        state.last_output_ms.insert(sid.into(), AtomicU64::new(1));
-        let mut sl = SilenceState::new();
-        sl.note_explicit_state(SHELL_IDLE, true);
-        let silence = Arc::new(Mutex::new(sl));
-        state.silence_states.insert(sid.into(), silence.clone());
-
-        apply_working_evidence(&state, &silence, sid, now_epoch_ms(), "working-screen");
-
-        assert_eq!(
-            state.shell_states.get(sid).unwrap().load(Ordering::Acquire),
-            SHELL_IDLE
-        );
-        assert!(silence.lock().idle_confirmed);
-    }
-
-    #[test]
-    fn test_explicit_busy_suppresses_silence_question_until_idle() {
-        let mut silence = SilenceState::new();
-        silence.note_explicit_state(SHELL_BUSY, true);
-        silence.last_output_at = std::time::Instant::now() - SILENCE_QUESTION_THRESHOLD;
-        silence.pending_question_line = Some("Continue?".into());
-        assert!(!silence.is_silent());
-        silence.note_explicit_state(SHELL_IDLE, true);
-        assert!(silence.is_silent());
-    }
-
-    #[test]
-    fn test_agent_screen_adapter_baselines() {
-        // Claude and Codex have presence-based active markers because both can
-        // freeze or leave a composer visible during long tools. Gemini/Aider
-        // remain prompt-based and use movement to hold BUSY.
-        let claude_working = vec!["✻ Cogitating… (12s)".into()];
-        let claude_ready = vec!["Answer complete".into(), "❯".into()];
-        let gemini_working_prompt_visible = vec![
-            "⠴ Checking files… (esc to cancel, 14s)".into(),
-            "────────────────────────".into(),
-            "> Type your message".into(),
-        ];
-        let gemini_ready = vec!["> Type your message".into()];
-        let aider_working = vec!["█░  Waiting for model".into()];
-        let aider_ready = vec!["Tokens: 10k sent".into(), ">".into()];
-        let grok_working = vec![
-            "❯ Ask anything".into(),
-            "⠹ Responding… 12s [stop]".into(),
-            "⌘ Grok 4.3 OpenRouter · Medium effort".into(),
-        ];
-        let grok_ready = vec![
-            "Done.".into(),
-            "❯ Ask anything".into(),
-            "⌘ Grok 4.3 OpenRouter · Medium effort".into(),
-        ];
-
-        for (agent, rows, expected) in [
-            ("claude", claude_working, AgentScreenActivity::Working),
-            ("claude", claude_ready, AgentScreenActivity::Ready),
-            (
-                "gemini",
-                gemini_working_prompt_visible,
-                AgentScreenActivity::Ready,
-            ),
-            ("gemini", gemini_ready, AgentScreenActivity::Ready),
-            ("aider", aider_working, AgentScreenActivity::Unknown),
-            ("aider", aider_ready, AgentScreenActivity::Ready),
-            ("grok", grok_working, AgentScreenActivity::Working),
-            ("grok", grok_ready, AgentScreenActivity::Ready),
-        ] {
-            assert_eq!(detect_agent_screen_activity(Some(agent), &rows), expected);
-        }
-    }
-
-    #[test]
-    fn active_screen_matrix_is_stable_and_repairs_false_idle_repeatedly() {
-        use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let cases = [
-            (
-                "codex-chevron",
-                "codex",
-                vec![
-                    "• Working (7s • esc to interrupt)".to_string(),
-                    "› Use /skills to list available skills".to_string(),
-                ],
-            ),
-            (
-                "codex-guillemet-background",
-                "codex",
-                vec![
-                    "› historical submitted prompt".to_string(),
-                    "• Waiting for background terminal (41s • esc to interrupt) · 1 background terminal running".to_string(),
-                    String::new(),
-                    "» Use /skills to list available skills".to_string(),
-                ],
-            ),
-            (
-                "claude-visible-composer",
-                "claude",
-                vec![
-                    "✽ Nucleating… (3m 50s · ↓ 7.8k tokens)".to_string(),
-                    String::new(),
-                    "────────────────────────────────────────".to_string(),
-                    "❯".to_string(),
-                    "────────────────────────────────────────".to_string(),
-                ],
-            ),
-            (
-                "claude-frozen-tool",
-                "claude",
-                vec![
-                    "✻ Sautéing… (12s · esc to interrupt)".to_string(),
-                    String::new(),
-                    "❯".to_string(),
-                ],
-            ),
-            (
-                "grok-responding",
-                "grok",
-                vec![
-                    "❯ Ask anything".to_string(),
-                    "⠴ Responding… 12s [stop]".to_string(),
-                    "⌘ Grok 4.3 OpenRouter · Medium effort".to_string(),
-                ],
-            ),
-        ];
-
-        for (sid, agent, rows) in cases {
-            state.session_states.insert(
-                sid.into(),
-                crate::state::SessionState {
-                    agent_type: Some(agent.into()),
-                    ..Default::default()
-                },
-            );
-            state
-                .shell_states
-                .insert(sid.into(), AtomicU8::new(SHELL_IDLE));
-            state.last_output_ms.insert(sid.into(), AtomicU64::new(1));
-            let lifecycle = Arc::new(Mutex::new(SilenceState::new()));
-            state.silence_states.insert(sid.into(), lifecycle.clone());
-
-            for iteration in 0..256 {
-                state
-                    .shell_states
-                    .get(sid)
-                    .unwrap()
-                    .store(SHELL_IDLE, Ordering::Release);
-                lifecycle.lock().confirm_idle();
-
-                let activity = detect_agent_screen_activity(Some(agent), &rows);
-                assert_eq!(
-                    activity,
-                    AgentScreenActivity::Working,
-                    "{sid} iteration {iteration}"
-                );
-                apply_working_evidence(&state, &lifecycle, sid, now_epoch_ms(), "working-screen");
-                assert_eq!(
-                    state.shell_states.get(sid).unwrap().load(Ordering::Acquire),
-                    SHELL_BUSY,
-                    "{sid} failed to repair false idle at iteration {iteration}"
-                );
-                assert!(!lifecycle.lock().idle_confirmed);
-            }
-        }
-    }
-
-    #[test]
-    fn completed_and_lookalike_screen_matrix_never_latches_working() {
-        let claude_completed = fixture_rows(include_str!(
-            "../../tests/terminal-stress/fixtures/claude-completed.txt"
-        ));
-        let cases = [
-            (
-                "codex completed output",
-                "codex",
-                vec![
-                    "• Waited for background terminal · cargo test".to_string(),
-                    "» Use /skills to list available skills".to_string(),
-                ],
-                AgentScreenActivity::Ready,
-            ),
-            (
-                "claude completed summary",
-                "claude",
-                claude_completed,
-                AgentScreenActivity::Ready,
-            ),
-            (
-                "claude hud progress",
-                "claude",
-                vec![
-                    "  [Opus | Team] ██░░░░░░░░ 17%".to_string(),
-                    "❯".to_string(),
-                ],
-                AgentScreenActivity::Ready,
-            ),
-            (
-                "claude source lookalike below composer",
-                "claude",
-                vec![
-                    "Completed normally".to_string(),
-                    "❯".to_string(),
-                    "✻ source_example… (not live)".to_string(),
-                ],
-                AgentScreenActivity::Ready,
-            ),
-        ];
-
-        for iteration in 0..256 {
-            for (name, agent, rows, expected) in &cases {
-                assert_eq!(
-                    detect_agent_screen_activity(Some(agent), rows),
-                    *expected,
-                    "{name} iteration {iteration}"
-                );
-            }
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum SanitizedTraceStep {
-        Submit,
-        RealActivity,
-        WorkingScreen,
-        ReadyScreen,
-        UnknownScreen,
-    }
-
-    fn replay_sanitized_agent_trace(agent: &str, steps: &[SanitizedTraceStep]) -> SilenceState {
-        let mut silence = SilenceState::new();
-        silence.confirm_idle();
-        for step in steps {
-            match step {
-                SanitizedTraceStep::Submit => silence.note_user_submission(true),
-                SanitizedTraceStep::RealActivity => silence.note_real_activity(),
-                SanitizedTraceStep::WorkingScreen => {
-                    let rows = if agent == "codex" {
-                        vec!["• Working".to_string(), "› sanitized prompt".to_string()]
-                    } else {
-                        vec!["sanitized animated output".to_string()]
-                    };
-                    if detect_agent_screen_activity(Some(agent), &rows)
-                        == AgentScreenActivity::Working
-                    {
-                        silence.note_working_screen();
-                    }
-                }
-                SanitizedTraceStep::ReadyScreen => {
-                    let rows = match agent {
-                        "codex" => vec!["sanitized final".into(), "› sanitized prompt".into()],
-                        "claude" => vec!["sanitized final".into(), "❯".into()],
-                        "gemini" => vec!["> Type your message".into()],
-                        "aider" => vec![">".into()],
-                        _ => Vec::new(),
-                    };
-                    if detect_agent_screen_activity(Some(agent), &rows)
-                        == AgentScreenActivity::Ready
-                    {
-                        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-                        silence.note_ready_screen();
-                    }
-                }
-                SanitizedTraceStep::UnknownScreen => silence.note_unknown_screen(),
-            }
-        }
-        silence
-    }
-
-    #[test]
-    fn sanitized_codex_and_claude_trace_replay_requires_post_submit_consumption() {
-        // Sanitized from the 2026-07-18 live sequence: ready prompt → injected
-        // checkpoint → working/real output → final protocol text → ready prompt.
-        // Repository paths, prompts, and response content are intentionally omitted.
-        for agent in ["codex", "claude"] {
-            let completed = replay_sanitized_agent_trace(
-                agent,
-                &[
-                    SanitizedTraceStep::Submit,
-                    SanitizedTraceStep::WorkingScreen,
-                    SanitizedTraceStep::RealActivity,
-                    SanitizedTraceStep::ReadyScreen,
-                ],
-            );
-            assert!(completed.idle_confirmed, "{agent} completed trace");
-
-            let silent = replay_sanitized_agent_trace(
-                agent,
-                &[
-                    SanitizedTraceStep::Submit,
-                    SanitizedTraceStep::ReadyScreen,
-                    SanitizedTraceStep::ReadyScreen,
-                ],
-            );
-            assert!(
-                !silent.idle_confirmed,
-                "{agent} silent/no-op submission must remain conservative without positive consumption"
-            );
-
-            let partial_redraw = replay_sanitized_agent_trace(
-                agent,
-                &[
-                    SanitizedTraceStep::Submit,
-                    SanitizedTraceStep::UnknownScreen,
-                    SanitizedTraceStep::ReadyScreen,
-                ],
-            );
-            assert!(
-                !partial_redraw.idle_confirmed,
-                "{agent} partial/alternate-screen redraw must not prove consumption"
-            );
-        }
-    }
-
-    fn process(pid: u32, parent_pid: u32, name: &str, command: &str) -> ProcessTreeEntry {
-        ProcessTreeEntry {
-            pid,
-            parent_pid,
-            name: name.to_string(),
-            command: command.to_string(),
-            age_seconds: None,
-        }
-    }
-
-    /// `sudo su` as the OS actually reports it: sudo re-execs itself, and on
-    /// macOS the second hop allocates its own PTY, so the inner shell is only
-    /// reachable through the parent chain.
-    fn sudo_su_tree() -> Vec<ProcessTreeEntry> {
-        vec![
-            process(100, 1, "zsh", "/bin/zsh"),
-            process(200, 100, "sudo", "sudo su"),
-            process(201, 200, "sudo", "sudo su"),
-            process(202, 201, "su", "su"),
-            process(203, 202, "sh", "sh"),
-        ]
-    }
-
-    #[test]
-    fn a_bare_shell_reads_as_a_prompt() {
-        assert!(is_prompt_shell_process(&process(1, 0, "sh", "sh")));
-        assert!(is_prompt_shell_process(&process(1, 0, "bash", "bash -l")));
-        // A login shell reports its name with a leading dash.
-        assert!(is_prompt_shell_process(&process(1, 0, "-zsh", "-zsh")));
-    }
-
-    #[test]
-    fn a_shell_handed_a_command_is_work() {
-        assert!(!is_prompt_shell_process(&process(
-            1,
-            0,
-            "sh",
-            "sh -c 'while true; do sleep 1; done'"
-        )));
-        assert!(!is_prompt_shell_process(&process(
-            1,
-            0,
-            "bash",
-            "bash -c make"
-        )));
-    }
-
-    #[test]
-    fn a_non_shell_is_never_a_prompt() {
-        assert!(!is_prompt_shell_process(&process(
-            1,
-            0,
-            "dd",
-            "dd if=/dev/rdisk11 of=/tmp/x.img"
-        )));
-        assert!(!is_prompt_shell_process(&process(1, 0, "vim", "vim a.txt")));
-    }
-
-    #[test]
-    fn nested_interactive_shell_is_a_prompt_not_work() {
-        // The regression: `sudo su` latches the outer shell BUSY via OSC 133 and
-        // the inner `sh` never emits the closing marker, so the tab reported
-        // working for as long as the root shell lived.
-        assert!(foreground_group_at_prompt(200, &sudo_su_tree()));
-        assert!(foreground_group_at_prompt(
-            300,
-            &[process(300, 100, "sh", "sh")]
-        ));
-    }
-
-    #[test]
-    fn a_wrapper_running_real_work_is_not_a_prompt() {
-        let mut tree = sudo_su_tree();
-        tree.push(process(204, 203, "dd", "dd if=/dev/rdisk11 of=/tmp/x.img"));
-        assert!(
-            !foreground_group_at_prompt(200, &tree),
-            "work anywhere under the wrapper must keep the session busy"
-        );
-        assert!(!foreground_group_at_prompt(
-            400,
-            &[
-                process(400, 100, "sudo", "sudo dd if=/dev/rdisk11"),
-                process(401, 400, "dd", "dd if=/dev/rdisk11"),
-            ]
-        ));
-    }
-
-    #[test]
-    fn an_unknown_root_is_not_a_prompt() {
-        // No snapshot entry for the pid means no evidence; fail toward busy.
-        assert!(!foreground_group_at_prompt(999, &sudo_su_tree()));
-    }
-
-    fn busy_plain_shell(sid: &str, silent_for_ms: u64) -> AppState {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-        state
-            .session_states
-            .insert(sid.to_string(), crate::state::SessionState::default());
-        state.last_output_ms.insert(
-            sid.to_string(),
-            AtomicU64::new(now_epoch_ms() - silent_for_ms),
-        );
-        state
-    }
-
-    #[test]
-    fn prompt_probe_waits_for_real_silence() {
-        let sid = "s";
-        assert!(prompt_probe_applies(
-            &busy_plain_shell(sid, SHELL_PROMPT_PROBE_SILENCE_MS + 500),
-            sid
-        ));
-        assert!(
-            !prompt_probe_applies(&busy_plain_shell(sid, 200), sid),
-            "a command that just printed is running, not parked at a prompt"
-        );
-    }
-
-    #[test]
-    fn prompt_probe_leaves_agents_alone() {
-        let sid = "s";
-        let state = busy_plain_shell(sid, SHELL_PROMPT_PROBE_SILENCE_MS + 500);
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("claude".to_string()),
-                ..Default::default()
-            },
-        );
-        assert!(
-            !prompt_probe_applies(&state, sid),
-            "agents own a ready-screen adapter; this probe must not second-guess it"
-        );
-    }
-
-    #[test]
-    fn prompt_probe_ignores_an_idle_session() {
-        use std::sync::atomic::AtomicU8;
-        let sid = "s";
-        let state = busy_plain_shell(sid, SHELL_PROMPT_PROBE_SILENCE_MS + 500);
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_IDLE));
-        assert!(!prompt_probe_applies(&state, sid));
-    }
-
-    #[test]
-    fn prompt_probe_demands_the_process_snapshot() {
-        let sid = "s";
-        let state = busy_plain_shell(sid, SHELL_PROMPT_PROBE_SILENCE_MS + 500);
-        state
-            .silence_states
-            .insert(sid.to_string(), Arc::new(Mutex::new(SilenceState::new())));
-        assert!(
-            process_snapshot_is_demanded(&state),
-            "without demand the cache stays empty and the probe can never fire"
-        );
-    }
-
-    /// A process the snapshot could age. Ageless entries keep the name list as
-    /// the only rule, which is what every pre-existing case here asserts.
-    fn aged_process(
-        pid: u32,
-        parent_pid: u32,
-        name: &str,
-        command: &str,
-        age_seconds: u64,
-    ) -> ProcessTreeEntry {
-        ProcessTreeEntry {
-            age_seconds: Some(age_seconds),
-            ..process(pid, parent_pid, name, command)
-        }
-    }
-
-    #[test]
-    fn sanitized_background_command_keeps_agent_working_across_adapters() {
-        // Sanitized from the 2026-07-19 live Codex sequence. The same lifecycle
-        // contract applies to Claude: a ready composer is not proof that an
-        // autonomous background command has completed.
-        for (index, agent) in ["codex", "claude"].into_iter().enumerate() {
-            let session_root = 100 + index as u32 * 100;
-            let agent_pid = session_root + 1;
-            let processes = vec![
-                process(session_root, 1, "zsh", "zsh"),
-                process(agent_pid, session_root, agent, agent),
-                process(
-                    agent_pid + 1,
-                    agent_pid,
-                    "rtk",
-                    "rtk env CARGO_BUILD_JOBS=4 cargo test --locked -p agent2-core",
-                ),
-                process(agent_pid + 2, agent_pid + 1, "cargo", "cargo test --locked"),
-                process(
-                    agent_pid + 3,
-                    agent_pid + 2,
-                    "agent2_core-test",
-                    "target/debug/deps/agent2_core-test",
-                ),
-            ];
-            let root = agent_process_root(session_root, agent, &processes).unwrap();
-            assert_eq!(root, agent_pid, "{agent} adapter root");
-            assert!(
-                has_meaningful_descendant(root, &processes),
-                "{agent} must retain autonomous work while cargo descendants live"
-            );
-
-            let silence = replay_sanitized_agent_trace(
-                agent,
-                &[
-                    SanitizedTraceStep::Submit,
-                    SanitizedTraceStep::RealActivity,
-                    SanitizedTraceStep::ReadyScreen,
-                ],
-            );
-            assert!(silence.idle_confirmed, "{agent} composer is terminal-ready");
-
-            let state = crate::state::tests_support::make_test_app_state();
-            let sid = format!("background-{agent}");
-            state.session_states.insert(
-                sid.clone(),
-                crate::state::SessionState {
-                    agent_type: Some(agent.to_string()),
-                    background_work: true,
-                    ..Default::default()
-                },
-            );
-            state
-                .shell_states
-                .insert(sid.clone(), std::sync::atomic::AtomicU8::new(SHELL_IDLE));
-            state
-                .silence_states
-                .insert(sid.clone(), Arc::new(Mutex::new(silence)));
-
-            let snapshot = state.session_state_with_shell(&sid).unwrap();
-            assert_eq!(snapshot.shell_state.as_deref(), Some("idle"));
-            assert_eq!(snapshot.agent_state.as_deref(), Some("working"));
-            assert!(
-                should_inject_now(&state, &sid),
-                "terminal-ready must remain usable independently of task lifecycle"
-            );
-        }
-    }
-
-    #[test]
-    fn persistent_helpers_are_not_background_work() {
-        let processes = vec![
-            process(10, 1, "codex", "codex"),
-            process(11, 10, "tuic-bridge", "tuic-bridge"),
-            process(12, 10, "mdkb", "mdkb serve"),
-            process(13, 10, "node", "node /opt/codex/node_repl.js"),
-            // Descendants owned by helper plumbing are ignored with the helper.
-            process(14, 12, "sqlite-worker", "sqlite-worker"),
-        ];
-        assert!(!has_meaningful_descendant(10, &processes));
-
-        let mut with_real_child = processes;
-        with_real_child.push(process(20, 10, "cargo", "cargo test --locked"));
-        assert!(has_meaningful_descendant(10, &with_real_child));
-    }
-
-    #[test]
-    fn daemons_started_with_the_agent_are_not_background_work() {
-        // Sanitized from a live 14-session instance on 2026-08-23, where every
-        // agent reported `working` forever. Neither name here can go on the
-        // helper list: `codex-code-mode-host` shipped with Codex 0.149.0 and the
-        // next release may rename it, and `npm` must keep meaning work.
-        let agent_age = 129_050;
-        let processes = vec![
-            aged_process(10, 1, "codex", "codex", agent_age),
-            aged_process(
-                11,
-                10,
-                "codex-code-mode-host",
-                "/opt/homebrew/Caskroom/codex/0.149.0/bin/codex-code-mode-host",
-                agent_age - 18,
-            ),
-            aged_process(
-                12,
-                10,
-                "npm",
-                "npm exec @upstash/context7-mcp",
-                agent_age - 1,
-            ),
-        ];
-        assert!(
-            !has_meaningful_descendant(10, &processes),
-            "daemons that came up with the agent are plumbing"
-        );
-
-        // The same two names, spawned by a turn instead of at startup.
-        let mut spawned_by_a_turn = processes.clone();
-        spawned_by_a_turn.push(aged_process(20, 10, "npm", "npm run build", 12));
-        assert!(
-            has_meaningful_descendant(10, &spawned_by_a_turn),
-            "work must stay visible under a name the startup window also sees"
-        );
-
-        // One second past the window is already work.
-        let mut just_outside = processes;
-        just_outside.push(aged_process(
-            21,
-            10,
-            "cargo",
-            "cargo test",
-            agent_age - AGENT_STARTUP_WINDOW_SECS - 1,
-        ));
-        assert!(has_meaningful_descendant(10, &just_outside));
-    }
-
-    #[test]
-    fn missing_ages_leave_the_helper_name_list_in_charge() {
-        // Windows reports no creation time. The rule must then behave exactly as
-        // it did before ages existed — erring toward reporting work.
-        let ageless = vec![
-            process(10, 1, "codex", "codex"),
-            process(11, 10, "codex-code-mode-host", "codex-code-mode-host"),
-        ];
-        assert!(has_meaningful_descendant(10, &ageless));
-
-        // A descendant older than its own agent cannot be work that agent
-        // spawned; a skewed `ps` sample must not invent background work.
-        let skewed = vec![
-            aged_process(10, 1, "codex", "codex", 100),
-            aged_process(11, 10, "mystery", "mystery", 400),
-        ];
-        assert!(!has_meaningful_descendant(10, &skewed));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn elapsed_time_field_parses_every_ps_shape() {
-        assert_eq!(parse_elapsed_time("05:12"), Some(312));
-        assert_eq!(parse_elapsed_time("01:00:00"), Some(3600));
-        assert_eq!(parse_elapsed_time("2-13:45:02"), Some(222_302));
-        // `ps` never emits a bare second count, so one is not a valid reading.
-        assert_eq!(parse_elapsed_time("42"), None);
-        assert_eq!(parse_elapsed_time("-"), None);
-        assert_eq!(parse_elapsed_time("1:2:3:4"), None);
-        assert_eq!(parse_elapsed_time("aa:bb"), None);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn timed_caffeinate_is_not_background_work_with_authoritative_argv() {
-        let processes = vec![
-            process(10, 1, "claude", "claude"),
-            process(11, 10, "caffeinate", "caffeinate -i -t 300"),
-        ];
-        assert!(!has_meaningful_descendant(10, &processes));
-    }
-
-    #[test]
-    fn timed_caffeinate_helper_does_not_hide_wrapped_work() {
-        for command in ["caffeinate -i -t 300", "/usr/bin/caffeinate -t 300 -i"] {
-            assert!(is_standalone_timed_caffeinate(command));
-            assert!(is_persistent_agent_helper_with_command_line(
-                &process(11, 10, "caffeinate", command),
-                true
-            ));
-        }
-        for command in [
-            "caffeinate -i -t 0",
-            "caffeinate -i",
-            "caffeinate -i cargo test",
-            "caffeinate -i -t 300 cargo test",
-        ] {
-            assert!(!is_standalone_timed_caffeinate(command));
-        }
-
-        let wrapped_work = vec![
-            process(10, 1, "claude", "claude"),
-            process(11, 10, "caffeinate", "caffeinate -i cargo test"),
-            process(12, 11, "cargo", "cargo test"),
-        ];
-        assert!(has_meaningful_descendant(10, &wrapped_work));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn background_snapshot_macos_truncated_comm_fixture_excludes_helpers() {
-        // Sanitized from macOS `ps -ww -axo pid=,ppid=,etime=,comm=,args=`
-        // output. Darwin may truncate `comm` while unlimited-width `args`
-        // retains the executable path needed to identify persistent integration
-        // helpers. `codex-code-mode-host` is on no name list and is excluded
-        // purely by having started with the agent.
-        const MACOS_PS: &str = r#"
-  700     1    01:00:05 /bin/zsh         /bin/zsh
-  701   700    01:00:00 /Applications/C  /Applications/Codex.app/Contents/MacOS/codex
-  702   701       59:58 /Users/boss/.lo  /Users/boss/.local/bin/mdkb serve
-  703   701       59:58 /Users/boss/.ca  /Users/boss/.cache/tuic/tuic-bridge --stdio
-  704   701       59:58 /opt/homebrew/b  /opt/homebrew/bin/node /Users/boss/.cache/tuic/node_repl.js
-  705   702       59:57 sqlite-worker    sqlite-worker
-  706   701       59:45 /opt/homebrew/Ca /opt/homebrew/Caskroom/codex/0.149.0/bin/codex-code-mode-host
-"#;
-        let processes = parse_process_tree_snapshot(true, MACOS_PS).unwrap();
-        assert_eq!(
-            processes[0].age_seconds,
-            Some(3605),
-            "the elapsed column must survive the truncated-comm layout"
-        );
-        assert_eq!(agent_process_root(700, "codex", &processes), Some(701));
-        assert!(!has_meaningful_descendant(701, &processes));
-
-        let mut with_turn_work = processes;
-        with_turn_work.push(aged_process(707, 701, "cargo", "cargo test", 30));
-        assert!(has_meaningful_descendant(701, &with_turn_work));
-    }
-
-    #[test]
-    fn version_named_claude_path_is_the_agent_root() {
-        let processes = vec![
-            process(10, 1, "zsh", "zsh"),
-            process(
-                11,
-                10,
-                "/Users/test/.local/share/claude/versions/2.1.87",
-                "2.1.87",
-            ),
-            process(12, 11, "cargo", "cargo test"),
-        ];
-        assert_eq!(agent_process_root(10, "claude", &processes), Some(11));
-        assert_eq!(
-            background_work_from_snapshot(10, "claude", &processes),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn wrapper_is_not_counted_as_permanent_agent_work() {
-        let idle = vec![
-            process(20, 1, "claude-wrapper", "claude-wrapper"),
-            process(21, 20, "/opt/claude/versions/2.1.87", "2.1.87"),
-        ];
-        assert_eq!(agent_process_root(20, "claude", &idle), Some(21));
-        assert_eq!(
-            background_work_from_snapshot(20, "claude", &idle),
-            Some(false)
-        );
-
-        let custom_alias = vec![
-            process(30, 1, "C2", "C2"),
-            process(31, 30, "mdkb", "mdkb serve"),
-        ];
-        assert_eq!(agent_process_root(30, "claude", &custom_alias), Some(30));
-        assert_eq!(
-            background_work_from_snapshot(30, "claude", &custom_alias),
-            Some(false)
-        );
-        let mut active_alias = custom_alias;
-        active_alias.push(process(32, 30, "cargo", "cargo test"));
-        assert_eq!(
-            background_work_from_snapshot(30, "claude", &active_alias),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn windows_helper_classification_does_not_guess_node_arguments() {
-        let node = process(40, 10, "node.exe", "node.exe node_repl.js");
-        assert!(is_persistent_agent_helper_with_command_line(&node, true));
-        assert!(
-            !is_persistent_agent_helper_with_command_line(&node, false),
-            "Toolhelp exposes only the executable name, so node.exe remains meaningful"
-        );
-        let dedicated = process(41, 10, "node_repl.exe", "");
-        assert!(is_persistent_agent_helper_with_command_line(
-            &dedicated, false
-        ));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn process_snapshot_rejects_nonzero_and_malformed_output() {
-        assert!(parse_process_tree_snapshot(false, "10 1 05:12 zsh zsh").is_none());
-        assert!(parse_process_tree_snapshot(true, "10 invalid 05:12 zsh zsh").is_none());
-        assert!(parse_process_tree_snapshot(true, "10 1 05:12").is_none());
-        // An unreadable elapsed column costs the age, not the whole snapshot:
-        // the name list still has to work.
-        let ageless = parse_process_tree_snapshot(true, "10 1 ? zsh zsh").unwrap();
-        assert_eq!(ageless[0].age_seconds, None);
-    }
-
-    #[test]
-    fn failed_first_process_entry_is_not_a_valid_snapshot() {
-        assert!(valid_process_snapshot(false, vec![process(10, 1, "zsh", "zsh")]).is_none());
-        assert!(valid_process_snapshot(true, Vec::new()).is_none());
-    }
-
-    #[test]
-    fn process_snapshot_cache_is_shared_across_sessions() {
-        let cache = ProcessSnapshotCache::default();
-        cache.store(Some(vec![
-            process(10, 1, "codex", "codex"),
-            process(11, 10, "cargo", "cargo test"),
-            process(20, 1, "claude", "claude"),
-        ]));
-        let (first_generation, first) = cache.load().unwrap();
-        let (second_generation, second) = cache.load().unwrap();
-        assert_eq!(first_generation, second_generation);
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(
-            background_work_from_snapshot(10, "codex", &first),
-            Some(true)
-        );
-        assert_eq!(
-            background_work_from_snapshot(20, "claude", &second),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn background_snapshot_ready_waits_for_newer_generation_and_repairs_working() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "background-ready-generation";
-        let parent_id = "background-ready-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        state.session_states.get_mut(child_id).unwrap().agent_type = Some("codex".into());
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        state
-            .silence_states
-            .get(child_id)
-            .unwrap()
-            .lock()
-            .ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-
-        let first_ready = try_timer_idle_transition(
-            &state,
-            &state.silence_states.get(child_id).unwrap().clone(),
-            child_id,
-            AgentScreenActivity::Ready,
-            Some("codex"),
-            Some(0),
-        );
-        assert!(!first_ready.transitioned);
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-
-        state.process_snapshot_cache.store(Some(vec![
-            process(10, 1, "codex", "codex"),
-            process(11, 10, "cargo", "cargo test --locked"),
-        ]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        let snapshot = state.session_state_with_shell(child_id).unwrap();
-        assert_eq!(snapshot.agent_state.as_deref(), Some("working"));
-        assert!(snapshot.background_work);
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-
-        let reconciled_ready = try_timer_idle_transition(
-            &state,
-            &state.silence_states.get(child_id).unwrap().clone(),
-            child_id,
-            AgentScreenActivity::Ready,
-            Some("codex"),
-            Some(0),
-        );
-        assert!(reconciled_ready.transitioned);
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "idle");
-    }
-
-    #[test]
-    fn same_epoch_working_evidence_requires_a_new_ready_probe_boundary() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "background-same-epoch-ready";
-        let parent_id = "background-same-epoch-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        state.session_states.get_mut(child_id).unwrap().agent_type = Some("codex".into());
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        silence.lock().ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(
-            !try_timer_idle_transition(
-                &state,
-                &silence,
-                child_id,
-                AgentScreenActivity::Ready,
-                Some("codex"),
-                Some(0),
-            )
-            .transitioned
-        );
-
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        assert!(
-            try_timer_idle_transition(
-                &state,
-                &silence,
-                child_id,
-                AgentScreenActivity::Ready,
-                Some("codex"),
-                Some(0),
-            )
-            .transitioned
-        );
-        assert_eq!(state.agent_inbox.get(parent_id).unwrap().len(), 1);
-        assert_eq!(
-            state
-                .session_states
-                .get(child_id)
-                .unwrap()
-                .background_probe_satisfied_turn_epoch,
-            Some(0)
-        );
-
-        apply_working_evidence(&state, &silence, child_id, now_epoch_ms(), "working-screen");
-        {
-            let session = state.session_states.get(child_id).unwrap();
-            assert_eq!(session.background_probe_satisfied_turn_epoch, None);
-            assert_eq!(session.background_probe_turn_epoch, None);
-            assert_eq!(session.background_probe_after_generation, None);
-            assert_eq!(session.background_snapshot_generation, 2);
-            assert!(!session.background_work);
-        }
-
-        silence.lock().ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-        assert!(
-            !try_timer_idle_transition(
-                &state,
-                &silence,
-                child_id,
-                AgentScreenActivity::Ready,
-                Some("codex"),
-                Some(0),
-            )
-            .transitioned
-        );
-        {
-            let session = state.session_states.get(child_id).unwrap();
-            assert_eq!(session.background_probe_turn_epoch, Some(0));
-            assert_eq!(session.background_probe_after_generation, Some(2));
-            assert_eq!(session.background_probe_satisfied_turn_epoch, None);
-        }
-
-        state.process_snapshot_cache.store(Some(vec![
-            process(10, 1, "codex", "codex"),
-            process(11, 10, "rtk", "rtk cargo test"),
-            process(12, 11, "cargo", "cargo test"),
-            process(13, 12, "rustc", "rustc --crate-name tuicommander"),
-        ]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        let working = state.session_state_with_shell(child_id).unwrap();
-        assert_eq!(working.agent_state.as_deref(), Some("working"));
-        assert!(working.background_work);
-
-        assert!(
-            try_timer_idle_transition(
-                &state,
-                &silence,
-                child_id,
-                AgentScreenActivity::Ready,
-                Some("codex"),
-                Some(0),
-            )
-            .transitioned
-        );
-        assert_eq!(state.agent_inbox.get(parent_id).unwrap().len(), 1);
-
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        assert_eq!(state.agent_inbox.get(parent_id).unwrap().len(), 2);
-        let content: serde_json::Value = serde_json::from_str(
-            &state
-                .agent_inbox
-                .get(parent_id)
-                .unwrap()
-                .back()
-                .unwrap()
-                .content,
-        )
-        .unwrap();
-        assert_eq!(content["state"], "idle");
-
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        assert!(!refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        assert_eq!(state.agent_inbox.get(parent_id).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn already_busy_working_evidence_invalidates_only_probe_boundaries() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "background-already-busy";
-        agent_session(&state, child_id, SHELL_BUSY);
-        {
-            let mut session = state.session_states.get_mut(child_id).unwrap();
-            session.agent_type = Some("codex".into());
-            session.background_work = true;
-            session.background_snapshot_generation = 9;
-            session.background_probe_turn_epoch = Some(0);
-            session.background_probe_after_generation = Some(8);
-            session.background_probe_satisfied_turn_epoch = Some(0);
-        }
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-
-        apply_working_evidence(&state, &silence, child_id, now_epoch_ms(), "working-screen");
-        {
-            let session = state.session_states.get(child_id).unwrap();
-            assert_eq!(session.background_probe_turn_epoch, None);
-            assert_eq!(session.background_probe_after_generation, None);
-            assert_eq!(session.background_probe_satisfied_turn_epoch, None);
-            assert!(session.background_work);
-            assert_eq!(session.background_snapshot_generation, 9);
-        }
-
-        {
-            let mut session = state.session_states.get_mut(child_id).unwrap();
-            session.background_probe_turn_epoch = Some(0);
-            session.background_probe_after_generation = Some(9);
-            session.background_probe_satisfied_turn_epoch = Some(0);
-        }
-        transition_explicit_shell_state_with_hook(
-            &state,
-            child_id,
-            SHELL_BUSY,
-            "busy",
-            true,
-            || {},
-        );
-        let session = state.session_states.get(child_id).unwrap();
-        assert_eq!(session.background_probe_turn_epoch, None);
-        assert_eq!(session.background_probe_after_generation, None);
-        assert_eq!(session.background_probe_satisfied_turn_epoch, None);
-        assert!(session.background_work);
-        assert_eq!(session.background_snapshot_generation, 9);
-        assert_eq!(
-            state
-                .shell_states
-                .get(child_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-    }
-
-    #[test]
-    fn background_snapshot_child_absent_releases_declared_completion() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "background-ready-completed";
-        let parent_id = "background-ready-completed-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        state.session_states.get_mut(child_id).unwrap().agent_type = Some("codex".into());
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state
-            .silence_states
-            .get(child_id)
-            .unwrap()
-            .lock()
-            .mark_suggest_candidate(vec!["Review result".to_string()], 0);
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        state
-            .silence_states
-            .get(child_id)
-            .unwrap()
-            .lock()
-            .ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-
-        assert!(
-            !try_timer_idle_transition(
-                &state,
-                &state.silence_states.get(child_id).unwrap().clone(),
-                child_id,
-                AgentScreenActivity::Ready,
-                Some("codex"),
-                Some(0),
-            )
-            .transitioned
-        );
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "codex", "codex")]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        assert!(
-            try_timer_idle_transition(
-                &state,
-                &state.silence_states.get(child_id).unwrap().clone(),
-                child_id,
-                AgentScreenActivity::Ready,
-                Some("codex"),
-                Some(0),
-            )
-            .transitioned
-        );
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-        assert!(emit_pending_suggest_if_idle(&state, &silence, child_id));
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "completed");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn claude_timed_caffeinate_does_not_delay_declared_completion() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "background-claude-caffeinate-completed";
-        let parent_id = "background-claude-caffeinate-completed-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        state.session_states.get_mut(child_id).unwrap().agent_type = Some("claude".into());
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state
-            .silence_states
-            .get(child_id)
-            .unwrap()
-            .lock()
-            .mark_suggest_candidate(vec!["Review result".to_string()], 0);
-        state
-            .process_snapshot_cache
-            .store(Some(vec![process(10, 1, "claude", "claude")]));
-
-        transition_explicit_shell_state_with_hook(
-            &state,
-            child_id,
-            SHELL_IDLE,
-            "idle",
-            true,
-            || {},
-        );
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-
-        state.process_snapshot_cache.store(Some(vec![
-            process(10, 1, "claude", "claude"),
-            process(11, 10, "mdkb", "mdkb mcp"),
-            process(12, 10, "tuic-bridge", "tuic-bridge"),
-            process(13, 10, "caffeinate", "caffeinate -i -t 300"),
-        ]));
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "claude",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-
-        let resolved = state.session_state_with_shell(child_id).unwrap();
-        assert_eq!(resolved.shell_state.as_deref(), Some("idle"));
-        assert_eq!(resolved.agent_state.as_deref(), Some("completed"));
-        assert!(!resolved.background_work);
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert_eq!(inbox.len(), 1);
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "completed");
-    }
-
-    #[test]
-    fn explicit_agent_idle_waits_for_newer_snapshot_and_repairs_working() {
-        for (session_id, hook_state) in [
-            ("background-hook-idle", true),
-            ("background-osc133-idle", false),
-        ] {
-            let state = crate::state::tests_support::make_test_app_state();
-            let parent_id = format!("{session_id}-parent");
-            agent_session(&state, session_id, SHELL_BUSY);
-            state.session_states.get_mut(session_id).unwrap().agent_type = Some("codex".into());
-            state
-                .session_parent
-                .insert(session_id.to_string(), parent_id.clone());
-            state.agent_inbox.entry(parent_id.clone()).or_default();
-            state
-                .process_snapshot_cache
-                .store(Some(vec![process(10, 1, "codex", "codex")]));
-
-            transition_explicit_shell_state_with_hook(
-                &state,
-                session_id,
-                SHELL_IDLE,
-                "idle",
-                hook_state,
-                || {},
-            );
-
-            assert_eq!(
-                state
-                    .shell_states
-                    .get(session_id)
-                    .unwrap()
-                    .load(Ordering::Acquire),
-                SHELL_IDLE
-            );
-            assert!(state.agent_inbox.get(&parent_id).unwrap().is_empty());
-            assert!(!refresh_background_work_from_cached_snapshot(
-                &state,
-                session_id,
-                10,
-                "codex",
-                0,
-                state.process_snapshot_cache.load(),
-            ));
-            assert!(state.agent_inbox.get(&parent_id).unwrap().is_empty());
-
-            state.process_snapshot_cache.store(Some(vec![
-                process(10, 1, "codex", "codex"),
-                process(11, 10, "cargo", "cargo test --locked"),
-            ]));
-            assert!(refresh_background_work_from_cached_snapshot(
-                &state,
-                session_id,
-                10,
-                "codex",
-                0,
-                state.process_snapshot_cache.load(),
-            ));
-            let snapshot = state.session_state_with_shell(session_id).unwrap();
-            assert_eq!(snapshot.shell_state.as_deref(), Some("idle"));
-            assert_eq!(snapshot.agent_state.as_deref(), Some("working"));
-            assert!(snapshot.background_work);
-            assert!(state.agent_inbox.get(&parent_id).unwrap().is_empty());
-        }
-    }
-
-    #[test]
-    fn explicit_agent_idle_child_absent_restores_api_state_and_notifies_once() {
-        for (session_id, declare_completion, expected_state) in [
-            ("background-explicit-idle", false, "idle"),
-            ("background-explicit-completed", true, "completed"),
-        ] {
-            let state = crate::state::tests_support::make_test_app_state();
-            let parent_id = format!("{session_id}-parent");
-            agent_session(&state, session_id, SHELL_BUSY);
-            state.session_states.get_mut(session_id).unwrap().agent_type = Some("codex".into());
-            state
-                .session_parent
-                .insert(session_id.to_string(), parent_id.clone());
-            state.agent_inbox.entry(parent_id.clone()).or_default();
-            if declare_completion {
-                state
-                    .silence_states
-                    .get(session_id)
-                    .unwrap()
-                    .lock()
-                    .mark_suggest_candidate(vec!["Review result".to_string()], 0);
-            }
-            state
-                .process_snapshot_cache
-                .store(Some(vec![process(10, 1, "codex", "codex")]));
-
-            transition_explicit_shell_state_with_hook(
-                &state,
-                session_id,
-                SHELL_IDLE,
-                "idle",
-                true,
-                || {},
-            );
-            assert!(state.agent_inbox.get(&parent_id).unwrap().is_empty());
-            let pending = state.session_state_with_shell(session_id).unwrap();
-            assert_eq!(pending.shell_state.as_deref(), Some("idle"));
-            assert_eq!(pending.agent_state.as_deref(), Some("working"));
-            assert!(pending.has_pending_background_probe());
-
-            state
-                .process_snapshot_cache
-                .store(Some(vec![process(10, 1, "codex", "codex")]));
-            assert!(refresh_background_work_from_cached_snapshot(
-                &state,
-                session_id,
-                10,
-                "codex",
-                0,
-                state.process_snapshot_cache.load(),
-            ));
-            let resolved = state.session_state_with_shell(session_id).unwrap();
-            assert_eq!(resolved.agent_state.as_deref(), Some(expected_state));
-            assert!(!resolved.has_pending_background_probe());
-            let inbox = state.agent_inbox.get(&parent_id).unwrap();
-            assert_eq!(inbox.len(), 1);
-            let content: serde_json::Value =
-                serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-            assert_eq!(content["state"], expected_state);
-            drop(inbox);
-
-            state
-                .process_snapshot_cache
-                .store(Some(vec![process(10, 1, "codex", "codex")]));
-            assert!(!refresh_background_work_from_cached_snapshot(
-                &state,
-                session_id,
-                10,
-                "codex",
-                0,
-                state.process_snapshot_cache.load(),
-            ));
-            assert_eq!(state.agent_inbox.get(&parent_id).unwrap().len(), 1);
-        }
-    }
-
-    #[test]
-    fn explicit_non_agent_idle_keeps_immediate_shell_semantics() {
-        for (session_id, hook_state) in [("plain-hook-idle", true), ("plain-osc133-idle", false)] {
-            let state = crate::state::tests_support::make_test_app_state();
-            state.session_states.insert(
-                session_id.to_string(),
-                crate::state::SessionState::default(),
-            );
-            state.shell_states.insert(
-                session_id.to_string(),
-                std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-            );
-            state.silence_states.insert(
-                session_id.to_string(),
-                Arc::new(Mutex::new(SilenceState::new())),
-            );
-
-            transition_explicit_shell_state_with_hook(
-                &state,
-                session_id,
-                SHELL_IDLE,
-                "idle",
-                hook_state,
-                || {},
-            );
-
-            assert_eq!(
-                state
-                    .shell_states
-                    .get(session_id)
-                    .unwrap()
-                    .load(Ordering::Acquire),
-                SHELL_IDLE
-            );
-            let session = state.session_states.get(session_id).unwrap();
-            assert_eq!(session.background_probe_turn_epoch, None);
-            assert_eq!(session.background_probe_after_generation, None);
-        }
-    }
-
-    #[test]
-    fn background_snapshot_refresher_is_demand_gated_without_sleeping() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        assert!(!refresh_process_snapshot_if_demanded(&state, || {
-            calls.fetch_add(1, Ordering::Relaxed);
-            None
-        }));
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-
-        let session_id = "background-demand";
-        agent_session(&state, session_id, SHELL_BUSY);
-        state.session_states.get_mut(session_id).unwrap().agent_type = Some("codex".into());
-        state
-            .session_states
-            .get_mut(session_id)
-            .unwrap()
-            .background_probe_turn_epoch = Some(0);
-        state
-            .session_states
-            .get_mut(session_id)
-            .unwrap()
-            .background_probe_after_generation = Some(0);
-
-        assert!(refresh_process_snapshot_if_demanded(&state, || {
-            calls.fetch_add(1, Ordering::Relaxed);
-            Some(vec![process(10, 1, "codex", "codex")])
-        }));
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            session_id,
-            10,
-            "codex",
-            0,
-            state.process_snapshot_cache.load(),
-        ));
-        assert!(!process_snapshot_is_demanded(&state));
-        assert!(!refresh_process_snapshot_if_demanded(&state, || {
-            calls.fetch_add(1, Ordering::Relaxed);
-            None
-        }));
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-    }
-
-    // --- Staleness counter tests ---
-
-    #[test]
-    fn test_silence_state_stale_after_many_output_chunks() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // Simulate 15 non-`?` chunks (well beyond STALE_QUESTION_CHUNKS)
-        for _ in 0..15 {
-            s.on_chunk(false, None, false, false, false);
-        }
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_silence(),
-            None,
-            "stale question after many chunks should not fire"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_few_decoration_chunks_still_fires() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        // 3 decoration chunks (mode line, separator, prompt) — within threshold
-        s.on_chunk(false, None, false, false, false);
-        s.on_chunk(false, None, false, false, false);
-        s.on_chunk(false, None, false, false, false);
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_silence(),
-            Some("Continue?".to_string()),
-            "few decoration chunks should still fire"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_counter_resets_on_new_question() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("First?".to_string()), false, false, false);
-        // Many non-`?` chunks → stale
-        for _ in 0..15 {
-            s.on_chunk(false, None, false, false, false);
-        }
-        // New `?` line resets the counter
-        s.on_chunk(false, Some("Second?".to_string()), false, false, false);
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_silence(),
-            Some("Second?".to_string()),
-            "new question should reset staleness"
-        );
-    }
-
-    // --- Screen verification tests ---
-
-    #[test]
-    fn test_verify_question_on_screen_found() {
-        let screen = vec![
-            String::new(),
-            "Some output".to_string(),
-            "Do you want to proceed?".to_string(),
-            "⏵⏵ task_name".to_string(),
-            String::new(),
-        ];
-        assert!(verify_question_on_screen(
-            &screen,
-            "Do you want to proceed?",
-            5
-        ));
-    }
-
-    #[test]
-    fn test_verify_question_on_screen_ink_indented() {
-        // Ink agents indent text with leading whitespace. extract_question_line
-        // captures "  Want me to do that?" (with spaces), screen_rows also has
-        // the same. Verification must match despite leading whitespace.
-        let screen = vec![
-            "⏺ Boss, this is a plan file".to_string(),
-            "  Is that right?".to_string(),
-            String::new(),
-            "  Want me to do that?".to_string(),
-            String::new(),
-        ];
-        // Question stored with leading whitespace from extract_question_line
-        assert!(verify_question_on_screen(
-            &screen,
-            "  Want me to do that?",
-            5
-        ));
-        // Also works if question was stored without whitespace
-        assert!(verify_question_on_screen(&screen, "Want me to do that?", 5));
-    }
-
-    #[test]
-    fn test_verify_question_on_screen_scrolled_away() {
-        // Question is NOT among the last 5 rows
-        let screen: Vec<String> = (0..24).map(|i| format!("line {i}")).collect();
-        assert!(!verify_question_on_screen(
-            &screen,
-            "Do you want to proceed?",
-            5
-        ));
-    }
-
-    #[test]
-    fn test_verify_question_on_screen_empty() {
-        let screen: Vec<String> = vec![];
-        assert!(!verify_question_on_screen(&screen, "Continue?", 5));
-    }
-
-    #[test]
-    fn test_verify_question_on_screen_partial_match() {
-        let screen = vec![
-            "This is not a question? but has more text".to_string(),
-            String::new(),
-        ];
-        // The stored question is just "question?" — substring should not match
-        assert!(!verify_question_on_screen(&screen, "question?", 5));
-    }
-
-    // --- Clear stale question tests ---
-
-    #[test]
-    fn test_silence_state_clear_stale_resets_pending() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.clear_stale_question();
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(s.check_silence(), None, "cleared stale should not fire");
-    }
-
-    #[test]
-    fn test_silence_state_clear_stale_allows_new_question() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, Some("Old?".to_string()), false, false, false);
-        s.clear_stale_question();
-        // New question after clear
-        s.on_chunk(false, Some("New?".to_string()), false, false, false);
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(
-            s.check_silence(),
-            Some("New?".to_string()),
-            "new question after clear should fire"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_repaint_same_question_does_not_refire() {
-        let mut s = SilenceState::new();
-        // Question arrives, silence fires, mark emitted
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(s.check_silence().is_some());
-        assert!(s.question_already_emitted);
-
-        // Terminal repaint: same `?` line re-appears as a changed row.
-        // This must NOT reset question_already_emitted.
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        assert!(
-            s.question_already_emitted,
-            "repaint of same question must not reset emitted flag"
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(
-            s.check_silence().is_none(),
-            "same question repaint must not re-fire"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_stale_same_question_scroll_does_not_refire() {
-        let mut s = SilenceState::new();
-        let past = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Question fires via chunk-based detection (Strategy 2)
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.last_output_at = past;
-        assert!(s.check_silence().is_some());
-
-        // Agent resumes: 15 non-`?` chunks (above STALE_QUESTION_CHUNKS)
-        for _ in 0..15 {
-            s.on_chunk(false, None, false, false, false);
-        }
-        assert!(
-            s.pending_question_line.is_none(),
-            "pending should be cleared by staleness"
-        );
-
-        // Same "Continue?" reappears in changed_rows because new output scrolled it
-        // to a different row. This is NOT a new question — must not re-fire.
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        assert!(
-            s.question_already_emitted,
-            "scroll of previously emitted question must not reset emitted flag"
-        );
-        s.last_output_at = past;
-        assert!(
-            s.check_silence().is_none(),
-            "same question text from scroll must not re-fire"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_stale_same_question_does_not_refire_after_user_input() {
-        let mut s = SilenceState::new();
-        let past = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        // Question fires
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.last_output_at = past;
-        assert!(s.check_silence().is_some());
-
-        // Agent resumes: 15 non-`?` chunks
-        for _ in 0..15 {
-            s.on_chunk(false, None, false, false, false);
-        }
-
-        // User provides input → new conversation cycle
-        s.suppress_user_input();
-        // Expire the echo suppression window so the next `?` line is not ignored
-        s.suppress_echo_until =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
-
-        // The same historical row is moved by a repaint after the answer. Text
-        // alone cannot prove that the agent asked it again, so it must remain
-        // suppressed; current-turn screen position/protocol evidence owns a
-        // genuinely repeated prompt.
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.last_output_at = past;
-        assert!(
-            s.check_silence().is_none(),
-            "historical question repaint after user input must not re-arm awaiting"
-        );
-    }
-
-    #[test]
-    fn current_chat_question_distinguishes_history_from_missing_prompt_anchor() {
-        let rows = vec![
-            "Confermi questa rimozione?".to_string(),
-            "› si".to_string(),
-            "Removed the worktree successfully.".to_string(),
-            "› ".to_string(),
-        ];
-        assert_eq!(
-            current_chat_question(&rows),
-            CurrentChatQuestion::PromptAnchored(None),
-            "later answer and completion must make the old question historical"
-        );
-        assert_eq!(
-            current_chat_question(&["Confermi questa rimozione?".to_string()]),
-            CurrentChatQuestion::NoPromptAnchor,
-            "headless/incomplete rendering may still use the bounded fallback"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_screen_emitted_question_scroll_does_not_refire() {
-        let mut s = SilenceState::new();
-        let past = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-
-        // Question arrives in a chunk
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-
-        // 15 non-? chunks → pending cleared by staleness
-        for _ in 0..15 {
-            s.on_chunk(false, None, false, false, false);
-        }
-        assert!(s.pending_question_line.is_none());
-
-        // Silence timer (Strategy 1) finds "Continue?" on screen and emits.
-        s.last_output_at = past;
-        s.mark_emitted("Continue?");
-
-        // New output causes scroll → same "Continue?" appears in changed_rows
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-
-        // Must NOT reset question_already_emitted — it's a scroll artifact
-        assert!(
-            s.question_already_emitted,
-            "scroll of screen-emitted question must not reset emitted flag"
-        );
-        s.last_output_at = past;
-        assert!(
-            !s.is_silent(),
-            "same question after screen emission must not allow re-detection"
-        );
-    }
-
-    #[test]
-    fn test_silence_state_different_question_after_emitted_does_fire() {
-        let mut s = SilenceState::new();
-        // First question fires
-        s.on_chunk(false, Some("Continue?".to_string()), false, false, false);
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert!(s.check_silence().is_some());
-
-        // Different question arrives — this IS a new question, must fire
-        s.on_chunk(
-            false,
-            Some("Are you sure?".to_string()),
-            false,
-            false,
-            false,
-        );
-        s.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(s.check_silence(), Some("Are you sure?".to_string()));
-    }
-
-    // --- find_last_chat_question tests ---
-
-    fn screen(lines: &[&str]) -> Vec<String> {
-        lines.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn test_find_last_chat_question_basic() {
-        let rows = screen(&[
-            "Do you want to proceed?",
-            "",
-            "────────────────────────────────",
-            "> ",
-            "────────────────────────────────",
-            "⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(
-            find_last_chat_question(&rows),
-            Some("Do you want to proceed?".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_find_last_chat_question_trailing_disclaimer_blocks_detection() {
-        // When the agent emits trailing text AFTER the suggest block (e.g.
-        // Claude Code's "(stopping here — waiting for your answer)" footer),
-        // the last chat line is the disclaimer, not the question. We
-        // deliberately do NOT scavenge past it — accepting this edge case
-        // false negative in exchange for not crossing the agent-turn boundary
-        // and matching the user's own previous `?`-ending input.
-        let rows = screen(&[
-            "⏺ FastAF v1.0.2 is connected.",
-            "  intent: await handshake then relay fixed response (Await ACK)",
-            "  Do you want me to proceed with this fix?",
-            "  suggest: 1) Screenshot overview panel | 2) Fix suggest scroll flicker | 3)",
-            "   Fix Cmd+Shift+M keybinding collision | 4) Manual test OSC 133",
-            "  (stopping here — waiting for your answer)",
-            "────────",
-            "❯ ",
-            "────────",
-            "  [Opus 4.6 | Max]",
-            "  ⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(find_last_chat_question(&rows), None);
-    }
-
-    #[test]
-    fn test_find_last_chat_question_does_not_cross_previous_input() {
-        // The user previously typed `tutto ok?` (ending with a `?`), the agent
-        // replied with a plain statement, then arrives at an empty prompt.
-        // The walker MUST NOT scavenge past the agent statement to pick up
-        // the user's own prior input — doing so fires a phantom question
-        // notification 10s after the reply.
-        let rows = screen(&[
-            "❯ tutto ok?",
-            "────────",
-            "⏺ Sì, tutto funziona correttamente.",
-            "  Il fix è stato verificato.",
-            "────────",
-            "❯ ",
-            "────────",
-            "  ⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(find_last_chat_question(&rows), None);
-    }
-
-    #[test]
-    fn test_find_last_chat_question_skips_wrapped_suggest_block() {
-        // Wrapped suggest between question and prompt must not block detection.
-        let rows = screen(&[
-            "Should I implement this approach?",
-            "suggest: 1) Opzione A | 2) Opzione B | 3) Opzione molto lunga che continua",
-            "su una seconda riga | 4) Quarta opzione",
-            "────────────────────────────────",
-            "> ",
-            "────────────────────────────────",
-            "⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(
-            find_last_chat_question(&rows),
-            Some("Should I implement this approach?".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_find_last_chat_question_no_question() {
-        // Agent statement (not a question) above prompt → None.
-        let rows = screen(&[
-            "I have completed the refactor.",
-            "",
-            "────────────────────────────────",
-            "> ",
-            "────────────────────────────────",
-            "⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(find_last_chat_question(&rows), None);
-    }
-
-    #[test]
-    fn test_find_last_chat_question_only_checks_first_chat_line() {
-        // With multiple chat lines above the prompt, only the immediately
-        // preceding one is considered — even if an older line ends with `?`.
-        let rows = screen(&[
-            "Old question from earlier?",
-            "Here is some context.",
-            "Do you agree with this plan?",
-            "",
-            "────────────────────────────────",
-            "> ",
-            "────────────────────────────────",
-            "⏵⏵ bypass permissions on",
-        ]);
-        // Last chat line is the empty line (skipped), then "Do you agree…?" → detected
-        assert_eq!(
-            find_last_chat_question(&rows),
-            Some("Do you agree with this plan?".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_find_last_chat_question_non_question_last_line_blocks() {
-        // If the last chat line above the prompt is not a question, we do NOT
-        // keep walking upward to find an older question.
-        let rows = screen(&[
-            "Shall I proceed?",
-            "Here is some unrelated follow-up text.",
-            "────────────────────────────────",
-            "> ",
-            "────────────────────────────────",
-            "⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(find_last_chat_question(&rows), None);
-    }
-
-    #[test]
-    fn test_find_last_chat_question_rejects_code_syntax() {
-        // `?` in code syntax must not be treated as a question.
-        let rows = screen(&[
-            "let x = map.get(&key)?",
-            "",
-            "────────────────────────────────",
-            "> ",
-            "────────────────────────────────",
-            "⏵⏵ bypass permissions on",
-        ]);
-        assert_eq!(find_last_chat_question(&rows), None);
-    }
-
-    #[test]
-    fn test_find_last_chat_question_codex_layout() {
-        // Codex has no separator lines — the walk must still find the question.
-        let rows = screen(&[
-            "Do you want me to proceed?",
-            "",
-            "› ",
-            "",
-            "  gpt-5.3-codex high · 100% left · ~/project",
-        ]);
-        assert_eq!(
-            find_last_chat_question(&rows),
-            Some("Do you want me to proceed?".to_string()),
-        );
-    }
-
-    // --- extract_question_line content filter tests ---
-
-    fn make_rows(texts: &[&str]) -> Vec<ChangedRow> {
-        texts
-            .iter()
-            .enumerate()
-            .map(|(i, t)| ChangedRow {
-                row_index: i,
-                text: t.to_string(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_code_comment() {
-        let rows = make_rows(&["// What is this?"]);
-        assert_eq!(extract_question_line(&rows), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_markdown_header() {
-        let rows = make_rows(&["## FAQ?"]);
-        assert_eq!(extract_question_line(&rows), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_diff_context() {
-        assert_eq!(extract_question_line(&make_rows(&["+  if x?"])), None);
-        assert_eq!(extract_question_line(&make_rows(&["-  if x?"])), None);
-        assert_eq!(extract_question_line(&make_rows(&[">  quoted?"])), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_numbered_diff_context() {
-        assert_eq!(
-            extract_question_line(&make_rows(&["1 +Run the following release checklist?"])),
-            None,
-            "a numbered diff row must not seed awaiting-question silence detection"
-        );
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_code_syntax() {
-        assert_eq!(
-            extract_question_line(&make_rows(&["fn foo() -> Option<bool>?"])),
-            None
-        );
-        assert_eq!(
-            extract_question_line(&make_rows(&["map.entry(key)?"])),
-            None
-        );
-        assert_eq!(extract_question_line(&make_rows(&["let x = a::b?"])), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_accepts_real_question() {
-        let rows = make_rows(&["Do you want to proceed?"]);
-        assert_eq!(
-            extract_question_line(&rows),
-            Some("Do you want to proceed?".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_question_line_accepts_yn_prompt() {
-        // Y/n prompt ends with `]`, not `?` — extract_question_line only matches `?`-ending.
-        // The actual question before the Y/n suffix ends with `?`:
-        let rows = make_rows(&["Continue?"]);
-        assert_eq!(extract_question_line(&rows), Some("Continue?".to_string()));
-    }
-
-    #[test]
-    fn test_extract_question_line_accepts_short_natural_question() {
-        // Boss confirmed: "continuo?" is a valid question
-        let rows = make_rows(&["continuo?"]);
-        assert_eq!(extract_question_line(&rows), Some("continuo?".to_string()));
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_asterisk_comment() {
-        let rows = make_rows(&["* What is this?"]);
-        assert_eq!(extract_question_line(&rows), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_accepts_parenthetical_options() {
-        let rows = make_rows(&["Continue (yes/no)?"]);
-        assert_eq!(
-            extract_question_line(&rows),
-            Some("Continue (yes/no)?".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_question_line_accepts_yn_parens() {
-        let rows = make_rows(&["Procedo (s/n)?"]);
-        assert_eq!(
-            extract_question_line(&rows),
-            Some("Procedo (s/n)?".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_question_line_accepts_option_prompt() {
-        let rows = make_rows(&["Apply changes (y)?"]);
-        assert_eq!(
-            extract_question_line(&rows),
-            Some("Apply changes (y)?".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_rust_try() {
-        assert_eq!(extract_question_line(&make_rows(&["foo.bar()?"])), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_generic_try() {
-        // Also caught by `::` filter
-        assert_eq!(extract_question_line(&make_rows(&["Vec::new()?"])), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_method_chain_try() {
-        assert_eq!(
-            extract_question_line(&make_rows(&["iter().map(|x| x)?"])),
-            None
-        );
-    }
-
-    // --- Prompt-prefixed user input rejection ---
-
-    #[test]
-    fn test_extract_question_line_rejects_claude_prompt() {
-        assert_eq!(extract_question_line(&make_rows(&["❯ tutto ok?"])), None);
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_codex_prompt() {
-        assert_eq!(
-            extract_question_line(&make_rows(&["› is this done?"])),
-            None
-        );
-    }
-
-    #[test]
-    fn test_extract_question_line_rejects_gemini_prompt() {
-        assert_eq!(
-            extract_question_line(&make_rows(&["> are you sure?"])),
-            None
-        );
-    }
-
-    #[test]
-    fn test_find_last_chat_question_rejects_user_prompt_line() {
-        let rows: Vec<String> = vec![
-            "❯ hai cambiato qualcosa?".into(),
-            "────────────────────────────────────────────────".into(),
-            "❯".into(),
-            "────────────────────────────────────────────────".into(),
-        ];
-        assert_eq!(find_last_chat_question(&rows), None);
-    }
-
-    #[test]
-    fn test_find_last_chat_question_agent_question_after_user_input() {
-        let rows: Vec<String> = vec![
-            "❯ tell me about this".into(),
-            "Would you like me to continue?".into(),
-            "────────────────────────────────────────────────".into(),
-            "❯".into(),
-            "────────────────────────────────────────────────".into(),
-        ];
-        assert_eq!(
-            find_last_chat_question(&rows),
-            Some("Would you like me to continue?".to_string())
-        );
-    }
-
-    // --- Resize grace period tests ---
-
-    #[test]
-    fn test_resize_grace_active_immediately_after_resize() {
-        let mut s = SilenceState::new();
-        s.on_resize();
-        assert!(
-            s.is_resize_grace(),
-            "grace period should be active right after resize"
-        );
-    }
-
-    #[test]
-    fn test_resize_grace_inactive_before_resize() {
-        let s = SilenceState::new();
-        assert!(
-            !s.is_resize_grace(),
-            "grace period should be inactive with no resize"
-        );
-    }
-
-    #[test]
-    fn test_resize_grace_expires_after_threshold() {
-        let mut s = SilenceState::new();
-        s.on_resize();
-        // Backdating the resize timestamp past the grace period
-        s.last_resize_at =
-            Some(std::time::Instant::now() - RESIZE_GRACE - std::time::Duration::from_millis(100));
-        assert!(!s.is_resize_grace(), "grace period should have expired");
-    }
-
-    #[test]
-    fn test_resize_grace_refreshed_on_second_resize() {
-        let mut s = SilenceState::new();
-        s.on_resize();
-        // Expire the first grace period
-        s.last_resize_at =
-            Some(std::time::Instant::now() - RESIZE_GRACE - std::time::Duration::from_millis(100));
-        assert!(!s.is_resize_grace());
-        // Second resize refreshes the timer
-        s.on_resize();
-        assert!(
-            s.is_resize_grace(),
-            "second resize should restart grace period"
-        );
-    }
-
-    // --- Startup grace period tests ---
-
-    #[test]
-    fn test_startup_grace_active_on_new_session() {
-        let s = SilenceState::new();
-        assert!(
-            s.is_startup_grace(),
-            "startup grace should be active on new session"
-        );
-    }
-
-    #[test]
-    fn test_startup_grace_settles_after_silence() {
-        let mut s = SilenceState::new();
-        // Simulate output stopping long enough ago
-        s.last_output_at = std::time::Instant::now()
-            - STARTUP_SETTLE_SILENCE
-            - std::time::Duration::from_millis(100);
-        s.check_startup_settle();
-        assert!(
-            !s.is_startup_grace(),
-            "startup grace should end after output silence"
-        );
-    }
-
-    #[test]
-    fn test_startup_grace_persists_during_output() {
-        let mut s = SilenceState::new();
-        // Output is recent — grace should persist
-        s.last_output_at = std::time::Instant::now();
-        s.check_startup_settle();
-        assert!(
-            s.is_startup_grace(),
-            "startup grace should persist while output is flowing"
-        );
-    }
-
-    #[test]
-    fn test_startup_grace_safety_cap() {
-        let mut s = SilenceState::new();
-        // Created long ago, but output is recent — safety cap should force settle
-        s.created_at =
-            std::time::Instant::now() - STARTUP_GRACE_MAX - std::time::Duration::from_secs(1);
-        s.last_output_at = std::time::Instant::now(); // output still flowing
-        s.check_startup_settle();
-        assert!(
-            !s.is_startup_grace(),
-            "startup grace should end at safety cap"
-        );
-    }
-
-    #[test]
-    fn test_startup_grace_idempotent_after_settle() {
-        let mut s = SilenceState::new();
-        s.last_output_at = std::time::Instant::now()
-            - STARTUP_SETTLE_SILENCE
-            - std::time::Duration::from_millis(100);
-        s.check_startup_settle();
-        assert!(s.startup_settled);
-        // Calling again doesn't change anything
-        s.check_startup_settle();
-        assert!(s.startup_settled);
-    }
-
-    // --- VtLogBuffer + parse_clean_lines pipeline tests ---
-
-    /// VtLogBuffer changed rows feed parse_clean_lines and produce a StatusLine event
-    /// for normal screen output.
-    #[test]
-    fn test_vt_log_pipeline_status_line_normal_screen() {
-        use crate::output_parser::{OutputParser, ParsedEvent};
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut parser = OutputParser::new();
-
-        let changed = vt_log.process(b"* Reading files...");
-        let events = parser.parse_clean_lines(&changed, true);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, ParsedEvent::StatusLine { .. })),
-            "expected StatusLine from normal screen, got: {:?}",
-            events
-        );
-    }
-
-    /// VtLogBuffer changed rows feed parse_clean_lines and produce an Intent event
-    /// during alternate screen (e.g. Claude Code / Ink).
-    #[test]
-    fn test_vt_log_pipeline_intent_alternate_screen() {
-        use crate::output_parser::{OutputParser, ParsedEvent};
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut parser = OutputParser::new();
-
-        // Enter alternate screen (smcup: ESC[?1049h)
-        let _ = vt_log.process(b"\x1b[?1049h");
-        let changed = vt_log.process(b"intent: Doing work (Test)");
-        let events = parser.parse_clean_lines(&changed, true);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, ParsedEvent::Intent { .. })),
-            "expected Intent from alternate screen, got: {:?}",
-            events
-        );
-    }
-
-    /// parse_osc94 is called on raw data (OSC 9;4 is invisible in clean rows).
-    #[test]
-    fn test_osc94_from_raw_stream() {
-        use crate::output_parser::{ParsedEvent, parse_osc94};
-
-        let raw = "\x1b]9;4;1;50\x07"; // OSC 9;4 progress 50%
-        let event = parse_osc94(raw);
-        assert!(
-            matches!(event, Some(ParsedEvent::Progress { .. })),
-            "expected Progress from raw OSC 9;4, got: {:?}",
-            event
-        );
-    }
-
-    /// extract_question_line finds `?`-ending rows from VtLogBuffer output.
-    #[test]
-    fn test_extract_question_line_basic() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let changed = vt_log.process(b"Would you like to proceed?");
-        assert_eq!(
-            extract_question_line(&changed).as_deref(),
-            Some("Would you like to proceed?")
-        );
-    }
-
-    /// Question row must be found even when a mode line with a higher row index
-    /// arrives in the same chunk (e.g. Claude Code question + ⏵⏵ status line).
-    #[test]
-    fn test_extract_question_line_with_mode_line_same_chunk() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let data = b"Le committo?\r\n\r\n\xe2\x8f\xb5\xe2\x8f\xb5 Reading files";
-        let changed = vt_log.process(data);
-        assert_eq!(
-            extract_question_line(&changed).as_deref(),
-            Some("Le committo?"),
-            "question must be found even when mode line is on a later row; changed_rows: {:?}",
-            changed
-                .iter()
-                .map(|r| format!("[{}] {:?}", r.row_index, r.text))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    /// Question must be found in alternate screen with cursor-positioned rows.
-    #[test]
-    fn test_extract_question_line_alternate_screen() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let _ = vt_log.process(b"\x1b[?1049h");
-        let data = b"\x1b[5;1HDo you want to proceed?\x1b[23;1H* Thinking...";
-        let changed = vt_log.process(data);
-        assert_eq!(
-            extract_question_line(&changed).as_deref(),
-            Some("Do you want to proceed?"),
-            "question must be found in alternate screen; changed_rows: {:?}",
-            changed
-                .iter()
-                .map(|r| format!("[{}] {:?}", r.row_index, r.text))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    /// End-to-end: VtLogBuffer → extract_question_line → SilenceState → check_silence.
-    /// Question + mode line arrive together → fires at 10s.
-    #[test]
-    fn test_e2e_question_detection_with_mode_line() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut silence = SilenceState::new();
-
-        let changed = vt_log.process(b"Le committo?\r\n\r\n\xe2\x8f\xb5\xe2\x8f\xb5 Reading files");
-        silence.on_chunk(false, extract_question_line(&changed), false, false, false);
-
-        assert_eq!(
-            silence.pending_question_line.as_deref(),
-            Some("Le committo?")
-        );
-
-        silence.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(silence.check_silence(), Some("Le committo?".to_string()));
-    }
-
-    /// End-to-end: question in chunk 1, mode line in chunk 2, then silence.
-    /// Non-`?` output must NOT prevent the question from firing at 10s.
-    #[test]
-    fn test_e2e_question_then_decoration_then_silence() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut silence = SilenceState::new();
-
-        let changed = vt_log.process(b"Le committo?");
-        silence.on_chunk(false, extract_question_line(&changed), false, false, false);
-
-        // Mode line / prompt decoration arrives in a separate chunk
-        let changed = vt_log.process(b"\r\n\xe2\x8f\xb5\xe2\x8f\xb5 Idle");
-        silence.on_chunk(false, extract_question_line(&changed), false, false, false);
-
-        // 10s silence → fires
-        silence.last_output_at = std::time::Instant::now()
-            - SILENCE_QUESTION_THRESHOLD
-            - std::time::Duration::from_millis(100);
-        assert_eq!(silence.check_silence(), Some("Le committo?".to_string()));
-    }
-
-    // --- Headless reader structured event tests ---
-
-    /// The headless reader logic: after process(), parse_clean_lines produces events.
-    /// This verifies the core data flow without spawning a full AppState.
-    #[test]
-    fn test_headless_reader_intent_event_logic() {
-        use crate::output_parser::{OutputParser, ParsedEvent};
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut parser = OutputParser::new();
-
-        let changed = vt_log.process(b"intent: Testing headless reader");
-        let events = parser.parse_clean_lines(&changed, true);
-
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, ParsedEvent::Intent { .. })),
-            "expected Intent from headless reader logic, got: {:?}",
-            events
-        );
-    }
-
-    /// The headless reader emits events for alternate screen content (e.g. Claude Code).
-    #[test]
-    fn test_headless_reader_alternate_screen_events() {
-        use crate::output_parser::{OutputParser, ParsedEvent};
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut parser = OutputParser::new();
-
-        let _ = vt_log.process(b"\x1b[?1049h"); // enter alternate screen
-        let changed = vt_log.process(b"* Reading files...");
-        let events = parser.parse_clean_lines(&changed, true);
-
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, ParsedEvent::StatusLine { .. })),
-            "headless reader must detect StatusLine during alternate screen, got: {:?}",
-            events
-        );
-    }
-
-    // --- Escape sequence handling diagnostics (using TerminalGrid) ---
-
-    /// Verify that `\x1b[<n>F` (CPL — Cursor Previous Line) is handled
-    /// and does NOT leak parameter digits into screen cell text.
-    #[test]
-    fn test_cpl_sequence_does_not_leak() {
-        let mut grid = crate::terminal_grid::TerminalGrid::new(24, 80, 0);
-        grid.process(b"\n");
-        grid.process(b"old content here\n");
-        grid.process(b"\x1b[1F");
-        grid.process(b"new content");
-        let row1 = grid.get_row_text(1);
-        assert_eq!(
-            row1.trim_end(),
-            "new content here",
-            "CPL should move cursor up; row1 = {:?}",
-            row1
-        );
-        assert!(
-            !row1.contains("1F"),
-            "escape param '1F' leaked into screen text: {:?}",
-            row1
-        );
-    }
-
-    /// Verify that `\x1b[<n>E` (CNL — Cursor Next Line) is handled.
-    #[test]
-    fn test_cnl_sequence_does_not_leak() {
-        let mut grid = crate::terminal_grid::TerminalGrid::new(24, 80, 0);
-        grid.process(b"line0");
-        grid.process(b"\x1b[1E");
-        grid.process(b"line1");
-        let row0 = grid.get_row_text(0);
-        let row1 = grid.get_row_text(1);
-        assert_eq!(
-            row0.trim_end(),
-            "line0",
-            "row0 should be unchanged; got {:?}",
-            row0
-        );
-        assert_eq!(
-            row1.trim_end(),
-            "line1",
-            "CNL should move cursor down; got {:?}",
-            row1
-        );
-    }
-
-    /// Simulate Ink-style rendering: write intent, then use CPL to update it.
-    /// This is what Claude Code does when updating its status line.
-    #[test]
-    fn test_vt100_ink_style_intent_with_cpl() {
-        use crate::output_parser::{OutputParser, ParsedEvent};
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut parser = OutputParser::new();
-
-        // Simulate Ink render: write placeholder, then CPL + overwrite with intent
-        let _ = vt_log.process(b"\x1b[?1049h"); // alternate screen
-        let _ = vt_log.process(b"placeholder text\r\n");
-        // Ink update: go up, clear line, write intent
-        let changed =
-            vt_log.process(b"\x1b[1F\x1b[2Kintent: Fix all 34 documentation gaps (Fixing gaps)");
-        let events = parser.parse_clean_lines(&changed, true);
-        let intent = events.iter().find_map(|e| match e {
-            ParsedEvent::Intent { text, title, .. } => Some((text.clone(), title.clone())),
-            _ => None,
-        });
-        assert!(
-            intent.is_some(),
-            "intent must be detected after CPL overwrite; changed={:?}, events={:?}",
-            changed,
-            events
-        );
-        let (text, title) = intent.unwrap();
-        assert_eq!(
-            text, "Fix all 34 documentation gaps",
-            "intent text must be clean (no '1F' leak); got: {:?}",
-            text
-        );
-        assert_eq!(title.as_deref(), Some("Fixing gaps"));
-    }
-
-    /// Chunked delivery: CSI split across two process() calls.
-    /// Verifies the vt100 parser buffers incomplete escapes correctly.
-    #[test]
-    fn test_vt100_chunked_csi_does_not_leak() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let _ = vt_log.process(b"\x1b[?1049h"); // alternate screen
-        let _ = vt_log.process(b"old line\r\n");
-
-        // Chunk 1: partial CSI (just the introducer)
-        let changed1 = vt_log.process(b"\x1b[");
-        // Chunk 2: parameter + final byte completing CPL, then text
-        let changed2 = vt_log.process(b"1Fintent: Fix all gaps");
-
-        // Check that no row contains literal "1F" as text
-        for row in changed1.iter().chain(changed2.iter()) {
-            assert!(
-                !row.text.contains("1F"),
-                "chunked CSI leaked '1F' into row text: {:?}",
-                row.text
-            );
-        }
-    }
-
-    /// Test what happens when CSI is aborted by an unexpected byte.
-    #[test]
-    fn test_aborted_csi_does_not_leak_digits() {
-        let mut grid = crate::terminal_grid::TerminalGrid::new(24, 80, 0);
-        // \x1b[1\x1b[2K — the first CSI is aborted by the second ESC
-        grid.process(b"\x1b[1\x1b[2KHello");
-        let row = grid.get_row_text(0);
-        eprintln!("aborted CSI row: {:?}", row);
-        assert!(
-            !row.starts_with('1'),
-            "aborted CSI parameter '1' should not appear in cell text: {:?}",
-            row
-        );
-    }
-
-    /// Test that unknown private CSI sequences don't leak.
-    #[test]
-    fn test_unknown_private_csi_does_not_leak() {
-        let mut grid = crate::terminal_grid::TerminalGrid::new(24, 80, 0);
-        // \x1b[?1234z — fictional private sequence with unknown final byte 'z'
-        grid.process(b"\x1b[?1234zVisible text");
-        let row = grid.get_row_text(0);
-        eprintln!("unknown private CSI row: {:?}", row);
-        assert_eq!(
-            row.trim_end(),
-            "Visible text",
-            "unknown private CSI should not leak; got: {:?}",
-            row
-        );
-    }
-
-    /// Simulate realistic Ink output with SGR + cursor movement + text.
-    /// This mimics what Claude Code actually sends through the PTY.
-    #[test]
-    fn test_vt100_realistic_ink_render_cycle() {
-        use crate::output_parser::{OutputParser, ParsedEvent};
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let mut parser = OutputParser::new();
-
-        let _ = vt_log.process(b"\x1b[?1049h"); // alternate screen
-
-        // Frame 1: Ink renders initial content with colors
-        let _ = vt_log.process(
-            b"\x1b[1;1H\x1b[38;2;128;128;128m\xe2\x97\x8f\x1b[0m \x1b[1mintent: Reading codebase structure (Reading code)\x1b[0m"
-        );
-
-        // Frame 2: Ink updates — cursor up, erase line, rewrite
-        // This is how Ink typically does incremental updates
-        let changed = vt_log.process(
-            b"\x1b[1F\x1b[2K\x1b[38;2;128;128;128m\xe2\x97\x8f\x1b[0m \x1b[1mintent: Fix all 34 documentation gaps (Fixing gaps)\x1b[0m"
-        );
-
-        let events = parser.parse_clean_lines(&changed, true);
-        let intent = events.iter().find_map(|e| match e {
-            ParsedEvent::Intent { text, title, .. } => Some((text.clone(), title.clone())),
-            _ => None,
-        });
-
-        // Print all changed rows for debugging
-        eprintln!("changed rows:");
-        for r in &changed {
-            eprintln!("  row[{}]: {:?}", r.row_index, r.text);
-        }
-        eprintln!("events: {:?}", events);
-
-        assert!(
-            intent.is_some(),
-            "intent must be detected in realistic Ink render; events={:?}",
-            events
-        );
-        let (text, title) = intent.unwrap();
-        assert!(
-            !text.contains("1F"),
-            "intent text must not contain escape leak '1F'; got: {:?}",
-            text
-        );
-        assert_eq!(text, "Fix all 34 documentation gaps");
-        assert_eq!(title.as_deref(), Some("Fixing gaps"));
-    }
-
-    /// Multi-chunk Ink render: data arrives in small fragments.
-    #[test]
-    fn test_vt100_fragmented_ink_output() {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(24, 80, 1000);
-        let _ = vt_log.process(b"\x1b[?1049h");
-
-        // Simulate fragmented delivery of: \x1b[1F\x1b[2Kintent: Fix all gaps
-        let fragments: Vec<&[u8]> = vec![
-            b"\x1b[", // CSI introducer
-            b"1",     // parameter
-            b"F",     // final byte (CPL)
-            b"\x1b[", // CSI introducer
-            b"2K",    // erase line
-            b"intent: Fix all gaps",
-        ];
-
-        let mut all_changed = Vec::new();
-        for frag in fragments {
-            let changed = vt_log.process(frag);
-            all_changed.extend(changed);
-        }
-
-        // Check no row contains '1F' leak
-        for row in &all_changed {
-            eprintln!("fragmented row[{}]: {:?}", row.row_index, row.text);
-            assert!(
-                !row.text.contains("1F"),
-                "fragmented delivery leaked '1F': {:?}",
-                row.text
-            );
-        }
-    }
-
-    // --- Shell state transition tests ---
-
-    #[test]
-    fn test_shell_state_busy_on_real_output() {
-        use std::sync::atomic::{AtomicU8, Ordering};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_NULL));
-        state.last_output_ms.insert(
-            sid.to_string(),
-            std::sync::atomic::AtomicU64::new(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-            ),
-        );
-
-        // Transition null → busy
-        assert!(
-            try_shell_transition(&state, sid, SHELL_NULL, SHELL_BUSY, true),
-            "should transition null → busy"
-        );
-        assert_eq!(
-            state.shell_states.get(sid).unwrap().load(Ordering::Relaxed),
-            SHELL_BUSY
-        );
-
-        // Transition busy → busy should fail (already busy, no re-emit)
-        assert!(
-            !try_shell_transition(&state, sid, SHELL_NULL, SHELL_BUSY, true),
-            "should NOT re-transition to busy"
-        );
-    }
-
-    #[test]
-    fn test_shell_state_idle_after_500ms() {
-        use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-        state
-            .session_states
-            .insert(sid.to_string(), crate::state::SessionState::default());
-
-        // Set last output to 600ms ago (> SHELL_IDLE_MS)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 600));
-
-        assert!(
-            should_transition_idle(&state, sid).should_transition,
-            "should be ready to transition idle (600ms elapsed, no sub-tasks)"
-        );
-        assert!(
-            try_shell_transition(&state, sid, SHELL_BUSY, SHELL_IDLE, true),
-            "should transition busy → idle"
-        );
-        assert_eq!(
-            state.shell_states.get(sid).unwrap().load(Ordering::Relaxed),
-            SHELL_IDLE
-        );
-    }
-
-    #[test]
-    fn test_shell_state_no_idle_with_subtasks() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                active_sub_tasks: 2,
-                ..Default::default()
-            },
-        );
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 600));
-
-        assert!(
-            !should_transition_idle(&state, sid).should_transition,
-            "should NOT transition idle when active_sub_tasks > 0 and elapsed < SUBTASK_STALE_MS"
-        );
-    }
-
-    #[test]
-    fn test_shell_state_idle_stale_subtasks_force_cleared() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                active_sub_tasks: 2,
-                ..Default::default()
-            },
-        );
-
-        // Set last output to 31s ago (> SUBTASK_STALE_MS)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 31_000));
-
-        assert!(
-            should_transition_idle(&state, sid).should_transition,
-            "should transition idle when active_sub_tasks > 0 but elapsed >= SUBTASK_STALE_MS"
-        );
-        // Verify the stale counter was force-cleared
-        let sub = state
-            .session_states
-            .get(sid)
-            .map(|s| s.active_sub_tasks)
-            .unwrap_or(999);
-        assert_eq!(sub, 0, "active_sub_tasks should be force-cleared to 0");
-    }
-
-    // ---- Activity pulse (story 625-56b0) ----
-    //
-    // What these protect: commit cda39f31 deleted the `pty-output` emit and left
-    // the frontend listener subscribed to it, so desktop `lastDataAt` and the
-    // background-tab unread flag silently froze for a commit. Nothing failed,
-    // because no test tied a producer to a consumer.
-    //
-    // LIMIT, stated rather than papered over: these drive `ActivityPulse`
-    // directly. They prove the pulse throttles and reaches the bus, and the
-    // frontend suite (`transport.test.ts`) proves both transports route the
-    // event to `onActivity`. Neither proves the PTY reader loop still CALLS
-    // `pulse()` — that needs a live PTY, and this crate has no harness that
-    // spawns one. Deleting the call site would still pass; deleting or renaming
-    // either end of the signal would not.
-
-    /// A session that produces output must announce it on the bus.
-    #[test]
-    fn activity_pulse_emits_on_first_output() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let mut rx = state.event_bus.subscribe();
-        let mut pulse = ActivityPulse::new();
-
-        pulse.pulse(&state, "sess-a");
-
-        match rx.try_recv().expect("bus must receive the activity pulse") {
-            crate::state::AppEvent::PtyActivity { session_id } => {
-                assert_eq!(session_id, "sess-a");
-            }
-            other => panic!("unexpected event variant: {other:?}"),
-        }
-    }
-
-    /// Repeated output inside the window collapses to one pulse. Dropping is the
-    /// intended behaviour here — the signal is payload-free and idempotent, so a
-    /// suppressed pulse carries nothing a later one does not.
-    #[test]
-    fn activity_pulse_suppresses_repeats_inside_window() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let mut rx = state.event_bus.subscribe();
-        let mut pulse = ActivityPulse::new();
-
-        for _ in 0..50 {
-            pulse.pulse(&state, "sess-a");
-        }
-
-        assert!(
-            matches!(
-                rx.try_recv(),
-                Ok(crate::state::AppEvent::PtyActivity { .. })
-            ),
-            "first pulse must go out"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "a burst inside one window must collapse to a single pulse"
-        );
-    }
-
-    /// ...but the session must not go quiet forever: once the window has passed,
-    /// the next chunk pulses again. A latch here would freeze `lastDataAt` at the
-    /// first byte of a long-running command, which is the bug in a new costume.
-    #[test]
-    fn activity_pulse_resumes_after_window() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let mut rx = state.event_bus.subscribe();
-        let mut pulse = ActivityPulse::new();
-
-        pulse.pulse(&state, "sess-a");
-        let _ = rx.try_recv();
-        // Reach back past the window instead of sleeping through it.
-        pulse.last = Some(std::time::Instant::now() - ACTIVITY_PULSE_WINDOW);
-        pulse.pulse(&state, "sess-a");
-
-        assert!(
-            matches!(
-                rx.try_recv(),
-                Ok(crate::state::AppEvent::PtyActivity { .. })
-            ),
-            "a chunk after the window must pulse again"
-        );
-    }
-
-    // The matching guarantee — that the pulse must NOT restamp
-    // `SessionState.last_activity_ms` — is asserted in `state.rs`, next to the
-    // accumulator that owns that field.
-
-    /// Story 1366-2b3e/H1: when the stale-subtasks recovery path force-clears
-    /// the in-memory counter, the caller must emit ActiveSubtasks{count:0}
-    /// so the frontend store and notification gate also reset.
-    #[test]
-    fn test_force_cleared_subtasks_signal_propagates() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                active_sub_tasks: 3,
-                ..Default::default()
-            },
-        );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 31_000));
-
-        let decision = should_transition_idle(&state, sid);
-        assert!(
-            decision.should_transition,
-            "stale path must transition idle"
-        );
-        assert!(
-            decision.force_cleared_subtasks,
-            "stale path must signal force-clear so caller emits count=0"
-        );
-
-        // Subscribe BEFORE emitting so the broadcast is captured.
-        let mut rx = state.event_bus.subscribe();
-        emit_active_subtasks(&state, sid, 0, "");
-
-        let event = rx.try_recv().expect("event bus must receive PtyParsed");
-        match event {
-            crate::state::AppEvent::PtyParsed { session_id, parsed } => {
-                assert_eq!(session_id, sid);
-                let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                assert_eq!(kind, "active-subtasks", "wrong event variant: {parsed}");
-                let count = parsed.get("count").and_then(|v| v.as_u64()).unwrap_or(999);
-                assert_eq!(count, 0, "count must be 0 to clear the badge");
-            }
-            other => panic!("unexpected event variant: {other:?}"),
-        }
-    }
-
-    /// Inverse: the normal idle path (no sub-tasks at all) must NOT signal
-    /// force_cleared_subtasks — otherwise we would emit redundant count=0
-    /// events on every healthy busy→idle.
-    #[test]
-    fn test_normal_idle_does_not_signal_force_clear() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-        state
-            .session_states
-            .insert(sid.to_string(), crate::state::SessionState::default());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 600));
-
-        let decision = should_transition_idle(&state, sid);
-        assert!(decision.should_transition);
-        assert!(
-            !decision.force_cleared_subtasks,
-            "no-sub-tasks idle must not request a redundant count=0 emission"
-        );
-    }
-
-    #[test]
-    fn test_shell_state_no_idle_agent_session_under_agent_threshold() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-
-        // Agent session: agent_type is set
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("claude".to_string()),
-                ..Default::default()
-            },
-        );
-
-        // 600ms elapsed — would trigger idle for a shell, but NOT for an agent session
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 600));
-
-        assert!(
-            !should_transition_idle(&state, sid).should_transition,
-            "agent session should NOT transition idle at 600ms (under AGENT_IDLE_MS)"
-        );
-    }
-
-    #[test]
-    fn test_shell_state_idle_agent_session_over_agent_threshold() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-
-        // Agent session: agent_type is set
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("claude".to_string()),
-                ..Default::default()
-            },
-        );
-
-        // 3000ms elapsed — over the 2500ms agent threshold
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 3000));
-
-        assert!(
-            should_transition_idle(&state, sid).should_transition,
-            "agent session SHOULD transition idle after agent threshold"
-        );
-    }
-
-    #[test]
-    fn test_shell_state_no_idle_before_500ms() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-        state
-            .session_states
-            .insert(sid.to_string(), crate::state::SessionState::default());
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 200));
-
-        assert!(
-            !should_transition_idle(&state, sid).should_transition,
-            "should NOT transition idle when only 200ms elapsed"
-        );
-    }
-
-    #[test]
-    fn test_shell_state_cas_prevents_duplicate_idle() {
-        use std::sync::atomic::{AtomicU8, Ordering};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-
-        // First CAS succeeds
-        assert!(try_shell_transition(
-            &state, sid, SHELL_BUSY, SHELL_IDLE, true
-        ));
-        // Second CAS fails (already idle)
-        assert!(
-            !try_shell_transition(&state, sid, SHELL_BUSY, SHELL_IDLE, true),
-            "second idle transition must fail — already idle"
-        );
-        assert_eq!(
-            state.shell_states.get(sid).unwrap().load(Ordering::Relaxed),
-            SHELL_IDLE
-        );
-    }
-
-    #[test]
-    fn test_shell_state_idle_to_busy_on_real_output() {
-        use std::sync::atomic::{AtomicU8, Ordering};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_IDLE));
-
-        assert!(
-            try_shell_transition(&state, sid, SHELL_IDLE, SHELL_BUSY, true),
-            "should transition idle → busy on real output"
-        );
-        assert_eq!(
-            state.shell_states.get(sid).unwrap().load(Ordering::Relaxed),
-            SHELL_BUSY
-        );
-    }
-
-    // --- Backup idle guard: has_recent_chunks ---
-
-    #[test]
-    fn test_has_recent_chunks_true_after_any_chunk() {
-        let mut s = SilenceState::new();
-        // Any chunk (including chrome-only) updates last_chunk_at
-        s.on_chunk(false, None, true, true, false);
-        assert!(
-            s.has_recent_chunks(),
-            "has_recent_chunks should be true right after any chunk"
-        );
-    }
-
-    #[test]
-    fn test_has_recent_chunks_true_after_real_chunk() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, None, false, false, false);
-        assert!(
-            s.has_recent_chunks(),
-            "has_recent_chunks should be true right after a real output chunk"
-        );
-    }
-
-    #[test]
-    fn test_has_recent_chunks_false_when_no_chunks_for_2s() {
-        let mut s = SilenceState::new();
-        s.on_chunk(false, None, true, true, false);
-        // Backdate last_chunk_at to 3 seconds ago
-        s.last_chunk_at = std::time::Instant::now() - std::time::Duration::from_secs(3);
-        assert!(
-            !s.has_recent_chunks(),
-            "has_recent_chunks should be false when last chunk was 3s ago"
-        );
-    }
-
-    #[test]
-    fn test_backup_idle_blocked_when_chunks_arriving() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-session";
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_BUSY));
-        state
-            .session_states
-            .insert(sid.to_string(), crate::state::SessionState::default());
-
-        // last_output_ms is 600ms ago (stale — would normally trigger idle)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(now - 600));
-
-        // Any chunk just arrived (real or chrome-only)
-        let mut silence = SilenceState::new();
-        silence.on_chunk(false, None, false, false, false); // chunk just arrived
-
-        // should_transition_idle says yes (based on last_output_ms alone)
-        assert!(
-            should_transition_idle(&state, sid).should_transition,
-            "should_transition_idle sees stale last_output_ms"
-        );
-        // But has_recent_chunks blocks the backup timer (recent chunk activity)
-        assert!(
-            silence.has_recent_chunks(),
-            "backup idle must be blocked because chunks are arriving"
-        );
-    }
-
-    #[test]
-    fn test_backup_idle_blocked_by_chrome_only_ticks() {
-        // Chrome-only ticks (status-line) MUST block the backup idle timer
-        // because they prove the reader thread is active and the agent is alive.
-        // Regression: f5c07388 changed has_recent_chunks() to use last_output_at,
-        // which let the backup timer fire during tool calls (>3s of no real output
-        // while status-line ticks every ~1s), causing false busy→idle oscillation.
-        let mut silence = SilenceState::new();
-        // Backdate real output to 5s ago (simulates a tool call in progress)
-        silence.last_output_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
-        // Chrome-only tick just arrived (status-line timer tick)
-        silence.on_chunk(false, None, true, true, false);
-        assert!(
-            silence.has_recent_chunks(),
-            "backup idle MUST be blocked when chrome-only ticks are arriving — agent is alive"
-        );
-    }
-
-    // Status-line idle transition: covered by test_backup_idle_blocked_by_chrome_only_ticks.
-    // Status-line ticking proves the agent is alive — the reader thread's !has_status_line
-    // guard blocks idle, and has_recent_chunks() (using last_chunk_at) blocks the backup timer.
-
-    #[test]
-    fn test_is_spinner_row_distinguishes_spinner_from_static_chrome() {
-        // Spinner rows prove agent is alive
-        assert!(crate::chrome::is_spinner_row("✻ Cogitated for 3m 47s"));
-        assert!(crate::chrome::is_spinner_row("⠋ Generating..."));
-        // Tool progress spinners prove agent is alive
-        assert!(crate::chrome::is_spinner_row("◐ Bash: .../b..."));
-        assert!(crate::chrome::is_spinner_row("◑ Read: src/main.rs"));
-        // Static chrome does NOT prove agent is alive
-        assert!(!crate::chrome::is_spinner_row("⏵ auto mode"));
-        assert!(!crate::chrome::is_spinner_row("▀▀▀▀▀▀▀▀"));
-    }
-
-    // --- ChunkProcessor tests ---
-
-    #[test]
-    fn test_chunk_processor_new_has_correct_defaults() {
-        let cp = ChunkProcessor::new(Some("/home/user/repo".to_string()), None);
-        assert_eq!(cp.session_cwd, Some("/home/user/repo".to_string()));
-        assert!(cp.last_status_task.is_none());
-        assert!(cp.last_question_text.is_none());
-        assert!(cp.last_choice_prompt_sig.is_none());
-    }
-
-    #[test]
-    fn test_chunk_processor_dedup_status_task() {
-        use crate::state::VtLogBuffer;
-        use std::sync::atomic::AtomicU64;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "test-cp-dedup";
-        let silence = Arc::new(Mutex::new(SilenceState::new()));
-        state
-            .silence_states
-            .insert(sid.to_string(), silence.clone());
-        state.shell_states.insert(
-            sid.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_NULL),
-        );
-        state
-            .vt_log_buffers
-            .insert(sid.to_string(), Mutex::new(VtLogBuffer::new(24, 80, 1000)));
-        state
-            .output_buffers
-            .insert(sid.to_string(), Mutex::new(OutputRingBuffer::new(4096)));
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(0));
-
-        let mut cp = ChunkProcessor::new(None, None);
-        let mut utf8_buf = Utf8ReadBuffer::new();
-        let mut esc_buf = EscapeAwareBuffer::new();
-
-        // First chunk with status line "* Reading files..."
-        let raw = b"* Reading files...";
-        let utf8_data = utf8_buf.push(raw);
-        let esc_data = esc_buf.push(&utf8_data);
-        let result1 = cp.process_chunk(&esc_data, &silence, sid, &state);
-
-        // Count how many PtyParsed events were sent with StatusLine
-        let mut rx = state.event_bus.subscribe();
-        // Second chunk with same status — should be deduped
-        let raw2 = b"\r\n* Reading files...";
-        let utf8_data2 = utf8_buf.push(raw2);
-        let esc_data2 = esc_buf.push(&utf8_data2);
-        let _result2 = cp.process_chunk(&esc_data2, &silence, sid, &state);
-
-        // Collect events from the second call
-        let mut status_count = 0;
-        while let Ok(evt) = rx.try_recv() {
-            if let crate::state::AppEvent::PtyParsed { parsed, .. } = evt
-                && parsed.get("type").and_then(|t| t.as_str()) == Some("status-line")
-            {
-                status_count += 1;
-            }
-        }
-        assert_eq!(
-            status_count, 0,
-            "duplicate StatusLine with same task_name should be deduped"
-        );
-
-        // Verify the result contains data
-        assert!(result1.is_some(), "first chunk should return data");
-    }
-
-    /// A new turn must re-emit its status line even when the task name is
-    /// identical to the previous turn's. Codex names every turn "Working", so a
-    /// session-lifetime dedup swallows the status line of every turn after the
-    /// first. Nothing then clears the prior turn's `suggested_actions`, which
-    /// `session_state_with_shell` reads as a completion marker — a busy agent is
-    /// reported completed/idle for the rest of the session.
-    #[test]
-    fn test_chunk_processor_status_dedup_is_scoped_to_turn() {
-        use crate::state::VtLogBuffer;
-        use std::sync::atomic::AtomicU64;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "test-cp-dedup-turn";
-        let silence = Arc::new(Mutex::new(SilenceState::new()));
-        state
-            .silence_states
-            .insert(sid.to_string(), silence.clone());
-        state.shell_states.insert(
-            sid.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_NULL),
-        );
-        state
-            .vt_log_buffers
-            .insert(sid.to_string(), Mutex::new(VtLogBuffer::new(24, 80, 1000)));
-        state
-            .output_buffers
-            .insert(sid.to_string(), Mutex::new(OutputRingBuffer::new(4096)));
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(0));
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                turn_epoch: 1,
-                ..Default::default()
-            },
-        );
-
-        let mut cp = ChunkProcessor::new(None, None);
-        let mut utf8_buf = Utf8ReadBuffer::new();
-        let mut esc_buf = EscapeAwareBuffer::new();
-
-        let feed = |cp: &mut ChunkProcessor,
-                    utf8_buf: &mut Utf8ReadBuffer,
-                    esc_buf: &mut EscapeAwareBuffer,
-                    raw: &[u8]|
-         -> usize {
-            let mut rx = state.event_bus.subscribe();
-            let utf8_data = utf8_buf.push(raw);
-            let esc_data = esc_buf.push(&utf8_data);
-            cp.process_chunk(&esc_data, &silence, sid, &state);
-            let mut count = 0;
-            while let Ok(evt) = rx.try_recv() {
-                if let crate::state::AppEvent::PtyParsed { parsed, .. } = evt
-                    && parsed.get("type").and_then(|t| t.as_str()) == Some("status-line")
-                {
-                    count += 1;
-                }
-            }
-            count
-        };
-
-        let turn1 = feed(
-            &mut cp,
-            &mut utf8_buf,
-            &mut esc_buf,
-            "• Working (1s • esc to interrupt)".as_bytes(),
-        );
-        assert_eq!(turn1, 1, "first turn must emit its status line");
-
-        // Spinner rotation inside the SAME turn stays deduped.
-        let same_turn = feed(
-            &mut cp,
-            &mut utf8_buf,
-            &mut esc_buf,
-            "\r\n• Working (2s • esc to interrupt)".as_bytes(),
-        );
-        assert_eq!(same_turn, 0, "spinner rotation within a turn must dedup");
-
-        // The user submits again: a new turn begins.
-        state
-            .session_states
-            .get_mut(sid)
-            .expect("session state")
-            .turn_epoch = 2;
-
-        let turn2 = feed(
-            &mut cp,
-            &mut utf8_buf,
-            &mut esc_buf,
-            "\r\n• Working (1s • esc to interrupt)".as_bytes(),
-        );
-        assert_eq!(
-            turn2, 1,
-            "a new turn must re-emit the status line even with an identical task name"
-        );
-    }
-
-    #[test]
-    fn test_chunk_processor_dedup_choice_prompt() {
-        use crate::state::VtLogBuffer;
-        use std::sync::atomic::AtomicU64;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "test-cp-choice-dedup";
-        let silence = Arc::new(Mutex::new(SilenceState::new()));
-        state
-            .silence_states
-            .insert(sid.to_string(), silence.clone());
-        state.shell_states.insert(
-            sid.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_NULL),
-        );
-        state
-            .vt_log_buffers
-            .insert(sid.to_string(), Mutex::new(VtLogBuffer::new(24, 80, 1000)));
-        state
-            .output_buffers
-            .insert(sid.to_string(), Mutex::new(OutputRingBuffer::new(4096)));
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(0));
-
-        let mut cp = ChunkProcessor::new(None, None);
-        let mut utf8_buf = Utf8ReadBuffer::new();
-        let mut esc_buf = EscapeAwareBuffer::new();
-
-        // Paint a Claude Code edit-confirm screen into the terminal.
-        let screen_bytes = b"Do you want to make this edit to CLAUDE.md?\r\n\
-              \xe2\x9d\xaf 1. Yes\r\n\
-              \x20\x20 2. Yes, allow all edits (shift+tab)\r\n\
-              \x20\x20 3. No\r\n\
-              \r\n\
-              Esc to cancel \xc2\xb7 Tab to amend\r\n";
-        let utf8_data = utf8_buf.push(screen_bytes);
-        let esc_data = esc_buf.push(&utf8_data);
-        let _ = cp.process_chunk(&esc_data, &silence, sid, &state);
-
-        // Drain events from the first chunk and count ChoicePrompt emits.
-        let mut rx = state.event_bus.subscribe();
-
-        // Second chunk: add an innocuous repaint (cursor home + re-emit same dialog).
-        // Same (title, option keys) signature → must be deduped.
-        let utf8_data2 = utf8_buf.push(screen_bytes);
-        let esc_data2 = esc_buf.push(&utf8_data2);
-        let _ = cp.process_chunk(&esc_data2, &silence, sid, &state);
-
-        let mut choice_count = 0;
-        while let Ok(evt) = rx.try_recv() {
-            if let crate::state::AppEvent::PtyParsed { parsed, .. } = evt
-                && parsed.get("type").and_then(|t| t.as_str()) == Some("choice-prompt")
-            {
-                choice_count += 1;
-            }
-        }
-        assert_eq!(
-            choice_count, 0,
-            "second chunk with identical ChoicePrompt (same title + option keys) must be deduped",
-        );
-        assert!(
-            cp.last_choice_prompt_sig.is_some(),
-            "signature must be stored after first emission"
-        );
-    }
-
-    /// Every Ink menu footer is byte-identical, so a session-lifetime question
-    /// dedup made the awaiting badge a one-shot: the first menu of a session
-    /// silently swallowed every later one. The marker must retire as soon as the
-    /// prompt leaves the screen.
-    #[test]
-    fn test_chunk_processor_question_dedup_retires_when_prompt_leaves_screen() {
-        use crate::state::VtLogBuffer;
-        use std::sync::atomic::AtomicU64;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "test-cp-question-dedup";
-        let silence = Arc::new(Mutex::new(SilenceState::new()));
-        state
-            .silence_states
-            .insert(sid.to_string(), silence.clone());
-        state.shell_states.insert(
-            sid.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_NULL),
-        );
-        state
-            .vt_log_buffers
-            .insert(sid.to_string(), Mutex::new(VtLogBuffer::new(24, 80, 1000)));
-        state
-            .output_buffers
-            .insert(sid.to_string(), Mutex::new(OutputRingBuffer::new(4096)));
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(0));
-
-        let mut cp = ChunkProcessor::new(None, None);
-        let mut utf8_buf = Utf8ReadBuffer::new();
-        let mut esc_buf = EscapeAwareBuffer::new();
-        let mut feed = |cp: &mut ChunkProcessor, bytes: &[u8]| {
-            let utf8_data = utf8_buf.push(bytes);
-            let esc_data = esc_buf.push(&utf8_data);
-            let _ = cp.process_chunk(&esc_data, &silence, sid, state.as_ref());
-        };
-        let count_questions =
-            |rx: &mut tokio::sync::broadcast::Receiver<crate::state::AppEvent>| {
-                let mut n = 0;
-                while let Ok(evt) = rx.try_recv() {
-                    if let crate::state::AppEvent::PtyParsed { parsed, .. } = evt
-                        && parsed.get("type").and_then(|t| t.as_str()) == Some("question")
-                    {
-                        n += 1;
-                    }
-                }
-                n
-            };
-
-        // Ink menu footer — identical bytes for every Claude Code menu.
-        const FOOTER: &[u8] =
-            "\x1b[2J\x1b[HEnter to select · ↑/↓ to navigate · Esc to cancel\r\n".as_bytes();
-
-        let mut rx = state.event_bus.subscribe();
-        feed(&mut cp, FOOTER);
-        assert_eq!(count_questions(&mut rx), 1, "first menu must be detected");
-
-        // Repaint while the prompt is still on screen: must stay deduped.
-        feed(&mut cp, "\x1b[H".as_bytes());
-        feed(&mut cp, FOOTER);
-        assert_eq!(
-            count_questions(&mut rx),
-            0,
-            "a repaint of the same on-screen prompt must not re-notify"
-        );
-
-        // The user answers: the prompt leaves the screen and the agent works.
-        feed(&mut cp, "\x1b[2J\x1b[Hrunning the fix\r\n".as_bytes());
-        assert!(
-            cp.last_question_text.is_none(),
-            "dedup marker must retire once the prompt is off screen"
-        );
-
-        // A second menu, byte-identical footer: must be detected again.
-        feed(&mut cp, FOOTER);
-        assert_eq!(
-            count_questions(&mut rx),
-            1,
-            "a later menu with the same footer must be detected again"
-        );
-    }
-
-    /// Same one-shot trap as the question dedup: a dialog the user answers must be
-    /// detectable again the next time the agent raises it.
-    #[test]
-    fn test_chunk_processor_choice_prompt_dedup_retires_when_dialog_leaves_screen() {
-        use crate::state::VtLogBuffer;
-        use std::sync::atomic::AtomicU64;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "test-cp-choice-retire";
-        let silence = Arc::new(Mutex::new(SilenceState::new()));
-        state
-            .silence_states
-            .insert(sid.to_string(), silence.clone());
-        state.shell_states.insert(
-            sid.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_NULL),
-        );
-        state
-            .vt_log_buffers
-            .insert(sid.to_string(), Mutex::new(VtLogBuffer::new(24, 80, 1000)));
-        state
-            .output_buffers
-            .insert(sid.to_string(), Mutex::new(OutputRingBuffer::new(4096)));
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(0));
-
-        let mut cp = ChunkProcessor::new(None, None);
-        let mut utf8_buf = Utf8ReadBuffer::new();
-        let mut esc_buf = EscapeAwareBuffer::new();
-        let mut feed = |cp: &mut ChunkProcessor, bytes: &[u8]| {
-            let utf8_data = utf8_buf.push(bytes);
-            let esc_data = esc_buf.push(&utf8_data);
-            let _ = cp.process_chunk(&esc_data, &silence, sid, state.as_ref());
-        };
-        let count_choices = |rx: &mut tokio::sync::broadcast::Receiver<crate::state::AppEvent>| {
-            let mut n = 0;
-            while let Ok(evt) = rx.try_recv() {
-                if let crate::state::AppEvent::PtyParsed { parsed, .. } = evt
-                    && parsed.get("type").and_then(|t| t.as_str()) == Some("choice-prompt")
-                {
-                    n += 1;
-                }
-            }
-            n
-        };
-
-        const DIALOG: &[u8] = "\x1b[2J\x1b[HDo you want to make this edit to CLAUDE.md?\r\n\
-              ❯ 1. Yes\r\n\
-                2. Yes, allow all edits (shift+tab)\r\n\
-                3. No\r\n\
-              \r\n\
-              Esc to cancel · Tab to amend\r\n"
-            .as_bytes();
-
-        let mut rx = state.event_bus.subscribe();
-        feed(&mut cp, DIALOG);
-        assert_eq!(count_choices(&mut rx), 1, "first dialog must be detected");
-
-        // Answered: the dialog leaves the screen while the agent applies the edit.
-        feed(&mut cp, "\x1b[2J\x1b[Happlying the edit\r\n".as_bytes());
-        assert!(
-            cp.last_choice_prompt_sig.is_none(),
-            "signature must retire once the dialog is off screen"
-        );
-
-        // The agent raises the identical dialog again.
-        feed(&mut cp, DIALOG);
-        assert_eq!(
-            count_choices(&mut rx),
-            1,
-            "the same dialog raised again must be detected again"
-        );
-    }
-
-    #[test]
-    fn test_chunk_processor_planfile_resolution() {
-        let cp = ChunkProcessor::new(Some("/home/user/repo".to_string()), None);
-        // Test that resolve_planfile_path resolves relative paths
-        let resolved = cp.resolve_planfile_path("plans/foo.md");
-        assert_eq!(resolved, Some("/home/user/repo/plans/foo.md".to_string()));
-    }
-
-    #[test]
-    fn test_chunk_processor_planfile_resolution_absolute_passthrough() {
-        let cp = ChunkProcessor::new(Some("/home/user/repo".to_string()), None);
-        let resolved = cp.resolve_planfile_path("/absolute/path/plan.md");
-        assert_eq!(resolved, Some("/absolute/path/plan.md".to_string()));
-    }
-
-    #[test]
-    fn test_chunk_processor_planfile_resolution_no_cwd() {
-        let cp = ChunkProcessor::new(None, None);
-        // Relative path with no CWD should return None
-        let resolved = cp.resolve_planfile_path("plans/foo.md");
-        assert_eq!(resolved, None);
-    }
-
-    #[test]
-    fn test_chunk_processor_planfile_normalizes_dotdot() {
-        let cp = ChunkProcessor::new(Some("/home/user/repo__wt/feat".to_string()), None);
-        let resolved = cp.resolve_planfile_path("../../repo/plans/foo.md");
-        assert_eq!(resolved, Some("/home/user/repo/plans/foo.md".to_string()));
-    }
-
-    // --- transform_xterm tests ---
-
-    #[test]
-    fn test_transform_xterm_no_token_passes_through() {
-        let mut cp = ChunkProcessor::new(None, None);
-        let result = cp.transform_xterm("just regular output".to_string());
-        assert_eq!(result, Some("just regular output".to_string()));
-    }
-
-    #[test]
-    fn test_transform_xterm_intent_passes_through() {
-        // Intent coloring is now handled by the frontend MutationObserver.
-        let mut cp = ChunkProcessor::new(None, None);
-        let result = cp.transform_xterm("intent: Fix the bug\n".to_string());
-        assert!(result.is_some());
-        let data = result.unwrap();
-        assert!(
-            data.contains("intent: Fix the bug"),
-            "intent must pass through to frontend"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_suggest_passes_through() {
-        // Suggest lines are no longer concealed in Rust — the frontend handles it.
-        let mut cp = ChunkProcessor::new(None, None);
-        let result = cp.transform_xterm("suggest: A | B | C\n".to_string());
-        assert!(result.is_some());
-        let data = result.unwrap();
-        assert!(
-            data.contains("suggest:"),
-            "suggest must pass through to frontend"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_incomplete_intent_passes_through() {
-        let mut cp = ChunkProcessor::new(None, None);
-        let r1 = cp.transform_xterm("intent: doing so".to_string());
-        assert!(r1.is_some(), "incomplete intent must pass through");
-    }
-
-    // --- alt buffer clear injection tests ---
-
-    #[test]
-    fn test_transform_xterm_alt_buffer_injects_clear() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // Enter alt buffer
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        assert!(cp.in_alt_buffer);
-        // Cursor home should get ESC[2J injected
-        let result = cp.transform_xterm("\x1b[Hcontent".to_string()).unwrap();
-        assert!(
-            result.contains("\x1b[2J\x1b[H"),
-            "clear should be injected before cursor home"
-        );
-    }
-
-    #[test]
-    fn test_inline_tui_mouse_mode_sets_fullscreen_without_1049() {
-        let mut cp = ChunkProcessor::new(None, None);
-        cp.apply_inline_tui_mode(false, true, Some("grok"));
-        assert!(cp.terminal_mode.is_fullscreen());
-        match &cp.terminal_mode {
-            crate::ai_agent::tui_detect::TerminalMode::FullscreenTui { app_hint, depth } => {
-                assert_eq!(app_hint.as_deref(), Some("grok"));
-                assert_eq!(*depth, 1);
-            }
-            other => panic!("expected FullscreenTui, got {other:?}"),
-        }
-        cp.apply_inline_tui_mode(false, false, Some("grok"));
-        assert!(!cp.terminal_mode.is_fullscreen());
-    }
-
-    #[test]
-    fn test_inline_tui_does_not_override_alt_screen_mode() {
-        let mut cp = ChunkProcessor::new(None, None);
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        cp.apply_inline_tui_mode(true, true, Some("grok"));
-        match &cp.terminal_mode {
-            crate::ai_agent::tui_detect::TerminalMode::FullscreenTui { depth, .. } => {
-                assert_eq!(*depth, 1, "must not nest on top of 1049");
-            }
-            other => panic!("expected FullscreenTui, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_transform_xterm_normal_buffer_no_inject() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // NOT in alt buffer — no injection
-        let result = cp.transform_xterm("\x1b[Hcontent".to_string()).unwrap();
-        assert!(
-            !result.contains("\x1b[2J"),
-            "should not inject clear in normal buffer"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_alt_buffer_exit_stops_inject() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // Enter then exit alt buffer
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        cp.transform_xterm("\x1b[?1049l".to_string());
-        assert!(!cp.in_alt_buffer);
-        let result = cp.transform_xterm("\x1b[Hcontent".to_string()).unwrap();
-        assert!(
-            !result.contains("\x1b[2J"),
-            "should not inject after leaving alt buffer"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_alt_buffer_no_clear_on_subsequent_redraws() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // Enter alt buffer — first cursor-home gets clear
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        let r1 = cp
-            .transform_xterm("\x1b[Hfirst redraw".to_string())
-            .unwrap();
-        assert!(r1.contains("\x1b[2J"), "first redraw must inject clear");
-
-        // Subsequent redraws must NOT inject clear (prevents per-keystroke flicker)
-        let r2 = cp
-            .transform_xterm("\x1b[Hsecond redraw".to_string())
-            .unwrap();
-        assert!(
-            !r2.contains("\x1b[2J"),
-            "subsequent redraws must not inject clear"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_alt_buffer_clear_on_shrink() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // Enter alt buffer, consume initial clear
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        cp.transform_xterm("\x1b[Hinit".to_string()); // consumes one-shot
-
-        // Simulate growing content: cursor-up 50 lines
-        cp.transform_xterm("\x1b[50A redraw tall".to_string());
-        assert_eq!(cp.last_cursor_up_n, 50);
-
-        // Simulate shrink: cursor-up only 20 lines (content got shorter)
-        let r = cp
-            .transform_xterm("\x1b[20A\x1b[Hredraw short".to_string())
-            .unwrap();
-        assert!(
-            r.contains("\x1b[2J"),
-            "clear must be injected when content shrinks"
-        );
-        assert_eq!(cp.last_cursor_up_n, 20);
-
-        // Next redraw at same height — no clear
-        let r2 = cp
-            .transform_xterm("\x1b[20A\x1b[Hsame height".to_string())
-            .unwrap();
-        assert!(!r2.contains("\x1b[2J"), "no clear when height stays same");
-    }
-
-    #[test]
-    fn test_transform_xterm_alt_buffer_clear_on_growth() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // Enter alt buffer, consume initial clear via cursor-home
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        cp.transform_xterm("\x1b[Hinit".to_string());
-
-        // Establish baseline height
-        cp.transform_xterm("\x1b[20Aredraw".to_string());
-        assert_eq!(cp.last_cursor_up_n, 20);
-
-        // Height grows — clear must fire (chrome shifted down, old top row is ghost)
-        let r = cp
-            .transform_xterm("\x1b[25A\x1b[Hredraw taller".to_string())
-            .unwrap();
-        assert!(
-            r.contains("\x1b[2J"),
-            "clear must be injected when content grows"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_cursor_up_fallback_on_entry() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // Enter alt buffer (sets alt_buffer_needs_clear)
-        cp.transform_xterm("\x1b[?1049h".to_string());
-
-        // Ink re-renders with cursor-up only, no cursor-home.
-        // The fallback must inject ESC[2J before the cursor-up.
-        let r = cp.transform_xterm("\x1b[30Acontent".to_string()).unwrap();
-        assert!(
-            r.contains("\x1b[2J\x1b[30A"),
-            "clear must inject before cursor-up fallback"
-        );
-        assert!(!cp.alt_buffer_needs_clear, "flag must be consumed");
-    }
-
-    #[test]
-    fn test_transform_xterm_cursor_up_fallback_on_shrink() {
-        let mut cp = ChunkProcessor::new(None, None);
-        cp.transform_xterm("\x1b[?1049h".to_string());
-        cp.transform_xterm("\x1b[Hinit".to_string()); // consume entry flag
-
-        // Establish height
-        cp.transform_xterm("\x1b[40Aredraw".to_string());
-
-        // Shrink with cursor-up only (no cursor-home) — fallback path
-        let r = cp
-            .transform_xterm("\x1b[25Aredraw short".to_string())
-            .unwrap();
-        assert!(
-            r.contains("\x1b[2J\x1b[25A"),
-            "cursor-up fallback must fire on shrink"
-        );
-    }
-
-    #[test]
-    fn test_transform_xterm_no_clear_on_normal_buffer_cursor_up() {
-        let mut cp = ChunkProcessor::new(None, None);
-        // NOT in alt buffer — cursor-up must NOT trigger clear injection
-        let r = cp.transform_xterm("\x1b[10Acontent".to_string()).unwrap();
-        assert!(!r.contains("\x1b[2J"), "must not inject in normal buffer");
-    }
-
-    #[test]
-    fn test_extract_largest_cursor_up() {
-        assert_eq!(extract_largest_cursor_up("\x1b[5A"), Some(5));
-        assert_eq!(extract_largest_cursor_up("\x1b[10Afoo\x1b[3A"), Some(10));
-        assert_eq!(extract_largest_cursor_up("no cursor up here"), None);
-        assert_eq!(extract_largest_cursor_up("\x1b[H"), None); // cursor home, not up
-    }
-
-    // --- inject_clear_before_cursor_up tests ---
-
-    #[test]
-    fn test_inject_clear_before_cursor_up_basic() {
-        let result = inject_clear_before_cursor_up("\x1b[20Acontent");
-        assert_eq!(result, "\x1b[2J\x1b[20Acontent");
-    }
-
-    #[test]
-    fn test_inject_clear_before_cursor_up_preserves_prefix() {
-        let result = inject_clear_before_cursor_up("prefix\x1b[10Acontent");
-        assert_eq!(result, "prefix\x1b[2J\x1b[10Acontent");
-    }
-
-    #[test]
-    fn test_inject_clear_before_cursor_up_no_match() {
-        let input = "no cursor up \x1b[H here";
-        let result = inject_clear_before_cursor_up(input);
-        assert_eq!(
-            result, input,
-            "cursor-home must NOT match cursor-up injection"
-        );
-    }
-
-    #[test]
-    fn test_inject_clear_before_cursor_up_bare_esc_a_ignored() {
-        // ESC[A (no number) means cursor-up 1, but has no digit before A
-        let input = "\x1b[Acontent";
-        let result = inject_clear_before_cursor_up(input);
-        assert_eq!(
-            result, input,
-            "bare ESC[A (no n) should not trigger injection"
-        );
-    }
-
-    // --- log_anomalous_sequences tests ---
-
-    #[test]
-    fn log_anomalous_detects_clear_screen() {
-        let found = detect_anomalous_sequences("\x1b[2J");
-        assert_eq!(found, vec!["ESC[2J (Clear Screen)"]);
-    }
-
-    #[test]
-    fn log_anomalous_detects_cursor_home() {
-        let found = detect_anomalous_sequences("\x1b[H");
-        assert_eq!(found, vec!["ESC[H (Cursor Home)"]);
-    }
-
-    #[test]
-    fn log_anomalous_detects_cursor_home_explicit() {
-        let found = detect_anomalous_sequences("\x1b[1;1H");
-        assert_eq!(found, vec!["ESC[1;1H (Cursor Home)"]);
-    }
-
-    #[test]
-    fn log_anomalous_detects_clear_scrollback() {
-        let found = detect_anomalous_sequences("\x1b[3J");
-        assert_eq!(found, vec!["ESC[3J (Clear Scrollback)"]);
-    }
-
-    #[test]
-    fn log_anomalous_detects_alt_screen_enter() {
-        let found = detect_anomalous_sequences("\x1b[?1049h");
-        assert_eq!(found, vec!["ESC[?1049h (Alt Screen Enter)"]);
-    }
-
-    #[test]
-    fn log_anomalous_detects_alt_screen_exit() {
-        let found = detect_anomalous_sequences("\x1b[?1049l");
-        assert_eq!(found, vec!["ESC[?1049l (Alt Screen Exit)"]);
-    }
-
-    #[test]
-    fn log_anomalous_multiple_in_one_chunk() {
-        let found = detect_anomalous_sequences("hello\x1b[2J\x1b[Hworld\x1b[3J");
-        assert_eq!(
-            found,
-            vec![
-                "ESC[2J (Clear Screen)",
-                "ESC[H (Cursor Home)",
-                "ESC[3J (Clear Scrollback)",
-            ]
-        );
-    }
-
-    #[test]
-    fn log_anomalous_ignores_normal_sequences() {
-        let found = detect_anomalous_sequences("\x1b[5A\x1b[10B\x1b[32mhello\x1b[0m");
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn log_anomalous_ignores_cursor_position_not_home() {
-        // ESC[5;10H is a regular cursor position, not anomalous
-        let found = detect_anomalous_sequences("\x1b[5;10H");
-        assert!(found.is_empty());
-    }
-
-    // --- inject_clear_before_cursor_home tests ---
-
-    #[test]
-    fn inject_clear_no_cursor_home() {
-        let data = "hello world\x1b[5A\x1b[32mgreen\x1b[0m";
-        assert_eq!(inject_clear_before_cursor_home(data), data);
-    }
-
-    #[test]
-    fn inject_clear_before_bare_home() {
-        let data = "\x1b[Hcontent after home";
-        assert_eq!(
-            inject_clear_before_cursor_home(data),
-            "\x1b[2J\x1b[Hcontent after home"
-        );
-    }
-
-    #[test]
-    fn inject_clear_before_explicit_home() {
-        let data = "\x1b[1;1Hcontent";
-        assert_eq!(
-            inject_clear_before_cursor_home(data),
-            "\x1b[2J\x1b[1;1Hcontent"
-        );
-    }
-
-    #[test]
-    fn inject_clear_preserves_prefix() {
-        let data = "prefix output\x1b[Hredraw content";
-        assert_eq!(
-            inject_clear_before_cursor_home(data),
-            "prefix output\x1b[2J\x1b[Hredraw content"
-        );
-    }
-
-    #[test]
-    fn inject_clear_only_first_home() {
-        // Only one ESC[2J should be injected, before the first ESC[H
-        let data = "\x1b[Hline1\x1b[Hline2";
-        let result = inject_clear_before_cursor_home(data);
-        assert_eq!(result, "\x1b[2J\x1b[Hline1\x1b[Hline2");
-        // Count occurrences of ESC[2J
-        assert_eq!(result.matches("\x1b[2J").count(), 1);
-    }
-
-    #[test]
-    fn inject_clear_ignores_non_home_cursor_position() {
-        // ESC[5;10H is a regular cursor position, not home — should NOT inject
-        let data = "\x1b[5;10Hcontent";
-        assert_eq!(inject_clear_before_cursor_home(data), data);
-    }
-
-    #[test]
-    fn inject_clear_preserves_utf8() {
-        let data = "héllo → \x1b[Hworld 🌍";
-        assert_eq!(
-            inject_clear_before_cursor_home(data),
-            "héllo → \x1b[2J\x1b[Hworld 🌍"
-        );
-    }
-
-    // --- is_wsl_shell tests ---
-
-    #[test]
-    fn is_wsl_shell_bare() {
-        assert!(super::is_wsl_shell("wsl.exe"));
-        assert!(super::is_wsl_shell("WSL.EXE"));
-        assert!(super::is_wsl_shell("wsl"));
-    }
-
-    #[test]
-    fn is_wsl_shell_with_args() {
-        assert!(super::is_wsl_shell("wsl.exe -d Ubuntu"));
-        assert!(super::is_wsl_shell(
-            "wsl.exe --distribution Debian -- /bin/zsh"
-        ));
-    }
-
-    #[test]
-    fn is_wsl_shell_full_path() {
-        assert!(super::is_wsl_shell("C:\\Windows\\System32\\wsl.exe"));
-        assert!(super::is_wsl_shell(
-            "C:\\Windows\\System32\\wsl.exe -d Ubuntu"
-        ));
-    }
-
-    #[test]
-    fn is_wsl_shell_non_wsl() {
-        assert!(!super::is_wsl_shell("powershell.exe"));
-        assert!(!super::is_wsl_shell("/bin/zsh"));
-        assert!(!super::is_wsl_shell("cmd.exe"));
-        assert!(!super::is_wsl_shell("wslconfig.exe"));
-    }
-
-    // --- PTY spawn retry parity (#493-fce6) ---
-
-    /// A binary that cannot exist, so `spawn_command` fails on every attempt
-    /// without depending on the host's PATH.
-    fn unspawnable_command() -> CommandBuilder {
-        CommandBuilder::new("/nonexistent/tuic-spawn-retry-probe")
-    }
-
-    /// Kill and reap a probe child without blocking the test: `wait()` on a live
-    /// PTY child does not return while the pair is still open in this process.
-    fn reap(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
-        let _ = child.kill();
-        for _ in 0..100 {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
-    fn probe_size() -> PtySize {
-        PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        }
-    }
-
-    #[test]
-    fn transient_allocation_recovers_and_uses_bounded_backoff() {
-        let mut attempts = 0;
-        let mut sleeps = Vec::new();
-        let result = retry_transient(
-            || {
-                attempts += 1;
-                if attempts < 3 {
-                    Err("busy")
-                } else {
-                    Ok("pair")
-                }
-            },
-            |_| true,
-            |attempt| sleeps.push(attempt),
-        );
-
-        assert_eq!(result, Ok("pair"));
-        assert_eq!(attempts, 3);
-        assert_eq!(sleeps, vec![1, 2]);
-    }
-
-    #[test]
-    fn transient_allocation_stops_after_the_attempt_limit() {
-        let mut attempts = 0;
-        let result = retry_transient(
-            || {
-                attempts += 1;
-                Err::<(), _>("busy")
-            },
-            |_| true,
-            |_| {},
-        );
-
-        assert_eq!(result, Err((PTY_SPAWN_ATTEMPTS, "busy")));
-        assert_eq!(attempts, PTY_SPAWN_ATTEMPTS);
-    }
-
-    #[test]
-    fn permanent_allocation_failure_is_not_retried() {
-        let mut attempts = 0;
-        let result = retry_transient(
-            || {
-                attempts += 1;
-                Err::<(), _>("permission denied")
-            },
-            |_| false,
-            |_| panic!("permanent failure must not sleep"),
-        );
-
-        assert_eq!(result, Err((1, "permission denied")));
-        assert_eq!(attempts, 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn pty_allocation_classifier_retries_resource_pressure_not_permissions() {
-        let exhausted = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EMFILE));
-        let denied = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EACCES));
-
-        assert!(is_transient_pty_open_error(&exhausted));
-        assert!(!is_transient_pty_open_error(&denied));
-    }
-
-    #[test]
-    fn permanent_command_spawn_failure_builds_once() {
-        let attempts = std::cell::Cell::new(0);
-        let Err(error) = spawn_pty_pair_with_retry(probe_size(), || {
-            attempts.set(attempts.get() + 1);
-            unspawnable_command()
-        }) else {
-            panic!("a nonexistent binary must not spawn");
-        };
-
-        assert_eq!(attempts.get(), 1);
-        assert!(error.contains("Failed to spawn shell"), "{error}");
-    }
-
-    /// A spawn that works first time must be built exactly once.
-    #[test]
-    fn a_working_spawn_is_built_once() {
-        let attempts = std::cell::Cell::new(0);
-        let (_pair, child) = spawn_pty_pair_with_retry(probe_size(), || {
-            attempts.set(attempts.get() + 1);
-            CommandBuilder::new("/bin/echo")
-        })
-        .expect("echo must spawn");
-
-        assert_eq!(attempts.get(), 1);
-        reap(child);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn async_spawn_wrapper_does_not_block_the_runtime_worker() {
-        let started = std::time::Instant::now();
-        let spawn = tokio::spawn(run_pty_spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            Ok::<_, String>(())
-        }));
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(80),
-            "blocking spawn work occupied the async runtime"
-        );
-        spawn.await.unwrap().unwrap();
-    }
-
-    // --- build_shell_command arg splitting tests ---
-
-    #[test]
-    fn build_shell_command_splits_args() {
-        let cmd = super::build_shell_command("wsl.exe -d Ubuntu");
-        let argv = cmd.as_unix_command_line().unwrap();
-        // The command line should contain the args as separate tokens
-        assert!(argv.contains("-d"), "Expected -d in: {}", argv);
-        assert!(argv.contains("Ubuntu"), "Expected Ubuntu in: {}", argv);
-    }
-
-    #[test]
-    fn build_shell_command_single_exe() {
-        // Single executable should still work (no extra empty args)
-        let cmd = super::build_shell_command("/bin/zsh");
-        let argv = cmd.as_unix_command_line().unwrap();
-        assert!(argv.contains("/bin/zsh"), "Expected /bin/zsh in: {}", argv);
-    }
-
-    #[test]
-    fn pty_parent_env_sanitizer_removes_no_color_and_allows_override() {
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        // Simulate CommandBuilder's inherited parent snapshot without mutating
-        // the process-global environment used by other tests.
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("NO_COLOR", "1");
-
-        sanitize_pty_parent_env(&mut cmd);
-
-        assert_eq!(
-            cmd.get_env("TERM"),
-            Some(std::ffi::OsStr::new("xterm-256color"))
-        );
-        assert_eq!(
-            cmd.get_env("COLORTERM"),
-            Some(std::ffi::OsStr::new("truecolor"))
-        );
-        assert_eq!(cmd.get_env("NO_COLOR"), None);
-
-        cmd.env("NO_COLOR", "intentional");
-        assert_eq!(
-            cmd.get_env("NO_COLOR"),
-            Some(std::ffi::OsStr::new("intentional"))
-        );
-    }
-
-    // --- windows_to_wsl_path tests ---
-
-    #[test]
-    fn wsl_path_drive_letter_backslash() {
-        assert_eq!(
-            super::windows_to_wsl_path("C:\\Users\\foo\\repos"),
-            "/mnt/c/Users/foo/repos"
-        );
-    }
-
-    #[test]
-    fn wsl_path_drive_letter_forward_slash() {
-        assert_eq!(
-            super::windows_to_wsl_path("C:/Users/foo/repos"),
-            "/mnt/c/Users/foo/repos"
-        );
-    }
-
-    #[test]
-    fn wsl_path_lowercase_drive() {
-        assert_eq!(super::windows_to_wsl_path("d:\\work"), "/mnt/d/work");
-    }
-
-    #[test]
-    fn wsl_path_already_linux() {
-        assert_eq!(
-            super::windows_to_wsl_path("/home/user/repos"),
-            "/home/user/repos"
-        );
-    }
-
-    #[test]
-    fn wsl_path_unc_unchanged() {
-        // UNC paths are not drive-letter paths — returned as-is
-        assert_eq!(
-            super::windows_to_wsl_path("\\\\server\\share"),
-            "\\\\server\\share"
-        );
-    }
-
-    #[test]
-    fn wsl_path_root_drive() {
-        assert_eq!(super::windows_to_wsl_path("C:\\"), "/mnt/c/");
-    }
-
-    // ---- Layer 3: state_change auto-notifications (#1164-2571) ----
-
-    #[test]
-    fn mark_session_exited_pushes_state_change_to_parent_inbox() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-sess";
-        let parent_id = "parent-sess";
-
-        // Register parent-child relationship
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        // Pre-init parent inbox
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-
-        mark_session_exited(child_id, &state);
-
-        let inbox = state
-            .agent_inbox
-            .get(parent_id)
-            .expect("parent inbox must exist");
-        assert!(
-            !inbox.is_empty(),
-            "parent inbox must have received state_change message"
-        );
-        let msg = inbox.front().unwrap();
-        let content: serde_json::Value =
-            serde_json::from_str(&msg.content).expect("content must be valid JSON");
-        assert_eq!(content["type"], "state_change");
-        assert_eq!(content["state"], "exited");
-    }
-
-    // ---- Self-acknowledging orchestrator lifecycle summary ----
-
-    fn lifecycle_inbox_message(
-        id: &str,
-        child: &str,
-        timestamp: u64,
-        content: serde_json::Value,
-    ) -> crate::state::AgentMessage {
-        crate::state::AgentMessage {
-            id: id.to_string(),
-            from_tuic_session: child.to_string(),
-            from_name: "tuic".to_string(),
-            content: content.to_string(),
-            timestamp,
-            delivered_via_channel: false,
-        }
-    }
-
-    const SUMMARY_CHILD: &str = "8c261794-91e5-44a4-bf63-ec8afafd2adc";
-
-    fn idle_payload() -> serde_json::Value {
-        serde_json::json!({"type": "state_change", "state": "idle", "session_id": SUMMARY_CHILD})
-    }
-
-    fn exited_payload() -> serde_json::Value {
-        serde_json::json!({
-            "type": "state_change",
-            "state": "exited",
-            "session_id": SUMMARY_CHILD,
-            "exit_code": 0,
-        })
-    }
-
-    #[test]
-    fn lifecycle_summary_carries_every_event_in_the_window() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let parent = "parent-summary";
-        state.push_agent_inbox(
-            parent,
-            lifecycle_inbox_message("tuic-auto-idle", SUMMARY_CHILD, 10, idle_payload()),
-        );
-        state.push_agent_inbox(
-            parent,
-            lifecycle_inbox_message("tuic-auto-exit", SUMMARY_CHILD, 20, exited_payload()),
-        );
-
-        let summary = summarize_lifecycle_group(
-            &state,
-            parent,
-            crate::state::OrchestratorWakeGroup {
-                observed_through: 0,
-                wake_through: 20,
-            },
-        )
-        .expect("a lifecycle-only window must summarize");
-
-        assert!(
-            summary.contains("child agent 8c261794 is now idle"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("child agent 8c261794 exited (exit 0)"),
-            "{summary}"
-        );
-        assert!(
-            !summary.contains("action=inbox"),
-            "a self-acknowledging notice must not send the reader to the inbox: {summary}"
-        );
-        assert_eq!(summary.lines().count(), 1, "must stay one composer line");
-    }
-
-    #[test]
-    fn peer_payload_in_the_window_forces_the_generic_wake() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let parent = "parent-mixed";
-        state.push_agent_inbox(
-            parent,
-            lifecycle_inbox_message("tuic-auto-idle", SUMMARY_CHILD, 10, idle_payload()),
-        );
-        state.push_agent_inbox(
-            parent,
-            crate::state::AgentMessage {
-                id: "peer-1".to_string(),
-                from_tuic_session: "peer".to_string(),
-                from_name: "sender".to_string(),
-                content: "secret peer payload".to_string(),
-                timestamp: 20,
-                delivered_via_channel: false,
-            },
-        );
-
-        assert!(
-            summarize_lifecycle_group(
-                &state,
-                parent,
-                crate::state::OrchestratorWakeGroup {
-                    observed_through: 0,
-                    wake_through: 20,
-                },
-            )
-            .is_none(),
-            "one peer message must disqualify the whole group, not be skipped"
-        );
-    }
-
-    #[test]
-    fn lifecycle_summary_ignores_messages_outside_the_reserved_window() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let parent = "parent-window";
-        state.push_agent_inbox(
-            parent,
-            lifecycle_inbox_message("tuic-auto-old", SUMMARY_CHILD, 10, idle_payload()),
-        );
-        state.push_agent_inbox(
-            parent,
-            lifecycle_inbox_message("tuic-auto-covered", SUMMARY_CHILD, 20, exited_payload()),
-        );
-        // Arrived after the reservation: neither described nor disqualifying.
-        state.push_agent_inbox(
-            parent,
-            crate::state::AgentMessage {
-                id: "peer-late".to_string(),
-                from_tuic_session: "peer".to_string(),
-                from_name: "sender".to_string(),
-                content: "later peer payload".to_string(),
-                timestamp: 30,
-                delivered_via_channel: false,
-            },
-        );
-
-        let summary = summarize_lifecycle_group(
-            &state,
-            parent,
-            crate::state::OrchestratorWakeGroup {
-                observed_through: 10,
-                wake_through: 20,
-            },
-        )
-        .expect("the reserved window is lifecycle-only");
-
-        assert!(summary.contains("exited (exit 0)"), "{summary}");
-        assert!(
-            !summary.contains("is now idle"),
-            "an already-observed message must not be repeated: {summary}"
-        );
-        assert!(!summary.contains("later peer payload"), "{summary}");
-    }
-
-    #[test]
-    fn oversize_lifecycle_summary_falls_back_to_the_generic_wake() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let parent = "parent-oversize";
-        for index in 0..12u64 {
-            state.push_agent_inbox(
-                parent,
-                lifecycle_inbox_message(
-                    &format!("tuic-auto-{index}"),
-                    SUMMARY_CHILD,
-                    index + 1,
-                    idle_payload(),
-                ),
-            );
-        }
-
-        assert!(
-            summarize_lifecycle_group(
-                &state,
-                parent,
-                crate::state::OrchestratorWakeGroup {
-                    observed_through: 0,
-                    wake_through: 12,
-                },
-            )
-            .is_none(),
-            "a burst too long to type must fall back to the generic wake"
-        );
-    }
-
-    #[test]
-    fn prompt_delivery_failure_reads_the_same_in_both_paths() {
-        let payload = serde_json::json!({
-            "type": "prompt_delivery_failed",
-            "reason": "timeout",
-            "session_id": SUMMARY_CHILD,
-        });
-        assert_eq!(
-            describe_lifecycle_payload(SUMMARY_CHILD, &payload),
-            "child agent 8c261794 initial prompt delivery timed out"
-        );
-    }
-
-    #[test]
-    fn try_shell_transition_busy_to_idle_pushes_state_change_to_parent_inbox() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-idle-sess";
-        let parent_id = "parent-idle-sess";
-
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        // Must have a session_state with agent_type to qualify for idle notification
-        let ss = crate::state::SessionState {
-            agent_type: Some("claude".to_string()),
-            ..Default::default()
-        };
-        state.session_states.insert(child_id.to_string(), ss);
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-        state.silence_states.insert(
-            child_id.to_string(),
-            Arc::new(Mutex::new(SilenceState::new())),
-        );
-
-        let transitioned = try_shell_transition(&state, child_id, SHELL_BUSY, SHELL_IDLE, true);
-        assert!(transitioned, "transition must succeed");
-
-        let inbox = state
-            .agent_inbox
-            .get(parent_id)
-            .expect("parent inbox must exist");
-        assert!(
-            !inbox.is_empty(),
-            "parent inbox must have received state_change message"
-        );
-        let msg = inbox.front().unwrap();
-        let content: serde_json::Value =
-            serde_json::from_str(&msg.content).expect("content must be valid JSON");
-        assert_eq!(content["type"], "state_change");
-        assert_eq!(content["state"], "idle");
-    }
-
-    #[test]
-    fn background_work_defers_parent_idle_until_descendants_finish() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-background-sess";
-        let parent_id = "parent-background-sess";
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state.session_states.insert(
-            child_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_work: true,
-                ..Default::default()
-            },
-        );
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-        state.silence_states.insert(
-            child_id.to_string(),
-            Arc::new(Mutex::new(SilenceState::new())),
-        );
-
-        assert!(try_shell_transition(
-            &state, child_id, SHELL_BUSY, SHELL_IDLE, true
-        ));
-        assert!(
-            state.agent_inbox.get(parent_id).unwrap().is_empty(),
-            "a ready composer must not announce autonomous completion"
-        );
-
-        assert!(set_background_work_for_epoch(&state, child_id, 0, 1, false));
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert_eq!(inbox.len(), 1);
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "idle");
-    }
-
-    #[test]
-    fn background_work_defers_declared_completion_without_generic_idle() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-background-completed";
-        let parent_id = "parent-background-completed";
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state.session_states.insert(
-            child_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_work: true,
-                ..Default::default()
-            },
-        );
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        let mut silence = SilenceState::new();
-        silence.mark_suggest_candidate(vec!["Review result".to_string()], 0);
-        let silence = Arc::new(Mutex::new(silence));
-        state
-            .silence_states
-            .insert(child_id.to_string(), silence.clone());
-
-        assert!(!emit_pending_suggest_if_idle(&state, &silence, child_id));
-        assert!(set_background_work_for_epoch(&state, child_id, 0, 1, false));
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert_eq!(inbox.len(), 1);
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "completed");
-        assert!(!emit_pending_suggest_if_idle(&state, &silence, child_id));
-    }
-
-    #[test]
-    fn cursor_prefix_completion_preserves_background_epoch_release() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-background-cursor-completed";
-        agent_session(&state, child_id, SHELL_IDLE);
-        state
-            .session_states
-            .get_mut(child_id)
-            .unwrap()
-            .background_work = true;
-        state.vt_log_buffers.insert(
-            child_id.to_string(),
-            Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-        );
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-        let mut processor = ChunkProcessor::new(None, None);
-
-        processor.process_chunk("........................| C ]", &silence, child_id, &state);
-        processor.process_chunk("\rsuggest: [ A | B", &silence, child_id, &state);
-        assert!(!silence.lock().completion_declared_for_epoch(0));
-        processor.process_chunk("\r\x1b[", &silence, child_id, &state);
-        assert!(!silence.lock().completion_declared_for_epoch(0));
-        processor.process_chunk("Ksuggest: [ A | B | C ]", &silence, child_id, &state);
-
-        {
-            let guard = silence.lock();
-            assert!(guard.completion_declared_for_epoch(0));
-            assert_eq!(
-                guard.pending_suggest_items.as_deref(),
-                Some(&["A".to_string(), "B".to_string(), "C".to_string()][..])
-            );
-            assert_eq!(guard.pending_suggest_turn_epoch, 0);
-        }
-        assert!(try_shell_transition(
-            &state, child_id, SHELL_BUSY, SHELL_IDLE, false
-        ));
-        let deferred = state.session_state_with_shell(child_id).unwrap();
-        assert_eq!(deferred.agent_state.as_deref(), Some("working"));
-        assert!(deferred.background_work);
-        assert!(set_background_work_for_epoch(&state, child_id, 0, 1, false));
-        let snapshot = state.session_state_with_shell(child_id).unwrap();
-        assert_eq!(snapshot.agent_state.as_deref(), Some("completed"));
-        assert!(!snapshot.background_work);
-    }
-
-    #[test]
-    fn physical_cursor_suggest_completes_after_wrapped_background_probe_clears() {
-        for wrap_count in 1..=5 {
-            let state = crate::state::tests_support::make_test_app_state();
-            let child_id = format!("wrapped-background-physical-suggest-{wrap_count}");
-            agent_session(&state, &child_id, SHELL_IDLE);
-            state.vt_log_buffers.insert(
-                child_id.clone(),
-                Mutex::new(crate::state::VtLogBuffer::new(10, 80, 1000)),
-            );
-            let silence = state.silence_states.get(&child_id).unwrap().clone();
-            let mut processor = ChunkProcessor::new(None, None);
-
-            note_submitted_input(&state, &child_id);
-            processor.process_chunk(
-                &"x".repeat(wrap_count * 80 + 1),
-                &silence,
-                &child_id,
-                &state,
-            );
-            {
-                let mut session = state.session_states.get_mut(&child_id).unwrap();
-                session.background_probe_turn_epoch = Some(1);
-                session.background_probe_after_generation = Some(0);
-            }
-            assert!(set_background_work_for_epoch(&state, &child_id, 1, 1, true));
-            assert!(state.session_states.get(&child_id).unwrap().background_work);
-
-            assert!(try_shell_transition(
-                &state, &child_id, SHELL_BUSY, SHELL_IDLE, false,
-            ));
-            assert!(set_background_work_for_epoch(
-                &state, &child_id, 1, 2, false
-            ));
-            assert_eq!(
-                state
-                    .session_state_with_shell(&child_id)
-                    .unwrap()
-                    .agent_state
-                    .as_deref(),
-                Some("idle"),
-                "wrap_count={wrap_count}"
-            );
-
-            processor.process_chunk(
-                "\r\x1b[2Ksuggest: [ background cleared | lifecycle complete | close smoke ]",
-                &silence,
-                &child_id,
-                &state,
-            );
-
-            let snapshot = state.session_state_with_shell(&child_id).unwrap();
-            assert_eq!(
-                snapshot.agent_state.as_deref(),
-                Some("completed"),
-                "wrap_count={wrap_count}"
-            );
-            assert!(!snapshot.background_work, "wrap_count={wrap_count}");
-            assert!(
-                silence.lock().completion_declared_for_epoch(1),
-                "wrap_count={wrap_count}"
-            );
-        }
-    }
-
-    #[test]
-    fn identical_suggest_reopens_only_after_fresh_work_in_a_new_turn() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "suggest-multiple-turns";
-        agent_session(&state, child_id, SHELL_IDLE);
-        state.vt_log_buffers.insert(
-            child_id.to_string(),
-            Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-        );
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-        let mut processor = ChunkProcessor::new(None, None);
-        let marker = "suggest: [ lifecycle fixed | close smoke | continue parity ]";
-
-        processor.process_chunk("first response\r\n", &silence, child_id, &state);
-        processor.process_chunk(marker, &silence, child_id, &state);
-        assert_eq!(
-            silence.lock().drain_pending_suggest(),
-            Some(vec![
-                "lifecycle fixed".to_string(),
-                "close smoke".to_string(),
-                "continue parity".to_string(),
-            ])
-        );
-
-        note_submitted_input(&state, child_id);
-        assert_eq!(state.session_states.get(child_id).unwrap().turn_epoch, 1);
-
-        // A previous-turn row can repaint as the input scrolls. Submission by
-        // itself must not reopen the content deduplication boundary.
-        processor.process_chunk(&format!("\r\n{marker}"), &silence, child_id, &state);
-        assert_eq!(silence.lock().drain_pending_suggest(), None);
-        processor.process_chunk(&format!("\r\n{marker}"), &silence, child_id, &state);
-        assert_eq!(silence.lock().drain_pending_suggest(), None);
-
-        // Real output proves the next response started. The identical marker
-        // is now a valid completion, but a second repaint in the same turn is
-        // still suppressed.
-        processor.process_chunk("\r\nsecond response\r\n", &silence, child_id, &state);
-        processor.process_chunk(marker, &silence, child_id, &state);
-        assert_eq!(
-            silence.lock().drain_pending_suggest(),
-            Some(vec![
-                "lifecycle fixed".to_string(),
-                "close smoke".to_string(),
-                "continue parity".to_string(),
-            ])
-        );
-        processor.process_chunk(&format!("\r\n{marker}"), &silence, child_id, &state);
-        assert_eq!(silence.lock().drain_pending_suggest(), None);
-        assert!(silence.lock().completion_declared_for_epoch(1));
-    }
-
-    #[test]
-    fn cursor_prefix_rejects_stale_suffix_then_emits_real_completion_once() {
-        for (index, bullet) in ["●", "⏺", "•", "◦"].into_iter().enumerate() {
-            let state = crate::state::tests_support::make_test_app_state();
-            let child_id = format!("cursor-stale-suffix-{index}");
-            agent_session(&state, &child_id, SHELL_IDLE);
-            state.vt_log_buffers.insert(
-                child_id.clone(),
-                Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-            );
-            let silence = state.silence_states.get(&child_id).unwrap().clone();
-            let mut processor = ChunkProcessor::new(None, None);
-
-            processor.process_chunk(
-                "............................| C ]",
-                &silence,
-                &child_id,
-                &state,
-            );
-            processor.process_chunk(
-                &format!("\r{bullet} suggest: [ A | B"),
-                &silence,
-                &child_id,
-                &state,
-            );
-            assert_eq!(silence.lock().drain_pending_suggest(), None, "{bullet}");
-
-            processor.process_chunk("\r\x1b[", &silence, &child_id, &state);
-            assert_eq!(silence.lock().drain_pending_suggest(), None, "{bullet}");
-            processor.process_chunk(
-                &format!("K{bullet} suggest: [ A | B | C ]"),
-                &silence,
-                &child_id,
-                &state,
-            );
-            assert_eq!(
-                silence.lock().drain_pending_suggest(),
-                Some(vec!["A".to_string(), "B".to_string(), "C".to_string()]),
-                "{bullet}"
-            );
-
-            processor.process_chunk(
-                &format!("\r\x1b[K{bullet} suggest: [ A | B | C ]"),
-                &silence,
-                &child_id,
-                &state,
-            );
-            assert_eq!(silence.lock().drain_pending_suggest(), None, "{bullet}");
-        }
-    }
-
-    #[test]
-    fn wrapped_suggest_reconstructs_unchanged_anchor_across_chunks() {
-        for (index, bullet) in ["●", "⏺", "•", "◦"].into_iter().enumerate() {
-            let state = crate::state::tests_support::make_test_app_state();
-            let child_id = format!("wrapped-suggest-across-chunks-{index}");
-            agent_session(&state, &child_id, SHELL_IDLE);
-            state.vt_log_buffers.insert(
-                child_id.clone(),
-                Mutex::new(crate::state::VtLogBuffer::new(24, 14, 1000)),
-            );
-            let silence = state.silence_states.get(&child_id).unwrap().clone();
-            let mut processor = ChunkProcessor::new(None, None);
-
-            processor.process_chunk(
-                &format!("{bullet} suggest: [ A"),
-                &silence,
-                &child_id,
-                &state,
-            );
-            assert_eq!(silence.lock().drain_pending_suggest(), None, "{bullet}");
-            processor.process_chunk("界 | B | C ]", &silence, &child_id, &state);
-
-            assert_eq!(
-                silence.lock().drain_pending_suggest(),
-                Some(vec!["A界".to_string(), "B".to_string(), "C".to_string()]),
-                "{bullet}"
-            );
-        }
-    }
-
-    #[test]
-    fn bounded_cursor_prefix_refusal_suppresses_structured_completion() {
-        for (child_id, columns, token) in [
-            (
-                "cursor-prefix-over-512-bytes",
-                700,
-                format!("suggest: [ A | B | C ]{}", "x".repeat(520)),
-            ),
-            (
-                "cursor-prefix-over-four-wraps",
-                20,
-                format!(
-                    "suggest: [ {} | {} | {} | {} ]",
-                    "a".repeat(30),
-                    "b".repeat(30),
-                    "c".repeat(30),
-                    "d".repeat(30)
-                ),
-            ),
-        ] {
-            let state = crate::state::tests_support::make_test_app_state();
-            agent_session(&state, child_id, SHELL_IDLE);
-            state.vt_log_buffers.insert(
-                child_id.to_string(),
-                Mutex::new(crate::state::VtLogBuffer::new(24, columns, 1000)),
-            );
-            let silence = state.silence_states.get(child_id).unwrap().clone();
-            let mut processor = ChunkProcessor::new(None, None);
-
-            processor.process_chunk(&token, &silence, child_id, &state);
-
-            assert_eq!(silence.lock().drain_pending_suggest(), None, "{child_id}");
-        }
-    }
-
-    #[test]
-    fn wrapped_suggest_requires_complete_non_nested_prefix() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "wrapped-suggest-incomplete";
-        agent_session(&state, child_id, SHELL_IDLE);
-        state.vt_log_buffers.insert(
-            child_id.to_string(),
-            Mutex::new(crate::state::VtLogBuffer::new(24, 10, 1000)),
-        );
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-        let mut processor = ChunkProcessor::new(None, None);
-
-        processor.process_chunk("suggest: [", &silence, child_id, &state);
-        processor.process_chunk(" A | B", &silence, child_id, &state);
-        assert_eq!(silence.lock().drain_pending_suggest(), None);
-
-        processor.process_chunk("\r\x1b[2K\x1b[1A\r\x1b[2K", &silence, child_id, &state);
-        processor.process_chunk("suggest: [", &silence, child_id, &state);
-        processor.process_chunk(" A | EP[\"node\"] | C ]", &silence, child_id, &state);
-        assert_eq!(silence.lock().drain_pending_suggest(), None);
-    }
-
-    #[test]
-    fn stale_background_clear_cannot_emit_after_new_turn() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-background-race";
-        let parent_id = "parent-background-race";
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state.session_states.insert(
-            child_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_work: true,
-                turn_epoch: 7,
-                ..Default::default()
-            },
-        );
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        state.silence_states.insert(
-            child_id.to_string(),
-            Arc::new(Mutex::new(SilenceState::new())),
-        );
-
-        note_submitted_input(&state, child_id);
-        assert!(!set_background_work_for_epoch(
-            &state, child_id, 7, 1, false
-        ));
-        assert!(state.session_states.get(child_id).unwrap().background_work);
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-    }
-
-    #[test]
-    fn background_snapshot_teardown_does_not_recreate_lifecycle_or_notify() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "background-teardown";
-        let parent_id = "background-teardown-parent";
-        agent_session(&state, child_id, SHELL_IDLE);
-        state
-            .session_states
-            .get_mut(child_id)
-            .unwrap()
-            .background_work = true;
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-
-        assert!(!set_background_work_for_epoch_with_hook(
-            &state,
-            child_id,
-            0,
-            1,
-            false,
-            || {
-                state.silence_states.remove(child_id);
-                state.shell_states.remove(child_id);
-                state.session_states.remove(child_id);
-            },
-        ));
-        assert!(!state.silence_states.contains_key(child_id));
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-    }
-
-    #[test]
-    fn failed_or_invalid_cached_snapshot_preserves_background_work() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "background-snapshot-failure";
-        state.session_states.insert(
-            session_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_work: true,
-                turn_epoch: 3,
-                ..Default::default()
-            },
-        );
-
-        assert!(!refresh_background_work_from_cached_snapshot(
-            &state, session_id, 10, "codex", 3, None,
-        ));
-        let invalid = Arc::new(vec![process(20, 1, "codex", "codex")]);
-        assert!(!refresh_background_work_from_cached_snapshot(
-            &state,
-            session_id,
-            10,
-            "codex",
-            3,
-            Some((1, invalid)),
-        ));
-        assert!(
-            state
-                .session_states
-                .get(session_id)
-                .unwrap()
-                .background_work
-        );
-    }
-
-    #[test]
-    fn cached_snapshot_detects_background_process_exit() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-background-exit";
-        let parent_id = "parent-background-exit";
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state.session_states.insert(
-            child_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_work: true,
-                turn_epoch: 4,
-                ..Default::default()
-            },
-        );
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        state.silence_states.insert(
-            child_id.to_string(),
-            Arc::new(Mutex::new(SilenceState::new())),
-        );
-        let exited = Arc::new(vec![process(10, 1, "codex", "codex")]);
-
-        assert!(refresh_background_work_from_cached_snapshot(
-            &state,
-            child_id,
-            10,
-            "codex",
-            4,
-            Some((2, exited)),
-        ));
-        assert!(!state.session_states.get(child_id).unwrap().background_work);
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "idle");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn standby_refuses_session_with_background_work() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "background-standby";
-        state.session_states.insert(
-            session_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_work: true,
-                ..Default::default()
-            },
-        );
-        assert_eq!(standby_session(&state, session_id), Ok(false));
-        assert!(!state.standby_sessions.contains_key(session_id));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn standby_refuses_session_with_pending_background_probe() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "background-probe-standby";
-        state.session_states.insert(
-            session_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                background_probe_turn_epoch: Some(3),
-                turn_epoch: 3,
-                ..Default::default()
-            },
-        );
-
-        assert!(background_activity_blocks_standby(&state, session_id));
-        assert_eq!(standby_session(&state, session_id), Ok(false));
-        assert!(!state.standby_sessions.contains_key(session_id));
-    }
-
-    #[test]
-    fn declared_completion_does_not_emit_ambiguous_idle_lifecycle() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-completed-sess";
-        let parent_id = "parent-completed-sess";
-
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state.session_states.insert(
-            child_id.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                ..Default::default()
-            },
-        );
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-        let mut silence = SilenceState::new();
-        silence.mark_suggest_candidate(vec!["Review result".to_string()], 0);
-        state
-            .silence_states
-            .insert(child_id.to_string(), Arc::new(Mutex::new(silence)));
-
-        assert!(try_shell_transition(
-            &state, child_id, SHELL_BUSY, SHELL_IDLE, true
-        ));
-
-        assert!(
-            state.agent_inbox.get(parent_id).unwrap().is_empty(),
-            "the suggest drain must publish completed instead of an earlier idle"
-        );
-        let silence = state.silence_states.get(child_id).unwrap().clone();
-        assert!(emit_pending_suggest_if_idle(&state, &silence, child_id));
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert_eq!(inbox.len(), 1);
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["state"], "completed");
-    }
-
-    #[test]
-    fn pending_initial_prompt_timeout_notifies_parent_once() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-prompt-timeout";
-        let parent_id = "parent-prompt-timeout";
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        state
-            .pending_initial_prompts
-            .insert(child_id.to_string(), "do the task".to_string());
-
-        assert!(notify_initial_prompt_timeout_if_pending(&state, child_id));
-        assert!(!notify_initial_prompt_timeout_if_pending(&state, child_id));
-
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert_eq!(inbox.len(), 1, "timeout notification must be emitted once");
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(content["type"], "prompt_delivery_failed");
-        assert_eq!(content["reason"], "timeout");
-        assert_eq!(content["session_id"], child_id);
-        assert!(!state.pending_initial_prompts.contains_key(child_id));
-    }
-
-    #[test]
-    fn try_shell_transition_non_agent_session_does_not_push_idle_notification() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "non-agent-sess";
-        let parent_id = "parent-non-agent-sess";
-
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        // No agent_type set — plain shell session
-        state
-            .session_states
-            .insert(child_id.to_string(), crate::state::SessionState::default());
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-
-        try_shell_transition(&state, child_id, SHELL_BUSY, SHELL_IDLE, true);
-
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert!(
-            inbox.is_empty(),
-            "non-agent sessions must not send idle notifications to parent"
-        );
-    }
-
-    #[test]
-    fn try_shell_transition_exit_path_does_not_push_idle_to_parent() {
-        // notify_parent=false (exit path): orchestrator must NOT receive spurious "idle"
-        // before the "exited" message from mark_session_exited.
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-exit-path";
-        let parent_id = "parent-exit-path";
-
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        let ss = crate::state::SessionState {
-            agent_type: Some("claude".to_string()),
-            ..Default::default()
-        };
-        state.session_states.insert(child_id.to_string(), ss);
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-
-        let transitioned = try_shell_transition(&state, child_id, SHELL_BUSY, SHELL_IDLE, false);
-        assert!(transitioned, "transition must succeed");
-
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert!(
-            inbox.is_empty(),
-            "exit path must not push idle notification — mark_session_exited sends exited"
-        );
-    }
-
-    #[test]
-    fn tombstone_transient_cleanup_removes_swarm_maps() {
-        // F3: all per-child swarm state must be cleaned on exit.
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "sess-cleanup";
-        let mcp_sid = "mcp-sess-cleanup";
-
-        state
-            .session_parent
-            .insert(sid.to_string(), "parent-sess".to_string());
-        state
-            .shell_state_since_ms
-            .insert(sid.to_string(), std::sync::atomic::AtomicU64::new(42));
-        state
-            .mcp_to_session
-            .insert(mcp_sid.to_string(), sid.to_string());
-        state
-            .session_to_mcp
-            .insert(sid.to_string(), vec![mcp_sid.to_string()]);
-        state.peer_agents.insert(
-            sid.to_string(),
-            crate::state::PeerAgent {
-                tuic_session: sid.to_string(),
-                mcp_session_id: mcp_sid.to_string(),
-                name: "worker".to_string(),
-                project: None,
-                registered_at: 1,
-            },
-        );
-        state.agent_inbox.entry(sid.to_string()).or_default();
-        state.agent_inbox_evictions.insert(sid.to_string(), 2);
-
-        tombstone_transient_cleanup(sid, &state);
-
-        assert!(
-            !state.session_parent.contains_key(sid),
-            "session_parent must be removed"
-        );
-        assert!(
-            !state.shell_state_since_ms.contains_key(sid),
-            "shell_state_since_ms must be removed"
-        );
-        assert!(
-            !state.mcp_to_session.contains_key(mcp_sid),
-            "mcp_to_session entry must be removed"
-        );
-        assert!(
-            !state.session_to_mcp.contains_key(sid),
-            "session_to_mcp entry must be removed"
-        );
-        assert!(!state.peer_agents.contains_key(sid));
-        assert!(!state.agent_inbox.contains_key(sid));
-        assert!(!state.agent_inbox_evictions.contains_key(sid));
-    }
-
-    // ── PTY-injection message delivery (Step 2) ─────────────────────
-
-    fn agent_session(state: &crate::state::AppState, sid: &str, shell: u8) {
-        use std::sync::atomic::AtomicU8;
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(shell));
-        state.session_states.insert(
-            sid.to_string(),
-            crate::state::SessionState {
-                agent_type: Some("claude".to_string()),
-                ..Default::default()
-            },
-        );
-        let mut silence = SilenceState::new();
-        silence.idle_confirmed = shell == SHELL_IDLE;
-        state
-            .silence_states
-            .insert(sid.to_string(), Arc::new(Mutex::new(silence)));
-    }
-
-    fn flush_one_pending_as_submitted(state: &crate::state::AppState, sid: &str) {
-        let claim = claim_idle_for_injection(state, sid).expect("idle claim");
-        let injection = state
-            .pending_injections
-            .get_mut(sid)
-            .and_then(|mut queue| queue.pop_front())
-            .expect("pending message");
-        apply_claimed_injection_outcome(
-            state,
-            sid,
-            injection.text(),
-            claim,
-            InjectionOutcome::Submitted,
-            ClaimedInjectionKind::Message,
-        );
-    }
-
-    fn completed_agent_session(state: &crate::state::AppState, sid: &str) {
-        agent_session(state, sid, SHELL_IDLE);
-        state.session_states.get_mut(sid).unwrap().suggested_actions =
-            Some(vec!["Review result".to_string()]);
-        state
-            .silence_states
-            .get(sid)
-            .unwrap()
-            .lock()
-            .mark_suggest_candidate(vec!["Review result".to_string()], 0);
-    }
-
-    fn assert_new_turn_silence_evidence(silence: &SilenceState) {
-        assert!(silence.explicit_busy);
-        assert!(!silence.hook_busy);
-        assert!(!silence.explicit_idle);
-        assert!(!silence.idle_confirmed);
-        assert!(silence.last_status_line_at.is_some());
-        assert!(silence.ready_since.is_none());
-        assert!(silence.interrupt_requested_at.is_none());
-        assert!(silence.turn_started_by_input);
-        assert!(!silence.turn_activity_seen);
-        assert!(!silence.completion_declared);
-        assert!(silence.pending_suggest_items.is_none());
-    }
-
-    #[test]
-    fn submitted_input_lifecycle_peer_injection_starts_new_turn_and_clears_completion() {
-        let state = crate::state::tests_support::make_test_app_state();
-        completed_agent_session(&state, "completed");
-        state.pending_injections.insert(
-            "completed".to_string(),
-            std::collections::VecDeque::from([crate::state::PendingInjection::peer_message(
-                "follow up",
-            )]),
-        );
-
-        flush_one_pending_as_submitted(&state, "completed");
-
-        let snapshot = state.session_state_with_shell("completed").unwrap();
-        assert_eq!(snapshot.shell_state.as_deref(), Some("busy"));
-        assert_eq!(snapshot.agent_state.as_deref(), Some("working"));
-        assert!(snapshot.suggested_actions.is_none());
-        assert!(
-            !state
-                .silence_states
-                .get("completed")
-                .unwrap()
-                .lock()
-                .completion_declared()
-        );
-    }
-
-    #[test]
-    fn submitted_epoch_and_busy_transition_are_one_critical_section() {
-        use std::sync::atomic::Ordering;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let session_id = "submitted-atomic";
-        completed_agent_session(&state, session_id);
-        let (start_tx, start_rx) = std::sync::mpsc::channel();
-        let (lock_held_tx, lock_held_rx) = std::sync::mpsc::channel();
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        let observer_state = Arc::clone(&state);
-        let observer = std::thread::spawn(move || {
-            start_rx.recv().unwrap();
-            let silence = observer_state
-                .silence_states
-                .get(session_id)
-                .unwrap()
-                .clone();
-            lock_held_tx.send(silence.try_lock().is_none()).unwrap();
-            let transitioned =
-                try_shell_transition(&observer_state, session_id, SHELL_IDLE, SHELL_IDLE, false);
-            finished_tx.send(transitioned).unwrap();
-        });
-
-        note_submitted_input_with_hook(&state, session_id, || {
-            assert_eq!(state.session_states.get(session_id).unwrap().turn_epoch, 1);
-            start_tx.send(()).unwrap();
-            assert!(
-                lock_held_rx.recv().unwrap(),
-                "epoch mutation must retain the lifecycle lock until BUSY"
-            );
-        });
-
-        assert!(
-            !finished_rx.recv().unwrap(),
-            "observer must see BUSY after the submitted-turn reservation"
-        );
-        observer.join().unwrap();
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-    }
-
-    #[test]
-    fn idle_parent_notification_finishes_before_new_turn_reservation() {
-        use std::sync::atomic::Ordering;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let child_id = "idle-race-child";
-        let parent_id = "idle-race-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-
-        let (start_tx, start_rx) = std::sync::mpsc::channel();
-        let (lock_held_tx, lock_held_rx) = std::sync::mpsc::channel();
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        let submitter_state = Arc::clone(&state);
-        let submitter = std::thread::spawn(move || {
-            start_rx.recv().unwrap();
-            let silence = submitter_state
-                .silence_states
-                .get(child_id)
-                .unwrap()
-                .clone();
-            lock_held_tx.send(silence.try_lock().is_none()).unwrap();
-            note_submitted_input(&submitter_state, child_id);
-            finished_tx.send(()).unwrap();
-        });
-
-        assert!(try_shell_transition_with_hook(
-            &state,
-            child_id,
-            SHELL_BUSY,
-            SHELL_IDLE,
-            true,
-            || {
-                start_tx.send(()).unwrap();
-                assert!(
-                    lock_held_rx.recv().unwrap(),
-                    "BUSY→IDLE must retain the lifecycle lock through parent enqueue"
-                );
-            },
-        ));
-        finished_rx.recv().unwrap();
-        submitter.join().unwrap();
-
-        assert_eq!(
-            state
-                .shell_states
-                .get(child_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-        assert_eq!(state.session_states.get(child_id).unwrap().turn_epoch, 1);
-        let inbox = state.agent_inbox.get(parent_id).unwrap();
-        assert_eq!(inbox.len(), 1);
-        let payload: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(payload["state"], "idle");
-    }
-
-    #[test]
-    fn new_turn_wins_before_queued_old_idle_transition() {
-        use std::sync::atomic::Ordering;
-
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let child_id = "inverse-idle-child";
-        let parent_id = "inverse-idle-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-
-        let (snapshotted_tx, snapshotted_rx) = std::sync::mpsc::channel();
-        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
-        let old_transition_state = Arc::clone(&state);
-        let old_transition = std::thread::spawn(move || {
-            let observed_turn_epoch = old_transition_state
-                .session_states
-                .get(child_id)
-                .map(|session| session.turn_epoch);
-            try_shell_transition_with_hooks(
-                ShellTransitionRequest {
-                    state: &old_transition_state,
-                    session_id: child_id,
-                    expected: SHELL_BUSY,
-                    new: SHELL_IDLE,
-                    notify_parent: true,
-                    observed_turn_epoch,
-                },
-                ShellTransitionHooks {
-                    after_epoch_snapshot: || {
-                        snapshotted_tx.send(()).unwrap();
-                        continue_rx.recv().unwrap();
-                    },
-                    after_cas: || {},
-                    before_parent_dispatch: || {},
-                },
-            )
-        });
-
-        snapshotted_rx.recv().unwrap();
-        note_submitted_input(&state, child_id);
-        continue_tx.send(()).unwrap();
-
-        assert!(
-            !old_transition.join().unwrap(),
-            "an idle transition from the prior epoch must not publish"
-        );
-        assert_eq!(state.session_states.get(child_id).unwrap().turn_epoch, 1);
-        assert_eq!(
-            state
-                .shell_states
-                .get(child_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-        assert!(state.agent_inbox.get(parent_id).unwrap().is_empty());
-    }
-
-    #[test]
-    fn explicit_idle_evidence_from_prior_turn_cannot_idle_new_submission() {
-        use std::sync::atomic::Ordering;
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "explicit-idle-epoch";
-        agent_session(&state, session_id, SHELL_BUSY);
-
-        transition_explicit_shell_state_with_hook(
-            &state,
-            session_id,
-            SHELL_IDLE,
-            "idle",
-            true,
-            || note_submitted_input(&state, session_id),
-        );
-
-        assert_eq!(state.session_states.get(session_id).unwrap().turn_epoch, 1);
-        assert_new_turn_silence_evidence(&state.silence_states.get(session_id).unwrap().lock());
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY,
-            "an explicit idle marker observed before the new input must be discarded"
-        );
-    }
-
-    #[test]
-    fn timer_idle_evidence_from_prior_turn_cannot_mutate_new_submission() {
-        use std::sync::atomic::Ordering;
-
-        for (session_id, activity) in [
-            ("ready-idle-epoch", AgentScreenActivity::Ready),
-            ("interrupted-idle-epoch", AgentScreenActivity::Interrupted),
-            ("unknown-idle-epoch", AgentScreenActivity::Unknown),
-        ] {
-            let state = crate::state::tests_support::make_test_app_state();
-            agent_session(&state, session_id, SHELL_BUSY);
-            let evidence_turn_epoch = Some(0);
-            note_submitted_input(&state, session_id);
-
-            let transition = try_timer_idle_transition(
-                &state,
-                &state.silence_states.get(session_id).unwrap().clone(),
-                session_id,
-                activity,
-                Some("claude"),
-                evidence_turn_epoch,
-            );
-
-            assert!(!transition.transitioned);
-            assert_new_turn_silence_evidence(&state.silence_states.get(session_id).unwrap().lock());
-            assert_eq!(
-                state
-                    .shell_states
-                    .get(session_id)
-                    .unwrap()
-                    .load(Ordering::Acquire),
-                SHELL_BUSY
-            );
-        }
-    }
-
-    #[test]
-    fn silence_idle_decision_from_prior_turn_cannot_idle_new_submission() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "silence-idle-epoch";
-        agent_session(&state, session_id, SHELL_BUSY);
-        state.last_output_ms.insert(
-            session_id.to_string(),
-            AtomicU64::new(now_epoch_ms().saturating_sub(AGENT_IDLE_MS + 1)),
-        );
-
-        let decision = should_transition_idle_with_hook(&state, session_id, || {
-            note_submitted_input(&state, session_id);
-        });
-        assert!(decision.should_transition);
-        assert_eq!(decision.turn_epoch, Some(0));
-
-        assert!(!try_shell_transition_for_epoch(
-            &state,
-            session_id,
-            SHELL_BUSY,
-            SHELL_IDLE,
-            true,
-            decision.turn_epoch,
-        ));
-        assert_eq!(state.session_states.get(session_id).unwrap().turn_epoch, 1);
-        assert_new_turn_silence_evidence(&state.silence_states.get(session_id).unwrap().lock());
-        assert_eq!(
-            state
-                .shell_states
-                .get(session_id)
-                .unwrap()
-                .load(Ordering::Acquire),
-            SHELL_BUSY
-        );
-    }
-
-    #[test]
-    fn parent_dispatch_runs_after_child_lifecycle_lock_release() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "dispatch-child";
-        let parent_id = "dispatch-parent";
-        agent_session(&state, child_id, SHELL_BUSY);
-        agent_session(&state, parent_id, SHELL_IDLE);
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        let observed_turn_epoch = state
-            .session_states
-            .get(child_id)
-            .map(|session| session.turn_epoch);
-
-        assert!(try_shell_transition_with_hooks(
-            ShellTransitionRequest {
-                state: &state,
-                session_id: child_id,
-                expected: SHELL_BUSY,
-                new: SHELL_IDLE,
-                notify_parent: true,
-                observed_turn_epoch,
-            },
-            ShellTransitionHooks {
-                after_epoch_snapshot: || {},
-                after_cas: || {},
-                before_parent_dispatch: || {
-                    let silence = state.silence_states.get(child_id).unwrap().clone();
-                    assert!(
-                        silence.try_lock().is_some(),
-                        "child lifecycle lock must be released before parent PTY dispatch"
-                    );
-                },
-            },
-        ));
-        assert_eq!(state.agent_inbox.get(parent_id).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn submitted_input_lifecycle_ready_before_status_line_is_not_stale_completed() {
-        let state = crate::state::tests_support::make_test_app_state();
-        completed_agent_session(&state, "quick-turn");
-        state.pending_injections.insert(
-            "quick-turn".to_string(),
-            std::collections::VecDeque::from([crate::state::PendingInjection::peer_message(
-                "quick follow up",
-            )]),
-        );
-        flush_one_pending_as_submitted(&state, "quick-turn");
-
-        state
-            .silence_states
-            .get("quick-turn")
-            .unwrap()
-            .lock()
-            .confirm_idle();
-        assert!(try_shell_transition(
-            &state,
-            "quick-turn",
-            SHELL_BUSY,
-            SHELL_IDLE,
-            false,
-        ));
-
-        let snapshot = state.session_state_with_shell("quick-turn").unwrap();
-        assert_eq!(snapshot.shell_state.as_deref(), Some("idle"));
-        assert_eq!(snapshot.agent_state.as_deref(), Some("idle"));
-        assert!(snapshot.suggested_actions.is_none());
-    }
-
-    #[test]
-    fn submitted_input_lifecycle_no_new_input_retains_completion() {
-        let state = crate::state::tests_support::make_test_app_state();
-        completed_agent_session(&state, "unchanged");
-
-        let snapshot = state.session_state_with_shell("unchanged").unwrap();
-        assert_eq!(snapshot.shell_state.as_deref(), Some("idle"));
-        assert_eq!(snapshot.agent_state.as_deref(), Some("completed"));
-        assert_eq!(
-            snapshot.suggested_actions,
-            Some(vec!["Review result".to_string()])
-        );
-        assert!(
-            state
-                .silence_states
-                .get("unchanged")
-                .unwrap()
-                .lock()
-                .completion_declared()
-        );
-    }
-
-    #[test]
-    fn should_inject_now_only_for_idle_agent() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "idle-agent", SHELL_IDLE);
-        agent_session(&state, "busy-agent", SHELL_BUSY);
-        assert!(
-            should_inject_now(&state, "idle-agent"),
-            "idle agent → inject"
-        );
-        assert!(
-            !should_inject_now(&state, "busy-agent"),
-            "busy agent → queue"
-        );
-        assert!(
-            !should_inject_now(&state, "unknown"),
-            "unknown session → never inject"
-        );
-    }
-
-    #[test]
-    fn injection_claim_rechecks_idle_atomically_after_delivery_decision() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "race-agent", SHELL_IDLE);
-        assert!(should_inject_now(&state, "race-agent"));
-
-        assert!(try_shell_transition(
-            &state,
-            "race-agent",
-            SHELL_IDLE,
-            SHELL_BUSY,
-            false,
-        ));
-
-        assert!(
-            claim_idle_for_injection(&state, "race-agent").is_none(),
-            "a sender that observed idle before the agent became busy must queue instead of writing into the active composer"
-        );
-    }
-
-    /// Typing into an idle agent must block injection outright — and a rejected
-    /// claim must leave the shell atom exactly as it found it, so the user's
-    /// half-typed line is never followed by a stray busy state. The post-CAS
-    /// re-check inside `claim_idle_for_injection` uses this same predicate for
-    /// the case where typing starts after the delivery decision.
-    #[test]
-    fn injection_claim_is_refused_while_the_user_is_typing() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "typing-agent", SHELL_IDLE);
-        assert!(should_inject_now(&state, "typing-agent"));
-
-        let mut buffer = InputLineBuffer::new();
-        buffer.feed("half typed prompt");
-        state
-            .input_buffers
-            .insert("typing-agent".to_string(), parking_lot::Mutex::new(buffer));
-
-        assert!(has_partial_user_input(&state, "typing-agent"));
-        assert!(!should_inject_now(&state, "typing-agent"));
-        assert!(
-            claim_idle_for_injection(&state, "typing-agent").is_none(),
-            "a partially typed composer must never be written into"
-        );
-        assert_eq!(
-            state
-                .shell_states
-                .get("typing-agent")
-                .map(|a| a.load(std::sync::atomic::Ordering::Relaxed)),
-            Some(SHELL_IDLE),
-            "a refused claim must not leave the session marked busy"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn agent_submission_rejects_partial_composer_without_writing() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "submit-partial", SHELL_IDLE);
-        let bytes = insert_recording_session(&state, "submit-partial");
-        let mut buffer = InputLineBuffer::new();
-        buffer.feed("Boss draft");
-        state.input_buffers.insert(
-            "submit-partial".to_string(),
-            parking_lot::Mutex::new(buffer),
-        );
-
-        assert_eq!(
-            write_agent_submission_to_pty(&state, "submit-partial", "new command"),
-            AgentSubmissionWrite::Rejected {
-                reason: "partial_composer",
-                composer_state: "partial",
-            }
-        );
-        assert!(bytes.lock().unwrap().is_empty());
-        assert_eq!(
-            state
-                .input_buffers
-                .get("submit-partial")
-                .unwrap()
-                .lock()
-                .content(),
-            "Boss draft",
-            "a receipt request must preserve the user's draft verbatim"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn agent_submission_does_not_overtake_existing_queue() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "submit-queued", SHELL_IDLE);
-        let bytes = insert_recording_session(&state, "submit-queued");
-        state
-            .pending_injections
-            .entry("submit-queued".to_string())
-            .or_default()
-            .push_back(crate::state::PendingInjection::peer_message("older peer"));
-
-        assert_eq!(
-            write_agent_submission_to_pty(&state, "submit-queued", "new command"),
-            AgentSubmissionWrite::Rejected {
-                reason: "queued_commands_pending",
-                composer_state: "empty",
-            }
-        );
-        assert!(bytes.lock().unwrap().is_empty());
-        assert_eq!(
-            state
-                .pending_injections
-                .get("submit-queued")
-                .unwrap()
-                .front()
-                .map(crate::state::PendingInjection::text),
-            Some("older peer")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn agent_submission_claim_prevents_concurrent_peer_splicing() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        agent_session(&state, "submit-race", SHELL_IDLE);
-        let bytes = insert_recording_session(&state, "submit-race");
-        let submit_state = Arc::clone(&state);
-        let submit = std::thread::spawn(move || {
-            write_agent_submission_to_pty(&submit_state, "submit-race", "atomic command")
-        });
-
-        for _ in 0..100 {
-            if !bytes.lock().unwrap().is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        let peer = deliver_message_to_pty(&state, "submit-race", "peer command");
-        let submitted = submit.join().unwrap();
-
-        assert!(matches!(submitted, AgentSubmissionWrite::Complete { .. }));
-        assert_eq!(peer, PtyDelivery::Queued);
-        assert_eq!(
-            String::from_utf8(bytes.lock().unwrap().clone()).unwrap(),
-            "\u{15}atomic command\r",
-            "the peer payload must not land between the split payload and Enter"
-        );
-        assert_eq!(
-            state
-                .pending_injections
-                .get("submit-race")
-                .unwrap()
-                .front()
-                .map(crate::state::PendingInjection::text),
-            Some("peer command")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn agent_submission_writer_lock_prevents_raw_input_splicing() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        agent_session(&state, "submit-raw-race", SHELL_IDLE);
-        let bytes = insert_recording_session(&state, "submit-raw-race");
-        let submit_state = Arc::clone(&state);
-        let submit = std::thread::spawn(move || {
-            write_agent_submission_to_pty(&submit_state, "submit-raw-race", "atomic command")
-        });
-
-        for _ in 0..100 {
-            if !bytes.lock().unwrap().is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        let raw_state = Arc::clone(&state);
-        let raw = std::thread::spawn(move || {
-            let writer = raw_state.pty_writer("submit-raw-race").unwrap();
-            let mut writer = writer.lock();
-            writer.write_all(b"raw input").unwrap();
-            writer.flush().unwrap();
-        });
-        let submitted = submit.join().unwrap();
-        raw.join().unwrap();
-
-        assert!(matches!(submitted, AgentSubmissionWrite::Complete { .. }));
-        assert_eq!(
-            String::from_utf8(bytes.lock().unwrap().clone()).unwrap(),
-            "\u{15}atomic command\rraw input",
-            "a raw writer may follow the submission but cannot land before its Enter"
-        );
-    }
-
-    #[test]
-    fn codex_heuristic_idle_is_not_safe_for_injection_or_standby() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "codex-heuristic", SHELL_IDLE);
-        state
-            .session_states
-            .get_mut("codex-heuristic")
-            .unwrap()
-            .agent_type = Some("codex".to_string());
-        state
-            .silence_states
-            .get("codex-heuristic")
-            .unwrap()
-            .lock()
-            .idle_confirmed = false;
-
-        assert!(!idle_is_confirmed(&state, "codex-heuristic"));
-        assert!(!should_inject_now(&state, "codex-heuristic"));
-
-        state
-            .silence_states
-            .get("codex-heuristic")
-            .unwrap()
-            .lock()
-            .confirm_idle();
-        assert!(idle_is_confirmed(&state, "codex-heuristic"));
-        assert!(should_inject_now(&state, "codex-heuristic"));
-    }
-
-    #[test]
-    fn should_inject_now_false_for_shell_and_confident_question() {
-        use std::sync::atomic::AtomicU8;
-        let state = crate::state::tests_support::make_test_app_state();
-        // Plain shell (no agent_type) — must never be injected into.
-        state
-            .shell_states
-            .insert("shell".to_string(), AtomicU8::new(SHELL_IDLE));
-        state
-            .session_states
-            .insert("shell".to_string(), crate::state::SessionState::default());
-        assert!(!should_inject_now(&state, "shell"), "shell → never inject");
-
-        // Agent idle but blocked on a CONFIDENT user-facing question (Ink menu,
-        // cliclack prompt, "Action Required" title) — never answer it.
-        state
-            .shell_states
-            .insert("q".to_string(), AtomicU8::new(SHELL_IDLE));
-        state.session_states.insert(
-            "q".to_string(),
-            crate::state::SessionState {
-                agent_type: Some("claude".to_string()),
-                awaiting_input: true,
-                question_confident: true,
-                ..Default::default()
-            },
-        );
-        let mut ready_silence = SilenceState::new();
-        ready_silence.idle_confirmed = true;
-        state
-            .silence_states
-            .insert("ready".to_string(), Arc::new(Mutex::new(ready_silence)));
-        assert!(
-            !should_inject_now(&state, "q"),
-            "confident question agent → do not answer its prompt"
-        );
-
-        // Agent idle at a mere ready prompt: the low-confidence silence heuristic
-        // sets awaiting_input WITHOUT question_confident (codex parks here
-        // permanently — story 091). Injection must proceed or delivery starves.
-        state
-            .shell_states
-            .insert("ready".to_string(), AtomicU8::new(SHELL_IDLE));
-        state.session_states.insert(
-            "ready".to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                awaiting_input: true,
-                question_confident: false,
-                ..Default::default()
-            },
-        );
-        assert!(
-            should_inject_now(&state, "ready"),
-            "awaiting_input-only (ready prompt) agent → inject, do not starve"
-        );
-    }
-
-    #[test]
-    fn deliver_queues_pending_for_busy_agent() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "busy", SHELL_BUSY);
-        let outcome = deliver_message_to_pty(&state, "busy", "[TUIC message from lead] go");
-        assert_eq!(
-            outcome,
-            PtyDelivery::Queued,
-            "a busy composer parks the message; nothing reached the terminal"
-        );
-        let q = state.pending_injections.get("busy").expect("queued");
-        assert_eq!(q.len(), 1);
-        assert_eq!(
-            q.front().map(crate::state::PendingInjection::text),
-            Some("[TUIC message from lead] go")
-        );
-    }
-
-    /// A live PTY whose every byte is recorded, so a test can assert both what
-    /// reached the composer and what deliberately did not.
-    #[cfg(unix)]
-    fn insert_recording_session(
-        state: &AppState,
-        session_id: &str,
-    ) -> Arc<std::sync::Mutex<Vec<u8>>> {
-        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        insert_session_with_writer(
-            state,
-            session_id,
-            Box::new(RecordingWriter {
-                bytes: Arc::clone(&bytes),
-            }),
-        );
-        bytes
-    }
-
-    /// Compose enqueue on a busy agent: nothing may reach the composer, or the
-    /// user's queued note would steer the turn they deliberately did not interrupt.
-    #[cfg(unix)]
-    #[test]
-    fn enqueue_parks_command_while_agent_is_busy() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "busy", SHELL_BUSY);
-        let bytes = insert_recording_session(&state, "busy");
-
-        let first = enqueue_user_command(&state, "busy", "run the tests").expect("enqueued");
-        assert_eq!((first.typed, first.queued), (false, 1));
-        let second = enqueue_user_command(&state, "busy", "then push").expect("enqueued");
-        assert_eq!((second.typed, second.queued), (false, 2));
-
-        let queue = state.pending_injections.get("busy").expect("queue");
-        assert_eq!(
-            queue.iter().map(|entry| entry.text()).collect::<Vec<_>>(),
-            vec!["run the tests", "then push"],
-            "queued in the order the user composed them"
-        );
-        assert!(queue.iter().all(|entry| entry.is_user_command()));
-        assert_eq!(
-            state
-                .session_state_with_shell("busy")
-                .expect("snapshot")
-                .queued_commands,
-            2,
-            "queue depth is visible to the polling UI"
-        );
-        assert!(
-            bytes.lock().unwrap().is_empty(),
-            "a busy composer receives nothing"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn enqueue_refuses_shells_and_dead_sessions() {
-        use std::sync::atomic::AtomicU8;
-        let state = crate::state::tests_support::make_test_app_state();
-        state
-            .shell_states
-            .insert("shell".to_string(), AtomicU8::new(SHELL_IDLE));
-        state
-            .session_states
-            .insert("shell".to_string(), crate::state::SessionState::default());
-        insert_recording_session(&state, "shell");
-        assert_eq!(
-            enqueue_user_command(&state, "shell", "ls").unwrap_err(),
-            "Session is not running an agent"
-        );
-
-        agent_session(&state, "gone", SHELL_IDLE);
-        assert_eq!(
-            enqueue_user_command(&state, "gone", "hi").unwrap_err(),
-            "Session not found",
-            "a tombstoned agent still has session_states — the PTY is what decides"
-        );
-
-        agent_session(&state, "blank", SHELL_IDLE);
-        insert_recording_session(&state, "blank");
-        assert_eq!(
-            enqueue_user_command(&state, "blank", "   \n ").unwrap_err(),
-            "Command text is empty"
-        );
-        assert_eq!(queued_command_count(&state, "blank"), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn clear_queued_commands_preserves_peer_deliveries() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "busy", SHELL_BUSY);
-        insert_recording_session(&state, "busy");
-        enqueue_user_command(&state, "busy", "one").expect("enqueued");
-        state.pending_injections.get_mut("busy").unwrap().push_back(
-            crate::state::PendingInjection::peer_message("[TUIC message from lead] first peer"),
-        );
-        enqueue_user_command(&state, "busy", "two").expect("enqueued");
-        state.pending_injections.get_mut("busy").unwrap().push_back(
-            crate::state::PendingInjection::peer_message("[TUIC message from worker] second peer"),
-        );
-
-        assert_eq!(queued_command_count(&state, "busy"), 2);
-        assert_eq!(clear_queued_commands(&state, "busy"), 2);
-        assert_eq!(queued_command_count(&state, "busy"), 0);
-        assert_eq!(
-            state.pending_injections.get("busy").map(|queue| queue
-                .iter()
-                .map(|entry| entry.text().to_string())
-                .collect::<Vec<_>>()),
-            Some(vec![
-                "[TUIC message from lead] first peer".to_string(),
-                "[TUIC message from worker] second peer".to_string(),
-            ]),
-            "Compose clear must retain peer delivery ownership and order"
-        );
-        assert_eq!(
-            clear_queued_commands(&state, "busy"),
-            0,
-            "clearing an empty queue is a no-op, not an error"
-        );
-    }
-
-    /// The Compose panel lists what waits and deletes one entry: peer wake
-    /// messages stay invisible and untouchable, exactly as for count and clear.
-    #[cfg(unix)]
-    #[test]
-    fn list_and_remove_expose_only_user_commands() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "busy", SHELL_BUSY);
-        insert_recording_session(&state, "busy");
-        enqueue_user_command(&state, "busy", "one").expect("enqueued");
-        state.pending_injections.get_mut("busy").unwrap().push_back(
-            crate::state::PendingInjection::peer_message("[TUIC message from lead] peer"),
-        );
-        enqueue_user_command(&state, "busy", "two").expect("enqueued");
-
-        let listed = list_queued_commands(&state, "busy");
-        assert_eq!(
-            listed.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
-            vec!["one", "two"],
-            "listed in delivery order, peer message excluded"
-        );
-
-        assert!(remove_queued_command(&state, "busy", listed[0].id));
-        assert_eq!(
-            list_queued_commands(&state, "busy")
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>(),
-            vec!["two"],
-        );
-        assert_eq!(
-            state
-                .pending_injections
-                .get("busy")
-                .map(|queue| queue.len()),
-            Some(2),
-            "the peer message survives a Compose delete"
-        );
-        assert!(
-            !remove_queued_command(&state, "busy", listed[0].id),
-            "removing an id that already drained is a no-op, not an error"
-        );
-    }
-
-    /// The idle path, end to end against a real PTY: an idle agent gets the text
-    /// typed and submitted at once (Ctrl-U prefix, CR in a separate write), so
-    /// enqueueing costs nothing when there is no turn to protect.
-    #[cfg(unix)]
-    #[test]
-    fn enqueue_types_immediately_when_agent_is_idle() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "idle-now", SHELL_IDLE);
-        let bytes = insert_recording_session(&state, "idle-now");
-
-        let outcome = enqueue_user_command(&state, "idle-now", "ship it").expect("enqueued");
-        assert_eq!((outcome.typed, outcome.queued), (true, 0));
-        assert_eq!(
-            String::from_utf8(bytes.lock().unwrap().clone()).unwrap(),
-            "\u{15}ship it\r"
-        );
-    }
-
-    /// FIFO under the idle path: a user command enqueued behind a peer delivery
-    /// must not jump ahead of it. The flush types the shared head and leaves the
-    /// session busy, so the user command stays parked for the next idle window.
-    #[cfg(unix)]
-    #[test]
-    fn enqueue_never_overtakes_a_command_already_waiting() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "fifo", SHELL_IDLE);
-        let bytes = insert_recording_session(&state, "fifo");
-        state
-            .pending_injections
-            .entry("fifo".to_string())
-            .or_default()
-            .push_back(crate::state::PendingInjection::peer_message("first"));
-
-        let outcome = enqueue_user_command(&state, "fifo", "second").expect("enqueued");
-        assert_eq!((outcome.typed, outcome.queued), (false, 1));
-        assert_eq!(
-            String::from_utf8(bytes.lock().unwrap().clone()).unwrap(),
-            "\u{15}first\r",
-            "the older command is the one that reached the composer"
-        );
-        assert_eq!(
-            state
-                .pending_injections
-                .get("fifo")
-                .expect("queue")
-                .front()
-                .map(crate::state::PendingInjection::text),
-            Some("second")
-        );
-    }
-
-    /// The defect this pair pins: `deliver_message_to_managed_pty` used to return
-    /// `state.sessions.contains_key(session_id)` — "the session exists", not "the
-    /// message was typed". Every call site read that as delivery and marked the
-    /// message `TerminalDispatched`, and the waiter filter hides Terminal-owned
-    /// messages, so a queued-but-never-typed message became invisible to
-    /// `agent wait` while still sitting unread in the inbox.
-    #[test]
-    fn queued_message_is_not_claimed_as_dispatched() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "busy-peer", SHELL_BUSY);
-        let msg = "m-queued";
-        assert_eq!(
-            state.assign_agent_delivery("busy-peer", msg, true),
-            crate::state::AgentDeliveryAssignment::Terminal
-        );
-
-        let outcome = deliver_message_to_pty(&state, "busy-peer", "[TUIC message from lead] go");
-        settle_terminal_delivery(&state, "busy-peer", msg, outcome);
-
-        assert_eq!(outcome, PtyDelivery::Queued);
-        assert_eq!(
-            state.agent_delivery_owner("busy-peer", msg),
-            Some(crate::state::AgentDeliveryOwner::TerminalPending),
-            "still owned by the terminal — but pending, never dispatched"
-        );
-    }
-
-    /// `settle_terminal_delivery` is the decision this fix introduced, so pin all
-    /// three branches directly. Driving `Typed` end-to-end would need a live PTY
-    /// (without one the claim path always reports `NotStarted` and requeues — see
-    /// `ready_prompt_delivery_attempts_and_requeues_when_pty_is_missing`), and a
-    /// fake PTY would only prove the fake.
-    #[test]
-    fn settle_maps_each_outcome_to_the_right_ownership() {
-        let state = crate::state::tests_support::make_test_app_state();
-        for (msg, outcome, expected) in [
-            (
-                "m-typed",
-                PtyDelivery::Typed,
-                Some(crate::state::AgentDeliveryOwner::TerminalDispatched),
-            ),
-            (
-                "m-queued",
-                PtyDelivery::Queued,
-                Some(crate::state::AgentDeliveryOwner::TerminalPending),
-            ),
-            ("m-gone", PtyDelivery::Unavailable, None),
-        ] {
-            assert_eq!(
-                state.assign_agent_delivery("peer", msg, true),
-                crate::state::AgentDeliveryAssignment::Terminal
-            );
-            settle_terminal_delivery(&state, "peer", msg, outcome);
-            assert_eq!(
-                state.agent_delivery_owner("peer", msg),
-                expected,
-                "{outcome:?} must not claim more or less than it achieved"
-            );
-        }
-    }
-
-    #[test]
-    fn dead_session_reports_unavailable_and_releases_ownership() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let msg = "m-dead";
-        assert_eq!(
-            state.assign_agent_delivery("ghost-peer", msg, true),
-            crate::state::AgentDeliveryAssignment::Terminal
-        );
-
-        // No PTY was ever registered for this id.
-        let outcome = deliver_message_to_managed_pty(&state, "ghost-peer", "[TUIC] hi");
-        settle_terminal_delivery(&state, "ghost-peer", msg, outcome);
-
-        assert_eq!(outcome, PtyDelivery::Unavailable);
-        assert_eq!(
-            state.agent_delivery_owner("ghost-peer", msg),
-            None,
-            "ownership handed back so `agent wait` can still surface the inbox copy"
-        );
-    }
-
-    #[test]
-    fn idle_flush_submits_only_one_queued_message_per_turn() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "idle", SHELL_IDLE);
-        state.pending_injections.insert(
-            "idle".to_string(),
-            std::collections::VecDeque::from([
-                crate::state::PendingInjection::peer_message("first"),
-                crate::state::PendingInjection::peer_message("second"),
-            ]),
-        );
-
-        flush_one_pending_as_submitted(&state, "idle");
-
-        assert_eq!(
-            state.pending_injections.get("idle").map(|queue| queue
-                .iter()
-                .map(|entry| entry.text().to_string())
-                .collect::<Vec<_>>()),
-            Some(vec!["second".to_string()]),
-            "submitting the first message makes the agent busy; later messages must wait for its next idle transition"
-        );
-    }
-
-    #[test]
-    fn deliver_queues_for_idle_agent_with_partial_user_input() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "typing", SHELL_IDLE);
-        let mut input = crate::input_line_buffer::InputLineBuffer::new();
-        input.feed("draft in progress");
-        state
-            .input_buffers
-            .insert("typing".to_string(), Mutex::new(input));
-
-        assert!(
-            !should_inject_now(&state, "typing"),
-            "partial composer input must block terminal injection"
-        );
-        deliver_message_to_pty(&state, "typing", "[TUIC message from child] done");
-        let pending = state.pending_injections.get("typing").unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending.front().map(crate::state::PendingInjection::text),
-            Some("[TUIC message from child] done")
-        );
-    }
-
-    #[test]
-    fn delivery_gate_assigns_waiter_without_touching_terminal_queue() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "waiting", SHELL_IDLE);
-        let lease = state.begin_agent_wait("waiting");
-        state.push_agent_inbox(
-            "waiting",
-            crate::state::AgentMessage {
-                id: "wait-owned".to_string(),
-                from_tuic_session: "sender".to_string(),
-                from_name: "sender".to_string(),
-                content: "done".to_string(),
-                timestamp: 1,
-                delivered_via_channel: false,
-            },
-        );
-
-        assert_eq!(
-            state.assign_agent_delivery("waiting", "wait-owned", true),
-            crate::state::AgentDeliveryAssignment::Waiter
-        );
-
-        assert!(
-            !state.pending_injections.contains_key("waiting"),
-            "active wait owns delivery; terminal injection must not be queued"
-        );
-        state.finish_agent_wait("waiting", lease, 0, true);
-    }
-
-    #[test]
-    fn deliver_noop_for_non_agent() {
-        let state = crate::state::tests_support::make_test_app_state();
-        // No session_states entry → not an agent.
-        deliver_message_to_pty(&state, "ghost", "hi");
-        assert!(
-            !state.pending_injections.contains_key("ghost"),
-            "non-agent must never queue"
-        );
-    }
-
-    #[test]
-    fn managed_delivery_rejects_stale_agent_state_without_pty() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "vanished", SHELL_BUSY);
-
-        assert_eq!(
-            deliver_message_to_managed_pty(&state, "vanished", "message"),
-            PtyDelivery::Unavailable
-        );
-        assert!(!state.pending_injections.contains_key("vanished"));
-    }
-
-    #[test]
-    fn failed_not_started_injection_rolls_back_claim_and_requeues() {
-        // The test state has no live PTY session, so composer lookup fails before
-        // any byte can be written. The delivery claim must be rolled back and the
-        // message kept pending instead of leaving a false BUSY state.
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "idle", SHELL_IDLE);
-        deliver_message_to_pty(&state, "idle", "now");
-        assert!(
-            state
-                .shell_states
-                .get("idle")
-                .is_some_and(|state| state.load(Ordering::Acquire) == SHELL_IDLE),
-            "a claim that never reached PTY I/O must restore IDLE"
-        );
-        assert_eq!(
-            state
-                .pending_injections
-                .get("idle")
-                .and_then(|queue| queue.front().map(|entry| entry.text().to_string())),
-            Some("now".to_string()),
-            "a not-started delivery must remain retryable"
-        );
-    }
-
-    #[test]
-    fn real_activity_invalidates_injection_rollback_ownership() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "active", SHELL_IDLE);
-        let claim = claim_idle_for_injection(&state, "active").expect("claim");
-        state
-            .silence_states
-            .get("active")
-            .unwrap()
-            .lock()
-            .note_real_activity();
-
-        assert!(!rollback_injection_claim(&state, "active", claim));
-        assert!(
-            state
-                .shell_states
-                .get("active")
-                .is_some_and(|value| value.load(Ordering::Acquire) == SHELL_BUSY),
-            "rollback must not erase genuine post-claim activity"
-        );
-    }
-
-    #[test]
-    fn partial_write_is_uncertain_not_not_started() {
-        struct PartialThenError {
-            wrote_once: bool,
-        }
-        impl std::io::Write for PartialThenError {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if self.wrote_once {
-                    Err(std::io::Error::other("injected failure"))
-                } else {
-                    self.wrote_once = true;
-                    Ok(bytes.len().min(2))
-                }
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let mut writer = PartialThenError { wrote_once: false };
-        let failure = write_all_with_progress(&mut writer, b"payload", 0).unwrap_err();
-        assert_eq!(failure.0, 2, "partial progress must be retained");
-        assert!(failure.1.contains("injected failure"));
-    }
-
-    #[cfg(unix)]
-    struct RecordingWriter {
-        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
-    }
-
-    #[cfg(unix)]
-    impl std::io::Write for RecordingWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.bytes.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[cfg(unix)]
-    struct FailingWriter;
-
-    #[cfg(unix)]
-    impl std::io::Write for FailingWriter {
-        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("injected PTY failure"))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[cfg(unix)]
-    fn insert_session_with_writer(
-        state: &AppState,
-        session_id: &str,
-        writer: Box<dyn std::io::Write + Send>,
-    ) {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "sleep 30"]);
-        let child = pair.slave.spawn_command(command).expect("spawn shell");
-        state.sessions.insert(
-            session_id.to_string(),
-            Mutex::new(PtySession {
-                writer: Arc::new(Mutex::new(writer)),
-                master: pair.master,
-                _child: child,
-                paused: Arc::new(AtomicBool::new(false)),
-                worktree: None,
-                cwd: None,
-                display_name: None,
-                display_name_is_custom: false,
-                is_remote: false,
-                shell: "/bin/sh".to_string(),
-            }),
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn concurrent_user_input_and_terminal_reply_are_both_serialized() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        insert_session_with_writer(
-            &state,
-            "serialized-writes",
-            Box::new(RecordingWriter {
-                bytes: Arc::clone(&bytes),
-            }),
-        );
-
-        let writer = state.pty_writer("serialized-writes").unwrap();
-        let held = writer.lock();
-        let input_state = Arc::clone(&state);
-        let input = std::thread::spawn(move || {
-            input_state
-                .write_pty_parts("serialized-writes", &[b"input"])
-                .unwrap();
-        });
-        let reply_state = Arc::clone(&state);
-        let reply = std::thread::spawn(move || {
-            write_terminal_reply(&reply_state, "serialized-writes", b"reply", "test");
-        });
-
-        drop(held);
-        input.join().unwrap();
-        reply.join().unwrap();
-        let output = bytes.lock().unwrap().clone();
-        assert!(
-            output == b"inputreply" || output == b"replyinput",
-            "{output:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn multiple_terminal_replies_keep_reader_order() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        insert_session_with_writer(
-            &state,
-            "reply-order",
-            Box::new(RecordingWriter {
-                bytes: Arc::clone(&bytes),
-            }),
-        );
-
-        write_terminal_reply(&state, "reply-order", b"first", "test");
-        write_terminal_reply(&state, "reply-order", b"second", "test");
-        assert_eq!(*bytes.lock().unwrap(), b"firstsecond");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_pty_write_reports_writer_failure_and_teardown() {
-        let state = crate::state::tests_support::make_test_app_state();
-        insert_session_with_writer(&state, "failed-writer", Box::new(FailingWriter));
-
-        let error = state
-            .write_pty_parts("failed-writer", &[b"reply"])
-            .expect_err("writer error must be observable");
-        assert!(error.contains("injected PTY failure"), "{error}");
-
-        state.sessions.remove("failed-writer");
-        let error = state
-            .write_pty_parts("failed-writer", &[b"late reply"])
-            .expect_err("removed session must reject writes");
-        assert_eq!(error, "Session not found");
-        write_terminal_reply(&state, "failed-writer", b"late reply", "test");
-    }
-
-    #[test]
-    fn uncertain_injection_preserves_busy_and_surfaces_status_flag() {
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "uncertain", SHELL_IDLE);
-        let claim = claim_idle_for_injection(&state, "uncertain").expect("claim");
-        mark_injection_uncertain(&state, "uncertain", claim);
-
-        assert!(
-            state
-                .shell_states
-                .get("uncertain")
-                .is_some_and(|value| value.load(Ordering::Acquire) == SHELL_BUSY)
-        );
-        assert!(
-            state
-                .silence_states
-                .get("uncertain")
-                .unwrap()
-                .lock()
-                .injection_delivery_uncertain
-        );
-        assert!(!state.pending_injections.contains_key("uncertain"));
-    }
-
-    #[test]
-    fn uncertain_injection_cannot_be_cleared_by_a_stale_ready_screen() {
-        let mut silence = SilenceState::new();
-        let token = silence.begin_injection_claim(true);
-        silence.mark_injection_uncertain(token);
-        silence.ready_since = Some(std::time::Instant::now() - AGENT_READY_CONFIRM);
-
-        assert!(!silence.note_ready_screen());
-        assert!(silence.injection_delivery_uncertain);
-        assert!(!silence.idle_confirmed);
-    }
-
-    #[test]
-    fn deliver_reenqueue_recovers_message_when_idle_races_enqueue() {
-        // CONC-A (story 101-20e3): the sender's should_inject_now read and its
-        // pending_injections push are not atomic vs a concurrent BUSY→IDLE flush. If the
-        // silence timer transitions to idle and drains the (still-empty) queue between
-        // them, the message would be stranded until the NEXT idle cycle. The post-enqueue
-        // re-check must recover it. Stress the race with a barrier: after both the sender
-        // and the transition+flush complete with the session ending idle, the queue MUST
-        // be empty (message delivered) regardless of interleaving. Pre-fix this fails in
-        // the bug window (sender reads busy, timer flushes empty, sender enqueues with no
-        // recovery). With no live PTY in this unit test, the recovered delivery
-        // must remain queued exactly once rather than being lost or duplicated.
-        use std::sync::{Arc, Barrier};
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        for i in 0..500 {
-            agent_session(&state, "race", SHELL_BUSY);
-            state.pending_injections.remove("race");
-
-            let barrier = Arc::new(Barrier::new(2));
-            let (s1, b1) = (Arc::clone(&state), Arc::clone(&barrier));
-            let sender = std::thread::spawn(move || {
-                b1.wait();
-                deliver_message_to_pty(&s1, "race", "[TUIC message from lead] go");
-            });
-            let (s2, b2) = (Arc::clone(&state), Arc::clone(&barrier));
-            let timer = std::thread::spawn(move || {
-                b2.wait();
-                // Silence timer: BUSY→IDLE also runs flush_pending_injections on idle.
-                s2.silence_states.get("race").unwrap().lock().idle_confirmed = true;
-                try_shell_transition(&s2, "race", SHELL_BUSY, SHELL_IDLE, false);
-                emit_shell_state(&s2, "race", "idle");
-                flush_pending_injections(&s2, "race");
-            });
-            sender.join().unwrap();
-            timer.join().unwrap();
-
-            let queued = state
-                .pending_injections
-                .get("race")
-                .map(|q| q.len())
-                .unwrap_or(0);
-            assert_eq!(queued, 1, "iteration {i}: message lost or duplicated");
-        }
-    }
-
-    // ---- CONC-B (story 100-e303 / commit 5410cc3d): resize_session_core ----
-    // resize_session_core serializes the whole grid+PTY resize for a session
-    // under one per-session lock so two concurrent differing resizes can never
-    // interleave and leave grid and PTY at mismatched dimensions. These cover
-    // the invalid-dims edge, the no-op guard, the (0,0) startup-dims seed, and
-    // the concurrent-race invariant (mirrors the CONC-A barrier test above).
-
-    /// Insert a live VtLogBuffer at the given dims so the grid path in
-    /// resize_session_core runs against a real grid.
-    fn seed_vt_grid(state: &crate::state::AppState, sid: &str, rows: u16, cols: u16) {
-        state.vt_log_buffers.insert(
-            sid.to_string(),
-            Mutex::new(VtLogBuffer::new(rows, cols, 1000)),
-        );
-    }
-
-    /// The reflow rewraps the whole ring and serializes a full frame under the VT
-    /// mutex. Run inline in the IPC handler — on macOS, the main thread — a
-    /// drag-resize froze the WebView for the length of every reflow it fired.
-    #[tokio::test]
-    async fn a_resize_reflows_off_the_calling_thread() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "resize-off-thread";
-        seed_vt_grid(&state, sid, 24, 80);
-
-        let caller = std::thread::current().id();
-        // The session has no PTY, so this ends in "Session not found" — after the
-        // grid reflow, which is precisely the work that must not run here.
-        let _ = resize_session_off_thread(&state, sid.to_string(), 40, 120).await;
-
-        assert!(resize_thread(sid).is_some(), "the reflow never ran at all");
-        assert_ne!(
-            resize_thread(sid),
-            Some(caller),
-            "the reflow ran on the calling thread"
-        );
-    }
-
-    #[test]
-    fn resize_rejects_zero_dims() {
-        let state = crate::state::tests_support::make_test_app_state();
-        // rows==0 / cols==0 are rejected before any lock, grid, or PTY work — the
-        // (0,0) pair is reserved as the "never applied" sentinel inside the lock.
-        assert!(resize_session_core(&state, "s", 0, 80).is_err());
-        assert!(resize_session_core(&state, "s", 24, 0).is_err());
-        // A rejected resize must not even create a resize_locks entry.
-        assert!(!state.resize_locks.contains_key("s"));
-    }
-
-    #[test]
-    fn resize_noop_guard_returns_none_on_matching_dims() {
-        let state = crate::state::tests_support::make_test_app_state();
-        // Pre-seed the last-applied dims, as if a prior resize reached the PTY.
-        state
-            .resize_locks
-            .insert("s".to_string(), Arc::new(Mutex::new((24, 80))));
-        // Same dims → no-op returning None WITHOUT touching the (absent) session.
-        // Without the guard this would fall through to sessions.get and fail with
-        // "Session not found", so Ok(None) proves the guard short-circuited first.
-        assert_eq!(resize_session_core(&state, "s", 24, 80), Ok(None));
-    }
-
-    #[test]
-    fn resize_seeds_applied_from_grid_and_noops_at_startup_dims() {
-        let state = crate::state::tests_support::make_test_app_state();
-        // Grid exists at the startup dims but resize_locks is empty → the lock
-        // opens at the (0,0) never-applied sentinel.
-        seed_vt_grid(&state, "s", 24, 80);
-        // A first resize matching only the startup dims must seed *applied from
-        // the live grid and then no-op — no gratuitous SIGWINCH, no session touch.
-        assert_eq!(resize_session_core(&state, "s", 24, 80), Ok(None));
-        // The seed must have populated resize_locks with the live grid dims.
-        assert_eq!(
-            *state.resize_locks.get("s").unwrap().lock(),
-            (24, 80),
-            "first resize must seed the last-applied dims from the live grid"
-        );
-    }
-
-    /// Build a real PTY session (openpty + a long-lived child) at the given dims,
-    /// plus a matching VtLogBuffer, so resize_session_core reaches the real
-    /// master.resize() ioctl and get_size() reflects it.
-    #[cfg(unix)]
-    fn spawn_real_pty_session(state: &crate::state::AppState, sid: &str, rows: u16, cols: u16) {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.args(["-c", "sleep 30"]);
-        let child = pair.slave.spawn_command(cmd).expect("spawn shell");
-        let master = pair.master;
-        let writer = master.take_writer().expect("writer");
-        state.sessions.insert(
-            sid.to_string(),
-            Mutex::new(PtySession {
-                writer: Arc::new(Mutex::new(writer)),
-                master,
-                _child: child,
-                paused: Arc::new(AtomicBool::new(false)),
-                worktree: None,
-                cwd: None,
-                display_name: None,
-                display_name_is_custom: false,
-                is_remote: false,
-                shell: "/bin/sh".to_string(),
-            }),
-        );
-        seed_vt_grid(state, sid, rows, cols);
-    }
-
-    /// CONC-B invariant: two concurrent resizes with different dims must leave the
-    /// grid AND the PTY at the same dimensions — both equal to whichever call
-    /// acquired the per-session lock last — never a grid/PTY mismatch. Stress the
-    /// race with a barrier over many iterations, like the CONC-A test above.
-    #[cfg(unix)]
-    #[test]
-    fn concurrent_differing_resizes_leave_grid_and_pty_consistent() {
-        use std::sync::Barrier;
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let sid = "resize-race";
-        spawn_real_pty_session(&state, sid, 24, 80);
-
-        const A: (u16, u16) = (30, 100);
-        const B: (u16, u16) = (40, 120);
-
-        for i in 0..100 {
-            let barrier = Arc::new(Barrier::new(2));
-            let (s1, b1) = (Arc::clone(&state), Arc::clone(&barrier));
-            let t1 = std::thread::spawn(move || {
-                b1.wait();
-                let _ = resize_session_core(&s1, sid, A.0, A.1);
-            });
-            let (s2, b2) = (Arc::clone(&state), Arc::clone(&barrier));
-            let t2 = std::thread::spawn(move || {
-                b2.wait();
-                let _ = resize_session_core(&s2, sid, B.0, B.1);
-            });
-            t1.join().unwrap();
-            t2.join().unwrap();
-
-            // The recorded applied dims, the live grid dims, and the real PTY size
-            // must all agree, and agree on one of the two racing targets.
-            let applied = *state.resize_locks.get(sid).unwrap().lock();
-            let (grid_rows, grid_cols) = {
-                let vt = state.vt_log_buffers.get(sid).unwrap();
-                let vt = vt.lock();
-                (vt.grid_screen_lines() as u16, vt.grid_columns() as u16)
-            };
-            let pty_size = state
-                .sessions
-                .get(sid)
-                .unwrap()
-                .lock()
-                .master
-                .get_size()
-                .expect("get_size");
-            assert_eq!(
-                (grid_rows, grid_cols),
-                applied,
-                "iter {i}: grid dims must match recorded applied dims"
-            );
-            assert_eq!(
-                (pty_size.rows, pty_size.cols),
-                applied,
-                "iter {i}: PTY size must match recorded applied dims"
-            );
-            assert!(
-                applied == A || applied == B,
-                "iter {i}: applied {applied:?} must be one of the racing targets"
-            );
-        }
-    }
-
-    #[test]
-    fn idle_transition_emits_before_submitting_one_pending_message() {
-        use std::collections::VecDeque;
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "sess", SHELL_BUSY);
-        let mut q = VecDeque::new();
-        q.push_back(crate::state::PendingInjection::peer_message("msg-1"));
-        q.push_back(crate::state::PendingInjection::peer_message("msg-2"));
-        state.pending_injections.insert("sess".to_string(), q);
-
-        // The transition is driven by verified ready-screen/Stop evidence in
-        // production. Model that evidence before testing its delivery side effect.
-        state
-            .silence_states
-            .get("sess")
-            .unwrap()
-            .lock()
-            .confirm_idle();
-
-        let mut events = state.event_bus.subscribe();
-        assert!(try_shell_transition(
-            &state, "sess", SHELL_BUSY, SHELL_IDLE, false
-        ));
-        emit_shell_state(&state, "sess", "idle");
-        flush_one_pending_as_submitted(&state, "sess");
-
-        assert_eq!(
-            state.pending_injections.get("sess").map(|q| q.len()),
-            Some(1),
-            "only one queued message may be submitted per idle turn"
-        );
-        let states: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
-            .filter_map(|event| match event {
-                crate::state::AppEvent::PtyParsed { parsed, .. }
-                    if parsed.get("type").and_then(|v| v.as_str()) == Some("shell-state") =>
-                {
-                    parsed
-                        .get("state")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(states, vec!["idle", "busy"]);
-    }
-
-    #[test]
-    fn flush_keeps_pending_while_question_confident() {
-        use std::collections::VecDeque;
-        let state = crate::state::tests_support::make_test_app_state();
-        use std::sync::atomic::AtomicU8;
-        state
-            .shell_states
-            .insert("sess".to_string(), AtomicU8::new(SHELL_BUSY));
-        state.session_states.insert(
-            "sess".to_string(),
-            crate::state::SessionState {
-                agent_type: Some("claude".to_string()),
-                awaiting_input: true,
-                question_confident: true,
-                ..Default::default()
-            },
-        );
-        let mut q = VecDeque::new();
-        q.push_back(crate::state::PendingInjection::peer_message("later"));
-        state.pending_injections.insert("sess".to_string(), q);
-
-        state.silence_states.insert(
-            "sess".to_string(),
-            Arc::new(Mutex::new(SilenceState::new())),
-        );
-        state
-            .silence_states
-            .get("sess")
-            .unwrap()
-            .lock()
-            .confirm_idle();
-
-        try_shell_transition(&state, "sess", SHELL_BUSY, SHELL_IDLE, false);
-        emit_shell_state(&state, "sess", "idle");
-        flush_pending_injections(&state, "sess");
-        assert_eq!(
-            state.pending_injections.get("sess").map(|q| q.len()),
-            Some(1),
-            "must not answer a confident user prompt — keep queued until it clears"
-        );
-
-        // The question clears (user answered) while the session is already idle:
-        // the unblock flush must drain the queue with no further transition.
-        state
-            .session_states
-            .get_mut("sess")
-            .unwrap()
-            .question_confident = false;
-        flush_one_pending_as_submitted(&state, "sess");
-        assert_eq!(
-            state.pending_injections.get("sess").map(|q| q.len()),
-            Some(0),
-            "unblock flush must submit once the confident question clears"
-        );
-    }
-
-    #[test]
-    fn injection_payload_single_line_ctrl_u_only() {
-        // Single-line: Ctrl-U prefix clears pending input; no paste wrapper.
-        assert_eq!(injection_payload("hello"), "\x15hello");
-    }
-
-    #[test]
-    fn injection_payload_multiline_bracketed_paste() {
-        // Multiline MUST ride in a bracketed paste — raw newlines prefill an
-        // Ink/codex TUI without submitting; the paste-end marker makes the
-        // separately-written CR a genuine Enter (story 091, verified live).
-        assert_eq!(
-            injection_payload("line1\nline2"),
-            "\x15\x1b[200~line1\nline2\x1b[201~"
-        );
-    }
-
-    #[test]
-    fn flush_noop_while_busy() {
-        // flush_pending_injections is self-guarded: a direct call against a busy
-        // agent (e.g. the user-input unblock path firing while the agent already
-        // went back to work) must leave the queue untouched.
-        use std::collections::VecDeque;
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "busy", SHELL_BUSY);
-        let mut q = VecDeque::new();
-        q.push_back(crate::state::PendingInjection::peer_message("later"));
-        state.pending_injections.insert("busy".to_string(), q);
-
-        flush_pending_injections(&state, "busy");
-        assert_eq!(
-            state.pending_injections.get("busy").map(|q| q.len()),
-            Some(1),
-            "busy agent → flush must be a no-op"
-        );
-    }
-
-    #[test]
-    fn ready_prompt_delivery_attempts_and_requeues_when_pty_is_missing() {
-        // codex idles at its ready prompt with awaiting_input=true (low-confidence
-        // silence heuristic) — delivery must inject, not queue forever (story 091).
-        use std::sync::atomic::AtomicU8;
-        let state = crate::state::tests_support::make_test_app_state();
-        state
-            .shell_states
-            .insert("codex".to_string(), AtomicU8::new(SHELL_IDLE));
-        state.session_states.insert(
-            "codex".to_string(),
-            crate::state::SessionState {
-                agent_type: Some("codex".to_string()),
-                awaiting_input: true,
-                question_confident: false,
-                ..Default::default()
-            },
-        );
-        let mut silence = SilenceState::new();
-        silence.confirm_idle();
-        state
-            .silence_states
-            .insert("codex".to_string(), Arc::new(Mutex::new(silence)));
-        deliver_message_to_pty(&state, "codex", "[TUIC message from lead] go");
-        assert_eq!(
-            state
-                .pending_injections
-                .get("codex")
-                .and_then(|queue| queue.front().map(|entry| entry.text().to_string())),
-            Some("[TUIC message from lead] go".to_string()),
-            "ready-prompt delivery must stay retryable when PTY lookup fails"
-        );
-    }
-
-    #[test]
-    fn state_change_to_parent_without_managed_pty_stays_inbox_only() {
-        // Logical agent state alone is not proof of a managed PTY. A child state
-        // change must remain available in the inbox without creating a phantom
-        // terminal injection for an external peer.
-        let state = crate::state::tests_support::make_test_app_state();
-        agent_session(&state, "parent", SHELL_BUSY);
-        state
-            .session_parent
-            .insert("child".to_string(), "parent".to_string());
-
-        push_state_change_to_parent(
-            &state,
-            "child",
-            serde_json::json!({"type":"state_change","state":"idle","session_id":"child"}),
-        );
-
-        // Inbox got the JSON payload…
-        assert_eq!(
-            state.agent_inbox.get("parent").map(|q| q.len()),
-            Some(1),
-            "parent inbox must receive the state_change"
-        );
-        assert!(
-            !state.pending_injections.contains_key("parent"),
-            "an external peer without a managed PTY must not receive terminal input"
-        );
-        let message_id = state
-            .agent_inbox
-            .get("parent")
-            .unwrap()
-            .front()
-            .unwrap()
-            .id
-            .clone();
-        assert_eq!(state.agent_delivery_owner("parent", &message_id), None);
-    }
-
-    #[test]
-    fn mark_session_exited_sends_single_exited_notification() {
-        // F1/DATA-1: only one state_change("exited") must reach parent inbox on exit.
-        // The BUSY→IDLE transition in the exit path uses notify_parent=false, so the
-        // orchestrator must never see a spurious "idle" before "exited".
-        let state = crate::state::tests_support::make_test_app_state();
-        let child_id = "child-exit-dedup";
-        let parent_id = "parent-exit-dedup";
-
-        state
-            .session_parent
-            .insert(child_id.to_string(), parent_id.to_string());
-        state.agent_inbox.entry(parent_id.to_string()).or_default();
-        let ss = crate::state::SessionState {
-            agent_type: Some("claude".to_string()),
-            ..Default::default()
-        };
-        state.session_states.insert(child_id.to_string(), ss);
-        state.shell_states.insert(
-            child_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-
-        // Simulate exit path: transition (notify_parent=false) + mark_session_exited.
-        try_shell_transition(&state, child_id, SHELL_BUSY, SHELL_IDLE, false);
-        // mark_session_exited needs a sessions entry to attempt exit-code capture
-        // (it's OK if there's none — it just skips the exit code).
-        push_state_change_to_parent(
-            &state,
-            child_id,
-            serde_json::json!({
-                "type": "state_change",
-                "state": "exited",
-                "session_id": child_id,
-                "exit_code": null,
-            }),
-        );
-
-        let inbox = state
-            .agent_inbox
-            .get(parent_id)
-            .expect("parent inbox must exist");
-        assert_eq!(inbox.len(), 1, "inbox must have exactly one message");
-        let content: serde_json::Value =
-            serde_json::from_str(&inbox.front().unwrap().content).unwrap();
-        assert_eq!(
-            content["state"], "exited",
-            "the single message must be 'exited'"
-        );
-    }
-
-    #[test]
-    fn tuic_osc_suggest_parsed_from_pty_stream() {
-        use crate::terminal_grid::TerminalGrid;
-        let mut grid = TerminalGrid::new(24, 80, 1000);
-        grid.process(b"\x1b]7770;suggest=Fix bug|Run tests|Deploy\x07");
-        let events = grid.drain_events();
-        let tuic: Vec<_> = events
-            .into_iter()
-            .filter(|e| matches!(e, crate::terminal_grid::TermEvent::Tuic { .. }))
-            .collect();
-        assert_eq!(tuic.len(), 1);
-        if let crate::terminal_grid::TermEvent::Tuic { verb, payload, .. } = &tuic[0] {
-            assert_eq!(verb, "suggest");
-            let items: Vec<String> = payload.split('|').map(|s| s.trim().to_string()).collect();
-            assert_eq!(items, vec!["Fix bug", "Run tests", "Deploy"]);
-        }
-    }
-
-    #[test]
-    fn tuic_osc_intent_with_title_parsed() {
-        use crate::terminal_grid::TerminalGrid;
-        let mut grid = TerminalGrid::new(24, 80, 1000);
-        grid.process(b"\x1b]7770;intent=Refactoring auth (Auth)\x07");
-        let events = grid.drain_events();
-        let tuic: Vec<_> = events
-            .into_iter()
-            .filter(|e| matches!(e, crate::terminal_grid::TermEvent::Tuic { .. }))
-            .collect();
-        assert_eq!(tuic.len(), 1);
-        if let crate::terminal_grid::TermEvent::Tuic { verb, payload, .. } = &tuic[0] {
-            assert_eq!(verb, "intent");
-            assert_eq!(payload, "Refactoring auth (Auth)");
-        }
-    }
-
-    #[test]
-    fn tuic_osc_block_start_parsed() {
-        use crate::terminal_grid::TerminalGrid;
-        let mut grid = TerminalGrid::new(24, 80, 1000);
-        grid.process(b"\x1b]7770;block=start\x07");
-        let events = grid.drain_events();
-        let tuic: Vec<_> = events
-            .into_iter()
-            .filter(|e| matches!(e, crate::terminal_grid::TermEvent::Tuic { .. }))
-            .collect();
-        assert_eq!(tuic.len(), 1);
-        if let crate::terminal_grid::TermEvent::Tuic { verb, payload, .. } = &tuic[0] {
-            assert_eq!(verb, "block");
-            assert_eq!(payload, "start");
-        }
-    }
-
-    #[test]
-    fn tuic_osc_block_end_with_exit_code_parsed() {
-        let payload = "end;1".to_string();
-        let (action, exit_code) = if let Some(rest) = payload.strip_prefix("end;") {
-            ("end".to_string(), rest.parse::<i32>().ok())
-        } else {
-            (payload.clone(), None)
-        };
-        assert_eq!(action, "end");
-        assert_eq!(exit_code, Some(1));
-    }
-
-    #[test]
-    fn tuic_osc_block_end_without_exit_code() {
-        let payload = "end".to_string();
-        let (action, exit_code) = if let Some(rest) = payload.strip_prefix("end;") {
-            ("end".to_string(), rest.parse::<i32>().ok())
-        } else {
-            (payload.clone(), None)
-        };
-        assert_eq!(action, "end");
-        assert_eq!(exit_code, None);
-    }
-
-    #[test]
-    fn tuic_osc_block_invalid_action_ignored() {
-        let payload = "invalid".to_string();
-        let (action, _exit_code) = if let Some(rest) = payload.strip_prefix("end;") {
-            ("end".to_string(), rest.parse::<i32>().ok())
-        } else {
-            (payload.clone(), None)
-        };
-        let is_valid = action == "start" || action == "end";
-        assert!(!is_valid, "invalid action should not produce an event");
-    }
-
-    #[test]
-    fn tuic_osc_state_transitions_shell_state() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-tuic-state";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-
-        let proc = ChunkProcessor::new(None, None);
-        proc.handle_tuic_state("busy", session_id, &state);
-
-        let current = state
-            .shell_states
-            .get(session_id)
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Acquire);
-        assert_eq!(current, SHELL_BUSY);
-
-        proc.handle_tuic_state("idle", session_id, &state);
-        let current = state
-            .shell_states
-            .get(session_id)
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Acquire);
-        assert_eq!(current, SHELL_IDLE);
-    }
-
-    #[test]
-    fn tuic_osc_state_emits_shell_state_event() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-tuic-emit";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-
-        let mut rx = state.event_bus.subscribe();
-
-        let proc = ChunkProcessor::new(None, None);
-        proc.handle_tuic_state("busy", session_id, &state);
-
-        let evt = rx.try_recv();
-        assert!(
-            evt.is_ok(),
-            "event_bus should have received a shell state event"
-        );
-        if let Ok(crate::state::AppEvent::PtyParsed {
-            session_id: sid,
-            parsed,
-        }) = evt
-        {
-            assert_eq!(sid, session_id);
-            assert_eq!(parsed["type"], "shell-state");
-            assert_eq!(parsed["state"], "busy");
-        } else {
-            panic!("expected PtyParsed event with shell-state");
-        }
-    }
-
-    #[test]
-    fn tuic_osc_state_unknown_verb_ignored() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-tuic-unknown";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-
-        let proc = ChunkProcessor::new(None, None);
-        proc.handle_tuic_state("thinking", session_id, &state);
-
-        let current = state
-            .shell_states
-            .get(session_id)
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Acquire);
-        assert_eq!(
-            current, SHELL_IDLE,
-            "unknown state should not change shell_states"
-        );
-    }
-
-    #[test]
-    fn tuic_state_awaiting_yields_confident_question() {
-        match tuic_state_awaiting_event("awaiting", 0) {
-            Some(ParsedEvent::Question {
-                confident,
-                prompt_text,
-            }) => {
-                assert!(confident, "hook awaiting must be a confident question");
-                assert_eq!(prompt_text, "", "hook awaiting carries no prompt text");
-            }
-            other => panic!("expected confident Question, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tuic_state_busy_yields_userinput_clear_with_prompt_line() {
-        // The busy transition's absolute prompt row (history_size + cursor row,
-        // here 42) must reach the UserInput event so the frontend can mark the
-        // user-prompt line on the scrollbar.
-        match tuic_state_awaiting_event("busy", 42) {
-            Some(ParsedEvent::UserInput { content, line }) => {
-                assert_eq!(content, "", "busy clear must not overwrite last_prompt");
-                assert_eq!(line, 42, "busy UserInput must carry the prompt row");
-            }
-            other => panic!("expected UserInput clear, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tuic_state_idle_yields_no_awaiting_event() {
-        assert!(
-            tuic_state_awaiting_event("idle", 0).is_none(),
-            "idle only transitions shell_state; it pushes no awaiting event"
-        );
-    }
-
-    #[test]
-    fn tuic_state_unknown_yields_no_awaiting_event() {
-        assert!(
-            tuic_state_awaiting_event("thinking", 0).is_none(),
-            "unknown verb must push no awaiting event"
-        );
-    }
-
-    #[test]
-    fn question_suppress_filters_only_questions_when_instrumented() {
-        let q_low = ParsedEvent::Question {
-            prompt_text: "?".into(),
-            confident: false,
-        };
-        let q_high = ParsedEvent::Question {
-            prompt_text: "Proceed?".into(),
-            confident: true,
-        };
-        let other = ParsedEvent::UserInput {
-            content: "hi".into(),
-            line: -1,
-        };
-        // Instrumented: every Question (silence + regex) is suppressed.
-        assert!(suppress_heuristic_question(true, &q_low));
-        assert!(suppress_heuristic_question(true, &q_high));
-        // Non-questions are never suppressed (idle/busy/etc. pass through).
-        assert!(!suppress_heuristic_question(true, &other));
-        // Not instrumented: nothing is suppressed.
-        assert!(!suppress_heuristic_question(false, &q_low));
-    }
-
-    // --- Raw-stream OSC reassembly ----------------------------------------
-
-    /// The failure the fixture caught: a PTY read ends mid-`ESC]777;…`. Each
-    /// half alone matches nothing, so without a carry the awaiting signal is
-    /// lost — silently, which is how it reached Boss's screen.
-    #[test]
-    fn raw_stream_reassembles_an_osc_split_across_reads() {
-        let whole = "\x1b]777;notify;Claude Code;Claude needs your permission\x07";
-        for split in [1, 8, 20, whole.len() - 1] {
-            let mut carry = String::new();
-            let mut events = Vec::new();
-            raw_stream_events(&mut carry, &whole[..split], &mut events);
-            raw_stream_events(&mut carry, &whole[split..], &mut events);
-            assert_eq!(
-                awaiting_prompts(&events),
-                vec!["Claude needs your permission".to_string()],
-                "split at {split} must yield exactly one awaiting signal"
-            );
-        }
-    }
-
-    /// A sequence that arrived whole leaves nothing behind, so the next chunk
-    /// cannot re-match it. One notification, one badge.
-    #[test]
-    fn raw_stream_does_not_refire_a_complete_sequence() {
-        let mut carry = String::new();
-        let mut events = Vec::new();
-        raw_stream_events(
-            &mut carry,
-            "\x1b]777;notify;Claude Code;Claude needs your permission\x07",
-            &mut events,
-        );
-        assert!(carry.is_empty(), "complete sequence must not be carried");
-        raw_stream_events(&mut carry, "ordinary output\r\n", &mut events);
-        assert_eq!(awaiting_prompts(&events).len(), 1);
-    }
-
-    /// An OSC that never terminates (or one whose payload we do not parse, like
-    /// a long OSC 52 clipboard blob) must not pin memory for the session.
-    #[test]
-    fn raw_stream_carry_is_bounded() {
-        let mut carry = String::new();
-        let mut events = Vec::new();
-        let huge = format!("\x1b]52;c;{}", "A".repeat(MAX_RAW_CARRY * 4));
-        raw_stream_events(&mut carry, &huge, &mut events);
-        assert!(
-            carry.len() <= MAX_RAW_CARRY,
-            "carry grew to {} bytes",
-            carry.len()
-        );
-    }
-
-    /// ST-terminated sequences close the carry too — otherwise every agent that
-    /// ends OSC with ESC-backslash would carry its whole stream forward.
-    #[test]
-    fn raw_stream_carry_recognises_st_termination() {
-        assert!(unterminated_osc_tail("\x1b]777;notify;Codex;approval\x1b\\").is_empty());
-        assert!(!unterminated_osc_tail("\x1b]777;notify;Codex;approval").is_empty());
-    }
-
-    // --- Awaiting-signal fixtures -----------------------------------------
-    //
-    // Captures of real agent output, replayed through the SAME composition the
-    // PTY hot path runs. Unit tests cover each parser in isolation; what kept
-    // breaking was the pipeline around them — which signals survive the hook
-    // suppression, and which never reach a parser at all. That gap is what a
-    // fixture closes: one file per observed failure, byte-for-byte off a live
-    // session, no mocks.
-    //
-    // Capturing a new one:
-    //   POST /diagnostics/capture with {"enabled":true,"session_id":"<id>"}
-    //   BEFORE reproducing, then POST {"enabled":false}. Copy the exact `.tcap`
-    //   file reported by GET /diagnostics/capture from the config-dir captures/
-    //   directory into src/fixtures/agent_prompts/. `/sessions/:id/output` is a
-    //   rendered/ring-buffer snapshot and is not valid raw-stream evidence.
-
-    fn agent_prompt_fixture(name: &str) -> Vec<u8> {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/fixtures/agent_prompts")
-            .join(name);
-        std::fs::read(&path).unwrap_or_else(|e| panic!("missing fixture {}: {e}", path.display()))
-    }
-
-    #[test]
-    fn historical_scenario_matrix_is_well_formed_and_fixture_backed() {
-        let bytes = agent_prompt_fixture("scenario-matrix.json");
-        let matrix: serde_json::Value = serde_json::from_slice(&bytes).expect("valid matrix JSON");
-        let scenarios = matrix["scenarios"].as_array().expect("scenario array");
-        assert!(
-            scenarios
-                .iter()
-                .any(|scenario| scenario["agent"] == "claude")
-        );
-        assert!(
-            scenarios
-                .iter()
-                .any(|scenario| scenario["agent"] == "codex")
-        );
-
-        let mut ids = std::collections::HashSet::new();
-        for scenario in scenarios {
-            let id = scenario["id"].as_str().expect("scenario id");
-            assert!(ids.insert(id), "duplicate scenario id: {id}");
-            let set = scenario["set"].as_str().expect("SET expectation");
-            let clears = scenario["clear"].as_array().expect("CLEAR expectations");
-            assert!(
-                set == "none" || !clears.is_empty(),
-                "every state SET needs at least one CLEAR path: {id}"
-            );
-            if scenario["source"] == "raw-fixture" {
-                let fixture = scenario["fixture"].as_str().expect("raw fixture name");
-                assert!(
-                    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("src/fixtures/agent_prompts")
-                        .join(fixture)
-                        .is_file(),
-                    "matrix references missing fixture: {fixture}"
-                );
-            }
-        }
-    }
-
-    /// What a replay saw on the way through, beyond the events it produced.
-    ///
-    /// The counter that matters is `ticks_without_cutoff`: `find_chrome_cutoff`
-    /// returning `None` means NO trim, so on that tick every status-line row
-    /// reached every parser. It is the fail-open branch, it is silent, and the
-    /// only way to know how often it fires on a real agent is to count it over
-    /// real bytes.
-    #[derive(Default)]
-    struct CaptureStats {
-        output_records: usize,
-        input_records: usize,
-        bytes: usize,
-        /// Output ticks whose screen held at least one non-blank row.
-        ticks_with_content: usize,
-        /// …of those, the ticks where no chrome anchor was found.
-        ticks_without_cutoff: usize,
-        rows_offered: usize,
-        rows_trimmed: usize,
-    }
-
-    /// Replay framed captures using their original PTY read/write boundaries.
-    /// Legacy `.raw` files decode as one output record; they retain parser value
-    /// but cannot prove boundary-sensitive or input-state behavior.
-    fn replay_capture(bytes: &[u8], hook_instrumented: bool) -> Vec<ParsedEvent> {
-        replay_capture_measured(bytes, hook_instrumented).0
-    }
-
-    fn replay_capture_measured(
-        bytes: &[u8],
-        hook_instrumented: bool,
-    ) -> (Vec<ParsedEvent>, CaptureStats) {
-        use crate::state::VtLogBuffer;
-
-        let mut vt_log = VtLogBuffer::new(41, 128, 2000);
-        let mut parser = crate::output_parser::OutputParser::new();
-        let mut input = crate::input_line_buffer::InputLineBuffer::new();
-        let mut carry = String::new();
-        let mut events = Vec::new();
-        let mut stats = CaptureStats::default();
-        for record in crate::pty_capture::decode(bytes).expect("valid capture") {
-            stats.bytes += record.data.len();
-            match record.direction {
-                crate::pty_capture::CaptureDirection::Output => {
-                    stats.output_records += 1;
-                    let mut changed = vt_log.process(&record.data);
-                    let offered = changed.len();
-                    let screen = vt_log.screen_rows();
-                    let refs: Vec<&str> = screen.iter().map(String::as_str).collect();
-                    let cutoff = crate::chrome::find_chrome_cutoff(&refs);
-                    if refs.iter().any(|row| !row.trim().is_empty()) {
-                        stats.ticks_with_content += 1;
-                        if cutoff.is_none() {
-                            stats.ticks_without_cutoff += 1;
-                        }
-                    }
-                    if let Some(cutoff) = cutoff {
-                        changed.retain(|row| row.row_index < cutoff);
-                    }
-                    stats.rows_offered += offered;
-                    stats.rows_trimmed += offered - changed.len();
-                    let data = String::from_utf8_lossy(&record.data);
-                    raw_stream_events(&mut carry, &data, &mut events);
-                    events.extend(
-                        parser
-                            .parse_clean_lines(&changed, true)
-                            .into_iter()
-                            .filter(|e| !suppress_heuristic_question(hook_instrumented, e)),
-                    );
-                }
-                crate::pty_capture::CaptureDirection::Input => {
-                    stats.input_records += 1;
-                    if let Ok(text) = std::str::from_utf8(&record.data) {
-                        for action in input.feed(text) {
-                            match action {
-                                crate::input_line_buffer::InputAction::Line(content) => {
-                                    events.push(ParsedEvent::UserInput { content, line: -1 });
-                                }
-                                crate::input_line_buffer::InputAction::Interrupt => {
-                                    events.push(ParsedEvent::UserInput {
-                                        content: String::new(),
-                                        line: -1,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        (events, stats)
-    }
-
-    /// An agent quoting an Ink dialog footer inside its own output, captured off a
-    /// live PTY on 2026-08-30. The line is byte-identical to the one a real
-    /// `AskUserQuestion` draws; only the indentation of the agent's frame differs.
-    ///
-    /// This ran through the pipeline and set `question_confident`, which no clear
-    /// path retracts — the tab reported the agent as blocked on the user while it
-    /// was working, for the rest of the turn. `hook_instrumented` is false on
-    /// purpose: that is the state of a Claude session that has not yet raised an
-    /// `AskUserQuestion`, so `suppress_heuristic_question` was not covering it.
-    #[test]
-    fn quoted_ink_footer_in_agent_output_raises_no_question() {
-        let events = replay_capture(
-            &agent_prompt_fixture("claude-quoted-ink-footer.tcap"),
-            false,
-        );
-        let questions: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, ParsedEvent::Question { .. }))
-            .collect();
-        assert!(
-            questions.is_empty(),
-            "an echoed footer is not a dialog, got: {questions:?}"
-        );
-    }
-
-    /// grok in `screen_mode = "minimal"` — the mode it is actually run in —
-    /// replayed byte-for-byte off a live 1.0.5 session (40x120, one full turn:
-    /// prompt → thinking → answer → ready).
-    ///
-    /// This is the whole grok chain in one assertion, because every link of it
-    /// has failed independently:
-    ///   1. the foreground binary reports as `grok-1.0.5` (a resolved symlink),
-    ///      and an exact-match table answers `None` — no `agent_type`, so
-    ///      `session_is_agent` is false and NOTHING can ever be typed into the
-    ///      composer: no peer message, no orchestrator mail wake;
-    ///   2. minimal mode draws no composer box, so a boxed-prompt matcher never
-    ///      fires `Ready` and the session stays BUSY for the whole process;
-    ///   3. `completed` needs the `suggest:` marker to survive the chrome trim.
-    ///
-    /// Ready must be the LAST verdict and Working must have occurred: a screen
-    /// adapter that only ever answers `Unknown` leaves `idle_confirmed` false,
-    /// which reads as "idle" to `agent_state` but blocks `should_inject_now` —
-    /// the mismatch that burns the orchestrator wake budget permanently.
-    #[test]
-    fn grok_minimal_capture_reaches_ready_and_declares_completion() {
-        use crate::state::VtLogBuffer;
-
-        assert_eq!(classify_agent("grok-1.0.5"), Some("grok"));
-        assert!(has_ready_screen_adapter(classify_agent("grok-1.0.5")));
-
-        let bytes = agent_prompt_fixture("grok-1.0.5-minimal-turn.tcap");
-        let mut vt_log = VtLogBuffer::new(40, 120, 2000);
-        let mut parser = crate::output_parser::OutputParser::new();
-        let mut saw_working = false;
-        let mut last_activity = AgentScreenActivity::Unknown;
-        let mut suggested = None;
-
-        for record in crate::pty_capture::decode(&bytes).expect("valid capture") {
-            if record.direction != crate::pty_capture::CaptureDirection::Output {
-                continue;
-            }
-            let mut changed = vt_log.process(&record.data);
-            let screen = vt_log.screen_rows();
-            let refs: Vec<&str> = screen.iter().map(String::as_str).collect();
-            if let Some(cutoff) = crate::chrome::find_chrome_cutoff(&refs) {
-                changed.retain(|row| row.row_index < cutoff);
-            }
-            for event in parser.parse_clean_lines(&changed, true) {
-                if let ParsedEvent::Suggest { items } = event {
-                    suggested = Some(items);
-                }
-            }
-            match detect_agent_screen_activity(Some("grok"), &screen) {
-                AgentScreenActivity::Unknown => {}
-                activity => {
-                    saw_working |= activity == AgentScreenActivity::Working;
-                    last_activity = activity;
-                }
-            }
-        }
-
-        assert!(
-            saw_working,
-            "grok's turn-status spinner must mark the session working, or a busy \
-             turn reads as idle and a peer message is typed into a live composer"
-        );
-        assert_eq!(
-            last_activity,
-            AgentScreenActivity::Ready,
-            "the bare `❯` composer row of minimal mode must end the turn Ready"
-        );
-        assert_eq!(
-            suggested.as_deref(),
-            Some(
-                &[
-                    "Altra richiesta".to_string(),
-                    "Fermati".to_string(),
-                    "Ripeti il conteggio".to_string(),
-                ][..]
-            ),
-            "the `suggest:` marker must survive the chrome trim — it is the only \
-             thing that promotes grok from `idle` to `completed`"
-        );
-    }
-
-    /// Replay a whole directory of real `.tcap` captures through the production
-    /// composition and report what the detection pipeline made of them.
-    ///
-    /// Ignored by default: the corpus is whatever the operator recorded through
-    /// `POST /diagnostics/capture`, and those files hold real session content —
-    /// prompts, source, paths — so they are deliberately NOT committed. This is a
-    /// measurement harness, not a regression test. What it surfaces becomes
-    /// either a code fix or a single committed fixture, chosen deliberately.
-    ///
-    /// ```text
-    /// TUIC_CAPTURE_CORPUS="$HOME/Library/Application Support/com.tuic.commander/captures" \
-    ///   cargo test -p tuicommander detection_over_capture_corpus -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "needs a capture corpus; see TUIC_CAPTURE_CORPUS"]
-    fn detection_over_capture_corpus() {
-        let Ok(dir) = std::env::var("TUIC_CAPTURE_CORPUS") else {
-            panic!("set TUIC_CAPTURE_CORPUS to a directory of .tcap/.raw captures");
-        };
-        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .expect("readable corpus directory")
-            .filter_map(|entry| {
-                let path = entry.ok()?.path();
-                matches!(
-                    path.extension().and_then(|e| e.to_str()),
-                    Some("tcap" | "raw")
-                )
-                .then_some(path)
-            })
-            .collect();
-        paths.sort();
-        assert!(!paths.is_empty(), "corpus held no captures");
-
-        for path in &paths {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let bytes = std::fs::read(path).expect("readable capture");
-            let Ok(records) = crate::pty_capture::decode(&bytes) else {
-                println!("{name:<42} UNDECODABLE");
-                continue;
-            };
-            if records.is_empty() {
-                println!("{name:<42} empty");
-                continue;
-            }
-
-            let (events, stats) = replay_capture_measured(&bytes, false);
-            let fail_open = if stats.ticks_with_content == 0 {
-                0.0
-            } else {
-                100.0 * stats.ticks_without_cutoff as f64 / stats.ticks_with_content as f64
-            };
-            println!(
-                "\n{name}\n  {:>6} out / {:>4} in records, {:>7} bytes | rows offered {:>6}, \
-                 trimmed {:>6} | no-cutoff {:>5.1}% of {} content ticks",
-                stats.output_records,
-                stats.input_records,
-                stats.bytes,
-                stats.rows_offered,
-                stats.rows_trimmed,
-                fail_open,
-                stats.ticks_with_content,
-            );
-
-            let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
-            for event in &events {
-                let kind = serde_json::to_value(event)
-                    .ok()
-                    .and_then(|v| v["type"].as_str().map(str::to_string))
-                    .unwrap_or_else(|| "?".to_string());
-                *kinds.entry(kind).or_default() += 1;
-            }
-            if kinds.is_empty() {
-                println!("  events: none");
-            } else {
-                let rendered: Vec<String> = kinds.iter().map(|(k, n)| format!("{k}×{n}")).collect();
-                println!("  events: {}", rendered.join(", "));
-            }
-
-            // Awaiting is sticky by construction: whatever SETs it owns nothing
-            // until something retracts it. Walk the sequence and report the
-            // badge a tab would still be rendering at the end of the capture.
-            let mut awaiting: Option<String> = None;
-            let mut sets = 0usize;
-            let mut clears = 0usize;
-            for event in &events {
-                match event {
-                    ParsedEvent::Question { prompt_text, .. } => {
-                        sets += 1;
-                        awaiting = Some(prompt_text.clone());
-                    }
-                    ParsedEvent::QuestionCleared | ParsedEvent::UserInput { .. } => {
-                        clears += usize::from(awaiting.take().is_some());
-                    }
-                    _ => {}
-                }
-            }
-            match awaiting {
-                Some(prompt) => println!(
-                    "  awaiting: {sets} set / {clears} cleared → STILL SET at end: {prompt:?}"
-                ),
-                None if sets > 0 => println!("  awaiting: {sets} set / {clears} cleared → clear"),
-                None => {}
-            }
-        }
-    }
-
-    fn awaiting_prompts(events: &[ParsedEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|e| match e {
-                ParsedEvent::Question {
-                    prompt_text,
-                    confident: true,
-                } => Some(prompt_text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Every prompt the pipeline reported, whatever its confidence. A signal
-    /// that badges the tab but stays retractable — Claude's `is waiting for
-    /// your input` notify — is invisible to `awaiting_prompts`, so asserting
-    /// "the notify survived the pipeline" needs this view instead.
-    fn awaiting_prompts_any_confidence(events: &[ParsedEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|e| match e {
-                ParsedEvent::Question { prompt_text, .. } => Some(prompt_text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Regression, captured 2026-08-08 from a live session parked on a plan
-    /// picker while its tab showed a "working" dot.
-    ///
-    /// The session is hook-instrumented Claude, so every regex Question is
-    /// dropped by design — and the picker is not `PreToolUse(AskUserQuestion)`,
-    /// so the hook emitted no `state=awaiting` either. Both channels silent, the
-    /// agent blocked. The one thing Claude did say is in these bytes:
-    /// `ESC]777;notify;Claude Code;Claude is waiting for your input BEL`.
-    /// Before that sequence was parsed this assertion found nothing.
-    #[test]
-    fn hook_instrumented_session_still_reports_awaiting_via_osc777() {
-        let events = replay_capture(&agent_prompt_fixture("claude-plan-picker.raw"), true);
-        // Retractable on purpose: the same body arrives on Claude's 60s idle
-        // timer after a finished turn. The picker keeps the badge because the
-        // prompt stays on screen, not because the notify is trusted forever.
-        let prompts = awaiting_prompts_any_confidence(&events);
-
-        assert!(
-            prompts
-                .iter()
-                .any(|p| p == "Claude is waiting for your input"),
-            "hook suppression must not swallow the agent's own notification; \
-             questions seen: {prompts:?}"
-        );
-    }
-
-    /// The same capture with hook instrumentation off: the notify is a property
-    /// of the agent's output, not of our suppression, so it must survive either
-    /// way. Guards against "fixed it by disabling the filter".
-    #[test]
-    fn osc777_awaiting_does_not_depend_on_hook_instrumentation() {
-        for hook in [true, false] {
-            let events = replay_capture(&agent_prompt_fixture("claude-plan-picker.raw"), hook);
-            assert!(
-                awaiting_prompts_any_confidence(&events)
-                    .iter()
-                    .any(|p| p == "Claude is waiting for your input"),
-                "notify lost with hook_instrumented={hook}"
-            );
-        }
-    }
-
-    /// Regression for the other observed Claude notification payload. OSC 777
-    /// is a desktop-notification transport, so the generic "needs your
-    /// attention" body is not proof that the composer awaits a response. Treating
-    /// it as a confident question latched awaiting after completion indefinitely.
-    #[test]
-    fn generic_osc777_attention_does_not_report_awaiting() {
-        for hook in [true, false] {
-            let events =
-                replay_capture(&agent_prompt_fixture("claude-generic-attention.raw"), hook);
-            assert!(
-                awaiting_prompts_any_confidence(&events).is_empty(),
-                "generic notification became awaiting with hook_instrumented={hook}: {events:?}"
-            );
-        }
-    }
-
-    // --- Awaiting RETRACTION -----------------------------------------------
-    //
-    // Why the fixtures above could not catch the stuck "question" badge: they
-    // replay bytes through the PARSERS and assert which events come out. The
-    // badge is not an event, it is `SessionState.awaiting_input` — and this
-    // failure was the ABSENCE of any event, so no capture can express it. The
-    // tests below close that gap by driving the real accumulator instead of
-    // the parser output: they assert the state a tab actually renders.
-
-    /// Wait for the event-bus accumulator to apply what we emitted. Polls
-    /// rather than sleeping a fixed amount so it neither flakes nor stalls.
-    async fn await_session<F: Fn(&crate::state::SessionState) -> bool>(
-        state: &Arc<AppState>,
-        session_id: &str,
-        pred: F,
-    ) -> bool {
-        for _ in 0..200 {
-            if state
-                .session_states
-                .get(session_id)
-                .is_some_and(|s| pred(&s))
-            {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        false
-    }
-
-    fn accumulating_state(session_id: &str) -> Arc<AppState> {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        state.session_states.insert(
-            session_id.to_string(),
-            crate::state::SessionState::default(),
-        );
-        crate::state::AppState::spawn_session_state_accumulator(state.clone());
-        state
-    }
-
-    fn heuristic_question(session_id: &str, prompt: &str) -> crate::state::AppEvent {
-        crate::state::AppEvent::PtyParsed {
-            session_id: session_id.to_string(),
-            parsed: serde_json::json!({
-                "type": "question",
-                "prompt_text": prompt,
-                "confident": false,
-            })
-            .into(),
-        }
-    }
-
-    /// Regression, observed 2026-08-10 on a live codex tab: the turn had
-    /// finished, the approval dialog was long gone, and the tab still read
-    /// "question".
-    ///
-    /// The sequence, end to end: codex prints "Would you like to make the
-    /// following edits?", the silence heuristic verifies it on screen and emits
-    /// a low-confidence Question, Boss answers with a bare Enter. That Enter
-    /// produces no `user-input` (that arm needs a non-empty typed line), codex
-    /// goes busy through screen movement rather than a parsed `status-line`,
-    /// and no `choice-prompt` was ever set to resolve. Every existing clear
-    /// needs an event that never arrives — so the badge latched.
-    #[tokio::test(flavor = "current_thread", start_paused = false)]
-    async fn stale_heuristic_awaiting_is_retracted_when_the_prompt_leaves_the_screen() {
-        use crate::state::VtLogBuffer;
-
-        let question = "Would you like to make the following edits?";
-        let mut vt = VtLogBuffer::new(41, 128, 2000);
-        vt.process(format!("\x1b[2J\x1b[H{question}\r\n").as_bytes());
-        assert!(
-            verify_question_on_screen(&vt.screen_rows(), question, SCREEN_VERIFY_ROWS),
-            "precondition: the prompt is on screen, so the heuristic fires"
-        );
-
-        let state = accumulating_state("s1");
-        state.emit_pty_event(heuristic_question("s1", question));
-        assert!(
-            await_session(&state, "s1", |s| s.awaiting_input).await,
-            "the low-confidence question must badge the tab"
-        );
-
-        // Bare Enter: codex repaints the finished turn, prompt gone.
-        vt.process(b"\x1b[2J\x1b[HDone. 2 files changed.\r\n");
-        assert!(
-            !verify_question_on_screen(&vt.screen_rows(), question, SCREEN_VERIFY_ROWS),
-            "the prompt must be gone — this is the branch that retracts"
-        );
-
-        emit_question_cleared_if_stale(&state, "s1");
-        assert!(
-            await_session(&state, "s1", |s| !s.awaiting_input
-                && s.question_text.is_none())
-            .await,
-            "the badge must drop once the question left the screen"
-        );
-    }
-
-    /// Regression, observed 2026-08-11 on a live Claude tab: the turn had ended
-    /// 17h earlier, its recap was the last thing on screen, no prompt anywhere —
-    /// and the tab still read "question". The session carried
-    /// `question_text = "Claude is waiting for your input"`, which is what Claude
-    /// notifies on its 60s idle timer as well as on a blocked picker. Parsed as
-    /// confident, it was retractable by nothing but a typed line, and there was
-    /// nothing to type.
-    ///
-    /// Both bodies go through the real parser here: hard-coding the JSON would
-    /// let the test keep passing after the parser stopped agreeing with it.
-    #[tokio::test(flavor = "current_thread")]
-    async fn osc777_notify_retraction_follows_the_wording() {
-        for (body, survives) in [
-            ("Claude is waiting for your input", false),
-            ("Claude needs your permission", true),
-        ] {
-            let raw = format!("\x1b]777;notify;Claude Code;{body}\x07");
-            let notify = crate::output_parser::parse_osc777_notify(&raw)
-                .unwrap_or_else(|| panic!("{body:?} must still report awaiting"));
-
-            let state = accumulating_state("s1");
-            state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-                session_id: "s1".to_string(),
-                parsed: serde_json::to_value(&notify).expect("serialisable").into(),
-            });
-            assert!(
-                await_session(&state, "s1", |s| s.awaiting_input).await,
-                "{body:?} must badge the tab"
-            );
-
-            // The screen is quiet and carries no prompt — the recap case.
-            emit_question_cleared_if_stale(&state, "s1");
-            let cleared = await_session(&state, "s1", |s| !s.awaiting_input).await;
-            assert_eq!(
-                cleared, !survives,
-                "{body:?}: expected survives={survives}, badge cleared={cleared}"
-            );
-        }
-    }
-
-    /// grok repaints while it waits, so "not on screen this tick" is not proof
-    /// that a confident prompt was answered. Retracting it would drop a real
-    /// approval request — the same reason the status-line arm keeps it sticky.
-    #[tokio::test(flavor = "current_thread")]
-    async fn confident_awaiting_is_never_retracted() {
-        let state = accumulating_state("s1");
-        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-            session_id: "s1".to_string(),
-            parsed: serde_json::json!({
-                "type": "question",
-                "prompt_text": "Run echo x",
-                "confident": true,
-            })
-            .into(),
-        });
-        assert!(await_session(&state, "s1", |s| s.awaiting_input).await);
-
-        emit_question_cleared_if_stale(&state, "s1");
-        assert!(
-            !await_session(&state, "s1", |s| !s.awaiting_input).await,
-            "a confident question must survive the retraction"
-        );
-    }
-
-    /// A live choice prompt owns its own resolution (`resolve_choice_prompt_input`
-    /// fires on the option keypress). Retracting under it would clear the badge
-    /// while the dialog is still on screen waiting for a key.
-    #[test]
-    fn retraction_skips_a_session_with_a_live_choice_prompt() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        let mut session = crate::state::SessionState {
-            awaiting_input: true,
-            question_confident: false,
-            ..Default::default()
-        };
-        session.choice_prompt = Some(crate::output_parser::ChoicePromptPayload {
-            title: "Which approach should I use?".to_string(),
-            options: vec![],
-            dismiss_key: None,
-            amend_key: None,
-        });
-        state.session_states.insert("s1".to_string(), session);
-
-        let mut rx = state.event_bus.subscribe();
-        emit_question_cleared_if_stale(&state, "s1");
-        assert!(
-            rx.try_recv().is_err(),
-            "no retraction may be emitted while a choice prompt is live"
-        );
-    }
-
-    /// The producer (here) and the consumer (state.rs) agree on one wire name.
-    /// A rename on either side would silently disable the retraction, which is
-    /// exactly the failure mode this whole path exists to prevent.
-    #[test]
-    fn retraction_is_emitted_as_question_cleared() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        state.session_states.insert(
-            "s1".to_string(),
-            crate::state::SessionState {
-                awaiting_input: true,
-                question_confident: false,
-                ..Default::default()
-            },
-        );
-
-        let mut rx = state.event_bus.subscribe();
-        emit_question_cleared_if_stale(&state, "s1");
-        match rx.try_recv() {
-            Ok(crate::state::AppEvent::PtyParsed { parsed, .. }) => {
-                assert_eq!(
-                    parsed.get("type").and_then(|t| t.as_str()),
-                    Some("question-cleared")
-                );
-            }
-            other => panic!("expected a PtyParsed retraction, got {other:?}"),
-        }
-    }
-
-    /// Nothing to retract must stay silent — an idle session emitting a clear
-    /// on every silence tick would flood the bus and every WS client with it.
-    #[test]
-    fn retraction_is_silent_when_the_session_is_not_awaiting() {
-        let state = Arc::new(crate::state::tests_support::make_test_app_state());
-        state
-            .session_states
-            .insert("s1".to_string(), crate::state::SessionState::default());
-
-        let mut rx = state.event_bus.subscribe();
-        emit_question_cleared_if_stale(&state, "s1");
-        assert!(rx.try_recv().is_err(), "idle session must emit nothing");
-    }
-
-    /// A multi-question `AskUserQuestion` as Claude renders it: a tab bar of
-    /// sub-questions, the current one's title and options, and the Ink footer.
-    /// `answered` moves the ⊠ and swaps the body — everything except the footer.
-    fn askuserquestion_wizard_screen(answered: usize) -> Vec<String> {
-        let tabs = ["CLI.md", "Exit codes", "Provider row"];
-        let bar = tabs
-            .iter()
-            .enumerate()
-            .map(|(i, t)| format!("{} {t}", if i < answered { "⊠" } else { "□" }))
-            .collect::<Vec<_>>()
-            .join("  ");
-        vec![
-            format!("←  {bar}  ✓ Submit  →"),
-            String::new(),
-            format!("Sub-question {}: what should step 14 send?", answered + 1),
-            String::new(),
-            format!("› 1. Option A for {}", tabs[answered.min(2)]),
-            format!("  2. Option B for {}", tabs[answered.min(2)]),
-            "  3. Type something.".to_string(),
-            String::new(),
-            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel".to_string(),
-        ]
-    }
-
-    /// Regression, observed 2026-08-21 on a live Claude tab: a multi-question
-    /// AskUserQuestion was on screen waiting on Boss and the tab read "working".
-    ///
-    /// The first sub-question badges the tab. Answering it clears the badge — and
-    /// the second sub-question repaints its title and options while the footer row
-    /// stays byte-identical, so the changed-rows parser never fires again and no
-    /// clear path is at fault: the SET simply never came back. The re-arm is the
-    /// only thing standing between that and a tab that lies for the rest of the
-    /// wizard.
-    #[tokio::test(flavor = "current_thread", start_paused = false)]
-    async fn open_dialog_rearms_awaiting_after_a_sub_question_is_answered() {
-        let first = askuserquestion_wizard_screen(0);
-        let footer = crate::output_parser::ink_dialog_footer(&first)
-            .expect("precondition: the Ink footer anchors the dialog");
-
-        let state = accumulating_state("s1");
-        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-            session_id: "s1".to_string(),
-            parsed: serde_json::json!({
-                "type": "question", "prompt_text": footer, "confident": true,
-            })
-            .into(),
-        });
-        assert!(
-            await_session(&state, "s1", |s| s.awaiting_input).await,
-            "the first sub-question must badge the tab"
-        );
-
-        // Boss answers it. Whatever cleared the badge — a typed line here — the
-        // wizard is still open on its next sub-question.
-        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-            session_id: "s1".to_string(),
-            parsed: serde_json::json!({ "type": "user-input", "content": "1" }).into(),
-        });
-        assert!(
-            await_session(&state, "s1", |s| !s.awaiting_input).await,
-            "precondition: answering clears the badge"
-        );
-
-        let second = askuserquestion_wizard_screen(1);
-        assert_ne!(second[2], first[2], "the body moved on");
-        assert_eq!(
-            second.last(),
-            first.last(),
-            "…but the footer did not — this is why the changed-rows parser is blind"
-        );
-
-        let evt = rearm_awaiting_for_open_dialog(&second, false, false, false, false)
-            .expect("an open dialog with the badge off must re-arm");
-        let ParsedEvent::Question {
-            prompt_text,
-            confident,
-        } = &evt
-        else {
-            panic!("re-arm must be a Question, got {evt:?}");
-        };
-        assert_eq!(prompt_text, footer);
-        assert!(confident, "an Ink footer is not a guess");
-
-        state.emit_pty_event(crate::state::AppEvent::PtyParsed {
-            session_id: "s1".to_string(),
-            parsed: serde_json::json!({
-                "type": "question", "prompt_text": prompt_text, "confident": confident,
-            })
-            .into(),
-        });
-        assert!(
-            await_session(&state, "s1", |s| s.awaiting_input).await,
-            "the tab must read awaiting again while the wizard is open"
-        );
-    }
-
-    /// The re-arm must not fire per repaint, must not fight OSC 7770, and must not
-    /// step on a live choice prompt — each of those was a separate storm in the
-    /// history of this file.
-    #[test]
-    fn rearm_stays_silent_unless_the_badge_is_actually_off() {
-        let screen = askuserquestion_wizard_screen(1);
-        assert!(
-            rearm_awaiting_for_open_dialog(&screen, false, true, false, false).is_none(),
-            "already awaiting — re-arming every repaint would storm"
-        );
-        assert!(
-            rearm_awaiting_for_open_dialog(&screen, true, false, false, false).is_none(),
-            "hook-instrumented sessions get awaiting from OSC 7770"
-        );
-        assert!(
-            rearm_awaiting_for_open_dialog(&screen, false, false, true, false).is_none(),
-            "a live choice prompt owns awaiting through its own resolve path"
-        );
-        let no_dialog = vec!["· Gallivanting… (15m 12s)".to_string(), "❯".to_string()];
-        assert!(
-            rearm_awaiting_for_open_dialog(&no_dialog, false, false, false, false).is_none(),
-            "no dialog on screen, no badge"
-        );
-        let quoted = vec!["+  Enter to select · Esc to cancel".to_string()];
-        assert!(
-            rearm_awaiting_for_open_dialog(&quoted, false, false, false, false).is_none(),
-            "a diff line quoting the footer is not a dialog"
-        );
-    }
-
-    /// The opening frame of a non-hook `AskUserQuestion`: the footer row genuinely
-    /// changed, so `parse_clean_lines` already parsed the real question this tick.
-    /// `SessionState.awaiting_input` is still false — this tick's events have not
-    /// reached it — so the badge guard alone lets the re-arm fire as well. The
-    /// accumulator keeps the LAST `prompt_text`, so the second event replaces the
-    /// question with the footer and the tab reads `⊠ … ✓ Submit`. It also resets
-    /// `last_question_text`, so the real question re-emits on the next repaint.
-    #[test]
-    fn rearm_yields_to_a_question_already_parsed_in_the_same_tick() {
-        let screen = askuserquestion_wizard_screen(0);
-        assert!(
-            rearm_awaiting_for_open_dialog(&screen, false, false, false, false).is_some(),
-            "precondition: this screen re-arms when nothing else spoke"
-        );
-        assert!(
-            rearm_awaiting_for_open_dialog(&screen, false, false, false, true).is_none(),
-            "the parsed question is the better text; the footer must not overwrite it"
-        );
-    }
-
-    #[test]
-    fn question_suppress_resolves_from_agent_config() {
-        use crate::config::{AgentSettings, AgentsConfig};
-        let mut agents = AgentsConfig::default();
-        let enabled = AgentSettings {
-            hook_instrumentation: Some(true),
-            ..Default::default()
-        };
-        agents.agents.insert("claude".into(), enabled);
-        let disabled = AgentSettings {
-            hook_instrumentation: Some(false),
-            ..Default::default()
-        };
-        agents.agents.insert("codex".into(), disabled);
-
-        assert!(hook_instrumented_for(&agents, Some("claude")));
-        assert!(
-            !hook_instrumented_for(&agents, Some("codex")),
-            "explicit false"
-        );
-        assert!(
-            !hook_instrumented_for(&agents, Some("gemini")),
-            "no override"
-        );
-        assert!(!hook_instrumented_for(&agents, None), "no agent type");
-    }
-
-    #[test]
-    fn osc133_a_transitions_to_idle_immediately() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-osc133-idle";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-        state
-            .has_osc133_integration
-            .insert(session_id.to_string(), ());
-
-        let mut proc = ChunkProcessor::new(None, None);
-        proc.handle_osc133_event('A', "", session_id, &state);
-
-        let current = state
-            .shell_states
-            .get(session_id)
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Acquire);
-        assert_eq!(
-            current, SHELL_IDLE,
-            "OSC 133 A should transition to idle immediately"
-        );
-    }
-
-    #[test]
-    fn osc133_c_transitions_to_busy_immediately() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-osc133-busy";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-        state
-            .has_osc133_integration
-            .insert(session_id.to_string(), ());
-
-        let mut proc = ChunkProcessor::new(None, None);
-        proc.handle_osc133_event('C', "", session_id, &state);
-
-        let current = state
-            .shell_states
-            .get(session_id)
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Acquire);
-        assert_eq!(
-            current, SHELL_BUSY,
-            "OSC 133 C should transition to busy immediately"
-        );
-    }
-
-    #[test]
-    fn osc133_a_emits_shell_state_event() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-osc133-emit";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-
-        // Subscribe to event bus before transition
-        let mut rx = state.event_bus.subscribe();
-
-        let mut proc = ChunkProcessor::new(None, None);
-        proc.handle_osc133_event('A', "", session_id, &state);
-
-        // Check event_bus received a state change
-        let evt = rx.try_recv();
-        assert!(
-            evt.is_ok(),
-            "event_bus should have received a shell state event"
-        );
-        if let Ok(crate::state::AppEvent::PtyParsed {
-            session_id: sid,
-            parsed,
-        }) = evt
-        {
-            assert_eq!(sid, session_id);
-            assert_eq!(parsed["type"], "shell-state");
-            assert_eq!(parsed["state"], "idle");
-        } else {
-            panic!("expected PtyParsed event with shell-state");
-        }
-    }
-
-    #[test]
-    fn osc133_d_does_not_transition_alone() {
-        // D means "command finished" but idle only happens when A arrives (prompt shown)
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-osc133-d";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_BUSY),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-        state
-            .has_osc133_integration
-            .insert(session_id.to_string(), ());
-
-        let mut proc = ChunkProcessor::new(None, None);
-        proc.handle_osc133_event('D', "0", session_id, &state);
-
-        let current = state
-            .shell_states
-            .get(session_id)
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Acquire);
-        assert_eq!(
-            current, SHELL_BUSY,
-            "OSC 133 D alone should NOT transition — wait for A"
-        );
-    }
-
-    #[test]
-    fn osc133_d_without_c_records_no_outcome() {
-        // A 'D' (command finished) without a preceding 'C' (command started) —
-        // e.g. Enter on an empty prompt — must NOT record a phantom outcome
-        // (empty command, "unknown" error) that would pollute the knowledge
-        // panel and the agent's injected prompt.
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-osc133-d-no-c";
-        state
-            .has_osc133_integration
-            .insert(session_id.to_string(), ());
-
-        let mut proc = ChunkProcessor::new(None, None);
-        proc.handle_osc133_event('D', "1", session_id, &state);
-
-        let recorded = state
-            .session_knowledge
-            .get(session_id)
-            .map(|k| k.lock().commands.len())
-            .unwrap_or(0);
-        assert_eq!(recorded, 0, "D without C must not record an outcome");
-    }
-
-    #[test]
-    fn osc133_c_then_d_records_outcome() {
-        // Regression guard: the normal path still records — C captures the
-        // command start, D finalizes the outcome.
-        let state = crate::state::tests_support::make_test_app_state();
-        let session_id = "test-osc133-c-then-d";
-        state.shell_states.insert(
-            session_id.to_string(),
-            std::sync::atomic::AtomicU8::new(SHELL_IDLE),
-        );
-        state
-            .shell_state_since_ms
-            .insert(session_id.to_string(), std::sync::atomic::AtomicU64::new(0));
-        state
-            .has_osc133_integration
-            .insert(session_id.to_string(), ());
-
-        let mut proc = ChunkProcessor::new(None, None);
-        proc.handle_osc133_event('C', "", session_id, &state);
-        proc.handle_osc133_event('D', "0", session_id, &state);
-
-        let recorded = state
-            .session_knowledge
-            .get(session_id)
-            .map(|k| k.lock().commands.len())
-            .unwrap_or(0);
-        assert_eq!(recorded, 1, "C→D should record exactly one outcome");
-    }
-
-    // --- is_cc_tool_call_header tests ---
-
-    #[test]
-    fn cc_tool_call_bash() {
-        assert!(is_cc_tool_call_header(
-            "⏺ Bash(curl -s 'http://localhost:9876/logs')"
-        ));
-    }
-
-    #[test]
-    fn cc_tool_call_read() {
-        assert!(is_cc_tool_call_header("⏺ Read(src/foo.rs)"));
-    }
-
-    #[test]
-    fn cc_tool_call_edit() {
-        assert!(is_cc_tool_call_header("⏺ Edit(file_path=/tmp/a.rs)"));
-    }
-
-    #[test]
-    fn cc_tool_call_mcp() {
-        assert!(is_cc_tool_call_header(
-            "⏺ mcp__tuicommander__ui(action=tab)"
-        ));
-    }
-
-    #[test]
-    fn cc_tool_call_with_leading_whitespace() {
-        assert!(is_cc_tool_call_header("  ⏺ Bash(ls)"));
-    }
-
-    #[test]
-    fn cc_prose_not_tool_call() {
-        assert!(!is_cc_tool_call_header("⏺ Boss, ci sono molti tipi di OSC"));
-    }
-
-    #[test]
-    fn cc_prose_with_paren_not_tool_call() {
-        assert!(!is_cc_tool_call_header(
-            "⏺ Nessun errore (tutti i log puliti)"
-        ));
-    }
-
-    #[test]
-    fn cc_calling_collapsed_not_tool_call() {
-        assert!(!is_cc_tool_call_header(
-            "⏺ Calling tuicommander 2 times… (ctrl+o to expand)"
-        ));
-    }
-
-    #[test]
-    fn cc_mission_control_not_tool_call() {
-        assert!(!is_cc_tool_call_header(
-            "⏺ Mission Control: opened in TUIC tab"
-        ));
-    }
-
-    #[test]
-    fn cc_empty_after_bullet_not_tool_call() {
-        assert!(!is_cc_tool_call_header("⏺ "));
-        assert!(!is_cc_tool_call_header("⏺"));
-    }
-
-    #[test]
-    fn cc_no_bullet_not_tool_call() {
-        assert!(!is_cc_tool_call_header("Bash(ls)"));
-        assert!(!is_cc_tool_call_header("plain text"));
-    }
-
-    /// Closing a tab must kill the agent grandchild, not just the shell.
-    ///
-    /// Mirrors `claude` launched inside the PTY's shell: shell → grandchild,
-    /// both ignoring SIGINT/SIGTERM/SIGHUP so only the SIGKILL on the foreground
-    /// process group can reap them. Before the killpg fix, `close_pty_core`
-    /// SIGKILLed the shell alone and the grandchild was orphaned to init.
-    #[cfg(unix)]
-    #[test]
-    fn close_pty_core_kills_agent_grandchild() {
-        use std::time::{Duration, Instant};
-
-        let pidfile = std::env::temp_dir().join(format!("tuic_pgkill_{}.pid", std::process::id()));
-        let _ = std::fs::remove_file(&pidfile);
-
-        let pty = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
-
-        // Outer shell ignores the catchable signals and backgrounds a grandchild
-        // that also ignores them, recording the grandchild PID for the probe.
-        let script = format!(
-            "trap '' INT TERM HUP; sh -c 'trap \"\" INT TERM HUP; sleep 30' & echo $! > {}; wait",
-            pidfile.display()
-        );
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.args(["-c", &script]);
-        let child = pty.slave.spawn_command(cmd).expect("spawn shell");
-
-        let master = pty.master;
-        let writer = master.take_writer().expect("writer");
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "test-pgkill";
-        state
-            .metrics
-            .active_sessions
-            .fetch_add(1, Ordering::Relaxed);
-        state.sessions.insert(
-            sid.to_string(),
-            Mutex::new(PtySession {
-                writer: Arc::new(Mutex::new(writer)),
-                master,
-                _child: child,
-                paused: Arc::new(AtomicBool::new(false)),
-                worktree: None,
-                cwd: None,
-                display_name: None,
-                display_name_is_custom: false,
-                is_remote: false,
-                shell: "/bin/sh".to_string(),
-            }),
-        );
-
-        let pid_alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0;
-        let read_pid = || {
-            std::fs::read_to_string(&pidfile)
-                .ok()
-                .and_then(|s| s.trim().parse::<libc::pid_t>().ok())
-        };
-
-        // Wait for the grandchild to come up and record its PID (up to ~3s).
-        let mut grandchild = None;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            if let Some(pid) = read_pid() {
-                grandchild = Some(pid);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let grandchild = grandchild.expect("grandchild PID should be written");
-        assert!(
-            pid_alive(grandchild),
-            "grandchild should be alive before close"
-        );
-
-        close_pty_core(&state, sid, false);
-
-        // killpg(SIGKILL) is untrappable: the grandchild must be gone shortly.
-        let mut dead = false;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if !pid_alive(grandchild) {
-                dead = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = std::fs::remove_file(&pidfile);
-        assert!(
-            dead,
-            "grandchild {grandchild} survived tab close — orphaned process tree"
-        );
-    }
-
-    /// Quitting the app must not leave agents behind. Two sessions, each with a
-    /// grandchild that ignores every catchable signal — the same shape as an
-    /// agent under job control, which is what used to survive a quit and keep
-    /// running (with its tuic-bridge) until the machine rebooted.
-    #[cfg(unix)]
-    #[test]
-    fn kill_all_sessions_on_exit_kills_every_agent() {
-        use std::time::{Duration, Instant};
-
-        let state = crate::state::tests_support::make_test_app_state();
-        let pid_alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0;
-        let mut pidfiles = Vec::new();
-        let mut grandchildren = Vec::new();
-
-        for n in 0..2 {
-            let pidfile = std::env::temp_dir()
-                .join(format!("tuic_exitkill_{}_{n}.pid", std::process::id()));
-            let _ = std::fs::remove_file(&pidfile);
-
-            let pty = native_pty_system()
-                .openpty(PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .expect("openpty");
-            let script = format!(
-                "trap '' INT TERM HUP; sh -c 'trap \"\" INT TERM HUP; sleep 30' & echo $! > {}; wait",
-                pidfile.display()
-            );
-            let mut cmd = CommandBuilder::new("/bin/sh");
-            cmd.args(["-c", &script]);
-            let child = pty.slave.spawn_command(cmd).expect("spawn shell");
-            let master = pty.master;
-            let writer = master.take_writer().expect("writer");
-
-            state
-                .metrics
-                .active_sessions
-                .fetch_add(1, Ordering::Relaxed);
-            state.sessions.insert(
-                format!("exit-kill-{n}"),
-                Mutex::new(PtySession {
-                    writer: Arc::new(Mutex::new(writer)),
-                    master,
-                    _child: child,
-                    paused: Arc::new(AtomicBool::new(false)),
-                    worktree: None,
-                    cwd: None,
-                    display_name: None,
-                    display_name_is_custom: false,
-                    is_remote: false,
-                    shell: "/bin/sh".to_string(),
-                }),
-            );
-            pidfiles.push(pidfile);
-        }
-
-        // Wait for both grandchildren to record their PIDs.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while grandchildren.len() < pidfiles.len() && Instant::now() < deadline {
-            grandchildren = pidfiles
-                .iter()
-                .filter_map(|f| {
-                    std::fs::read_to_string(f)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<libc::pid_t>().ok())
-                })
-                .collect();
-            if grandchildren.len() < pidfiles.len() {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-        assert_eq!(
-            grandchildren.len(),
-            pidfiles.len(),
-            "both grandchildren should have started"
-        );
-
-        kill_all_sessions_on_exit(&state);
-
-        assert!(
-            state.sessions.is_empty(),
-            "every session must be drained from the map"
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut survivors: Vec<libc::pid_t> = Vec::new();
-        while Instant::now() < deadline {
-            survivors = grandchildren
-                .iter()
-                .copied()
-                .filter(|p| pid_alive(*p))
-                .collect();
-            if survivors.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        for f in &pidfiles {
-            let _ = std::fs::remove_file(f);
-        }
-        assert!(
-            survivors.is_empty(),
-            "agents {survivors:?} survived app exit — orphaned process tree"
-        );
-    }
-
-    // ── process_kitty_actions ───────────────────────────────────────
-
-    #[test]
-    fn process_kitty_actions_empty_is_noop() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "kitty-empty";
-        process_kitty_actions(&[], sid, &state);
-        assert!(
-            !state.kitty_states.contains_key(sid),
-            "empty action list must not allocate per-session kitty state"
-        );
-    }
-
-    #[test]
-    fn process_kitty_actions_push_pop_query_tracks_flag_stack() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "kitty-stack";
-
-        // Two pushes: current flags follow the top of the stack.
-        process_kitty_actions(&[KittyAction::Push(1), KittyAction::Push(5)], sid, &state);
-        assert_eq!(
-            state.kitty_states.get(sid).unwrap().lock().current_flags(),
-            5
-        );
-
-        // Pop returns to the first pushed value.
-        process_kitty_actions(&[KittyAction::Pop], sid, &state);
-        assert_eq!(
-            state.kitty_states.get(sid).unwrap().lock().current_flags(),
-            1
-        );
-
-        // Query with no live PTY session must not panic (writer path is skipped)
-        // and must leave the flag stack untouched.
-        process_kitty_actions(&[KittyAction::Query], sid, &state);
-        assert_eq!(
-            state.kitty_states.get(sid).unwrap().lock().current_flags(),
-            1
-        );
-    }
-
-    // ── cleanup_session ─────────────────────────────────────────────
-
-    #[test]
-    fn cleanup_session_clears_transient_session_maps() {
-        use std::sync::atomic::{AtomicU8, AtomicU64};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "cleanup-maps";
-        state
-            .output_buffers
-            .insert(sid.to_string(), Mutex::new(OutputRingBuffer::new(4096)));
-        state.vt_log_buffers.insert(
-            sid.to_string(),
-            Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
-        );
-        state
-            .kitty_states
-            .insert(sid.to_string(), Mutex::new(KittyKeyboardState::new()));
-        state
-            .shell_states
-            .insert(sid.to_string(), AtomicU8::new(SHELL_IDLE));
-        state
-            .last_output_ms
-            .insert(sid.to_string(), AtomicU64::new(0));
-        state
-            .term_aliases
-            .insert(sid.to_string(), "alias".to_string());
-        state.exit_codes.insert(sid.to_string(), 0);
-
-        cleanup_session(sid, &state);
-
-        assert!(!state.output_buffers.contains_key(sid));
-        assert!(!state.vt_log_buffers.contains_key(sid));
-        assert!(!state.kitty_states.contains_key(sid));
-        assert!(!state.shell_states.contains_key(sid));
-        assert!(!state.last_output_ms.contains_key(sid));
-        assert!(!state.term_aliases.contains_key(sid));
-        assert!(!state.exit_codes.contains_key(sid));
-    }
-
-    /// Populate the per-session maps that no teardown phase used to own, plus the
-    /// two the post-mortem read needs. Deliberately independent of the production
-    /// enumeration: a teardown test that reuses the list it verifies proves nothing.
-    fn populate_unowned_session_maps(state: &crate::state::AppState, sid: &str) {
-        use std::sync::atomic::{AtomicBool, AtomicU64};
-        state
-            .slash_mode
-            .insert(sid.to_string(), AtomicBool::new(true));
-        state
-            .last_input_ms
-            .insert(sid.to_string(), AtomicU64::new(7));
-        state.has_osc133_integration.insert(sid.to_string(), ());
-        state.agent_read_cursor.insert(sid.to_string(), 3);
-        state
-            .marker_stats
-            .insert(sid.to_string(), crate::state::MarkerStats::default());
-        state.session_knowledge.insert(
-            sid.to_string(),
-            Mutex::new(crate::ai_agent::knowledge::SessionKnowledge::new()),
-        );
-        state.session_visibility.insert(sid.to_string(), true);
-        state.ai_suggestions_enabled.insert(sid.to_string(), true);
-        state.file_sandboxes.insert(
-            sid.to_string(),
-            crate::ai_agent::sandbox::FileSandbox::new(std::env::temp_dir()).expect("sandbox"),
-        );
-        state.unrestricted_sessions.insert(sid.to_string(), ());
-        state
-            .term_aliases
-            .insert(sid.to_string(), "tc-9".to_string());
-    }
-
-    /// The swarm/identity maps. `tombstone_transient_cleanup` has always reaped
-    /// these; `cleanup_session` never did, which is the divergence F8 removes.
-    fn populate_swarm_session_maps(state: &crate::state::AppState, sid: &str, mcp_sid: &str) {
-        state
-            .session_parent
-            .insert(sid.to_string(), "parent-sess".to_string());
-        state
-            .shell_state_since_ms
-            .insert(sid.to_string(), std::sync::atomic::AtomicU64::new(42));
-        state
-            .mcp_to_session
-            .insert(mcp_sid.to_string(), sid.to_string());
-        state
-            .session_to_mcp
-            .insert(sid.to_string(), vec![mcp_sid.to_string()]);
-        state.peer_agents.insert(
-            sid.to_string(),
-            crate::state::PeerAgent {
-                tuic_session: sid.to_string(),
-                mcp_session_id: mcp_sid.to_string(),
-                name: "worker".to_string(),
-                project: None,
-                registered_at: 1,
-            },
-        );
-        state.agent_inbox.entry(sid.to_string()).or_default();
-        state.agent_inbox_evictions.insert(sid.to_string(), 2);
-    }
-
-    #[test]
-    fn closing_a_session_reaps_the_swarm_maps_too() {
-        // The two teardowns were enumerated by hand and drifted: an explicit close
-        // over HTTP DELETE goes straight to cleanup_session, which left every peer
-        // identity, inbox and mcp mapping behind for the life of the process.
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "close-swarm";
-        let mcp_sid = "mcp-close-swarm";
-        populate_swarm_session_maps(&state, sid, mcp_sid);
-
-        cleanup_session(sid, &state);
-
-        assert!(!state.session_parent.contains_key(sid));
-        assert!(!state.shell_state_since_ms.contains_key(sid));
-        assert!(!state.mcp_to_session.contains_key(mcp_sid));
-        assert!(!state.session_to_mcp.contains_key(sid));
-        assert!(!state.peer_agents.contains_key(sid));
-        assert!(!state.agent_inbox.contains_key(sid));
-        assert!(!state.agent_inbox_evictions.contains_key(sid));
-    }
-
-    #[test]
-    fn closing_a_session_reaps_the_maps_no_phase_owned() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "close-unowned";
-        populate_unowned_session_maps(&state, sid);
-
-        cleanup_session(sid, &state);
-
-        assert!(!state.slash_mode.contains_key(sid));
-        assert!(!state.last_input_ms.contains_key(sid));
-        assert!(!state.has_osc133_integration.contains_key(sid));
-        assert!(!state.agent_read_cursor.contains_key(sid));
-        assert!(!state.marker_stats.contains_key(sid));
-        assert!(!state.session_visibility.contains_key(sid));
-        assert!(!state.ai_suggestions_enabled.contains_key(sid));
-        assert!(!state.term_aliases.contains_key(sid));
-
-        // Owned elsewhere, deliberately untouched — see the DEFERRED note on
-        // remove_post_mortem_session_state. A sandbox belongs to a conversation
-        // that outlives the PTY; knowledge is what the next session inherits.
-        assert!(state.file_sandboxes.contains_key(sid));
-        assert!(state.unrestricted_sessions.contains_key(sid));
-        assert!(state.session_knowledge.contains_key(sid));
-    }
-
-    #[test]
-    fn a_tombstone_drops_live_process_state_and_keeps_the_post_mortem_maps() {
-        // A tombstone is still readable for TOMBSTONE_TTL_MS, so the split is not
-        // "reap everything": what the dead process owned goes, what a post-mortem
-        // read needs stays.
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "tombstone-split";
-        populate_unowned_session_maps(&state, sid);
-
-        tombstone_transient_cleanup(sid, &state);
-
-        assert!(
-            !state.slash_mode.contains_key(sid),
-            "input mode belongs to the dead process"
-        );
-        assert!(!state.last_input_ms.contains_key(sid));
-        assert!(
-            !state.has_osc133_integration.contains_key(sid),
-            "shell integration belongs to the dead shell"
-        );
-        assert!(!state.agent_read_cursor.contains_key(sid));
-
-        assert!(
-            state.marker_stats.contains_key(sid),
-            "marker tallies are exactly what a post-mortem question asks for"
-        );
-        assert!(
-            state.session_knowledge.contains_key(sid),
-            "knowledge is flushed to disk by a 2s task — reaping it here loses it"
-        );
-        assert!(state.term_aliases.contains_key(sid), "the tab still shows");
-        assert!(state.session_visibility.contains_key(sid));
-        assert!(state.ai_suggestions_enabled.contains_key(sid));
-    }
-
-    #[test]
-    fn reaping_a_tombstone_leaves_no_session_state_behind() {
-        // The normal exit path is tombstone → sweeper, and cleanup_session is never
-        // called on it. Anything the sweeper's list forgot therefore leaked for the
-        // life of the process, not for TOMBSTONE_TTL_MS — which is what happened to
-        // the terminal alias.
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "tombstone-reaped";
-        populate_unowned_session_maps(&state, sid);
-        populate_swarm_session_maps(&state, sid, "mcp-tombstone-reaped");
-
-        tombstone_transient_cleanup(sid, &state);
-        remove_post_mortem_session_state(sid, &state);
-
-        assert!(!state.term_aliases.contains_key(sid));
-        assert!(!state.marker_stats.contains_key(sid));
-        assert!(!state.session_visibility.contains_key(sid));
-        assert!(!state.ai_suggestions_enabled.contains_key(sid));
-        assert!(!state.last_output_ms.contains_key(sid));
-        assert!(!state.slash_mode.contains_key(sid));
-        assert!(!state.peer_agents.contains_key(sid));
-    }
-
-    /// Stamp a tombstone that is already older than the TTL.
-    fn stamp_aged_tombstone(state: &crate::state::AppState, sid: &str, now_ms: u64) {
-        state.last_output_ms.insert(
-            sid.to_string(),
-            AtomicU64::new(now_ms - TOMBSTONE_TTL_MS - 1),
-        );
-    }
-
-    #[test]
-    fn a_timestamp_left_without_buffers_is_still_reaped() {
-        // An explicit DELETE runs the full cleanup, and the reader thread can then
-        // reach EOF and re-stamp last_output_ms through the tombstone path. The
-        // buffers are already gone, so a sweeper that discovers candidates by
-        // walking output_buffers never sees that lone entry again.
-        let state = crate::state::tests_support::make_test_app_state();
-        let now_ms = 10 * TOMBSTONE_TTL_MS;
-        stamp_aged_tombstone(&state, "orphan-stamp", now_ms);
-
-        assert_eq!(
-            aged_out_tombstones(&state, now_ms),
-            vec!["orphan-stamp".to_string()],
-            "a stamp with no buffers is still session state to reap"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_session_id_reused_before_the_sweep_is_not_reaped() {
-        // The HTTP spawn path accepts a caller-supplied id, so an aged tombstone's
-        // id can come back to life between candidate selection and removal. Reaping
-        // it then deletes the LIVE session's buffers, alias and visibility.
-        let state = crate::state::tests_support::make_test_app_state();
-        let now_ms = 10 * TOMBSTONE_TTL_MS;
-        let sid = "reused-id";
-        stamp_aged_tombstone(&state, sid, now_ms);
-        state
-            .term_aliases
-            .insert(sid.to_string(), "tc-1".to_string());
-        let candidates = aged_out_tombstones(&state, now_ms);
-        assert_eq!(candidates, vec![sid.to_string()]);
-
-        // The race: a client recreates the id after selection, before removal.
-        crate::state::tests_support::insert_dummy_session(&state, sid);
-        reap_tombstones(&state, &candidates);
-
-        assert!(
-            state.term_aliases.contains_key(sid),
-            "the live session that reclaimed this id must keep its state"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_session_removes_session_and_decrements_metrics() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "cleanup-real";
-        spawn_short_session(&state, sid);
-        let before = state.metrics.active_sessions.load(Ordering::Relaxed);
-        assert!(state.sessions.contains_key(sid));
-
-        cleanup_session(sid, &state);
-
-        assert!(
-            !state.sessions.contains_key(sid),
-            "the live session entry must be removed"
-        );
-        assert_eq!(
-            state.metrics.active_sessions.load(Ordering::Relaxed),
-            before - 1,
-            "removing a live session must decrement the active-session gauge"
-        );
-    }
-
-    /// Insert a minimal real PTY session (short-lived `sleep`) so functions that
-    /// require a live `PtySession` can be exercised. Mirrors `create_pty`'s
-    /// active-session bookkeeping.
-    #[cfg(unix)]
-    fn spawn_short_session(state: &crate::state::AppState, sid: &str) {
-        let pty = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.args(["-c", "sleep 5"]);
-        let child = pty.slave.spawn_command(cmd).expect("spawn");
-        let master = pty.master;
-        let writer = master.take_writer().expect("writer");
-        state
-            .metrics
-            .active_sessions
-            .fetch_add(1, Ordering::Relaxed);
-        state.sessions.insert(
-            sid.to_string(),
-            Mutex::new(PtySession {
-                writer: Arc::new(Mutex::new(writer)),
-                master,
-                _child: child,
-                paused: Arc::new(AtomicBool::new(false)),
-                worktree: None,
-                cwd: None,
-                display_name: None,
-                display_name_is_custom: false,
-                is_remote: false,
-                shell: "/bin/sh".to_string(),
-            }),
-        );
-    }
-
-    // ── ChunkProcessor::check_pending_planfiles ─────────────────────
-
-    #[test]
-    fn check_pending_planfiles_empty_is_noop() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let mut cp = ChunkProcessor::new(None, None);
-        cp.check_pending_planfiles("sid", &state);
-        assert!(cp.pending_planfiles.is_empty());
-    }
-
-    #[test]
-    fn check_pending_planfiles_drops_expired_and_tombstones() {
-        use std::time::{Duration, Instant};
-        let state = crate::state::tests_support::make_test_app_state();
-        let mut cp = ChunkProcessor::new(None, None);
-        let missing = "/no/such/planfile/expired.md".to_string();
-        // Deadline in the (immediate) past: the internal `Instant::now()` runs
-        // after the sleep, so `now > deadline` holds.
-        cp.pending_planfiles.push((missing.clone(), Instant::now()));
-        std::thread::sleep(Duration::from_millis(2));
-
-        cp.check_pending_planfiles("sid", &state);
-
-        assert!(
-            cp.pending_planfiles.is_empty(),
-            "an expired retry must be dropped from the queue"
-        );
-        assert!(
-            cp.gaveup_planfiles.contains(&missing),
-            "a dropped retry must be tombstoned so it is not re-queued forever"
-        );
-    }
-
-    #[test]
-    fn check_pending_planfiles_keeps_missing_file_until_deadline() {
-        use std::time::{Duration, Instant};
-        let state = crate::state::tests_support::make_test_app_state();
-        let mut cp = ChunkProcessor::new(None, None);
-        let missing = "/no/such/planfile/pending.md".to_string();
-        cp.pending_planfiles
-            .push((missing, Instant::now() + Duration::from_secs(30)));
-
-        cp.check_pending_planfiles("sid", &state);
-
-        assert_eq!(
-            cp.pending_planfiles.len(),
-            1,
-            "a not-yet-existing file with a live deadline stays queued"
-        );
-    }
-
-    #[test]
-    fn check_pending_planfiles_emits_when_file_appears() {
-        use std::time::{Duration, Instant};
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "planfile-emit";
-        let mut cp = ChunkProcessor::new(None, None);
-
-        let dir = std::env::temp_dir().join(format!("tuic_planfile_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let file = dir.join("plan.md");
-        std::fs::write(&file, "# plan").expect("write plan file");
-        let path = file.to_string_lossy().to_string();
-
-        cp.pending_planfiles
-            .push((path.clone(), Instant::now() + Duration::from_secs(30)));
-        let mut rx = state.event_bus.subscribe();
-
-        cp.check_pending_planfiles(sid, &state);
-
-        assert!(
-            cp.pending_planfiles.is_empty(),
-            "a resolved file must leave the retry queue"
-        );
-        assert!(
-            cp.emitted_planfiles.contains(&path),
-            "a resolved path must be recorded as emitted"
-        );
-        let mut got = false;
-        while let Ok(evt) = rx.try_recv() {
-            if let crate::state::AppEvent::PtyParsed { parsed, .. } = evt
-                && parsed.get("type").and_then(|t| t.as_str()) == Some("plan-file")
-                && parsed.get("path").and_then(|p| p.as_str()) == Some(path.as_str())
-            {
-                got = true;
-            }
-        }
-        assert!(
-            got,
-            "a resolved plan file must emit a plan-file PtyParsed event"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ── wake_session ────────────────────────────────────────────────
-
-    #[cfg(unix)]
-    #[test]
-    fn wake_session_returns_false_when_not_in_standby() {
-        let state = crate::state::tests_support::make_test_app_state();
-        assert_eq!(wake_session(&state, "not-parked"), Ok(false));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn wake_session_errors_and_consumes_entry_when_session_missing() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let sid = "parked-but-gone";
-        state.standby_sessions.insert(sid.to_string(), 0);
-
-        let res = wake_session(&state, sid);
-
-        assert!(
-            res.is_err(),
-            "a standby entry without a live session must error"
-        );
-        assert!(res.unwrap_err().contains("Session not found"));
-        assert!(
-            !state.standby_sessions.contains_key(sid),
-            "the standby entry is consumed even on the error path"
-        );
-    }
-
-    // ── process-stats helpers ───────────────────────────────────────
-
-    #[cfg(not(windows))]
-    #[test]
-    fn query_process_stats_reports_own_process() {
-        let own = std::process::id();
-        let map = query_process_stats(&[own]);
-        assert!(map.contains_key(&own), "ps must report our own pid");
-        let (rss, _cpu) = map[&own];
-        assert!(
-            rss > 0,
-            "resident set size of a live process must be positive"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn query_process_stats_empty_input_is_empty() {
-        assert!(query_process_stats(&[]).is_empty());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn collect_descendant_pids_returns_some_for_live_pid() {
-        assert!(
-            collect_descendant_pids(std::process::id()).is_some(),
-            "walking the process table for a live pid must succeed"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn process_tree_snapshot_reports_own_process() {
-        let own = std::process::id();
-        let snapshot = process_tree_snapshot().expect("ps process-tree snapshot");
-        let mine = snapshot
-            .iter()
-            .find(|process| process.pid == own)
-            .expect("the process-tree parser must preserve live PIDs");
-        // The startup window silently degrades to the old name-only rule when
-        // ages are missing, so this platform's `etime` column has to be proven
-        // readable here rather than inferred from the fixture tests.
-        assert!(
-            mine.age_seconds.is_some(),
-            "this platform's ps must yield a parsable elapsed time"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn collect_process_stats_includes_tuicommander_itself() {
-        let state = crate::state::tests_support::make_test_app_state();
-        let stats = collect_process_stats(&state);
-        let own = std::process::id();
-        assert!(
-            stats
-                .iter()
-                .any(|s| s.session_id.is_none() && s.pid == own && s.name == "FastAF"),
-            "TUIC's own process must appear with no session id"
-        );
-    }
+mod tests;
+
+/// Read-only launch receipt evidence. Silence/output movement alone cannot prove
+/// a new agent has reached its native composer.
+pub(crate) fn managed_launch_screen_ready(state: &AppState, session_id: &str) -> bool {
+    state
+        .session_maps
+        .silence_states
+        .get(session_id)
+        .is_some_and(|silence| silence.lock().cached_screen_activity == AgentScreenActivity::Ready)
 }

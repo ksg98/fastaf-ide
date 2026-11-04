@@ -1,13 +1,25 @@
 import { type Component, createSignal, For, onMount, Show } from "solid-js";
-import { t } from "../../../i18n";
+import { AVAILABLE_LOCALES, localeName, t } from "../../../i18n";
 import { invoke } from "../../../invoke";
+import { isMacOS } from "../../../platform";
 import { appLogger } from "../../../stores/appLogger";
-import type { CustomLauncher, IdeType, UpdateChannel } from "../../../stores/settings";
+import type {
+	CloseBehavior,
+	CustomLauncher,
+	IdeType,
+	TrayIconPreference,
+	UpdateChannel,
+} from "../../../stores/settings";
 import { IDE_NAMES, settingsStore } from "../../../stores/settings";
 import { updaterStore } from "../../../stores/updater";
 import { isTauri } from "../../../transport";
+import { Button } from "../../ui/Button";
+import { Input } from "../../ui/Input";
+import { Textarea } from "../../ui/Textarea";
+import { ExpertSetting } from "../ExpertSetting";
 import { SettingInput, SettingSelect, SettingSlider, SettingToggle } from "../SettingFields";
 import s from "../Settings.module.css";
+import { SectionCard, SettingPageHeader, SettingRow, StatusSummary } from "../SettingsPrimitives";
 
 interface CliStatus {
 	installed: boolean;
@@ -28,7 +40,6 @@ export const GeneralTab: Component = () => {
 	const [cliStatus, setCliStatus] = createSignal<CliStatus | null>(null);
 	const [cliInstalling, setCliInstalling] = createSignal(false);
 	const [mdkbStatus, setMdkbStatus] = createSignal<MdkbStatus | null>(null);
-	const [mdkbInstalling, setMdkbInstalling] = createSignal(false);
 	const [mdkbError, setMdkbError] = createSignal<string | null>(null);
 
 	const refreshCliStatus = async () => {
@@ -77,18 +88,6 @@ export const GeneralTab: Component = () => {
 		}
 	};
 
-	const handleInstallMdkb = async () => {
-		setMdkbInstalling(true);
-		try {
-			await invoke<string>("install_mdkb");
-			await refreshMdkbStatus();
-		} catch (err) {
-			appLogger.error("app", "Failed to install mdkb", err);
-		} finally {
-			setMdkbInstalling(false);
-		}
-	};
-
 	const handleUninstallMdkb = async () => {
 		setMdkbError(null);
 		try {
@@ -114,440 +113,514 @@ export const GeneralTab: Component = () => {
 		]);
 	const removeLauncher = (id: string) => settingsStore.setCustomLaunchers(launchers().filter((l) => l.id !== id));
 
+	const languageOptions = AVAILABLE_LOCALES.map((value) => ({ value, label: localeName(value) }));
+
 	const updateChannelOptions = [
 		{ value: "stable", label: t("general.channel.stable", "Stable") },
 		{ value: "nightly", label: t("general.channel.nightly", "Nightly") },
 	];
 
 	return (
-		<div class={s.section}>
-			<h3>{t("general.heading.general", "General")}</h3>
-
-			<SettingInput
-				label={t("general.label.shell", "Shell")}
-				value={settingsStore.state.shell ?? ""}
-				onInput={(v) => settingsStore.setShell(v)}
-				placeholder={t("general.placeholder.shell", "Default shell")}
-				hint={t("general.hint.shell", "Shell used in terminals (leave blank for system default)")}
-			/>
-
-			<SettingToggle
-				checked={settingsStore.state.importToolsEnabled}
-				onChange={(v) => settingsStore.setImportToolsEnabled(v)}
-				label={t("general.toggle.importToolsEnabled", "Import from other tools")}
-				hint={t(
-					"general.hint.importToolsEnabled",
-					"Show 'Import from Claude Code / Codex / Cursor / superset.sh' in the Add Repository menu",
-				)}
-			/>
-
-			<Show when={isTauri() && cliStatus()}>
-				<h3>
-					{t("general.heading.cli", "fastaf CLI")}
-					<span class={s.infoBadge}>
-						?
-						<span class={s.infoBadgeTip}>
-							{t(
-								"general.hint.cliInfo",
-								"The fastaf CLI lets you control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions (create, list, send input, read output), and query repository status. Useful for scripting automation.",
-							)}
-						</span>
-					</span>
-				</h3>
-
-				<div class={s.group}>
-					<Show
-						when={cliStatus()!.installed}
-						fallback={
-							<>
-								<p class={s.hint}>
-									{t(
-										"general.hint.cliNotInstalled",
-										"Install the fastaf CLI to control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions, and query repository status. Useful for scripting automation.",
-									)}
-								</p>
-								<button
-									class={s.testBtn}
-									onClick={handleInstallCli}
-									disabled={cliInstalling()}
-									style={{ "margin-top": "8px" }}
-								>
-									{cliInstalling()
-										? t("general.btn.installing", "Installing...")
-										: t("general.btn.installCli", "Install fastaf CLI")}
-								</button>
-							</>
-						}
-					>
-						<p class={s.hint} style={{ color: "var(--success)" }}>
-							{t("general.hint.cliInstalled", "Installed at {path}", {
-								path: cliStatus()!.path ?? "/usr/local/bin/tuic",
-							})}
-							{!cliStatus()!.version_match && (
-								<span style={{ color: "var(--warning, #e5c07b)", "margin-left": "8px" }}>
-									{cliStatus()!.auto_updatable
-										? t("general.hint.cliOutdated", "(update pending — restart to apply)")
-										: t("general.hint.cliUpdateAvailable", "(update available)")}
-								</span>
-							)}
-						</p>
-						<div style={{ display: "flex", gap: "8px", "margin-top": "8px" }}>
-							<Show when={!cliStatus()!.version_match}>
-								<button class={s.testBtn} onClick={handleInstallCli} disabled={cliInstalling()}>
-									{cliInstalling() ? t("general.btn.updating", "Updating...") : t("general.btn.updateCli", "Update")}
-								</button>
-							</Show>
-							<button class={s.testBtn} onClick={handleUninstallCli}>
-								{t("general.btn.uninstallCli", "Uninstall")}
-							</button>
-						</div>
-					</Show>
-				</div>
-			</Show>
-
-			<Show when={isTauri()}>
-				<h3>
-					{t("general.heading.codeIntelligence", "Code Intelligence")}
-					<span class={s.infoBadge}>
-						?
-						<span class={s.infoBadgeTip}>
-							{t(
-								"general.hint.codeIntelligenceInfo",
-								"Integrates with MDKB to provide code navigation features in the editor: Cmd+Click go-to-definition, Shift+F12 find references, and symbol outline. Also serves as a persistent memory manager for AI agents, fully integrated with FastAF. MDKB indexes your repositories and exposes a local daemon for fast lookups.",
-							)}
-						</span>
-					</span>
-				</h3>
-
-				<div class={s.group}>
-					<Show
-						when={mdkbStatus()?.available}
-						fallback={
-							<>
-								<p class={s.hint}>
-									{t(
-										"general.hint.mdkbNotInstalled",
-										"Install MDKB to enable outline, go-to-definition, and find references in the code editor.",
-									)}
-								</p>
-								<button
-									class={s.testBtn}
-									onClick={handleInstallMdkb}
-									disabled={mdkbInstalling()}
-									style={{ "margin-top": "8px" }}
-								>
-									{mdkbInstalling()
-										? t("general.btn.installing", "Installing...")
-										: t("general.btn.installMdkb", "Install MDKB")}
-								</button>
-							</>
-						}
-					>
-						<p class={s.hint} style={{ color: "var(--success)" }}>
-							{t("general.hint.mdkbInstalled", "Installed at {path}", {
-								path: mdkbStatus()!.binaryPath ?? "unknown",
-							})}
-							{mdkbStatus()!.version && (
-								<span style={{ "margin-left": "8px", color: "var(--fg-muted)" }}>v{mdkbStatus()!.version}</span>
-							)}
-						</p>
-						<button class={s.testBtn} onClick={handleUninstallMdkb} style={{ "margin-top": "8px" }}>
-							{t("general.btn.uninstallMdkb", "Uninstall")}
-						</button>
-						<Show when={mdkbError()}>
-							<p class={s.hint} style={{ color: "var(--error)" }}>
-								{mdkbError()}
-							</p>
-						</Show>
-					</Show>
-				</div>
-			</Show>
-
-			<h3>{t("general.heading.confirmations", "Confirmations")}</h3>
-
-			<SettingToggle
-				checked={settingsStore.state.confirmBeforeQuit}
-				onChange={(v) => settingsStore.setConfirmBeforeQuit(v)}
-				label={t("general.toggle.confirmBeforeQuit", "Confirm before quitting")}
-				hint={t("general.hint.confirmBeforeQuit", "Show a confirmation dialog when closing the app")}
-			/>
-
-			<SettingToggle
-				checked={settingsStore.state.confirmBeforeClosingTab}
-				onChange={(v) => settingsStore.setConfirmBeforeClosingTab(v)}
-				label={t("general.toggle.confirmBeforeClosingTab", "Confirm before closing a tab")}
-				hint={t("general.hint.confirmBeforeClosingTab", "Show a confirmation dialog when closing a terminal tab")}
-			/>
-
-			<h3>{t("general.heading.terminal", "Terminal")}</h3>
-
-			<SettingToggle
-				checked={settingsStore.state.copyOnSelect}
-				onChange={(v) => settingsStore.setCopyOnSelect(v)}
-				label={t("general.toggle.copyOnSelect", "Copy on select")}
-				hint={t("general.hint.copyOnSelect", "Automatically copy selected text to clipboard")}
-			/>
-
-			<SettingToggle
-				checked={settingsStore.state.terminalDragSelects}
-				onChange={(v) => settingsStore.setTerminalDragSelects(v)}
-				label={t("general.toggle.terminalDragSelects", "Drag to select in full-screen apps")}
-				hint={t(
-					"general.hint.terminalDragSelects",
-					"Click-and-drag selects text even when an app (vim, htop) captures the mouse; a plain click is still sent to the app",
-				)}
-			/>
-
-			<SettingToggle
-				checked={settingsStore.state.osc52Clipboard}
-				onChange={(v) => settingsStore.setOsc52Clipboard(v)}
-				label={t("general.toggle.osc52Clipboard", "Allow OSC 52 clipboard writes")}
-				hint={t(
-					"general.hint.osc52Clipboard",
-					"Let terminal programs set the system clipboard (OSC 52). A notice appears on each write. Disable to ignore clipboard writes from terminal output.",
-				)}
-			/>
-
-			<SettingSlider
-				label={t("general.label.scrollSensitivity", "Scroll sensitivity")}
-				value={settingsStore.state.terminalScrollSensitivity}
-				onChange={(v) => settingsStore.setTerminalScrollSensitivity(v)}
-				min={20}
-				max={200}
-				step={10}
-				suffix="%"
-				hint={t(
-					"general.hint.scrollSensitivity",
-					"How fast the terminal scrolls per wheel/trackpad tick (100% = raw device speed)",
-				)}
-			/>
-
-			<SettingToggle
-				checked={settingsStore.state.showLastPrompt}
-				onChange={(v) => settingsStore.setShowLastPrompt(v)}
-				label="Show agent context bar"
-				hint="Display the model's current intent, its orchestrator-assigned task, and the last prompt sent to an agent"
-			/>
-
-			<h3>{t("general.heading.powerManagement", "Power Management")}</h3>
-
-			<SettingToggle
-				checked={settingsStore.state.preventSleepWhenBusy}
-				onChange={(v) => settingsStore.setPreventSleepWhenBusy(v)}
-				label={t("general.toggle.preventSleepWhenBusy", "Prevent sleep when busy")}
-				hint={t("general.hint.preventSleepWhenBusy", "Keep the system awake while scripts are running")}
-			/>
-
-			<SettingSlider
-				label="Auto-Standby Timeout"
-				value={settingsStore.state.standbyTimeoutMinutes}
-				onChange={(v) => settingsStore.setStandbyTimeoutMinutes(v)}
-				min={0}
-				max={60}
-				step={1}
-				formatValue={(v) => (v === 0 ? "Off" : `${v} min`)}
-				hint="Pause idle background sessions after this duration to save resources. 0 = disabled."
-			/>
-
-			<SettingSelect
-				label="Content Indexing"
-				value={settingsStore.state.indexStrategy}
-				onChange={(v) =>
-					settingsStore.setIndexStrategy(v as "active_only" | "active_and_switch" | "all_sequential" | "disabled")
-				}
-				options={[
-					{ value: "disabled", label: "Disabled" },
-					{ value: "active_only", label: "Active repo only" },
-					{ value: "active_and_switch", label: "Active + on switch" },
-					{ value: "all_sequential", label: "All repos at boot" },
-				]}
-				hint="When to build search indexes. Set to Disabled to turn off background indexing entirely."
-			/>
-
-			<h3>{t("general.heading.updates", "Updates")}</h3>
-
-			<SettingToggle
-				checked={settingsStore.state.autoUpdateEnabled}
-				onChange={(v) => settingsStore.setAutoUpdateEnabled(v)}
-				label={t("general.toggle.autoUpdateEnabled", "Automatically check for updates")}
-				hint={t("general.hint.autoUpdateEnabled", "Download and install updates in the background")}
-			/>
-
-			<SettingSelect
-				label={t("general.label.updateChannel", "Update Channel")}
-				value={settingsStore.state.updateChannel}
-				onChange={(v) => settingsStore.setUpdateChannel(v as UpdateChannel)}
-				options={updateChannelOptions}
-				hint={
-					settingsStore.state.updateChannel !== "stable"
-						? t("general.hint.updateChannelWarning", "Nightly builds may be unstable")
-						: t("general.hint.updateChannel", "Choose which release channel to receive updates from")
-				}
-				hintStyle={settingsStore.state.updateChannel !== "stable" ? { color: "var(--warning, #e5c07b)" } : undefined}
-			/>
-
-			<div class={s.group}>
-				<button
-					class={s.testBtn}
-					onClick={() => {
-						updaterStore.checkForUpdate().catch((err: unknown) => appLogger.debug("app", "Update check failed", err));
-					}}
-					disabled={updaterStore.state.checking || updaterStore.state.downloading}
-				>
-					{updaterStore.state.checking
-						? t("general.btn.checking", "Checking...")
-						: t("general.btn.checkNow", "Check Now")}
-				</button>
-				<Show when={updaterStore.state.available && updaterStore.state.version}>
-					<p class={s.hint} style={{ color: "var(--success)" }}>
-						{t("general.hint.updateAvailable", "Version {version} is available!", {
-							version: updaterStore.state.version ?? "",
-						})}
-					</p>
-				</Show>
-				<Show
-					when={
-						!updaterStore.state.available &&
-						!updaterStore.state.checking &&
-						!updaterStore.state.error &&
-						!updaterStore.state.noRelease
+		<div class={`${s.section} ${s.applicationPage}`}>
+			<SettingPageHeader title="General" breadcrumb="Application / General" scope="Application defaults" />
+			<SectionCard title={t("general.heading.updates", "Updates")}>
+				<StatusSummary
+					label="Update status"
+					actions={
+						<Button
+							data-non-setting="Explicit update discovery; does not change update preferences"
+							class={s.testBtn}
+							onClick={() => {
+								updaterStore
+									.checkForUpdate()
+									.catch((err: unknown) => appLogger.debug("app", "Update check failed", err));
+							}}
+							disabled={updaterStore.state.checking || updaterStore.state.downloading}
+						>
+							{updaterStore.state.checking
+								? t("general.btn.checking", "Checking...")
+								: t("general.btn.checkNow", "Check Now")}
+						</Button>
 					}
-				>
-					<p class={s.hint}>{t("general.hint.latestVersion", "You are on the latest version")}</p>
-				</Show>
-				<Show when={updaterStore.state.noRelease}>
-					<p class={s.hint} style={{ color: "var(--fg-muted)" }}>
-						{t("general.hint.noRelease", "No {channel} releases published yet", {
-							channel: settingsStore.state.updateChannel,
-						})}
-					</p>
-				</Show>
-				<Show when={updaterStore.state.error}>
-					<p class={s.hint} style={{ color: "var(--accent-red, #f44747)" }}>
-						{updaterStore.state.error}
-					</p>
-				</Show>
-			</div>
-
-			<SettingSelect
-				label={t("general.label.defaultIde", "Default IDE")}
-				value={settingsStore.state.ide}
-				onChange={(v) => settingsStore.setIde(v as IdeType)}
-				options={ideOptions}
-				hint={t("general.hint.defaultIde", "IDE used to open repositories")}
-			/>
-
-			<Show when={isTauri()}>
-				<h3>{t("general.heading.customLaunchers", "Custom Launchers")}</h3>
-				<div class={s.group}>
-					<p class={s.hint}>
-						{t(
-							"general.hint.customLaunchers",
-							'Define your own tools for the "Open in" menu. Each argument may use {path}, {file}, {fileDir}, {repo}, {cwd}, {home}, {line}, {column} placeholders. One argument per line.',
-						)}
-					</p>
-					<For each={launchers()}>
-						{(launcher) => (
-							<div
-								class={s.group}
-								style={{
-									border: "1px solid var(--border)",
-									"border-radius": "var(--radius-md)",
-									padding: "8px",
-									"margin-bottom": "8px",
-								}}
+					details={
+						<>
+							{" "}
+							<Show when={updaterStore.state.available && updaterStore.state.version}>
+								<p class={s.hint} style={{ color: "var(--success)" }}>
+									{t("general.hint.updateAvailable", "Version {version} is available!", {
+										version: updaterStore.state.version ?? "",
+									})}
+								</p>
+							</Show>
+							<Show
+								when={
+									!updaterStore.state.available &&
+									!updaterStore.state.checking &&
+									!updaterStore.state.error &&
+									!updaterStore.state.noRelease &&
+									!updaterStore.state.unsupported
+								}
 							>
-								<div style={{ display: "flex", gap: "8px", "align-items": "center", "margin-bottom": "6px" }}>
-									<input
-										type="checkbox"
-										checked={launcher.enabled}
-										title={t("general.label.launcherEnabled", "Enabled")}
-										onChange={(e) => updateLauncher(launcher.id, { enabled: e.currentTarget.checked })}
-									/>
-									<input
-										type="text"
-										value={launcher.name}
-										placeholder={t("general.placeholder.launcherName", "Name")}
-										onInput={(e) => updateLauncher(launcher.id, { name: e.currentTarget.value })}
-										style={{ flex: "1" }}
-									/>
-									<button class={s.testBtn} onClick={() => removeLauncher(launcher.id)}>
-										{t("general.btn.remove", "Remove")}
-									</button>
-								</div>
-								<input
-									type="text"
-									value={launcher.executable}
-									placeholder={t("general.placeholder.launcherExec", "Executable (e.g. code, or /usr/local/bin/code)")}
-									onInput={(e) => updateLauncher(launcher.id, { executable: e.currentTarget.value })}
-									style={{ width: "100%", "margin-bottom": "6px" }}
-								/>
-								<textarea
-									value={launcher.args.join("\n")}
-									placeholder={"--goto\n{file}:{line}:{column}"}
-									rows={3}
-									onInput={(e) => updateLauncher(launcher.id, { args: e.currentTarget.value.split("\n") })}
-									style={{ width: "100%", "font-family": "var(--font-mono)", "font-size": "var(--font-sm)" }}
-								/>
-							</div>
-						)}
-					</For>
-					<button class={s.testBtn} onClick={addLauncher}>
-						{t("general.btn.addLauncher", "Add launcher")}
-					</button>
-				</div>
-			</Show>
+								<p class={s.hint}>{t("general.hint.latestVersion", "You are on the latest version")}</p>
+							</Show>
+							<Show when={updaterStore.state.unsupported}>
+								<p class={s.hint} style={{ color: "var(--fg-muted)" }}>
+									{updaterStore.state.unsupported}
+								</p>
+							</Show>
+							<Show when={updaterStore.state.noRelease}>
+								<p class={s.hint} style={{ color: "var(--fg-muted)" }}>
+									{t("general.hint.noRelease", "No {channel} releases published yet", {
+										channel: settingsStore.state.updateChannel,
+									})}
+								</p>
+							</Show>
+							<Show when={updaterStore.state.error}>
+								<p class={s.hint} style={{ color: "var(--accent-red, #f44747)" }}>
+									{updaterStore.state.error}
+								</p>
+							</Show>
+						</>
+					}
+				/>
+				<SettingToggle
+					settingId="app.auto_update_enabled"
+					row
+					checked={settingsStore.state.autoUpdateEnabled}
+					onChange={(v) => settingsStore.setAutoUpdateEnabled(v)}
+					label={t("general.toggle.autoUpdateEnabled", "Automatically check for updates")}
+					hint={t("general.hint.autoUpdateEnabled", "Download and install updates in the background")}
+				/>
 
-			<h3>{t("general.heading.experimental", "Experimental Features")}</h3>
+				<SettingToggle
+					settingId="app.defer_update_relaunch"
+					row
+					checked={settingsStore.state.deferUpdateRelaunch}
+					onChange={(v) => settingsStore.setDeferUpdateRelaunch(v)}
+					label={t("general.toggle.deferUpdateRelaunch", "Wait for agents before restarting")}
+					hint={t(
+						"general.hint.deferUpdateRelaunch",
+						"After an update installs, restart only when no session is busy or waiting for input",
+					)}
+				/>
 
-			<div class={s.group}>
-				<p class={s.warning}>
-					{t("general.hint.experimentalWarning", "These features are under active development and may be unstable.")}
-				</p>
-				<div class={s.toggle}>
-					<input
-						type="checkbox"
-						checked={settingsStore.state.experimentalFeaturesEnabled}
-						onChange={(e) => settingsStore.setExperimentalFeaturesEnabled(e.currentTarget.checked)}
+				<SettingToggle
+					settingId="app.eager_resume_after_update"
+					row
+					checked={settingsStore.state.eagerResumeAfterUpdate}
+					onChange={(v) => settingsStore.setEagerResumeAfterUpdate(v)}
+					label={t("general.toggle.eagerResumeAfterUpdate", "Resume all agents after an update")}
+					hint={t(
+						"general.hint.eagerResumeAfterUpdate",
+						"After the app restarts for an update, resume every agent tab with a confirmed session on every branch, without visiting each one",
+					)}
+				/>
+
+				<ExpertSetting configKey="app.update_channel" value={settingsStore.state.updateChannel}>
+					<SettingSelect
+						settingId="app.update_channel"
+						row
+						label={t("general.label.updateChannel", "Update Channel")}
+						value={settingsStore.state.updateChannel}
+						onChange={(v) => settingsStore.setUpdateChannel(v as UpdateChannel)}
+						options={updateChannelOptions}
+						hint={
+							settingsStore.state.updateChannel !== "stable"
+								? t("general.hint.updateChannelWarning", "Nightly builds may be unstable")
+								: t("general.hint.updateChannel", "Choose which release channel to receive updates from")
+						}
+						hintStyle={
+							settingsStore.state.updateChannel !== "stable" ? { color: "var(--warning, #e5c07b)" } : undefined
+						}
 					/>
-					<span>{t("general.toggle.experimentalFeatures", "Enable experimental features")}</span>
-				</div>
-				<p class={s.hint}>
-					{t(
-						"general.hint.experimentalFeatures",
-						"Opt in to features under active development. Individual options appear below when enabled.",
-					)}
-				</p>
-			</div>
-
-			<Show when={settingsStore.state.experimentalFeaturesEnabled}>
-				<SettingToggle
-					checked={settingsStore.state.aiChatEnabled}
-					onChange={(v) => settingsStore.setAiChatEnabled(v)}
-					label={t("general.toggle.aiChat", "AI Chat")}
-					hint={t("general.hint.aiChat", "Enable the AI Chat panel, keyboard shortcut, and command palette entry.")}
-				/>
-
-				<SettingToggle
-					checked={settingsStore.state.aiTriageEnabled}
-					onChange={(v) => settingsStore.setAiTriageEnabled(v)}
-					label={t("general.toggle.aiTriage", "AI Triage")}
-					hint={t(
-						"general.hint.aiTriage",
-						"Enable AI-powered diff triage to classify changed files by relevance and risk.",
-					)}
-				/>
-
-				<SettingToggle
-					checked={settingsStore.state.aiWatchersEnabled}
-					onChange={(v) => settingsStore.setAiWatchersEnabled(v)}
-					label={t("general.toggle.aiWatchers", "AI Watchers")}
-					hint={t(
-						"general.hint.aiWatchers",
-						"Enable terminal watchers that trigger AI actions on shell events (idle, busy, errors).",
-					)}
-				/>
+				</ExpertSetting>
+			</SectionCard>
+			<Show when={isTauri()}>
+				<SectionCard title="Local tools">
+					<Show when={isTauri() && cliStatus()}>
+						<SettingRow
+							label={t("general.heading.cli", "fastaf CLI")}
+							hint={
+								cliStatus()?.installed
+									? `${t("general.hint.cliInstalled", "Installed at {path}", { path: cliStatus()?.path ?? "/usr/local/bin/fastaf" })}${!cliStatus()?.version_match ? ` ${cliStatus()?.auto_updatable ? t("general.hint.cliOutdated", "(update pending — restart to apply)") : t("general.hint.cliUpdateAvailable", "(update available)")}` : ""}`
+									: t(
+											"general.hint.cliNotInstalled",
+											"Install the fastaf CLI to control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions, and query repository status. Useful for scripting automation.",
+										)
+							}
+							help={t("general.hint.cliInfo", "Control terminals, tabs and repositories from scripts.")}
+						>
+							{() => (
+								<div>
+									<Show when={!cliStatus()?.installed || !cliStatus()?.version_match}>
+										<Button
+											data-non-setting="Install, update or remove an optional CLI binary; not a stored setting"
+											class={s.testBtn}
+											onClick={handleInstallCli}
+											disabled={cliInstalling()}
+										>
+											{cliInstalling()
+												? t("general.btn.installing", "Installing...")
+												: cliStatus()?.installed
+													? t("general.btn.updateCli", "Update")
+													: t("general.btn.installCli", "Install fastaf CLI")}
+										</Button>
+									</Show>
+									<Show when={cliStatus()?.installed}>
+										<Button
+											data-non-setting="Install, update or remove an optional CLI binary; not a stored setting"
+											class={s.testBtn}
+											onClick={handleUninstallCli}
+										>
+											{t("general.btn.uninstallCli", "Uninstall")}
+										</Button>
+									</Show>
+								</div>
+							)}
+						</SettingRow>
+					</Show>
+					<Show when={isTauri()}>
+						<SettingRow
+							label={t("general.heading.codeIntelligence", "Code Intelligence")}
+							hint={
+								mdkbStatus()?.available
+									? `${t("general.hint.mdkbInstalled", "Installed at {path}", { path: mdkbStatus()?.binaryPath ?? "unknown" })}${mdkbStatus()?.version ? ` v${mdkbStatus()?.version}` : ""}`
+									: t(
+											"general.hint.mdkbNotInstalled",
+											"Install mdkb on your PATH to enable outline, go-to-definition and find references in the code editor. FastAF picks it up on its own.",
+										)
+							}
+							error={mdkbError() ?? undefined}
+							help={t("general.hint.codeIntelligenceInfo", "Code navigation, symbol outlines and agent memory.")}
+						>
+							{() => (
+								<Show when={mdkbStatus()?.available}>
+									<Button
+										data-non-setting="Install, update or remove an optional CLI binary; not a stored setting"
+										class={s.testBtn}
+										onClick={handleUninstallMdkb}
+									>
+										{t("general.btn.uninstallMdkb", "Uninstall")}
+									</Button>
+								</Show>
+							)}
+						</SettingRow>
+					</Show>
+					<Show when={isTauri()}>
+						<>
+							<div>
+								<SettingRow
+									label={t("general.heading.customLaunchers", "Custom Launchers")}
+									help={
+										<>
+											{t(
+												"general.hint.customLaunchers",
+												'Define your own tools for the "Open in" menu. Each argument may use {path}, {file}, {fileDir}, {repo}, {cwd}, {home}, {line}, {column} placeholders. One argument per line.',
+											)}
+										</>
+									}
+									hint={launchers().length ? `${launchers().length} custom launchers` : "No custom launchers"}
+								>
+									{() => (
+										<Button
+											data-non-setting="Create or remove a stable custom-launcher record through its owner"
+											class={s.testBtn}
+											onClick={addLauncher}
+										>
+											{t("general.btn.addLauncher", "Add launcher")}
+										</Button>
+									)}
+								</SettingRow>
+								<For each={launchers()}>
+									{(launcher) => (
+										<div
+											class={s.group}
+											style={{
+												border: "1px solid var(--border)",
+												"border-radius": "var(--radius-md)",
+												padding: "8px",
+												"margin-bottom": "8px",
+											}}
+										>
+											<div style={{ display: "flex", gap: "8px", "align-items": "center", "margin-bottom": "6px" }}>
+												<input
+													data-setting-id="app.custom_launchers.{id}.enabled"
+													type="checkbox"
+													checked={launcher.enabled}
+													title={t("general.label.launcherEnabled", "Enabled")}
+													onChange={(e) => updateLauncher(launcher.id, { enabled: e.currentTarget.checked })}
+												/>
+												<Input
+													data-setting-id="app.custom_launchers.{id}.name"
+													type="text"
+													value={launcher.name}
+													placeholder={t("general.placeholder.launcherName", "Name")}
+													onInput={(e) => updateLauncher(launcher.id, { name: e.currentTarget.value })}
+													style={{ flex: "1" }}
+												/>
+												<Button
+													data-non-setting="Create or remove a stable custom-launcher record through its owner"
+													class={s.testBtn}
+													onClick={() => removeLauncher(launcher.id)}
+												>
+													{t("general.btn.remove", "Remove")}
+												</Button>
+											</div>
+											<Input
+												data-setting-id="app.custom_launchers.{id}.executable"
+												type="text"
+												value={launcher.executable}
+												placeholder={t(
+													"general.placeholder.launcherExec",
+													"Executable (e.g. code, or /usr/local/bin/code)",
+												)}
+												onInput={(e) => updateLauncher(launcher.id, { executable: e.currentTarget.value })}
+												style={{ width: "100%", "margin-bottom": "6px" }}
+											/>
+											<Textarea
+												data-setting-id="app.custom_launchers.{id}.args"
+												value={launcher.args.join("\n")}
+												placeholder={"--goto\n{file}:{line}:{column}"}
+												rows={3}
+												onInput={(e) => updateLauncher(launcher.id, { args: e.currentTarget.value.split("\n") })}
+												style={{ width: "100%", "font-family": "var(--font-mono)", "font-size": "var(--font-sm)" }}
+											/>
+										</div>
+									)}
+								</For>
+							</div>
+						</>
+					</Show>
+				</SectionCard>
 			</Show>
+			<SectionCard title={t("general.heading.general", "General")}>
+				{/* A picker with one option is not a choice. */}
+				<Show when={AVAILABLE_LOCALES.length > 1}>
+					<SettingSelect
+						settingId="app.language"
+						row
+						label={t("general.label.language", "Language")}
+						value={settingsStore.state.language}
+						onChange={(v) => settingsStore.setLanguage(v)}
+						options={languageOptions}
+						hint={t("general.hint.language", "Language of the FastAF interface")}
+					/>
+				</Show>
+
+				<SettingToggle
+					settingId="app.show_last_prompt"
+					row
+					checked={settingsStore.state.showLastPrompt}
+					onChange={(v) => settingsStore.setShowLastPrompt(v)}
+					label="Show agent context bar"
+					hint="Display the model's current intent, its orchestrator-assigned task, and the last prompt sent to an agent"
+				/>
+
+				<SettingToggle
+					settingId="app.import_tools_enabled"
+					row
+					checked={settingsStore.state.importToolsEnabled}
+					onChange={(v) => settingsStore.setImportToolsEnabled(v)}
+					label={t("general.toggle.importToolsEnabled", "Import from other tools")}
+					hint={t(
+						"general.hint.importToolsEnabled",
+						"Show 'Import from Claude Code / Codex / Cursor / superset.sh' in the Add Repository menu",
+					)}
+				/>
+			</SectionCard>
+			<SectionCard title={t("general.heading.confirmations", "Confirmations")}>
+				<Show when={isTauri()}>
+					<SettingSelect
+						settingId="app.close_behavior"
+						unavailableValues={settingsStore.state.trayIcon === "never" ? ["background"] : []}
+						row
+						label={t("general.label.closeBehavior", "When closing the main window")}
+						value={settingsStore.state.closeBehavior}
+						onChange={(value) => settingsStore.setCloseBehavior(value as CloseBehavior)}
+						options={[
+							{ value: "ask", label: t("general.closeBehavior.ask", "Ask") },
+							{ value: "background", label: t("general.closeBehavior.background", "Background") },
+							{ value: "quit", label: t("general.closeBehavior.quit", "Quit") },
+						]}
+						hint={t(
+							"general.hint.closeBehavior",
+							"Background hides visible windows and keeps sessions running. Quit still confirms when enabled.",
+						)}
+					/>
+				</Show>
+
+				<Show when={isTauri()}>
+					<SettingSelect
+						settingId="app.background.tray_icon"
+						row
+						label={t("general.label.trayIcon", "Tray and menu-bar icon")}
+						value={settingsStore.state.trayIcon}
+						onChange={(value) => settingsStore.setTrayIcon(value as TrayIconPreference)}
+						options={[
+							{ value: "always", label: t("general.trayIcon.always", "Always") },
+							{ value: "background_only", label: t("general.trayIcon.backgroundOnly", "Only in background") },
+							{ value: "never", label: t("general.trayIcon.never", "Never") },
+						]}
+						hint={t(
+							"general.hint.trayIcon",
+							"Never disables Background. Without a tray host, including stock GNOME, closing minimizes the window so it remains reachable.",
+						)}
+					/>
+				</Show>
+
+				<Show when={isTauri() && isMacOS()}>
+					<SettingToggle
+						settingId="app.background.hide_dock_icon"
+						row
+						checked={settingsStore.state.hideDockIcon}
+						onChange={(enabled) => settingsStore.setHideDockIcon(enabled)}
+						label={t("general.toggle.hideDockIcon", "Hide Dock icon in background")}
+						hint={t("general.hint.hideDockIcon", "Restore the Dock icon when FastAF is shown again")}
+					/>
+				</Show>
+				<SettingToggle
+					settingId="app.confirm_before_quit"
+					row
+					checked={settingsStore.state.confirmBeforeQuit}
+					onChange={(v) => settingsStore.setConfirmBeforeQuit(v)}
+					label={t("general.toggle.confirmBeforeQuit", "Confirm before quitting")}
+					hint={t("general.hint.confirmBeforeQuit", "Confirm real quit when terminal sessions are active")}
+				/>
+
+				<SettingToggle
+					settingId="app.confirm_before_closing_tab"
+					row
+					checked={settingsStore.state.confirmBeforeClosingTab}
+					onChange={(v) => settingsStore.setConfirmBeforeClosingTab(v)}
+					label={t("general.toggle.confirmBeforeClosingTab", "Confirm before closing a tab")}
+					hint={t("general.hint.confirmBeforeClosingTab", "Show a confirmation dialog when closing a terminal tab")}
+				/>
+			</SectionCard>
+			<SectionCard title={t("general.heading.powerManagement", "Power Management")}>
+				<SettingToggle
+					settingId="app.prevent_sleep_when_busy"
+					row
+					checked={settingsStore.state.preventSleepWhenBusy}
+					onChange={(v) => settingsStore.setPreventSleepWhenBusy(v)}
+					label={t("general.toggle.preventSleepWhenBusy", "Prevent sleep when busy")}
+					hint={t("general.hint.preventSleepWhenBusy", "Keep the system awake while scripts are running")}
+				/>
+
+				<ExpertSetting configKey="app.standby_timeout_minutes" value={settingsStore.state.standbyTimeoutMinutes}>
+					<SettingSlider
+						settingId="app.standby_timeout_minutes"
+						row
+						label="Auto-Standby Timeout"
+						value={settingsStore.state.standbyTimeoutMinutes}
+						onChange={(v) => settingsStore.setStandbyTimeoutMinutes(v)}
+						min={0}
+						max={60}
+						step={1}
+						formatValue={(v) => (v === 0 ? "Off" : `${v} min`)}
+						hint="Pause idle background sessions after this duration to save resources. 0 = disabled."
+					/>
+				</ExpertSetting>
+
+				<ExpertSetting configKey="app.index_strategy" value={settingsStore.state.indexStrategy}>
+					<SettingSelect
+						settingId="app.index_strategy"
+						row
+						label="Content Indexing"
+						value={settingsStore.state.indexStrategy}
+						onChange={(v) =>
+							settingsStore.setIndexStrategy(v as "active_only" | "active_and_switch" | "all_sequential" | "disabled")
+						}
+						options={[
+							{ value: "disabled", label: "Disabled" },
+							{ value: "active_only", label: "Active repo only" },
+							{ value: "active_and_switch", label: "Active + on switch" },
+							{ value: "all_sequential", label: "All repos at boot" },
+						]}
+						hint="When to build search indexes. Set to Disabled to turn off background indexing entirely."
+					/>
+				</ExpertSetting>
+			</SectionCard>
+			<SectionCard title="Resource Limits">
+				<ExpertSetting configKey="app.index_memory_budget_mb" value={settingsStore.state.indexMemoryBudgetMb}>
+					<SettingInput
+						settingId="app.index_memory_budget_mb"
+						row
+						type="number"
+						label="Content index memory budget (MB)"
+						value={String(settingsStore.state.indexMemoryBudgetMb)}
+						onInput={(value) => value.trim() !== "" && settingsStore.setIndexMemoryBudgetMb(Number(value))}
+						hint="Total memory available for content search indexes before older indexes are dropped."
+					/>
+				</ExpertSetting>
+				<ExpertSetting configKey="app.attachment_max_bytes" value={settingsStore.state.attachmentMaxBytes}>
+					<SettingInput
+						settingId="app.attachment_max_bytes"
+						row
+						type="number"
+						label="Maximum attachment size (bytes)"
+						value={String(settingsStore.state.attachmentMaxBytes)}
+						onInput={(value) => value.trim() !== "" && settingsStore.setAttachmentMaxBytes(Number(value))}
+						hint="Maximum size of one attachment. Existing attachments are not changed."
+					/>
+				</ExpertSetting>
+				<Show when={isTauri()}>
+					<ExpertSetting
+						configKey="app.background.webview_unload_minutes"
+						value={settingsStore.state.webviewUnloadMinutes}
+					>
+						<SettingInput
+							settingId="app.background.webview_unload_minutes"
+							row
+							type="number"
+							label="Background WebView unload delay (minutes)"
+							value={String(settingsStore.state.webviewUnloadMinutes)}
+							onInput={(value) => value.trim() !== "" && settingsStore.setWebviewUnloadMinutes(Number(value))}
+							hint="Unload the hidden WebView after this delay. Zero keeps it loaded; terminal sessions keep running."
+						/>
+					</ExpertSetting>
+				</Show>
+			</SectionCard>
+
+			<SectionCard title={t("developerTools.heading.ide", "IDE")}>
+				<SettingSelect
+					settingId="app.ide"
+					row
+					label={t("general.label.defaultIde", "Default IDE")}
+					value={settingsStore.state.ide}
+					onChange={(v) => settingsStore.setIde(v as IdeType)}
+					options={ideOptions}
+					hint={t("general.hint.defaultIde", "IDE used to open repositories")}
+				/>
+			</SectionCard>
+
+			<SectionCard title={t("general.heading.experimental", "Experimental Features")}>
+				<div class={s.group}>
+					<p class={s.warning}>
+						{t("general.hint.experimentalWarning", "These features are under active development and may be unstable.")}
+					</p>
+					<SettingToggle
+						settingId="app.experimental_features_enabled"
+						row
+						checked={settingsStore.state.experimentalFeaturesEnabled}
+						onChange={(enabled) => settingsStore.setExperimentalFeaturesEnabled(enabled)}
+						label={t("general.toggle.experimentalFeatures", "Enable experimental features")}
+						hint={t(
+							"general.hint.experimentalFeatures",
+							"Opt in to features under active development: the AI Chat panel and SSH Tunnels.",
+						)}
+					/>
+					<Show when={settingsStore.state.experimentalFeaturesEnabled}>
+						<SettingToggle
+							settingId="app.ai_chat_enabled"
+							row
+							checked={settingsStore.state.aiChatEnabled}
+							onChange={(v) => settingsStore.setAiChatEnabled(v)}
+							label={t("general.toggle.aiChat", "AI Chat")}
+							hint={t("general.hint.aiChat", "Enable the AI Chat panel, keyboard shortcut, and command palette entry.")}
+						/>
+					</Show>
+				</div>
+			</SectionCard>
 		</div>
 	);
 };

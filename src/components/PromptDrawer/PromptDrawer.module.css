@@ -87,6 +87,7 @@
 .categories {
   display: flex;
   gap: 4px;
+  flex-wrap: wrap;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -225,6 +226,8 @@
 
 .footer {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   align-items: center;
   justify-content: space-between;
   padding: 8px 16px;
@@ -235,6 +238,8 @@
 /* Composes is class-only, so the "+ New Prompt" btn is styled by selector
    rather than local class — kept in sync with .btnPrimary in controls. */
 .footer > button {
+  flex-shrink: 0;
+  white-space: nowrap;
   min-height: 0;
   padding: 4px 10px;
   font-size: var(--font-sm);
@@ -357,7 +362,9 @@
 }
 
 .editor {
-  width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+  width: 640px;
   max-width: 90vw;
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
@@ -375,52 +382,6 @@
   }
 }
 
-.editor h4 {
-  margin: 0 0 16px;
-  font-size: var(--font-lg);
-}
-
-.editorField {
-  margin-bottom: 12px;
-}
-
-.editorField label {
-  display: block;
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--fg-secondary);
-  margin-bottom: 4px;
-}
-
-.editorField input,
-.editorField textarea,
-.editorField select {
-  width: 100%;
-  padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
-  font-size: var(--font-base);
-  font-family: inherit;
-  box-sizing: border-box;
-  outline: none;
-  transition: border-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out);
-}
-
-.editorField input:focus,
-.editorField textarea:focus,
-.editorField select:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
-}
-
-.editorField textarea {
-  resize: vertical;
-  font-family: var(--font-mono);
-}
-
 .editorActions {
   display: flex;
   gap: 8px;
@@ -436,7 +397,10 @@
   font-size: var(--font-sm);
 }
 
-.editorActions button:first-child {
+/* Save stays the accent fill; the second selector out-ranks the shared
+   `button[data-ready]` look (ready-actions.css), which Save carries while dirty. */
+.editorActions button:first-child,
+.editorActions button[data-ready]:first-child:not(:disabled) {
   background: var(--accent);
   color: var(--text-on-accent);
   box-shadow: var(--highlight-inset);
@@ -455,66 +419,6 @@
   color: var(--error);
   background: color-mix(in srgb, var(--error) 10%, transparent);
   border-radius: var(--radius-md);
-}
-
-/* Placement checkbox grid */
-.placementGrid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-}
-
-.placementCheck {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-sm);
-  color: var(--fg-secondary);
-  cursor: pointer;
-}
-
-.placementCheck input {
-  cursor: pointer;
-}
-
-/* Toggle row for auto-execute */
-.toggleRow {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-
-.toggleRow input {
-  width: auto;
-  flex-shrink: 0;
-  margin: 0 2px 0 0;
-}
-
-.fieldHint {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  margin-top: 2px;
-}
-
-/* Reset button */
-.resetBtn {
-  background: transparent !important;
-  color: var(--warning) !important;
-  border: 1px solid var(--warning) !important;
-}
-
-/* Badge */
-.badge {
-  display: inline-block;
-  font-size: var(--font-2xs);
-  padding: 1px 5px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  color: var(--fg-muted);
-  border: 1px solid var(--border-subtle);
-  margin-left: 6px;
-  vertical-align: middle;
 }
 
 /* Tag badges on prompt rows */
@@ -564,112 +468,6 @@
 
 .toggleOff {
   opacity: 0.4;
-}
-
-/* Side-by-side fields (execution mode + auto-execute) */
-.editorFieldRow {
-  display: flex;
-  gap: 16px;
-}
-
-.editorFieldRow > .editorField {
-  flex: 1;
-}
-
-/* Variable insertion dropdown */
-.varDropdownWrap {
-  position: relative;
-  margin-top: 4px;
-}
-
-.varDropdownBtn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  cursor: pointer;
-  transition: border-color var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
-}
-
-.varDropdownBtn:hover {
-  border-color: var(--accent);
-  color: var(--fg-primary);
-}
-
-.varChevron {
-  font-size: 8px;
-  transition: transform var(--duration-base) var(--ease-out);
-}
-
-.varChevronOpen {
-  transform: rotate(180deg);
-}
-
-.varDropdownList {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  margin-top: 2px;
-  background: var(--surface-overlay);
-  backdrop-filter: var(--blur-overlay);
-  -webkit-backdrop-filter: var(--blur-overlay);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
-  z-index: var(--z-dropdown);
-  max-height: 280px;
-  overflow-y: auto;
-}
-
-.varGroupLabel {
-  padding: 4px 10px 2px;
-  font-size: var(--font-2xs);
-  font-weight: 700;
-  color: var(--fg-muted);
-  background: var(--surface-overlay);
-  backdrop-filter: var(--blur-overlay);
-  -webkit-backdrop-filter: var(--blur-overlay);
-  position: sticky;
-  top: 0;
-}
-
-.varItem {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  width: 100%;
-  padding: 4px 10px;
-  background: none;
-  border: none;
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  cursor: pointer;
-  text-align: left;
-  transition: background var(--duration-fast) var(--ease-out);
-}
-
-.varItem:hover {
-  background: var(--surface-hover);
-}
-
-.varItemName {
-  font-family: var(--font-mono);
-  font-size: var(--font-xs);
-  color: var(--accent);
-  flex-shrink: 0;
-  min-width: 120px;
-}
-
-.varItemDesc {
-  color: var(--fg-muted);
-  font-size: var(--font-xs);
 }
 
 /* Variable dialog enhancements */

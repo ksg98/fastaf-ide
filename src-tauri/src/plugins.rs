@@ -4,6 +4,7 @@
 //! Each plugin directory contains a `manifest.json` and a JS entry point.
 //!
 //! This module provides:
+//! - `seed_externalized_builtin_plugins()` — one-time seeding of bundled packages (none today)
 //! - `register_plugin_protocol()` — custom `plugin://` URI scheme handler
 //! - `list_user_plugins` — Tauri command returning valid manifests
 //! - `start_plugin_watcher()` — file watcher for hot-reload events
@@ -63,6 +64,17 @@ use tauri::{AppHandle, Emitter};
 /// self-register arbitrary capabilities for built-in plugins.
 const BUILTIN_PLUGIN_CAPABILITIES: &[(&str, &[&str])] = &[("plan", &["fs:read"])];
 
+/// Ids of the plugins compiled into the frontend (`BUILTIN_PLUGINS` in
+/// `src/plugins/index.ts`). Keep the two lists in step.
+///
+/// FastAF ships Plan and Stories as built-ins, where upstream 2.0 turned them
+/// into external packages. When both exist the built-in wins: an external
+/// package with one of these ids fails `validate_manifest`, so it is never
+/// listed, loaded or granted capabilities, and an install of one is refused.
+/// Its directory is left on disk untouched, because deleting a user's files is
+/// worse than ignoring them.
+const BUILTIN_PLUGIN_IDS: &[&str] = &["plan", "stories-ticker"];
+
 fn check_plugin_capability_inner(
     loaded_plugins: &dashmap::DashMap<String, Vec<String>>,
     plugin_id: &str,
@@ -113,8 +125,140 @@ fn plugins_dir() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// One-time seeding of bundled packages
+// ---------------------------------------------------------------------------
+
+const SEEDED_PLUGINS_MARKER: &str = ".seeded-plugins-v1";
+
+struct SeededPlugin {
+    id: &'static str,
+    files: &'static [(&'static str, &'static str)],
+}
+
+/// Packages seeded into every install, once. Empty: FastAF ships Plan and
+/// Stories as built-ins (`BUILTIN_PLUGIN_IDS`), where upstream 2.0 seeded them
+/// as external packages. Only list a package FastAF may redistribute.
+const SEEDED_PLUGINS: &[SeededPlugin] = &[];
+
+/// Install `SEEDED_PLUGINS` as ordinary external plugins exactly once. With
+/// nothing to seed it writes nothing, not even the marker.
+pub(crate) fn seed_externalized_builtin_plugins(config_dir: &Path) -> Result<(), String> {
+    seed_plugins_once(config_dir, SEEDED_PLUGINS)
+}
+
+/// Existing directories win, so a manually installed or newer package is never
+/// overwritten. The marker is written only after every package is present or
+/// deliberately preserved; uninstalling later therefore remains permanent.
+fn seed_plugins_once(config_dir: &Path, plugins: &[SeededPlugin]) -> Result<(), String> {
+    if plugins.is_empty() {
+        return Ok(());
+    }
+    let marker = config_dir.join(SEEDED_PLUGINS_MARKER);
+    if marker.exists() {
+        return Ok(());
+    }
+
+    let target_root = config_dir.join("plugins");
+    std::fs::create_dir_all(&target_root)
+        .map_err(|e| format!("Failed to create plugins directory: {e}"))?;
+
+    for plugin in plugins {
+        let target = target_root.join(plugin.id);
+        if target.exists() {
+            continue;
+        }
+
+        let staging = target_root.join(format!(".seed-{}-{}", plugin.id, uuid::Uuid::new_v4()));
+        let install = (|| -> Result<(), String> {
+            std::fs::create_dir(&staging)
+                .map_err(|e| format!("Failed to stage plugin {}: {e}", plugin.id))?;
+            for (name, contents) in plugin.files {
+                std::fs::write(staging.join(name), contents)
+                    .map_err(|e| format!("Failed to seed plugin {}/{}: {e}", plugin.id, name))?;
+            }
+            std::fs::rename(&staging, &target)
+                .map_err(|e| format!("Failed to install seeded plugin {}: {e}", plugin.id))
+        })();
+        if let Err(error) = install {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    }
+
+    crate::config::persist_atomic(&marker, b"1\n")
+}
+
+// ---------------------------------------------------------------------------
+// Plugins bundled for install on request
+// ---------------------------------------------------------------------------
+
+/// Plugins FastAF can install from its own binary when the user asks, such as
+/// the Tasks work-item providers. Empty: upstream's providers (github-work,
+/// gitlab, jira) come from a repository with no license, so FastAF cannot
+/// redistribute them. The install commands stay registered so a provider
+/// FastAF may ship only needs an entry here; until then Tasks says "Not
+/// available in this build." Nothing here is ever installed automatically.
+const BUNDLED_ON_REQUEST: &[SeededPlugin] = &[];
+
+/// Ids of the plugins FastAF can install from its own bundle.
+fn bundled_plugin_ids() -> Vec<String> {
+    BUNDLED_ON_REQUEST
+        .iter()
+        .map(|plugin| plugin.id.to_string())
+        .collect()
+}
+
+// DESKTOP-ONLY (HTTP parity): pairs with `install_bundled_plugin`, which needs an AppHandle.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn list_bundled_plugins() -> Vec<String> {
+    bundled_plugin_ids()
+}
+
+/// Write a bundled plugin's files into a prepared target. Kept apart from the
+/// command so tests can exercise it without an `AppHandle`.
+fn write_bundled_plugin(id: &str) -> Result<(PreparedTarget, PluginManifest), String> {
+    let plugin = BUNDLED_ON_REQUEST
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or_else(|| format!("\"{id}\" is not bundled with FastAF"))?;
+    let manifest_src = plugin
+        .files
+        .iter()
+        .find(|(name, _)| *name == "manifest.json")
+        .map(|(_, contents)| *contents)
+        .ok_or_else(|| format!("Bundled plugin \"{id}\" has no manifest.json"))?;
+    let manifest: PluginManifest = serde_json::from_str(manifest_src)
+        .map_err(|e| format!("Invalid bundled manifest for \"{id}\": {e}"))?;
+    validate_manifest(&manifest, plugin.id)?;
+    let target = prepare_plugin_target(&manifest)?;
+    for (name, contents) in plugin.files {
+        std::fs::write(target.path.join(name), contents)
+            .map_err(|e| format!("Failed to write {id}/{name}: {e}"))?;
+    }
+    Ok((target, manifest))
+}
+
+/// Install one of FastAF's bundled plugins (a Tasks provider) on request.
+/// Re-installing over an existing copy keeps its `data/`, like every install path.
+// DESKTOP-ONLY (HTTP parity): takes AppHandle; local-FS install/emit
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn install_bundled_plugin(
+    id: String,
+    app_handle: AppHandle,
+) -> Result<PluginManifest, String> {
+    let (target, manifest) = write_bundled_plugin(&id)?;
+    finalize_plugin_install(target, &manifest, &app_handle)
+}
+
+// ---------------------------------------------------------------------------
 // Manifest
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "settings/plugin_contract_tests.rs"]
+mod settings_contract_tests;
 
 /// Plugin manifest as declared in `manifest.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +266,14 @@ pub struct PluginManifest {
     pub id: String,
     pub name: String,
     pub version: String,
+    /// Computed from installed files; manifest input cannot claim an identity.
+    #[serde(
+        default,
+        skip_deserializing,
+        skip_serializing_if = "Option::is_none",
+        rename = "contentSha256"
+    )]
+    pub content_digest: Option<String>,
     #[serde(rename = "minAppVersion")]
     pub min_app_version: String,
     pub main: String,
@@ -142,6 +294,40 @@ pub struct PluginManifest {
     /// Each entry is a plain binary name (e.g. "rtk", "mdkb").
     #[serde(default)]
     pub binaries: Vec<String>,
+    /// Account providers whose accounts `httpFetch({account})` may use: a core
+    /// provider id (`"github"`) or a token-only descriptor registered on load.
+    #[serde(default)]
+    pub providers: Vec<ManifestProvider>,
+    /// Complete scoped settings schema. Existing configurable plugins use host migrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<crate::settings::plugin_schema::Definition>,
+}
+
+/// One manifest `providers` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ManifestProvider {
+    Core(String),
+    Declared(crate::accounts::ProviderDescriptor),
+}
+
+/// Account providers that core registers itself; a manifest may only reference them.
+const CORE_ACCOUNT_PROVIDERS: &[&str] = &["github"];
+
+impl ManifestProvider {
+    fn id(&self) -> &str {
+        match self {
+            Self::Core(id) => id,
+            Self::Declared(descriptor) => &descriptor.id,
+        }
+    }
+}
+
+impl PluginManifest {
+    /// Manifest consent: may this plugin authenticate with accounts of `provider`?
+    pub(crate) fn declares_provider(&self, provider: &str) -> bool {
+        self.providers.iter().any(|entry| entry.id() == provider)
+    }
 }
 
 /// Binary name prefixes that are never permitted in plugin manifests.
@@ -191,6 +377,12 @@ fn validate_manifest(manifest: &PluginManifest, dir_name: &str) -> Result<(), St
     if manifest.id.is_empty() {
         return Err("id is empty".into());
     }
+    if BUILTIN_PLUGIN_IDS.contains(&manifest.id.as_str()) {
+        return Err(format!(
+            "id \"{}\" belongs to a plugin built into FastAF",
+            manifest.id
+        ));
+    }
     if manifest.id != dir_name {
         return Err(format!(
             "id \"{}\" does not match directory name \"{}\"",
@@ -222,6 +414,10 @@ fn validate_manifest(manifest: &PluginManifest, dir_name: &str) -> Result<(), St
             return Err(format!("unknown capability: \"{cap}\""));
         }
     }
+    if manifest.capabilities.iter().any(|cap| cap == "net:http") && manifest.allowed_urls.is_empty()
+    {
+        return Err("net:http requires a non-empty allowedUrls list".into());
+    }
     // Validate declared binaries
     for binary in &manifest.binaries {
         if binary.contains('/') || binary.contains('\\') || binary.contains("..") {
@@ -245,6 +441,44 @@ fn validate_manifest(manifest: &PluginManifest, dir_name: &str) -> Result<(), St
     // binaries requires exec:cli capability
     if !manifest.binaries.is_empty() && !manifest.capabilities.contains(&"exec:cli".to_string()) {
         return Err("manifest declares binaries but lacks exec:cli capability".into());
+    }
+    validate_providers(manifest)
+}
+
+/// Accounts are used only through `httpFetch`, so `providers` requires `net:http`.
+fn validate_providers(manifest: &PluginManifest) -> Result<(), String> {
+    if !manifest.providers.is_empty() && !manifest.capabilities.iter().any(|c| c == "net:http") {
+        return Err("manifest declares providers but lacks net:http capability".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for entry in &manifest.providers {
+        let id = entry.id();
+        let core = CORE_ACCOUNT_PROVIDERS.contains(&id);
+        if matches!(entry, ManifestProvider::Core(_)) != core {
+            return Err(format!(
+                "provider \"{id}\" must be a core id or a new declared descriptor"
+            ));
+        }
+        if !seen.insert(id) {
+            return Err(format!("provider \"{id}\" is declared twice"));
+        }
+    }
+    Ok(())
+}
+
+/// Register the manifest's declared descriptors, owned by the plugin id. All or
+/// nothing: a rejected descriptor removes the ones registered before it.
+fn register_manifest_providers(manifest: &PluginManifest) -> Result<(), String> {
+    for entry in &manifest.providers {
+        if let ManifestProvider::Declared(descriptor) = entry
+            && let Err(e) = crate::accounts::register_provider(&manifest.id, descriptor.clone())
+        {
+            crate::accounts::unregister_providers(&manifest.id);
+            return Err(format!(
+                "Plugin \"{}\" provider \"{}\": {e}",
+                manifest.id, descriptor.id
+            ));
+        }
     }
     Ok(())
 }
@@ -274,6 +508,23 @@ fn is_path_escape(relative: &str) -> bool {
     false
 }
 
+/// Drops a leading `~v<digits>/` load-version segment from a plugin file path.
+/// Any other leading segment, including `~v` alone or `~vx`, is a real directory.
+fn strip_load_version(file: &str) -> &str {
+    let Some(rest) = file.strip_prefix("~v") else {
+        return file;
+    };
+    match rest.split_once('/') {
+        Some((digits, tail))
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            tail
+        }
+        None if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) => "",
+        _ => file,
+    }
+}
+
 /// Resolve a `plugin://{id}/{file}` URI to a filesystem path within the
 /// plugins directory. Returns `None` if the path is invalid or escapes.
 fn resolve_plugin_path(uri_path: &str) -> Option<PathBuf> {
@@ -288,6 +539,13 @@ fn resolve_plugin_path(uri_path: &str) -> Option<PathBuf> {
     let (plugin_id, file) = trimmed.split_once('/')?;
 
     if plugin_id.is_empty() || file.is_empty() {
+        return None;
+    }
+
+    // The frontend loads a plugin under `/{id}/~v{n}/` so that every relative import
+    // of one load shares a URL the WebView has not cached. The segment is not on disk.
+    let file = strip_load_version(file);
+    if file.is_empty() {
         return None;
     }
 
@@ -315,8 +573,8 @@ fn resolve_plugin_path(uri_path: &str) -> Option<PathBuf> {
 /// Serves JS files from `{config_dir}/plugins/{id}/{file}` with the
 /// `application/javascript` MIME type. Rejects path traversal attempts.
 ///
-/// The `?t=<timestamp>` query parameter is accepted (and ignored) to allow
-/// cache-busting for hot-reload.
+/// A leading `~v<digits>/` path segment (the frontend's per-load cache-busting
+/// version for hot reload, see `strip_load_version`) is accepted and ignored.
 pub fn register_plugin_protocol(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     builder.register_uri_scheme_protocol("plugin", |_ctx, request| {
         let uri = request.uri();
@@ -342,12 +600,7 @@ pub fn register_plugin_protocol(builder: tauri::Builder<tauri::Wry>) -> tauri::B
         match std::fs::read(&file_path) {
             Ok(data) => {
                 // Determine MIME type from extension
-                let mime = match file_path.extension().and_then(|e| e.to_str()) {
-                    Some("js" | "mjs") => "application/javascript",
-                    Some("json") => "application/json",
-                    Some("css") => "text/css",
-                    _ => "application/octet-stream",
-                };
+                let mime = plugin_asset_mime(&file_path);
 
                 Response::builder()
                     .status(StatusCode::OK)
@@ -366,6 +619,16 @@ pub fn register_plugin_protocol(builder: tauri::Builder<tauri::Wry>) -> tauri::B
     })
 }
 
+fn plugin_asset_mime(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("js" | "mjs") => "application/javascript",
+        Some("json") => "application/json",
+        Some("css") => "text/css",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -373,7 +636,32 @@ pub fn register_plugin_protocol(builder: tauri::Builder<tauri::Wry>) -> tauri::B
 /// Scan the user plugins directory and return all valid manifests.
 /// Invalid manifests are logged and skipped — never cause an error.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn list_user_plugins() -> Vec<PluginManifest> {
+pub async fn list_user_plugins(
+    plugin_ids: Option<Vec<String>>,
+) -> Result<Vec<PluginManifest>, String> {
+    crate::fs::spawn_blocking_fs(move || Ok(list_user_plugins_blocking(plugin_ids))).await
+}
+
+pub(crate) fn list_user_plugins_blocking(plugin_ids: Option<Vec<String>>) -> Vec<PluginManifest> {
+    if let Some(plugin_ids) = plugin_ids {
+        let mut seen = std::collections::HashSet::new();
+        return plugin_ids
+            .into_iter()
+            .filter(|id| !id.starts_with('.') && seen.insert(id.clone()))
+            .filter_map(|id| {
+                let mut manifest = match read_single_manifest(&id) {
+                    Ok(manifest) => manifest,
+                    Err(err) => {
+                        tracing::warn!(source = "plugins", plugin = %id, "Failed to load manifest: {err}");
+                        return None;
+                    }
+                };
+                manifest.content_digest =
+                    crate::plugin_content::digest(&plugins_dir().join(&id)).ok();
+                Some(manifest)
+            })
+            .collect();
+    }
     let dir = plugins_dir();
     if !dir.exists() {
         return Vec::new();
@@ -435,6 +723,8 @@ pub fn list_user_plugins() -> Vec<PluginManifest> {
             continue;
         }
 
+        let mut manifest = manifest;
+        manifest.content_digest = crate::plugin_content::digest(&path).ok();
         manifests.push(manifest);
     }
 
@@ -469,6 +759,8 @@ pub(crate) fn register_loaded_plugin_impl(
     // Read only the specific plugin's manifest instead of scanning the entire dir.
     let manifest = read_single_manifest(&plugin_id)?;
 
+    let settings = crate::plugin_settings::prepare_settings(&manifest, Some(state))?;
+
     // Only allow capabilities that appear in the manifest
     for cap in &capabilities {
         if !manifest.capabilities.contains(cap) {
@@ -476,6 +768,24 @@ pub(crate) fn register_loaded_plugin_impl(
                 "Plugin \"{plugin_id}\" claims capability \"{cap}\" not declared in manifest"
             ));
         }
+    }
+
+    if let Some(settings) = &settings {
+        settings
+            .migrate()
+            .map_err(|_| "Plugin settings migration failed".to_owned())?;
+    }
+
+    // A WebView reload re-registers an already-loaded plugin without ever
+    // calling uninstall. Dispose its previous runtime state (fs watchers,
+    // rate-limiter history) before granting the fresh capability set, or
+    // each reload leaks a watcher set and MAX_WATCHERS_PER_PLUGIN caps out
+    // after a handful of reloads (#649-56fb). Idempotent: a no-op on first load.
+    dispose_plugin_runtime_state(state, &plugin_id);
+    register_manifest_providers(&manifest)?;
+
+    if let Some(settings) = settings {
+        state.plugin_settings.register(settings);
     }
 
     state.loaded_plugins.insert(plugin_id, capabilities);
@@ -507,7 +817,10 @@ pub fn unregister_loaded_plugin(
 }
 
 pub(crate) fn unregister_loaded_plugin_impl(state: &crate::AppState, plugin_id: &str) {
+    state.plugin_http_requests.cancel_plugin(plugin_id);
+    state.plugin_settings.unregister(plugin_id);
     state.loaded_plugins.remove(plugin_id);
+    crate::accounts::unregister_providers(plugin_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -533,8 +846,16 @@ pub fn set_plugin_output_watchers(
     seq: u64,
     watchers: Vec<crate::output_watchers::WatcherSpec>,
     state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
+    webview: tauri::Webview,
 ) -> crate::output_watchers::SyncOutcome {
-    set_plugin_output_watchers_impl(&state, &client_id, seq, &watchers)
+    let outcome = state.plugin_output_watchers.write().sync_for_webview(
+        webview.label(),
+        &client_id,
+        seq,
+        &watchers,
+    );
+    log_rejected_output_watchers(&outcome);
+    outcome
 }
 
 pub(crate) fn set_plugin_output_watchers_impl(
@@ -547,6 +868,11 @@ pub(crate) fn set_plugin_output_watchers_impl(
         .plugin_output_watchers
         .write()
         .sync(client_id, seq, watchers);
+    log_rejected_output_watchers(&outcome);
+    outcome
+}
+
+fn log_rejected_output_watchers(outcome: &crate::output_watchers::SyncOutcome) {
     if !outcome.rejected.is_empty() {
         tracing::info!(
             source = "plugin",
@@ -554,7 +880,6 @@ pub(crate) fn set_plugin_output_watchers_impl(
             outcome.rejected
         );
     }
-    outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +928,9 @@ fn resolve_data_path(plugin_id: &str, relative_path: &str) -> Result<PathBuf, St
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn read_plugin_data(plugin_id: String, path: String) -> Result<Option<String>, String> {
     let file_path = resolve_data_path(&plugin_id, &path)?;
+    if file_path == plugin_data_dir(&plugin_id)?.join("config.json") {
+        return crate::plugin_settings::read_config(&plugin_id);
+    }
     match std::fs::read_to_string(&file_path) {
         Ok(content) => Ok(Some(content)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -613,6 +941,9 @@ pub fn read_plugin_data(plugin_id: String, path: String) -> Result<Option<String
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn write_plugin_data(plugin_id: String, path: String, content: String) -> Result<(), String> {
     let file_path = resolve_data_path(&plugin_id, &path)?;
+    if file_path == plugin_data_dir(&plugin_id)?.join("config.json") {
+        return crate::plugin_settings::write_config(&plugin_id, &content);
+    }
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create data directory: {e}"))?;
@@ -624,6 +955,9 @@ pub fn write_plugin_data(plugin_id: String, path: String, content: String) -> Re
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn delete_plugin_data(plugin_id: String, path: String) -> Result<(), String> {
     let file_path = resolve_data_path(&plugin_id, &path)?;
+    if file_path == plugin_data_dir(&plugin_id)?.join("config.json") {
+        return Err("Use typed settings reset for plugin configuration".into());
+    }
     match std::fs::remove_file(&file_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -684,13 +1018,18 @@ pub async fn install_plugin_from_url(
         .await
         .map_err(|e| format!("Failed to read download: {e}"))?;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join(format!("tuic-plugin-{}.zip", uuid::Uuid::new_v4()));
-    std::fs::write(&temp_path, &bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
+    // A `NamedTempFile` is created 0600 with an unguessable name and removed on
+    // drop, so a panic or early return cannot leak the archive into shared /tmp.
+    let mut temp_file = tempfile::Builder::new()
+        .prefix("tuic-plugin-")
+        .suffix(".zip")
+        .tempfile()
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    std::io::Write::write_all(&mut temp_file, &bytes)
+        .and_then(|()| std::io::Write::flush(&mut temp_file))
+        .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
-    let result = install_zip_inner(&temp_path, &app_handle);
-    let _ = std::fs::remove_file(&temp_path);
-    result
+    install_zip_inner(temp_file.path(), &app_handle)
 }
 
 // ---------------------------------------------------------------------------
@@ -698,23 +1037,77 @@ pub async fn install_plugin_from_url(
 // ---------------------------------------------------------------------------
 
 /// Holds the prepared target directory and optional backup of existing data/.
+///
+/// The backup lives next to the plugin dirs (inside `plugins_dir()`), never in
+/// the OS temp dir: `rename` fails with EXDEV across filesystems, which is the
+/// normal case on Linux (tmpfs `/tmp` vs. a config dir under `$HOME`).
+///
+/// If the install is abandoned (any `?` between `prepare_plugin_target` and
+/// `finalize_plugin_install`, or a panic), `Drop` moves the backup back so the
+/// user's `data/` is never lost.
 struct PreparedTarget {
     path: PathBuf,
     data_backup: Option<PathBuf>,
 }
 
+impl PreparedTarget {
+    /// Move the backed-up `data/` back into the target. Idempotent: a no-op
+    /// when there is no backup. On failure the backup is kept for `Drop` to retry.
+    fn restore_data(&mut self) -> Result<(), String> {
+        let Some(backup) = self.data_backup.as_ref() else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(&self.path)
+            .map_err(|e| format!("Failed to recreate plugin dir: {e}"))?;
+        let data = self.path.join("data");
+        if data.exists() {
+            // A partial install must not shadow the user's data.
+            std::fs::remove_dir_all(&data)
+                .map_err(|e| format!("Failed to clear data/ before restore: {e}"))?;
+        }
+        std::fs::rename(backup, &data).map_err(|e| format!("Failed to restore data/: {e}"))?;
+        self.data_backup = None;
+        Ok(())
+    }
+}
+
+impl Drop for PreparedTarget {
+    fn drop(&mut self) {
+        if let Err(e) = self.restore_data() {
+            tracing::warn!(
+                source = "plugins",
+                "Could not restore plugin data/ from {:?}: {e}",
+                self.data_backup
+            );
+        }
+    }
+}
+
 /// Prepare the target plugin directory: backup data/, clean, create fresh dir.
 fn prepare_plugin_target(manifest: &PluginManifest) -> Result<PreparedTarget, String> {
-    let target_dir = plugins_dir().join(&manifest.id);
+    let root = plugins_dir();
+    let target_dir = root.join(&manifest.id);
 
-    // Preserve data/ directory if plugin already exists
+    // Preserve data/ directory if plugin already exists. The backup is a hidden
+    // sibling inside plugins_dir() (same filesystem as the source, so rename
+    // cannot hit EXDEV); discovery skips dot-directories.
     let data_backup = if target_dir.join("data").exists() {
-        let tmp = std::env::temp_dir().join(format!("tuic-data-backup-{}", uuid::Uuid::new_v4()));
-        std::fs::rename(target_dir.join("data"), &tmp)
+        let backup = root.join(format!(
+            ".tuic-data-backup-{}-{}",
+            manifest.id,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::rename(target_dir.join("data"), &backup)
             .map_err(|e| format!("Failed to backup data/: {e}"))?;
-        Some(tmp)
+        Some(backup)
     } else {
         None
+    };
+
+    // From here on the guard restores data/ if anything below fails.
+    let prepared = PreparedTarget {
+        path: target_dir.clone(),
+        data_backup,
     };
 
     // Clean target
@@ -725,23 +1118,17 @@ fn prepare_plugin_target(manifest: &PluginManifest) -> Result<PreparedTarget, St
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("Failed to create plugin dir: {e}"))?;
 
-    Ok(PreparedTarget {
-        path: target_dir,
-        data_backup,
-    })
+    Ok(prepared)
 }
 
 #[cfg(feature = "desktop")]
 /// Restore data/ backup, emit plugin-changed event, log success.
 fn finalize_plugin_install(
-    target: PreparedTarget,
+    mut target: PreparedTarget,
     manifest: &PluginManifest,
     app_handle: &AppHandle,
 ) -> Result<PluginManifest, String> {
-    if let Some(tmp) = target.data_backup {
-        std::fs::rename(&tmp, target.path.join("data"))
-            .map_err(|e| format!("Failed to restore data/: {e}"))?;
-    }
+    target.restore_data()?;
 
     let _ = app_handle.emit("plugin-changed", vec![manifest.id.clone()]);
     crate::app_logger::log_via_handle(
@@ -750,7 +1137,9 @@ fn finalize_plugin_install(
         "plugin",
         &format!("Installed plugin \"{}\" v{}", manifest.id, manifest.version),
     );
-    Ok(manifest.clone())
+    let mut installed = manifest.clone();
+    installed.content_digest = crate::plugin_content::digest(&target.path).ok();
+    Ok(installed)
 }
 
 /// Recursively copy a directory, skipping the `data/` subdirectory (preserved separately).
@@ -876,7 +1265,13 @@ fn extract_zip_entries(
             .ok_or_else(|| "ZIP entry has unsafe path".to_string())?
             .to_path_buf();
 
-        let entry_str = entry_path.to_string_lossy();
+        // `enclosed_name` hands back a host path, and Windows renders it with
+        // `\`. The prefix comes from the archive's own entry names, which ZIP
+        // always spells with `/`, so on Windows the strip below never matched:
+        // every entry was skipped and a plugin installed into an empty
+        // directory without an error. Windows accepts `/` in the paths it is
+        // given, so normalising here is enough.
+        let entry_str = entry_path.to_string_lossy().replace('\\', "/");
 
         // Strip prefix (if manifest was inside a subdirectory)
         let relative = if !prefix.is_empty() {
@@ -917,7 +1312,10 @@ fn extract_zip_entries(
 fn find_manifest_in_zip(archive: &zip::ZipArchive<std::fs::File>) -> Result<String, String> {
     // Try root-level first
     for i in 0..archive.len() {
-        let name = archive.name_for_index(i).unwrap_or("");
+        let name = archive
+            .name_for_index(i)
+            .and_then(Result::ok)
+            .unwrap_or_default();
         if name == "manifest.json" {
             return Ok("manifest.json".to_string());
         }
@@ -926,9 +1324,12 @@ fn find_manifest_in_zip(archive: &zip::ZipArchive<std::fs::File>) -> Result<Stri
     // Try single top-level dir: <dirname>/manifest.json
     let mut top_dirs = std::collections::HashSet::new();
     for i in 0..archive.len() {
-        let name = archive.name_for_index(i).unwrap_or("");
+        let name = archive
+            .name_for_index(i)
+            .and_then(Result::ok)
+            .unwrap_or_default();
         if let Some(slash) = name.find('/') {
-            top_dirs.insert(&name[..=slash]);
+            top_dirs.insert(name[..=slash].to_string());
         }
     }
 
@@ -936,7 +1337,11 @@ fn find_manifest_in_zip(archive: &zip::ZipArchive<std::fs::File>) -> Result<Stri
         let dir = top_dirs.into_iter().next().unwrap();
         let candidate = format!("{dir}manifest.json");
         for i in 0..archive.len() {
-            if archive.name_for_index(i).unwrap_or("") == candidate {
+            if archive
+                .name_for_index(i)
+                .and_then(Result::ok)
+                .is_some_and(|name| name == candidate)
+            {
                 return Ok(candidate);
             }
         }
@@ -954,6 +1359,7 @@ fn find_manifest_in_zip(archive: &zip::ZipArchive<std::fs::File>) -> Result<Stri
 /// registered watch (the `debounce_loop`), the capability grant, and the
 /// exec:cli rate-limiter history.
 pub(crate) fn dispose_plugin_runtime_state(state: &crate::AppState, id: &str) {
+    state.plugin_settings.unregister(id);
     // Drop every watcher this plugin registered. Dropping the `RecommendedWatcher`
     // closes its notify channel, so the matching `debounce_loop` thread exits.
     state.plugin_watchers.retain(|_, (pid, _)| pid != id);
@@ -961,6 +1367,8 @@ pub(crate) fn dispose_plugin_runtime_state(state: &crate::AppState, id: &str) {
     state.loaded_plugins.remove(id);
     // Clear the exec:cli sliding-window rate-limiter entry for this id.
     crate::plugin_exec::clear_rate_limit(id);
+    // Descriptors leave with the plugin; accounts and their credentials stay.
+    crate::accounts::unregister_providers(id);
 }
 
 /// Remove a plugin and all its files (including data/).
@@ -1212,7 +1620,7 @@ mod tests {
             set_plugin_output_watchers_impl(&state, "c1", 1, &[spec("a", "done"), spec("b", "x+")]);
 
         assert!(outcome.applied);
-        assert!(outcome.rejected.is_empty());
+        assert_eq!(outcome.rejected, [] as [std::string::String; 0]);
         let watchers = state.plugin_output_watchers.read();
         assert!(!watchers.needs_all_lines());
         assert!(!watchers.is_idle());
@@ -1248,7 +1656,10 @@ mod tests {
         set_plugin_output_watchers_impl(&state, "c1", 2, &[spec("new", "kept")]);
 
         let watchers = state.plugin_output_watchers.read();
-        assert!(watchers.matching_ids("gone").is_empty());
+        assert_eq!(
+            watchers.matching_ids("gone"),
+            [] as [std::string::String; 0]
+        );
         assert_eq!(watchers.matching_ids("kept"), vec!["c1/new".to_string()]);
     }
 
@@ -1279,7 +1690,7 @@ mod tests {
         let outcome = set_plugin_output_watchers_impl(&state, "c1", 2, &[]);
 
         assert!(outcome.applied);
-        assert!(outcome.rejected.is_empty());
+        assert_eq!(outcome.rejected, [] as [std::string::String; 0]);
         assert!(state.plugin_output_watchers.read().is_idle());
     }
 
@@ -1418,6 +1829,53 @@ mod tests {
         assert!(result.unwrap().ends_with("my-plugin/dist/bundle.js"));
     }
 
+    #[test]
+    fn resolve_strips_the_load_version_segment() {
+        // The frontend loads a whole plugin under `/{id}/~v{n}/`, so relative imports
+        // inherit the version. The file on disk has no such directory.
+        let versioned = resolve_plugin_path("/my-plugin/~v1791828000000/provider.js").unwrap();
+        assert_eq!(
+            versioned,
+            resolve_plugin_path("/my-plugin/provider.js").unwrap()
+        );
+        let nested = resolve_plugin_path("/my-plugin/~v7/lib/model.js").unwrap();
+        assert!(nested.ends_with("my-plugin/lib/model.js"));
+    }
+
+    #[test]
+    fn resolve_versioned_path_still_rejects_traversal_and_empty_files() {
+        assert!(resolve_plugin_path("/my-plugin/~v1/../../secret").is_none());
+        assert!(resolve_plugin_path("/my-plugin/~v1/").is_none());
+        assert!(resolve_plugin_path("/my-plugin/~v1").is_none());
+    }
+
+    #[test]
+    fn resolve_keeps_a_directory_that_only_looks_like_a_version() {
+        // Only `~v<digits>` is a load version; any other name is a real directory.
+        assert!(
+            resolve_plugin_path("/my-plugin/~vx/a.js")
+                .unwrap()
+                .ends_with("my-plugin/~vx/a.js")
+        );
+        assert!(
+            resolve_plugin_path("/my-plugin/~v/a.js")
+                .unwrap()
+                .ends_with("my-plugin/~v/a.js")
+        );
+    }
+
+    #[test]
+    fn plugin_protocol_serves_webassembly_with_its_standard_mime_type() {
+        assert_eq!(
+            plugin_asset_mime(Path::new("sqlite-viewer/vendor/sql-wasm.wasm")),
+            "application/wasm"
+        );
+        assert_eq!(
+            plugin_asset_mime(Path::new("sqlite-viewer/vendor/sql-wasm.js")),
+            "application/javascript"
+        );
+    }
+
     // -- Manifest validation --
 
     fn valid_manifest(dir_name: &str) -> PluginManifest {
@@ -1425,6 +1883,7 @@ mod tests {
             id: dir_name.to_string(),
             name: "Test Plugin".to_string(),
             version: "1.0.0".to_string(),
+            content_digest: None,
             min_app_version: "0.3.0".to_string(),
             main: "main.js".to_string(),
             description: None,
@@ -1433,7 +1892,36 @@ mod tests {
             allowed_urls: vec![],
             agent_types: vec![],
             binaries: vec![],
+            providers: vec![],
+            settings: None,
         }
+    }
+
+    #[test]
+    fn loading_http_manifest_without_allowed_urls_fails() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let plugin_dir = dir.path().join("plugins/http-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let mut manifest = valid_manifest("http-plugin");
+        manifest.capabilities = vec!["net:http".into()];
+        let write_manifest = |manifest: &PluginManifest| {
+            std::fs::write(
+                plugin_dir.join("manifest.json"),
+                serde_json::to_vec(manifest).unwrap(),
+            )
+            .unwrap();
+        };
+        write_manifest(&manifest);
+        let error = read_single_manifest("http-plugin").unwrap_err();
+        assert!(error.contains("allowedUrls"), "unexpected error: {error}");
+        manifest.allowed_urls = vec!["https://api.example.com/*".into()];
+        write_manifest(&manifest);
+        assert!(read_single_manifest("http-plugin").is_ok());
+        manifest.capabilities.clear();
+        manifest.allowed_urls.clear();
+        write_manifest(&manifest);
+        assert!(read_single_manifest("http-plugin").is_ok());
     }
 
     #[test]
@@ -1583,16 +2071,50 @@ mod tests {
 
     // -- list_user_plugins with temp dir --
 
+    /// Catches targeted reload silently discarding the manifest validation reason.
     #[test]
-    fn list_returns_empty_when_no_dir() {
-        // plugins_dir() points to the real config; we test the scanning logic
-        // indirectly through validate_manifest above. The list function itself
-        // just returns an empty vec when the dir doesn't exist.
-        let dir = std::env::temp_dir().join("tuic-test-nonexistent-plugins");
-        let _ = std::fs::remove_dir_all(&dir);
-        // We can't easily override plugins_dir() in tests, but we can verify
-        // the function doesn't panic
-        let _ = list_user_plugins();
+    fn targeted_discovery_logs_manifest_validation_reason() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let plugin_dir = dir.path().join("plugins/invalid-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let mut manifest = valid_manifest("invalid-plugin");
+        manifest.name.clear();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let log_path = dir.path().join("discovery.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || log.try_clone().unwrap())
+            .finish();
+        let manifests = tracing::subscriber::with_default(subscriber, || {
+            list_user_plugins_blocking(Some(vec!["invalid-plugin".into()]))
+        });
+        assert!(
+            manifests.is_empty(),
+            "invalid plugins must still be skipped"
+        );
+        let output = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            output.contains("invalid-plugin"),
+            "missing plugin identity: {output}"
+        );
+        assert!(
+            output.contains("name is empty"),
+            "missing validation reason: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_returns_empty_when_no_dir() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        assert!(list_user_plugins(None).await.unwrap().is_empty());
     }
 
     // -- Plugin data path resolution --
@@ -1787,18 +2309,120 @@ mod tests {
         );
     }
 
+    // Catches: the built-in Plan plugin losing the fs:read it needs to read plan
+    // files, or gaining anything beyond it.
     #[test]
-    fn check_capability_allows_builtin_plugin() {
+    fn builtin_plan_plugin_has_exactly_fs_read() {
         let plugins = dashmap::DashMap::new();
         assert!(check_plugin_capability_inner(&plugins, "plan", "fs:read").is_ok());
+        for capability in KNOWN_CAPABILITIES.iter().filter(|c| **c != "fs:read") {
+            let err = check_plugin_capability_inner(&plugins, "plan", capability).unwrap_err();
+            assert!(err.contains("Built-in plugin"), "{capability}: {err}");
+        }
     }
 
     #[test]
-    fn check_capability_rejects_builtin_undeclared_capability() {
-        let plugins = dashmap::DashMap::new();
-        let result = check_plugin_capability_inner(&plugins, "plan", "exec:cli");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Built-in plugin"));
+    fn builtin_capability_table_only_names_builtin_plugins() {
+        for (id, _) in BUILTIN_PLUGIN_CAPABILITIES {
+            assert!(BUILTIN_PLUGIN_IDS.contains(id), "{id} is not a built-in id");
+        }
+    }
+
+    // Catches: an external package taking a built-in's id, so two plugins
+    // register as "plan" or the package inherits the built-in's identity.
+    #[test]
+    fn manifest_with_a_builtin_id_is_rejected() {
+        for id in BUILTIN_PLUGIN_IDS {
+            let err = validate_manifest(&valid_manifest(id), id).unwrap_err();
+            assert!(err.contains("built into FastAF"), "{id}: {err}");
+        }
+    }
+
+    // Catches: a leftover external `plan` package (seeded by upstream 2.0) being
+    // listed, loaded or granted its declared capabilities beside the built-in.
+    #[test]
+    fn external_package_with_a_builtin_id_is_ignored_and_left_on_disk() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let plan = dir.path().join("plugins/plan");
+        std::fs::create_dir_all(&plan).unwrap();
+        let manifest = serde_json::json!({
+            "id": "plan", "name": "Plan", "version": "1.0.0", "minAppVersion": "0.0.0",
+            "main": "main.js", "capabilities": ["fs:read", "exec:cli"], "binaries": ["git"]
+        });
+        std::fs::write(plan.join("manifest.json"), manifest.to_string()).unwrap();
+        std::fs::write(plan.join("main.js"), "user copy").unwrap();
+
+        assert!(list_user_plugins_blocking(None).is_empty());
+        assert!(list_user_plugins_blocking(Some(vec!["plan".into()])).is_empty());
+        let state = crate::state::tests_support::make_test_app_state();
+        assert!(
+            register_loaded_plugin_impl(&state, "plan".into(), vec!["exec:cli".into()]).is_err()
+        );
+        assert!(!state.loaded_plugins.contains_key("plan"));
+        assert!(check_plugin_capability(&state, "plan", "exec:cli").is_err());
+        assert_eq!(
+            std::fs::read_to_string(plan.join("main.js")).unwrap(),
+            "user copy"
+        );
+    }
+
+    fn seed_fixture() -> [SeededPlugin; 2] {
+        [
+            SeededPlugin {
+                id: "seed-alpha",
+                files: &[("manifest.json", "{}"), ("main.js", "alpha")],
+            },
+            SeededPlugin {
+                id: "seed-beta",
+                files: &[("manifest.json", "{}"), ("main.js", "beta")],
+            },
+        ]
+    }
+
+    // Catches: FastAF seeding a package into every install again (it ships
+    // none it may redistribute), or leaving a marker that blocks a later one.
+    #[test]
+    fn shipped_seed_list_is_empty_and_writes_nothing() {
+        assert!(SEEDED_PLUGINS.is_empty());
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_externalized_builtin_plugins(dir.path()).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn seeds_once_and_keeps_uninstall_permanent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let packages = seed_fixture();
+        seed_plugins_once(dir.path(), &packages).unwrap();
+
+        for id in ["seed-alpha", "seed-beta"] {
+            let plugin = dir.path().join("plugins").join(id);
+            assert!(plugin.join("manifest.json").is_file());
+            assert!(plugin.join("main.js").is_file());
+        }
+        assert!(dir.path().join(SEEDED_PLUGINS_MARKER).is_file());
+
+        std::fs::remove_dir_all(dir.path().join("plugins/seed-alpha")).unwrap();
+        seed_plugins_once(dir.path(), &packages).unwrap();
+        assert!(!dir.path().join("plugins/seed-alpha").exists());
+    }
+
+    #[test]
+    fn seeding_never_overwrites_an_existing_user_plugin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let alpha = dir.path().join("plugins/seed-alpha");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::write(alpha.join("main.js"), "user version").unwrap();
+
+        seed_plugins_once(dir.path(), &seed_fixture()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(alpha.join("main.js")).unwrap(),
+            "user version"
+        );
+        assert!(!alpha.join("manifest.json").exists());
+        assert!(dir.path().join("plugins/seed-beta/main.js").is_file());
     }
 
     // -- is_plugin_code_change --
@@ -2026,7 +2650,78 @@ mod tests {
         assert!(!state.loaded_plugins.contains_key("gate-plugin"));
     }
 
+    /// A WebView reload calls register_loaded_plugin again for an already-loaded
+    /// plugin — uninstall is never invoked. Without disposing the previous
+    /// runtime state first, each reload leaks the old fs-watcher set and
+    /// MAX_WATCHERS_PER_PLUGIN caps out after a handful of reloads (#649-56fb).
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn register_disposes_previous_runtime_state_on_reregister() {
+        use notify::{Config, RecommendedWatcher, Watcher};
+
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let plugin_dir = dir.path().join("plugins").join("reload-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{
+                "id": "reload-plugin",
+                "name": "Reload Plugin",
+                "version": "1.0.0",
+                "minAppVersion": "0.0.0",
+                "main": "main.js",
+                "capabilities": ["fs:watch"]
+            }"#,
+        )
+        .unwrap();
+
+        let state = crate::state::tests_support::make_test_app_state();
+
+        register_loaded_plugin_impl(&state, "reload-plugin".into(), vec!["fs:watch".into()])
+            .unwrap();
+
+        // The plugin sets up a watcher after loading.
+        let (tx, _rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+        let watcher = RecommendedWatcher::new(tx, Config::default()).unwrap();
+        state
+            .plugin_watchers
+            .insert("w1".into(), ("reload-plugin".into(), watcher));
+        assert_eq!(state.plugin_watchers.len(), 1);
+
+        // WebView reload re-registers the same plugin without ever unloading it.
+        register_loaded_plugin_impl(&state, "reload-plugin".into(), vec!["fs:watch".into()])
+            .unwrap();
+
+        // The stale watcher set from before the reload must be gone, not
+        // accumulated alongside whatever the reloaded plugin sets up next.
+        assert!(
+            state.plugin_watchers.is_empty(),
+            "reload must dispose the previous watcher set"
+        );
+        // The capability grant itself survives the reload.
+        assert_eq!(
+            state.loaded_plugins.get("reload-plugin").map(|c| c.clone()),
+            Some(vec!["fs:watch".to_string()])
+        );
+    }
+
     // -- install data/ preservation (AppHandle-free seam) --
+
+    // Catches: an unlicensed Tasks provider bundled into the binary again, or the
+    // install command writing something for an id it does not ship.
+    #[test]
+    fn no_work_item_provider_is_bundled_and_unknown_ids_error() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        assert_eq!(bundled_plugin_ids(), Vec::<String>::new());
+        for id in ["github-work", "gitlab", "jira", "not-bundled"] {
+            let err = write_bundled_plugin(id).err().unwrap();
+            assert!(err.contains("not bundled with FastAF"), "{id}: {err}");
+        }
+        assert!(!dir.path().join("plugins").exists());
+    }
 
     /// A reinstall wipes the plugin dir but must NOT lose the user's data/.
     /// prepare_plugin_target backs data/ out before the clean and hands back the
@@ -2043,11 +2738,25 @@ mod tests {
         std::fs::write(target.join("data").join("state.json"), "keepme").unwrap();
         std::fs::write(target.join("old.js"), "stale code").unwrap();
 
-        let prepared = prepare_plugin_target(&valid_manifest("dp-plugin")).unwrap();
+        let mut prepared = prepare_plugin_target(&valid_manifest("dp-plugin")).unwrap();
 
         // data/ was moved out to the backup (contents intact), the stale file is
         // gone, and a fresh empty target dir exists.
-        let backup = prepared.data_backup.expect("data/ must be backed up");
+        let backup = prepared
+            .data_backup
+            .clone()
+            .expect("data/ must be backed up");
+        // The backup must live under plugins_dir() (same filesystem as the
+        // plugin dirs) so rename can never fail with EXDEV, and be hidden so
+        // discovery skips it.
+        assert_eq!(backup.parent().unwrap(), plugins_dir());
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".tuic-data-backup-")
+        );
         assert_eq!(
             std::fs::read_to_string(backup.join("state.json")).unwrap(),
             "keepme"
@@ -2062,12 +2771,53 @@ mod tests {
         );
         assert!(prepared.path.is_dir(), "fresh target dir must exist");
 
-        // The restore rename (as finalize_plugin_install performs) round-trips it.
-        std::fs::rename(&backup, prepared.path.join("data")).unwrap();
+        // The restore (as finalize_plugin_install performs) round-trips it and
+        // leaves no backup dir behind.
+        prepared.restore_data().unwrap();
         assert_eq!(
             std::fs::read_to_string(prepared.path.join("data").join("state.json")).unwrap(),
             "keepme"
         );
+        assert!(!backup.exists(), "backup must be gone after restore");
+    }
+
+    /// An abandoned install (error between prepare and finalize) must put the
+    /// user's data/ back instead of orphaning it in the backup dir.
+    #[test]
+    fn prepare_plugin_target_drop_restores_data_on_abandoned_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let target = dir.path().join("plugins").join("dp-plugin");
+        std::fs::create_dir_all(target.join("data")).unwrap();
+        std::fs::write(target.join("data").join("state.json"), "keepme").unwrap();
+
+        let backup = {
+            let prepared = prepare_plugin_target(&valid_manifest("dp-plugin")).unwrap();
+            // Simulate a half-extracted install that then errors out.
+            std::fs::write(prepared.path.join("partial.js"), "x").unwrap();
+            prepared.data_backup.clone().unwrap()
+        }; // dropped without finalize
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("data").join("state.json")).unwrap(),
+            "keepme"
+        );
+        assert!(!backup.exists(), "backup must be cleaned up on drop");
+    }
+
+    /// A leftover hidden backup dir (e.g. after a crash) must never be listed
+    /// as a plugin, even if it contains a manifest.
+    #[tokio::test]
+    async fn list_user_plugins_ignores_leftover_data_backup_dir() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let leftover = dir.path().join("plugins").join(".tuic-data-backup-x-1234");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("manifest.json"), valid_manifest_json("x")).unwrap();
+
+        assert!(list_user_plugins(None).await.unwrap().is_empty());
     }
 
     /// A first install (no prior dir) has nothing to back up.

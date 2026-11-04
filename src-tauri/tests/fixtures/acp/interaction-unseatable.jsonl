@@ -1,0 +1,12 @@
+// Two questions this client has no seat for: one scoped to a JSON-RPC request
+// rather than a session, one naming a session it is not attached to. Both are
+// declined without a person ever seeing them.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"request","id":7,"method":"elicitation/create","params":{"requestId":99,"mode":"form","message":"Which account?","requestedSchema":{"type":"object","properties":{"account":{"type":"string","title":"Account"}},"required":["account"]}}}
+{"step":"expect_response","id":7,"result":{"action":"cancel"}}
+{"step":"request","id":8,"method":"session/request_permission","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000bb","toolCall":{"toolCallId":"call-1","title":"Write a file"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}
+{"step":"expect_response","id":8,"result":{"outcome":{"outcome":"cancelled"}}}
+{"step":"await_stdin_eof"}

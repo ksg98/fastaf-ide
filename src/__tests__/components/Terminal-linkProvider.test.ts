@@ -17,8 +17,34 @@ describe("linkProvider regexes", () => {
 			return results;
 		}
 
+		// Catches: directory paths swallowing a sentence period and resolving to a nonexistent file (#2372).
+		it.each([
+			["work/engineering/gdpr-asset-data-maintenance.md. Next", "work/engineering/gdpr-asset-data-maintenance.md"],
+			["work/README.md.", "work/README.md"],
+			["/repo/.config/v1.2/notes.md:12:4.", "/repo/.config/v1.2/notes.md:12:4"],
+			["C:\\repo\\notes.md.", "C:\\repo\\notes.md"],
+			["./assets/. Next", "./assets/"],
+		])("excludes sentence punctuation from %s", (text, path) => {
+			expect(matchAll(text)).toEqual([path]);
+		});
+
 		it("matches absolute paths", () => {
 			expect(matchAll("open /usr/local/bin/test.rs")).toEqual(["/usr/local/bin/test.rs"]);
+		});
+
+		it("matches slash-terminated directories without treating prose as a path", () => {
+			expect(matchAll("browse ~/Gits/.tmp/ego-ux-eval/ and ./assets/ now")).toEqual([
+				"~/Gits/.tmp/ego-ux-eval/",
+				"./assets/",
+			]);
+		});
+
+		it("matches paths without a known extension when they contain a directory", () => {
+			expect(matchAll("open /repo/Makefile and src/scripts/build")).toEqual(["/repo/Makefile", "src/scripts/build"]);
+		});
+
+		it("matches absolute Windows paths with backslash separators", () => {
+			expect(matchAll("open C:\\Users\\boss\\notes.md:12")).toEqual(["C:\\Users\\boss\\notes.md:12"]);
 		});
 
 		it("matches relative ./ paths", () => {
@@ -27,6 +53,16 @@ describe("linkProvider regexes", () => {
 
 		it("matches relative ../ paths", () => {
 			expect(matchAll("see ../lib/utils.py")).toEqual(["../lib/utils.py"]);
+		});
+
+		// Catches: punctuation trimming changing the target of a final parent-directory segment.
+		it("preserves parent-directory targets while excluding a following sentence period", () => {
+			expect(matchAll("browse ../.. and /repo/src/.. and C:\\repo\\src\\..")).toEqual([
+				"../..",
+				"/repo/src/..",
+				"C:\\repo\\src\\..",
+			]);
+			expect(matchAll("browse ../../...")).toEqual(["../../.."]);
 		});
 
 		it("matches ~/ home paths", () => {

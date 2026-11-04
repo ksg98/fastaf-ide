@@ -20,8 +20,8 @@ const DetachedMarkdownPanel: Component<{ params: URLSearchParams }> = (props) =>
 
 function getActiveFsRoot(): string | undefined {
 	const activeRepo = repositoriesStore.getActive();
-	if (!activeRepo?.activeBranch) return undefined;
-	return activeRepo.branches[activeRepo.activeBranch]?.worktreePath || activeRepo.path;
+	if (!activeRepo?.activeWorkspaceId) return undefined;
+	return activeRepo.workspaces[activeRepo.activeWorkspaceId]?.worktreePath || activeRepo.path;
 }
 
 export const markdownPanelAdapter: PanelAdapter = {

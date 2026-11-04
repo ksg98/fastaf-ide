@@ -313,6 +313,13 @@ pub async fn voice_start(app: AppHandle) -> Result<(), String> {
         if dictation.recording.load(Ordering::Acquire) {
             return Err("Dictation is recording — stop it before starting voice mode".to_string());
         }
+        // Hands-free dictation keeps its own capture open while armed.
+        if dictation.hands_free_audio.lock().is_some() {
+            return Err(
+                "Hands-free dictation is listening — turn it off before starting voice mode"
+                    .to_string(),
+            );
+        }
         if app.state::<VoiceState>().active.load(Ordering::Acquire) {
             return Err("Voice session already running".to_string());
         }
@@ -474,7 +481,10 @@ pub fn voice_set_config(app: AppHandle, config: VoiceConfig) -> Result<(), Strin
 /// Output devices available for speech, so Settings can offer the same list the
 /// notification sounds use.
 #[tauri::command]
-pub fn voice_list_output_devices() -> Vec<crate::notification_sound::AudioOutputDevice> {
+pub fn voice_list_output_devices()
+-> Result<Vec<crate::notification_sound::AudioOutputDevice>, String> {
+    // Upstream made device enumeration fallible; a failure now reaches the
+    // caller as an error instead of an empty list.
     crate::notification_sound::list_output_devices()
 }
 

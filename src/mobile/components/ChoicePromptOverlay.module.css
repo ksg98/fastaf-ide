@@ -6,7 +6,7 @@
   max-height: 60vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  background: rgba(37, 37, 38, 0.95);
+  background: var(--bg-secondary);
   border-top: 1px solid var(--border);
   border-radius: 12px 12px 0 0;
   z-index: 50;
@@ -18,11 +18,14 @@
   font-size: var(--font-sm);
   font-weight: 600;
   border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 
-.item {
+button.item[data-control-layout="row"] {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 14px 16px;
   border: none;
@@ -38,11 +41,11 @@
 }
 
 .item:active {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-tertiary);
 }
 
 .itemHighlighted {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bg-highlight);
 }
 
 .itemDestructive .label {
@@ -57,7 +60,7 @@
   height: 22px;
   padding: 0 6px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-tertiary);
   color: var(--accent);
   font-family: var(--font-mono);
   font-size: 0.8em;
@@ -67,6 +70,9 @@
 
 .label {
   flex: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
   font-weight: 500;
 }
 
@@ -74,4 +80,26 @@
   color: var(--fg-muted);
   font-size: 0.8em;
   font-family: var(--font-mono);
+}
+
+.preview {
+  flex-basis: 100%;
+  margin: 0;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-family: var(--font-mono);
+}
+
+.embedded {
+  position: static;
+  max-height: 35vh;
+  border-radius: 0;
+}
+
+.submit {
+  width: 100%;
+  justify-content: flex-start;
 }

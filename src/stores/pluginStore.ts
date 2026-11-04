@@ -187,6 +187,16 @@ function createPluginStore() {
 		return invoke<PluginManifest>("install_plugin_from_folder", { path });
 	}
 
+	/** Ids of the plugins FastAF ships in its own binary (the Tasks providers). */
+	async function listBundled(): Promise<string[]> {
+		return invoke<string[]>("list_bundled_plugins");
+	}
+
+	/** Install a plugin FastAF ships in its own binary. Returns the installed manifest. */
+	async function installBundled(id: string): Promise<PluginManifest> {
+		return invoke<PluginManifest>("install_bundled_plugin", { id });
+	}
+
 	return {
 		state,
 		registerPlugin,
@@ -202,6 +212,8 @@ function createPluginStore() {
 		installFromUrl,
 		installFromZip,
 		installFromFolder,
+		listBundled,
+		installBundled,
 	};
 }
 

@@ -36,6 +36,33 @@ describe("terminalsStore", () => {
 		});
 	});
 
+	describe("toggleAnswersOnly()", () => {
+		it("is off for a new terminal and flips only the targeted one", () => {
+			testInScope(() => {
+				const id1 = store.add(makeTerminal({ name: "T1" }));
+				const id2 = store.add(makeTerminal({ name: "T2" }));
+				expect(store.get(id1)!.answersOnly).toBe(false);
+				store.toggleAnswersOnly(id1);
+				expect(store.get(id1)!.answersOnly).toBe(true);
+				expect(store.get(id2)!.answersOnly).toBe(false);
+				store.toggleAnswersOnly(id1);
+				expect(store.get(id1)!.answersOnly).toBe(false);
+			});
+		});
+
+		it("defaults to the active terminal and ignores a missing one", () => {
+			testInScope(() => {
+				store.toggleAnswersOnly(); // no active terminal: no-op, no throw
+				const id = store.add(makeTerminal());
+				store.setActive(id);
+				store.toggleAnswersOnly();
+				expect(store.get(id)!.answersOnly).toBe(true);
+				store.toggleAnswersOnly("term-missing");
+				expect(store.state.terminals["term-missing"]).toBeUndefined();
+			});
+		});
+	});
+
 	describe("remove()", () => {
 		it("removes a terminal", () => {
 			testInScope(() => {
@@ -139,7 +166,7 @@ describe("terminalsStore", () => {
 				const lines = store.get(id)!.userPromptLines;
 				expect(lines.length).toBe(500);
 				expect(lines[0]).toBe(1);
-				expect(lines[lines.length - 1]).toBe(500);
+				expect(lines.at(-1)!).toBe(500);
 			});
 		});
 	});
@@ -203,6 +230,70 @@ describe("terminalsStore", () => {
 				const id = store.add(makeTerminal());
 				store.setSessionId(id, "sess-1");
 				expect(store.get(id)!.sessionId).toBe("sess-1");
+			});
+		});
+	});
+
+	describe("applyAlias()", () => {
+		// Story 761-c847: the backend assigns the alias the instant a PTY spawns,
+		// while the frontend still awaits session creation before calling
+		// setSessionId — so `term-alias-assigned` can arrive before the session
+		// is bound to any terminal. Before this fix, that event was silently
+		// dropped because getTerminalForSession(sessionId) returned null.
+		it("retains an alias that arrives before setSessionId binds the session, and applies it on bind", () => {
+			testInScope(() => {
+				const id = store.add(makeTerminal());
+				// Alias event races ahead of the bind — no terminal maps to "sess-1" yet.
+				store.applyAlias("sess-1", "tc-1");
+				expect(store.get(id)!.alias).toBeNull();
+
+				store.setSessionId(id, "sess-1");
+				expect(store.get(id)!.alias).toBe("tc-1");
+			});
+		});
+
+		it("applies immediately when the session is already bound", () => {
+			testInScope(() => {
+				const id = store.add(makeTerminal());
+				store.setSessionId(id, "sess-2");
+				store.applyAlias("sess-2", "tc-2");
+				expect(store.get(id)!.alias).toBe("tc-2");
+			});
+		});
+
+		it("applies immediately when bound via add() with a sessionId", () => {
+			testInScope(() => {
+				store.applyAlias("sess-3", "tc-3");
+				const id = store.add(makeTerminal({ sessionId: "sess-3" }));
+				expect(store.get(id)!.alias).toBe("tc-3");
+			});
+		});
+
+		it("applies immediately when bound via register() with a sessionId", () => {
+			testInScope(() => {
+				store.applyAlias("sess-4", "tc-4");
+				store.register("term-fixed", { ...makeTerminal(), sessionId: "sess-4" });
+				expect(store.get("term-fixed")!.alias).toBe("tc-4");
+			});
+		});
+
+		it("does not disturb a persisted alias when no alias event ever arrives for the new session", () => {
+			testInScope(() => {
+				const id = store.add({ ...makeTerminal(), alias: "persisted-alias" });
+				store.setSessionId(id, "sess-5");
+				expect(store.get(id)!.alias).toBe("persisted-alias");
+			});
+		});
+
+		it("a retained alias for one session is not applied to a different terminal's bind", () => {
+			testInScope(() => {
+				const idA = store.add(makeTerminal({ name: "A" }));
+				const idB = store.add(makeTerminal({ name: "B" }));
+				store.applyAlias("sess-a", "tc-a");
+				store.setSessionId(idB, "sess-b");
+				expect(store.get(idB)!.alias).toBeNull();
+				store.setSessionId(idA, "sess-a");
+				expect(store.get(idA)!.alias).toBe("tc-a");
 			});
 		});
 	});
@@ -333,6 +424,48 @@ describe("terminalsStore", () => {
 				store.add(makeTerminal({ name: "T1" }));
 				store.add(makeTerminal({ name: "T2" }));
 				expect(store.getIds()).toHaveLength(2);
+			});
+		});
+	});
+
+	describe("getSubAgentTag()", () => {
+		it("returns null for a terminal no agent spawned", () => {
+			testInScope(() => {
+				const id = store.add(makeTerminal({ name: "Plain", sessionId: "s-plain" }));
+				expect(store.getSubAgentTag(id)).toBeNull();
+			});
+		});
+
+		it("names the parent tab matched by its TUIC_SESSION", () => {
+			testInScope(() => {
+				store.add(makeTerminal({ name: "Orchestrator", sessionId: "pty-parent", tuicSession: "tuic-parent" }));
+				const child = store.add(makeTerminal({ name: "Worker", sessionId: "pty-child", parentSession: "tuic-parent" }));
+				expect(store.getSubAgentTag(child)).toBe("Orchestrator");
+			});
+		});
+
+		it("names the parent tab matched by its PTY session id", () => {
+			testInScope(() => {
+				// A spawned parent has no frontend tuicSession: its PTY id IS its TUIC_SESSION.
+				store.add(makeTerminal({ name: "Spawned lead", sessionId: "pty-lead" }));
+				const child = store.add(makeTerminal({ name: "Worker", sessionId: "pty-child", parentSession: "pty-lead" }));
+				expect(store.getSubAgentTag(child)).toBe("Spawned lead");
+			});
+		});
+
+		it("follows a rename of the parent tab", () => {
+			testInScope(() => {
+				const parent = store.add(makeTerminal({ name: "Before", sessionId: "pty-p" }));
+				const child = store.add(makeTerminal({ name: "Worker", sessionId: "pty-c", parentSession: "pty-p" }));
+				store.update(parent, { name: "After" });
+				expect(store.getSubAgentTag(child)).toBe("After");
+			});
+		});
+
+		it("still marks the terminal as a sub-agent when the parent has no tab", () => {
+			testInScope(() => {
+				const child = store.add(makeTerminal({ name: "Worker", sessionId: "pty-c", parentSession: "external-caller" }));
+				expect(store.getSubAgentTag(child)).toBe("external agent");
 			});
 		});
 	});
@@ -685,6 +818,84 @@ describe("terminalsStore", () => {
 				store.setActive(id2);
 				store.remove(id1);
 				expect(store.getPreviousActiveId()).toBeNull();
+			});
+		});
+	});
+
+	describe("activation history (back/forward)", () => {
+		function addActivated(n: number): string[] {
+			const ids: string[] = [];
+			for (let i = 0; i < n; i++) {
+				const id = store.add(makeTerminal({ name: `T${i}` }));
+				store.setActive(id);
+				ids.push(id);
+			}
+			return ids;
+		}
+
+		// catches: back navigation reorders the history so back twice returns to the start
+		it("history_back_forward_walks_mru_without_reordering", () => {
+			testInScope(() => {
+				const [a, b, c] = addActivated(3);
+				const walk = (dir: "back" | "forward") => {
+					const id = store.stepHistory(dir);
+					if (id) store.setActive(id);
+					return id;
+				};
+				expect(walk("back")).toBe(b);
+				expect(walk("back")).toBe(a);
+				expect(walk("back")).toBeNull();
+				expect(walk("forward")).toBe(b);
+				expect(walk("forward")).toBe(c);
+				expect(walk("forward")).toBeNull();
+				expect(store.state.history).toEqual([c, b, a]);
+			});
+		});
+
+		// catches: activating a terminal after stepping back leaves a stale forward part
+		it("activating_another_terminal_truncates_the_forward_part", () => {
+			testInScope(() => {
+				const [a, b, c] = addActivated(3);
+				store.setActive(store.stepHistory("back") as string); // b
+				const d = store.add(makeTerminal({ name: "D" }));
+				store.setActive(d);
+				expect(store.getHistoryTarget("forward")).toBeNull();
+				expect(store.state.history).toEqual([d, b, a]);
+				expect(store.state.history).not.toContain(c);
+			});
+		});
+
+		// catches: back jumps to a closed terminal
+		it("closed_terminal_leaves_history", () => {
+			testInScope(() => {
+				const [a, b, c] = addActivated(3);
+				store.remove(b);
+				expect(store.state.history).toEqual([c, a]);
+				expect(store.getHistoryTarget("back")).toBe(a);
+			});
+		});
+
+		// catches: removing an entry before the cursor shifts back/forward onto the wrong terminal
+		it("removing_an_entry_ahead_of_the_cursor_keeps_the_current_position", () => {
+			testInScope(() => {
+				const [a, b, c] = addActivated(3);
+				store.setActive(store.stepHistory("back") as string); // b, cursor 1
+				store.setActive(store.stepHistory("back") as string); // a, cursor 2
+				store.remove(c);
+				expect(store.state.history).toEqual([b, a]);
+				expect(store.getHistoryTarget("forward")).toBe(b);
+				expect(store.getHistoryTarget("back")).toBeNull();
+			});
+		});
+
+		// catches: unbounded history growth
+		it("keeps_only_the_ten_most_recent_distinct_terminals", () => {
+			testInScope(() => {
+				const ids = addActivated(12);
+				expect(store.state.history).toEqual(ids.slice(2).reverse());
+				store.setActive(ids[5]);
+				expect(store.state.history[0]).toBe(ids[5]);
+				expect(new Set(store.state.history).size).toBe(store.state.history.length);
 			});
 		});
 	});

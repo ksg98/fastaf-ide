@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { "name": "ego", "version": "0.1.0" },
+      "io.modelcontextprotocol/clientCapabilities": {
+        "elicitation": { "form": { "schemaValidation": true } }
+      },
+      "progressToken": 0
+    }
+  }
+}

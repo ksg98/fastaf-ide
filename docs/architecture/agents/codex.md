@@ -288,7 +288,7 @@ of submitting the turn. Managed automation must use one atomic MCP call:
 ```
 
 `submit` claims a confirmed-idle, empty managed-agent composer; holds the PTY
-writer across Ctrl-U, optional bracketed paste, the 50 ms scheduling gap, and
+writer across Ctrl-U, a 50 ms gap, optional bracketed paste, the 50 ms scheduling gap, and
 the final carriage return; advances the normal input FSM and turn epoch; then
 waits internally for child terminal movement. The same response returns
 `submission_id`, `submitted`, `write_state`, `acknowledged`, `retry_safe`,

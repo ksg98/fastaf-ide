@@ -143,19 +143,3 @@
   font-variant-numeric: tabular-nums;
 }
 
-.historyBtn {
-  flex-shrink: 0;
-  height: 22px;
-  padding: 0 8px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
-  font: inherit;
-  cursor: pointer;
-}
-
-.historyBtn:hover {
-  color: var(--fg-primary);
-  background: var(--surface-hover);
-}

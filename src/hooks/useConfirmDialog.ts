@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import type { OrphanAssessment } from "./git/createRepositoryRefreshCoordinator";
 
 /** Which button the Enter key activates. Defaults to "confirm" for backward
  *  compatibility; destructive dialogs can set "cancel" so an accidental Enter
@@ -17,11 +18,17 @@ export interface ConfirmOptions {
 	/** Optional middle button (e.g. "Don't Save"). When set the dialog offers a
 	 *  third outcome ("discard") between confirm and cancel. */
 	discardLabel?: string;
+	discardDanger?: boolean;
+	discardDisabled?: boolean;
+	archiveChecklist?: import("../stores/workspaceIdentity").ArchiveChecklist;
+	workspaceName?: string;
 	kind?: "info" | "warning" | "error";
 	/** Which button Enter activates. Defaults to "confirm". */
 	defaultButton?: ConfirmDefaultButton;
 	/** When set, the dialog auto-clicks cancel after this many ms, with a countdown on the cancel label. */
 	autoCancelMs?: number;
+	/** When set, the dialog auto-clicks confirm after this many ms, with a countdown on the confirm label. */
+	autoConfirmMs?: number;
 }
 
 /** Internal state for the currently visible confirm dialog */
@@ -31,9 +38,14 @@ export interface ConfirmDialogState {
 	confirmLabel: string;
 	cancelLabel: string;
 	discardLabel?: string;
+	discardDanger?: boolean;
+	discardDisabled?: boolean;
+	archiveChecklist?: import("../stores/workspaceIdentity").ArchiveChecklist;
+	workspaceName?: string;
 	kind: "info" | "warning" | "error";
 	defaultButton: ConfirmDefaultButton;
 	autoCancelMs?: number;
+	autoConfirmMs?: number;
 }
 
 /**
@@ -49,7 +61,7 @@ export function useConfirmDialog() {
 	// shown. Concurrent confirm() calls enqueue instead of overwriting a single
 	// resolver — the previous single-slot design orphaned every promise but the
 	// last (its await never settled) and silently dropped earlier dialogs.
-	const queue: Array<{ options: ConfirmOptions; resolve: (value: ConfirmResult) => void }> = [];
+	const queue: Array<{ options: ConfirmOptions; resolve: (value: ConfirmResult) => void; key?: string }> = [];
 
 	/** Render the dialog at the head of the queue, or hide it when empty. */
 	function showHead() {
@@ -64,17 +76,26 @@ export function useConfirmDialog() {
 			confirmLabel: head.options.okLabel || "OK",
 			cancelLabel: head.options.cancelLabel || "Cancel",
 			discardLabel: head.options.discardLabel,
+			discardDanger: head.options.discardDanger,
+			...(head.options.archiveChecklist
+				? {
+						discardDisabled: head.options.discardDisabled,
+						archiveChecklist: head.options.archiveChecklist,
+						workspaceName: head.options.workspaceName,
+					}
+				: {}),
 			kind: head.options.kind || "warning",
 			defaultButton: head.options.defaultButton || "confirm",
 			autoCancelMs: head.options.autoCancelMs,
+			autoConfirmMs: head.options.autoConfirmMs,
 		});
 	}
 
 	/** Show a confirmation dialog — resolves true on confirm, false on cancel.
 	 *  When a dialog is already visible, this one queues and shows after it. */
-	function confirm(options: ConfirmOptions): Promise<boolean> {
+	function confirm(options: ConfirmOptions, key?: string): Promise<boolean> {
 		return new Promise<boolean>((resolve) => {
-			queue.push({ options, resolve: (value) => resolve(value === "confirm") });
+			queue.push({ options, resolve: (value) => resolve(value === "confirm"), key });
 			if (queue.length === 1) showHead();
 		});
 	}
@@ -84,6 +105,14 @@ export function useConfirmDialog() {
 		const head = queue.shift();
 		head?.resolve(value);
 		showHead();
+	}
+
+	function answerOrphanCleanup(repoPath: string, remove: boolean) {
+		const index = queue.findIndex((request) => request.key === `orphan:${repoPath}`);
+		if (index < 0) return;
+		const [request] = queue.splice(index, 1);
+		request.resolve(remove ? "confirm" : "cancel");
+		if (index === 0) showHead();
 	}
 
 	/** Called when user confirms */
@@ -98,29 +127,95 @@ export function useConfirmDialog() {
 
 	/** Called when the user picks the middle "discard" action (e.g. Don't Save) */
 	function handleDiscard() {
+		if (dialogState()?.discardDisabled) return;
 		settle("discard");
 	}
 
-	/** Confirm removing a worktree/branch */
-	async function confirmRemoveWorktree(branchName: string): Promise<boolean> {
-		return await confirm({
-			title: "Remove worktree?",
-			message: `Remove ${branchName}?\nThis deletes the worktree directory and its local branch.`,
-			okLabel: "Remove",
+	/** Confirm removing a linked worktree. */
+	async function confirmRemoveWorktree(
+		branchName: string,
+		status: import("../stores/workspaceIdentity").WorkspaceLifecycleStatus,
+		deleteBranch: boolean,
+	): Promise<boolean | "delete" | "archive"> {
+		if (deleteBranch && !status.missingCheckout && status.archiveChecklist) {
+			const checklist = status.archiveChecklist;
+			return new Promise<boolean | "delete" | "archive">((resolve) => {
+				queue.push({
+					options: {
+						title: "Archive workspace?",
+						message: "",
+						workspaceName: branchName,
+						archiveChecklist: checklist,
+						okLabel: "Archive",
+						discardLabel: "Delete",
+						discardDanger: true,
+						discardDisabled: !checklist.can_delete,
+					},
+					resolve: (value) =>
+						resolve(value === "confirm" ? "archive" : value === "discard" && checklist.can_delete ? "delete" : false),
+				});
+				if (queue.length === 1) showHead();
+			});
+		}
+		const lost = status.dirtyFiles ?? 0;
+		const missing = status.missingCheckout === true;
+		const dirty = lost > 0 ? `${lost} uncommitted file${lost === 1 ? "" : "s"} will be discarded` : "clean";
+		const commits =
+			status.commitStatus === "merged"
+				? "This branch's commits are in the default branch"
+				: status.commitStatus === "in_sync"
+					? "This branch has nothing of its own, not merged work"
+					: status.commitStatus === "pushed_unmerged"
+						? "This branch is not merged, but all its commits are pushed"
+						: status.commitStatus === "unrelated_history"
+							? "This branch has unrelated history: no common ancestor with the default branch; keep it or archive its current tip before deletion"
+							: "commits remain in the parent repository";
+		const untracked = status.untrackedFiles
+			? `\nUntracked files: ${status.untrackedFiles} untracked files will be discarded.`
+			: "";
+		const sessions = status.liveSessions?.length
+			? `\nLive sessions in this worktree: ${status.liveSessions.map((session) => session.name).join(", ")}. Removing it will interrupt them.`
+			: "";
+		// Mirrors `retain_finished_checkout` (src-tauri/src/worktree.rs): a clean, integrated
+		// checkout is archived for reuse, so the branch stays checked out there.
+		const recycled =
+			deleteBranch &&
+			status.removalSafety === "safe" &&
+			!missing &&
+			status.dirtyFiles === 0 &&
+			!(status.submoduleUnpushedCommits ?? []).some((entry) => entry.count > 0) &&
+			(status.commitStatus === "merged" || status.commitStatus === "in_sync");
+		const branchAction =
+			deleteBranch && !recycled
+				? "Git will safely delete the local branch; if it is unmerged, the branch is kept."
+				: "The local branch will be kept.";
+		const destructive = status.removalSafety === "requires_force";
+		const submoduleCommits = (status.submoduleUnpushedCommits ?? [])
+			.filter((entry) => entry.count > 0)
+			.map((entry) => `${entry.path}: ${entry.count} commits not on a remote-tracking branch`);
+		const canDelete = recycled && !status.liveSessions?.length;
+		const options: ConfirmOptions = {
+			discardLabel: canDelete ? "Delete" : undefined,
+			discardDanger: canDelete || undefined,
+			title: destructive ? "Destroy workspace state?" : recycled ? "Archive workspace?" : "Remove workspace?",
+			message: `${recycled ? "Archive" : "Remove"} "${branchName}"?\n\n${recycled ? "The clean checkout moves to the archive area for reuse; it is not deleted.\n" : ""}${missing ? "The checkout directory is missing; Git still has a worktree registration. Its submodule refs will be preserved before cleanup." : `Working tree: ${dirty}.`}${untracked}${sessions}${submoduleCommits.length ? `\nSubmodules: ${submoduleCommits.join("; ")}.` : ""}\nCommit state: ${commits}.\n${branchAction}${canDelete ? "\nDelete instead permanently removes the checkout and the local branch." : ""}`,
+			okLabel: destructive ? "Delete anyway" : recycled ? "Archive" : "Remove",
 			cancelLabel: "Cancel",
-			kind: "warning",
+			kind: destructive ? "error" : "warning",
+		};
+		return new Promise<boolean | "delete">((resolve) => {
+			queue.push({
+				options,
+				resolve: (value) => resolve(value === "discard" && canDelete ? "delete" : value === "confirm"),
+			});
+			if (queue.length === 1) showHead();
 		});
 	}
 
-	/** Confirm force-removing a worktree that is locked by an active agent.
-	 *
-	 *  Pass `deleteBranch=true` when the branch ref will also be force-deleted —
-	 *  the dialog then warns that any unmerged/unpushed commits will be
-	 *  destroyed along with the worktree (force-remove uses `git branch -D`).
-	 */
+	/** Confirm overriding an agent's worktree lock. */
 	async function confirmRemoveLockedWorktree(branchName: string, deleteBranch: boolean = true): Promise<boolean> {
 		const branchWarning = deleteBranch
-			? `\n\nThe branch "${branchName}" will be force-deleted (\`git branch -D\`). Any unmerged or unpushed commits will be permanently lost.`
+			? `\n\nThe branch "${branchName}" will be deleted only if its commits are already integrated. Otherwise it will be kept and the result will explain why.`
 			: "";
 		return await confirm({
 			title: "Worktree is locked by an agent",
@@ -202,41 +297,57 @@ export function useConfirmDialog() {
 	}
 
 	/** Confirm removing orphaned worktrees (detached-HEAD, branch deleted) */
-	async function confirmOrphanCleanup(paths: string[]): Promise<boolean> {
-		const list = paths.map((p) => `  • ${p}`).join("\n");
-		return await confirm({
-			title: "Orphaned worktrees found",
-			message: `${paths.length} worktree(s) have no branch and will be removed:\n${list}`,
-			okLabel: "Remove",
-			cancelLabel: "Keep",
-			kind: "warning",
-			// Destructive, and raised from a background refresh rather than a user
-			// gesture — it can appear mid-typing, so a stray Enter must keep.
-			defaultButton: "cancel",
-		});
+	async function confirmOrphanCleanup(
+		repoPath: string,
+		assessments: OrphanAssessment[],
+		countdownSeconds: number,
+	): Promise<boolean> {
+		const allSafe = assessments.every((entry) => entry.safe);
+		const list = assessments.map((entry) => `  • ${entry.path}${entry.reason ? `: ${entry.reason}` : ""}`).join("\n");
+		return await confirm(
+			{
+				title: "Orphaned worktrees found",
+				message: allSafe
+					? `${assessments.length} clean worktree(s) have no branch and can be removed:\n${list}`
+					: `Review before removing these orphaned worktrees:\n${list}`,
+				okLabel: "Remove",
+				cancelLabel: "Keep",
+				kind: "warning",
+				defaultButton: "cancel",
+				autoConfirmMs: allSafe ? countdownSeconds * 1000 : undefined,
+			},
+			`orphan:${repoPath}`,
+		);
 	}
 
-	/** Confirm a cleanup that would take the worktree's uncommitted work with it.
-	 *  The backend refuses archive/delete on a worktree it cannot confirm is clean;
-	 *  this is the ask that unblocks it. `commitsAhead` is 0 when the merge itself
-	 *  would also be a no-op — worth saying, because then nothing is gained either. */
+	/** Confirm cleanup hazards before retrying with an explicit fingerprint.
+	 *  `commitsAhead` is 0 when the merge itself would also be a no-op. */
 	async function confirmDirtyWorktreeCleanup(
 		branchName: string,
 		action: string,
 		commitsAhead: number,
+		lifecycle?: import("../stores/workspaceIdentity").WorkspaceLifecycleStatus,
 	): Promise<boolean> {
 		const verb = action === "delete" ? "Deleting" : "Archiving";
-		const fate =
-			action === "delete"
-				? "removes the worktree directory — the uncommitted changes are lost."
-				: "moves the worktree to __archived/ — the uncommitted changes move with it.";
+		const dirty = lifecycle?.dirtyFiles;
+		const fate = action === "delete" ? "removes the worktree directory" : "moves the worktree to __archived/";
+		const consequence =
+			dirty === 0
+				? `The worktree for "${branchName}" is clean. ${verb} it ${fate}.`
+				: `The worktree for "${branchName}" has uncommitted changes. ${verb} it ${fate} — ${action === "delete" ? "the changes are lost" : "the changes move with it"}.`;
+		const warnings = lifecycle?.warnings?.length
+			? lifecycle.warnings
+			: (lifecycle?.liveSessions?.map((session) => `Live session: ${session.name}`) ?? []);
 		const noop =
 			commitsAhead === 0
 				? `\n\n"${branchName}" also has no commits the target branch lacks, so the merge itself would do nothing.`
 				: "";
+		const submoduleCommits = (lifecycle?.submoduleUnpushedCommits ?? [])
+			.filter((entry) => entry.count > 0)
+			.map((entry) => `${entry.path}: ${entry.count} commits not on a remote-tracking branch`);
 		return await confirm({
-			title: "Uncommitted work in the worktree",
-			message: `The worktree for "${branchName}" has uncommitted changes. ${verb} it ${fate}${noop}\n\nContinue?`,
+			title: dirty === 0 ? "Review worktree cleanup" : "Uncommitted work in the worktree",
+			message: `${consequence}${noop}${warnings.length ? `\n\n${warnings.join("\n")}` : ""}${submoduleCommits.length ? `\n\nSubmodules: ${submoduleCommits.join("; ")}.` : ""}\n\nContinue?`,
 			okLabel: action === "delete" ? "Delete anyway" : "Archive anyway",
 			cancelLabel: "Keep it",
 			kind: "warning",
@@ -252,6 +363,7 @@ export function useConfirmDialog() {
 		confirmRemoveRepo,
 		confirmStashAndSwitch,
 		confirmOrphanCleanup,
+		answerOrphanCleanup,
 		confirmDirtyWorktreeCleanup,
 		reportGitError,
 		/** Reactive state for rendering the dialog — null when hidden */

@@ -1,0 +1,58 @@
+{
+  "session_id": "d00720ae-f711-470f-b114-05d3f1c31bb7",
+  "cwd": "/Users/stefano.straus/Gits/.tmp/results/desk-2021b/scratch/parity-ego-p2",
+  "worktree_path": null,
+  "worktree_branch": null,
+  "display_name": "\u03b5go",
+  "display_name_is_custom": false,
+  "display_name_from_spawn": false,
+  "is_remote": true,
+  "alias": "pepa-1",
+  "tuic_session": "d00720ae-f711-470f-b114-05d3f1c31bb7",
+  "state": {
+    "awaiting_input": true,
+    "question_text": "Allow run printf PARITY_EGO_P2_OK?",
+    "question_confident": true,
+    "rate_limited": false,
+    "shell_state": "busy",
+    "agent_state": "awaiting_input",
+    "last_activity_ms": 1792551758418,
+    "agent_type": "ego",
+    "agent_intent": "Execute exactly printf PARITY_EGO_P2_OK with exec now. The native permission gat",
+    "choice_prompt": {
+      "title": "Allow run printf PARITY_EGO_P2_OK?",
+      "options": [
+        {
+          "key": "y",
+          "label": "yes",
+          "highlighted": true,
+          "destructive": false
+        },
+        {
+          "key": "a",
+          "label": "yes, do not ask again for exec(printf PARITY_EGO_P2_OK)",
+          "highlighted": false,
+          "destructive": false
+        },
+        {
+          "key": "n",
+          "label": "no, say what to do instead",
+          "highlighted": false,
+          "destructive": true
+        },
+        {
+          "key": "e",
+          "label": "edit",
+          "highlighted": false,
+          "destructive": false
+        },
+        {
+          "key": "d",
+          "label": "details",
+          "highlighted": false,
+          "destructive": false
+        }
+      ]
+    }
+  }
+}

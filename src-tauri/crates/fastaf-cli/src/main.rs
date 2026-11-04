@@ -7,10 +7,13 @@
 //! When invoked as `tmux` (via symlink), enters tmux-compatibility mode
 //! and translates tmux commands to TUIC equivalents.
 
+mod bg;
 mod ipc;
 mod mcp;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -21,6 +24,10 @@ use clap::{Parser, Subcommand};
     about = "FastAF CLI — editor, multiplexer, orchestrator"
 )]
 struct Cli {
+    /// Select an isolated application instance (overrides TUIC_APP_INSTANCE)
+    #[arg(long, global = true)]
+    instance: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -31,6 +38,32 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a command detached and queue a completion wake to this FastAF session
+    Bg {
+        /// Append command output here; write the exit code to <log>.exit
+        log: String,
+        /// Command and arguments after --
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
+    #[command(name = "__bg-runner", hide = true)]
+    BgRunner {
+        log: String,
+        caller: String,
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
+    /// Apply a shared automation action (JSON object, or - for stdin)
+    Automations { arguments: Option<String> },
+    /// Apply a typed workflow action (JSON object, or - for stdin)
+    Workflow { arguments: Option<String> },
+    /// Call a server-owned MCP tool with JSON arguments
+    Mcp {
+        /// MCP tool name (for example agent or session)
+        tool: String,
+        /// JSON object, or - to read it from stdin (defaults to {})
+        arguments: Option<String>,
+    },
     /// Open a file or directory in FastAF
     Open {
         /// Path to open (file or directory)
@@ -116,6 +149,27 @@ enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Use server-owned MCP session actions
+    Session {
+        #[command(subcommand)]
+        action: McpSessionAction,
+    },
+    /// Use server-owned MCP worktree actions
+    Repo {
+        #[command(subcommand)]
+        action: RepoAction,
+    },
+    /// Call the native story service with a typed JSON action
+    Story {
+        /// JSON object tagged with action (for example '{"action":"list_plans"}')
+        action: String,
+        /// Owning project (defaults to the current directory)
+        #[arg(long)]
+        project: Option<String>,
+        /// Live PTY session for a manual claim
+        #[arg(long)]
+        session_id: Option<String>,
+    },
     /// Show FastAF status
     Status,
     /// Install the fastaf CLI to system PATH
@@ -146,15 +200,7 @@ enum Command {
 #[derive(Subcommand)]
 enum AgentAction {
     /// Spawn a new agent
-    Spawn {
-        /// Agent type (claude, codex, etc.)
-        agent_type: String,
-        /// Initial prompt for the agent (required by the server)
-        prompt: String,
-        /// Repository path (defaults to the current directory)
-        #[arg(long)]
-        repo: Option<String>,
-    },
+    Spawn(Box<AgentSpawnArgs>),
     /// List running agents
     Ls,
     /// Send a message to a registered peer's inbox (peer registry, not the PTY).
@@ -165,6 +211,8 @@ enum AgentAction {
         target: String,
         /// Message text
         message: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Type a prompt into an agent's PTY and submit it (no peer routing).
     ///
@@ -176,6 +224,136 @@ enum AgentAction {
         target: String,
         /// Prompt text
         message: String,
+    },
+    /// Wait for new mailbox entries without polling
+    Wait {
+        #[arg(long)]
+        since: Option<u64>,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the caller's mailbox
+    Inbox {
+        #[arg(long)]
+        since: Option<u64>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List registered peers
+    ListPeers {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show orchestration capacity
+    Stats {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args)]
+struct AgentSpawnArgs {
+    /// Agent type (claude, codex, etc.)
+    agent_type: String,
+    /// Initial prompt for the agent (required by the server)
+    prompt: String,
+    /// Repository path (defaults to the current directory)
+    #[arg(long)]
+    repo: Option<String>,
+    /// Agent display name
+    #[arg(long)]
+    name: Option<String>,
+    /// Model routing value passed to the agent launcher
+    #[arg(long)]
+    model: Option<String>,
+    /// Explicit launcher argument (repeat for multiple arguments)
+    #[arg(long, allow_hyphen_values = true)]
+    args: Vec<String>,
+    /// Working directory (overrides --repo)
+    #[arg(long, conflicts_with = "repo")]
+    cwd: Option<String>,
+    /// Enable print mode for agents that support it
+    #[arg(long)]
+    print_mode: bool,
+    /// PTY description shown by FastAF
+    #[arg(long)]
+    pty_description: Option<String>,
+    #[arg(long)]
+    rows: Option<u16>,
+    #[arg(long)]
+    cols: Option<u16>,
+    #[arg(long)]
+    output_format: Option<String>,
+    #[arg(long)]
+    binary_path: Option<String>,
+    /// Print the raw server payload
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum McpSessionAction {
+    Status {
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Wait {
+        target: String,
+        #[arg(long, default_value = "idle")]
+        until: String,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    Output {
+        target: String,
+        #[arg(long)]
+        since_cursor: Option<u64>,
+        #[arg(long)]
+        from_line: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepoAction {
+    #[command(name = "worktree-list")]
+    List {
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(name = "worktree-create")]
+    Create {
+        path: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        base_ref: Option<String>,
+        #[arg(long)]
+        spawn_session: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(name = "worktree-remove")]
+    Remove {
+        path: String,
+        branch: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -190,10 +368,12 @@ fn main() {
         .unwrap_or_default();
 
     if argv0 == "tmux" {
+        select_instance(None);
         return tmux_compat();
     }
 
     let cli = Cli::parse();
+    select_instance(cli.instance.as_deref());
 
     let result = match cli.command {
         Some(cmd) => dispatch(cmd),
@@ -218,9 +398,29 @@ fn main() {
     }
 }
 
+fn select_instance(instance: Option<&str>) {
+    let result = match instance {
+        Some(id) => tuic_ipc::app_instance::select_app_instance(Some(id)),
+        None => tuic_ipc::app_instance::select_app_instance_from_env(),
+    };
+    if let Err(error) = result {
+        eprintln!("fastaf: {error}");
+        std::process::exit(1);
+    }
+}
+
 fn dispatch(cmd: Command) -> Result<(), String> {
     match cmd {
         Command::Open { path, wait, goto } => cmd_open(path, wait, goto),
+        Command::Bg { log, command } => bg::launch(&log, &command),
+        Command::BgRunner {
+            log,
+            caller,
+            command,
+        } => bg::run(&log, &caller, &command),
+        Command::Automations { arguments } => cmd_mcp("automations", arguments.as_deref()),
+        Command::Workflow { arguments } => cmd_mcp("workflow", arguments.as_deref()),
+        Command::Mcp { tool, arguments } => cmd_mcp(&tool, arguments.as_deref()),
         Command::Diff { file_a, file_b } => cmd_diff(&file_a, &file_b),
         Command::Ls { json } => cmd_ls(json),
         Command::New { name, repo } => cmd_new(name.as_deref(), repo.as_deref()).map(|_| ()),
@@ -238,6 +438,13 @@ fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Kill { target } => cmd_kill(&target),
         Command::Resize { target, size } => cmd_resize(&target, &size),
         Command::Agent { action } => cmd_agent(action),
+        Command::Session { action } => cmd_mcp_session(action),
+        Command::Repo { action } => cmd_repo(action),
+        Command::Story {
+            action,
+            project,
+            session_id,
+        } => cmd_story(&action, project.as_deref(), session_id.as_deref()),
         Command::Status => cmd_status(),
         Command::InstallCli { path } => cmd_install_cli(path.as_deref()),
         Command::Alias { remove } => cmd_alias(remove),
@@ -249,6 +456,63 @@ fn dispatch(cmd: Command) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Command implementations
 // ---------------------------------------------------------------------------
+
+fn cmd_mcp(tool: &str, arguments: Option<&str>) -> Result<(), String> {
+    let mut stdin_text = String::new();
+    let text = if arguments == Some("-") {
+        std::io::stdin()
+            .read_to_string(&mut stdin_text)
+            .unwrap_or_else(|e| {
+                mcp_usage_error(&format!("Cannot read MCP arguments from stdin: {e}"))
+            });
+        stdin_text.as_str()
+    } else {
+        arguments.unwrap_or("{}")
+    };
+    let parsed: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|e| mcp_usage_error(&format!("MCP arguments must be a JSON object: {e}")));
+    if !parsed.is_object() {
+        mcp_usage_error("MCP arguments must be a JSON object");
+    }
+    let result = mcp::McpClient::connect_for_orchestration()?.call_text(tool, parsed)?;
+    println!("{result}");
+    Ok(())
+}
+
+fn mcp_usage_error(message: &str) -> ! {
+    eprintln!("fastaf: {message}");
+    std::process::exit(2)
+}
+
+fn cmd_story(action: &str, project: Option<&str>, session_id: Option<&str>) -> Result<(), String> {
+    let action: serde_json::Value = serde_json::from_str(action)
+        .map_err(|e| format!("Story action must be a JSON object: {e}"))?;
+    if !action.is_object() || action["action"].as_str().is_none() {
+        return Err("Story action must be a JSON object with an action field".into());
+    }
+    let project = match project {
+        Some(path) => resolve_path(path),
+        None => std::env::current_dir()
+            .map_err(|e| format!("Cannot get current directory: {e}"))?
+            .to_string_lossy()
+            .to_string(),
+    };
+    let body = serde_json::json!({"action": action, "sessionId": session_id});
+    let response = ipc::request(
+        "POST",
+        &format!("/stories/action?path={}", urlencod(&project)),
+        Some(&body.to_string()),
+    )
+    .map_err(|e| format!("Story request failed: {e}"))?;
+    if !response.is_success() {
+        return Err(format!(
+            "Story request failed (HTTP {}): {}",
+            response.status, response.body
+        ));
+    }
+    println!("{}", response.body);
+    Ok(())
+}
 
 fn cmd_open(path: Option<String>, _wait: bool, goto: Option<String>) -> Result<(), String> {
     ipc::ensure_running().map_err(|e| e.to_string())?;
@@ -276,12 +540,24 @@ fn cmd_open(path: Option<String>, _wait: bool, goto: Option<String>) -> Result<(
     // Check if path is a directory → open as repo, file → open in editor
     let metadata = std::fs::metadata(actual_path);
     if metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
-        // A directory is a REPO, not a terminal: hand it to the app, which adds it
-        // to the sidebar if it is new (asking first) and activates it. Creating a
-        // PTY here instead — as this used to — left the sidebar untouched, which is
-        // never what `fastaf .` means. Use `fastaf new` when you want a shell.
-        open_deep_link(&format!("tuic://open-repo?path={}", urlencod(actual_path)))
-            .map_err(|e| e.to_string())?;
+        // Registration is permanent; a temp directory is not. Refuse rather than
+        // leave a row the user must later hunt down (#763-d219).
+        if is_disposable_root(Path::new(actual_path), &disposable_roots()) {
+            return Err(format!(
+                "Refusing to register \"{actual_path}\" as a repository: it is inside a temporary \
+                 directory, which the OS deletes while the sidebar entry stays behind forever.\n\
+                 For a shell there instead: fastaf new {actual_path}"
+            ));
+        }
+        // The selected server owns registration. Dev builds and headless
+        // instances need no OS URL handler or connected desktop window.
+        let result = mcp::McpClient::connect()?.call(
+            "repo",
+            serde_json::json!({"action": "add", "path": actual_path}),
+        )?;
+        if let Some(warning) = result["warning"].as_str() {
+            eprintln!("warning: {warning}");
+        }
         eprintln!("Opening {actual_path}");
     } else {
         // Open file in editor via deep link
@@ -350,8 +626,7 @@ fn session_status(s: &serde_json::Value) -> String {
     "-".to_string()
 }
 
-/// First segment of a session UUID — enough to identify a session by eye and
-/// accepted everywhere a target is taken (`resolve_session_id` prefix-matches).
+/// First segment of a session UUID — enough to identify a session by eye.
 fn short_id(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
 }
@@ -448,82 +723,51 @@ fn cmd_new(name: Option<&str>, repo: Option<&str>) -> Result<String, String> {
 }
 
 fn cmd_send(target: &str, keys: &[String]) -> Result<(), String> {
-    let id = resolve_session_id(target)?;
-    let body = serde_json::json!({ "data": translate_keys(keys) });
-    let resp = ipc::post(&format!("/sessions/{id}/write"), &body.to_string())
-        .map_err(|e| e.to_string())?;
-
-    if !resp.is_success() {
-        return Err(format!("Failed to send keys: {}", resp.body));
-    }
-
+    mcp_session_call(
+        "input",
+        target,
+        serde_json::json!({"input": translate_keys(keys)}),
+    )?;
     Ok(())
 }
 
 /// Build the `/output` query for `capture`. `raw` takes no format so the server
 /// returns the untouched byte tail; `lines` maps to the server's `limit`.
-fn capture_query(format: &str, lines: Option<usize>) -> String {
-    let mut params: Vec<String> = Vec::new();
-    match format {
-        "raw" => {}
-        "log" => params.push("format=log".to_string()),
-        _ => params.push("format=text".to_string()),
+fn capture_payload(format: &str, lines: Option<usize>) -> Result<serde_json::Value, String> {
+    if !matches!(format, "raw" | "text") {
+        return Err(format!(
+            "capture format '{format}' is not supported; use raw or text"
+        ));
     }
-    if let Some(n) = lines {
-        params.push(format!("limit={n}"));
-    }
-    if params.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", params.join("&"))
-    }
+    Ok(optional_fields(
+        serde_json::json!({"format": format}),
+        [("limit", lines.map(serde_json::Value::from))],
+    ))
 }
 
 fn cmd_capture(target: &str, format: &str, lines: Option<usize>) -> Result<(), String> {
-    let id = resolve_session_id(target)?;
-    let fmt_param = capture_query(format, lines);
-
-    let resp = ipc::get(&format!("/sessions/{id}/output{fmt_param}")).map_err(|e| e.to_string())?;
-
-    if resp.is_success() {
-        // Output might be JSON with a "data" field or plain text
-        if let Ok(v) = resp.json() {
-            if let Some(data) = v["data"].as_str() {
-                print!("{data}");
-            } else if let Some(lines) = v["lines"].as_array() {
-                for line in lines {
-                    if let Some(text) = line["text"].as_str() {
-                        println!("{text}");
-                    }
-                }
-            } else {
-                print!("{}", resp.body);
+    let payload = mcp_session_call("output", target, capture_payload(format, lines)?)?;
+    if let Some(data) = payload["data"].as_str() {
+        print!("{data}");
+    } else if let Some(lines) = payload["lines"].as_array() {
+        for line in lines {
+            if let Some(text) = line["text"].as_str() {
+                println!("{text}");
             }
-        } else {
-            print!("{}", resp.body);
         }
     } else {
-        return Err(format!("Failed to capture: {}", resp.body));
+        print_mcp_payload(&payload, false);
     }
 
     Ok(())
 }
 
 fn cmd_kill(target: &str) -> Result<(), String> {
-    let id = resolve_session_id(target)?;
-    let resp = ipc::delete(&format!("/sessions/{id}")).map_err(|e| e.to_string())?;
-
-    if resp.is_success() {
-        eprintln!("Killed session {id}");
-    } else {
-        return Err(format!("Failed to kill session: {}", resp.body));
-    }
-
+    mcp_session_call("kill", target, serde_json::json!({}))?;
     Ok(())
 }
 
 fn cmd_resize(target: &str, size: &str) -> Result<(), String> {
-    let id = resolve_session_id(target)?;
     let parts: Vec<&str> = size.split('x').collect();
     if parts.len() != 2 {
         return Err("Size must be WIDTHxHEIGHT (e.g. 120x40)".to_string());
@@ -531,14 +775,11 @@ fn cmd_resize(target: &str, size: &str) -> Result<(), String> {
     let cols: u16 = parts[0].parse().map_err(|_| "Invalid width")?;
     let rows: u16 = parts[1].parse().map_err(|_| "Invalid height")?;
 
-    let body = serde_json::json!({ "rows": rows, "cols": cols });
-    let resp = ipc::post(&format!("/sessions/{id}/resize"), &body.to_string())
-        .map_err(|e| e.to_string())?;
-
-    if !resp.is_success() {
-        return Err(format!("Failed to resize: {}", resp.body));
-    }
-
+    mcp_session_call(
+        "resize",
+        target,
+        serde_json::json!({"rows": rows, "cols": cols}),
+    )?;
     Ok(())
 }
 
@@ -546,35 +787,46 @@ fn cmd_agent(action: AgentAction) -> Result<(), String> {
     ipc::ensure_running().map_err(|e| e.to_string())?;
 
     match action {
-        AgentAction::Spawn {
-            agent_type,
-            prompt,
-            repo,
-        } => {
-            let cwd = match repo {
+        AgentAction::Spawn(args) => {
+            let AgentSpawnArgs {
+                agent_type,
+                prompt,
+                repo,
+                name,
+                model,
+                args,
+                cwd,
+                print_mode,
+                pty_description,
+                rows,
+                cols,
+                output_format,
+                binary_path,
+                json,
+            } = *args;
+            let cwd = match cwd.or(repo) {
                 Some(r) => resolve_path(&r),
                 None => std::env::current_dir()
                     .map(|d| d.to_string_lossy().to_string())
                     .map_err(|e| format!("Cannot get cwd: {e}"))?,
             };
 
-            // Server's SpawnAgentRequest reads `cwd` (not `repo_path`) and requires `prompt`.
-            let body = serde_json::json!({
-                "agent_type": agent_type,
-                "cwd": cwd,
-                "prompt": prompt,
+            let payload = agent_spawn_payload(AgentSpawnInput {
+                agent_type: &agent_type,
+                prompt: &prompt,
+                cwd: &cwd,
+                name: name.as_deref(),
+                model: model.as_deref(),
+                args: &args,
+                print_mode,
+                pty_description: pty_description.as_deref(),
+                rows,
+                cols,
+                output_format: output_format.as_deref(),
+                binary_path: binary_path.as_deref(),
             });
-            let resp =
-                ipc::post("/sessions/agent", &body.to_string()).map_err(|e| e.to_string())?;
-
-            if resp.is_success() {
-                if let Ok(v) = resp.json() {
-                    let id = v["session_id"].as_str().unwrap_or("?");
-                    println!("Spawned {agent_type} agent: {id}");
-                }
-            } else {
-                return Err(format!("Failed to spawn agent: {}", resp.body));
-            }
+            let response = mcp::McpClient::connect_for_orchestration()?.call("agent", payload)?;
+            print_mcp_payload(&response, json);
         }
         AgentAction::Ls => {
             let resp = ipc::get("/sessions").map_err(|e| e.to_string())?;
@@ -604,38 +856,267 @@ fn cmd_agent(action: AgentAction) -> Result<(), String> {
                 println!("{:<38} {:<12} {:<10} {}", id, agent_type, status, repo);
             }
         }
-        AgentAction::Send { target, message } => {
-            // Peer routing only — deliberately NOT resolve_session_id. That
+        AgentAction::Send {
+            target,
+            message,
+            json,
+        } => {
+            // Peer routing only — deliberately NOT a session action. That
             // resolves PTYs, and a registered external orchestrator has no PTY,
             // so routing through it answered "Session not found" while the MCP
             // tool delivered the same UUID fine. PTY text injection stays
             // available, and explicit, as `fastaf send` / `fastaf send-keys`.
-            let report = mcp::agent_send(&target, &message)?;
-            println!("{}", mcp::delivery_line(&target, &report));
+            let client = mcp::McpClient::connect_for_orchestration()?;
+            let report = mcp::agent_send(&client, &target, &message)?;
+            if json {
+                println!("{report}");
+            } else {
+                println!("{}", mcp::delivery_line(&target, &report));
+            }
         }
         AgentAction::Type { target, message } => {
-            let id = resolve_session_id(&target)?;
             let (payload, enter) = agent_send_parts(&message);
-            let body = serde_json::json!({ "data": payload });
-            let resp = ipc::post(&format!("/sessions/{id}/write"), &body.to_string())
-                .map_err(|e| e.to_string())?;
-
-            if !resp.is_success() {
-                return Err(format!("Failed to send: {}", resp.body));
-            }
+            mcp_session_call("input", &target, serde_json::json!({"input": payload}))?;
 
             // Raw-mode agent TUIs require Enter in a later PTY read. A combined
             // `message\r` is commonly treated as a prefill and left unsent.
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let body = serde_json::json!({ "data": enter });
-            let resp = ipc::post(&format!("/sessions/{id}/write"), &body.to_string())
-                .map_err(|e| e.to_string())?;
-            if !resp.is_success() {
-                return Err(format!("Failed to submit agent message: {}", resp.body));
+            mcp_session_call("input", &target, serde_json::json!({"input": enter}))?;
+        }
+        AgentAction::Wait {
+            since,
+            timeout_ms,
+            json,
+        } => {
+            let payload = optional_fields(
+                serde_json::json!({"action": "wait"}),
+                [
+                    ("since", since.map(serde_json::Value::from)),
+                    ("timeout_ms", timeout_ms.map(serde_json::Value::from)),
+                ],
+            );
+            print_mcp_payload(
+                &mcp::McpClient::connect_for_orchestration()?.call("agent", payload)?,
+                json,
+            );
+        }
+        AgentAction::Inbox { since, limit, json } => {
+            let payload = optional_fields(
+                serde_json::json!({"action": "inbox"}),
+                [
+                    ("since", since.map(serde_json::Value::from)),
+                    ("limit", limit.map(serde_json::Value::from)),
+                ],
+            );
+            print_mcp_payload(
+                &mcp::McpClient::connect_for_orchestration()?.call("agent", payload)?,
+                json,
+            );
+        }
+        AgentAction::ListPeers { path, json } => {
+            let payload = optional_fields(
+                serde_json::json!({"action": "list_peers"}),
+                [("path", path.map(serde_json::Value::from))],
+            );
+            print_mcp_payload(&mcp::McpClient::connect()?.call("agent", payload)?, json);
+        }
+        AgentAction::Stats { json } => {
+            let response = ipc::get("/stats").map_err(|e| e.to_string())?;
+            if !response.is_success() {
+                return Err(format!("Server error: {}", response.status));
             }
+            print_mcp_payload(&response.json().map_err(|e| e.to_string())?, json);
         }
     }
 
+    Ok(())
+}
+
+struct AgentSpawnInput<'a> {
+    agent_type: &'a str,
+    prompt: &'a str,
+    cwd: &'a str,
+    name: Option<&'a str>,
+    model: Option<&'a str>,
+    args: &'a [String],
+    print_mode: bool,
+    pty_description: Option<&'a str>,
+    rows: Option<u16>,
+    cols: Option<u16>,
+    output_format: Option<&'a str>,
+    binary_path: Option<&'a str>,
+}
+
+fn agent_spawn_payload(input: AgentSpawnInput<'_>) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "action": "spawn", "agent_type": input.agent_type, "prompt": input.prompt,
+        "cwd": input.cwd, "print_mode": input.print_mode,
+    });
+    let fields = [
+        ("name", input.name.map(serde_json::Value::from)),
+        ("model", input.model.map(serde_json::Value::from)),
+        (
+            "pty_description",
+            input.pty_description.map(serde_json::Value::from),
+        ),
+        ("rows", input.rows.map(serde_json::Value::from)),
+        ("cols", input.cols.map(serde_json::Value::from)),
+        (
+            "output_format",
+            input.output_format.map(serde_json::Value::from),
+        ),
+        (
+            "binary_path",
+            input.binary_path.map(serde_json::Value::from),
+        ),
+    ];
+    payload = optional_fields(payload, fields);
+    if !input.args.is_empty() {
+        payload["args"] = serde_json::json!(input.args);
+    }
+    payload
+}
+
+fn optional_fields<const N: usize>(
+    mut payload: serde_json::Value,
+    fields: [(&str, Option<serde_json::Value>); N],
+) -> serde_json::Value {
+    let object = payload.as_object_mut().expect("payload is an object");
+    for (name, value) in fields {
+        if let Some(value) = value {
+            object.insert(name.to_string(), value);
+        }
+    }
+    payload
+}
+
+fn print_mcp_payload(payload: &serde_json::Value, json: bool) {
+    if json {
+        println!("{payload}");
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
+        );
+    }
+}
+
+/// Ask the authoritative MCP session resolver to accept a PTY id,
+/// `tuic_session`, or terminal alias. The CLI must not infer addresses from
+/// `/sessions`, because that list has no peer identity or alias contract.
+fn mcp_session_call(
+    action: &str,
+    target: &str,
+    fields: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    mcp::McpClient::connect()?.call("session", session_payload(action, target, fields)?)
+}
+
+fn session_payload(
+    action: &str,
+    target: &str,
+    mut fields: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let object = fields
+        .as_object_mut()
+        .ok_or("session payload is not an object")?;
+    object.insert("action".to_string(), serde_json::json!(action));
+    object.insert("session_id".to_string(), serde_json::json!(target));
+    Ok(fields)
+}
+
+fn cmd_mcp_session(action: McpSessionAction) -> Result<(), String> {
+    ipc::ensure_running().map_err(|e| e.to_string())?;
+    let (payload, json) = match action {
+        McpSessionAction::Status { target, json } => (
+            serde_json::json!({"action": "status", "session_id": target}),
+            json,
+        ),
+        McpSessionAction::Wait {
+            target,
+            until,
+            timeout_ms,
+            json,
+        } => (
+            optional_fields(
+                serde_json::json!({"action": "wait", "session_id": target, "until": until}),
+                [("timeout_ms", timeout_ms.map(serde_json::Value::from))],
+            ),
+            json,
+        ),
+        McpSessionAction::Output {
+            target,
+            since_cursor,
+            from_line,
+            limit,
+            json,
+        } => (
+            optional_fields(
+                serde_json::json!({"action": "output", "session_id": target}),
+                [
+                    ("since_cursor", since_cursor.map(serde_json::Value::from)),
+                    ("from_line", from_line.map(serde_json::Value::from)),
+                    ("limit", limit.map(serde_json::Value::from)),
+                ],
+            ),
+            json,
+        ),
+    };
+    let target = payload["session_id"]
+        .as_str()
+        .ok_or("missing session target")?;
+    let fields = payload
+        .as_object()
+        .cloned()
+        .ok_or("session payload is not an object")?;
+    let mut fields = serde_json::Value::Object(fields);
+    fields.as_object_mut().expect("object").remove("action");
+    fields.as_object_mut().expect("object").remove("session_id");
+    print_mcp_payload(
+        &mcp_session_call(
+            payload["action"].as_str().unwrap_or_default(),
+            target,
+            fields,
+        )?,
+        json,
+    );
+    Ok(())
+}
+
+fn cmd_repo(action: RepoAction) -> Result<(), String> {
+    ipc::ensure_running().map_err(|e| e.to_string())?;
+    let (payload, json) = match action {
+        RepoAction::List { path, json } => (
+            serde_json::json!({"action": "worktree_list", "path": resolve_path(&path)}),
+            json,
+        ),
+        RepoAction::Create {
+            path,
+            branch,
+            base_ref,
+            spawn_session,
+            json,
+        } => (
+            optional_fields(
+                serde_json::json!({"action": "worktree_create", "path": resolve_path(&path), "spawn_session": spawn_session}),
+                [
+                    ("branch", branch.map(serde_json::Value::from)),
+                    ("base_ref", base_ref.map(serde_json::Value::from)),
+                ],
+            ),
+            json,
+        ),
+        RepoAction::Remove {
+            path,
+            branch,
+            force,
+            json,
+        } => (
+            serde_json::json!({"action": "worktree_remove", "path": resolve_path(&path), "branch": branch, "force": force}),
+            json,
+        ),
+    };
+    print_mcp_payload(&mcp::McpClient::connect()?.call("repo", payload)?, json);
     Ok(())
 }
 
@@ -723,6 +1204,7 @@ fn cmd_install_cli(target: Option<&str>) -> Result<(), String> {
         }
 
         // Needs elevation — use osascript on macOS, sudo on Linux
+        #[cfg(target_os = "macos")]
         let parent = std::path::Path::new(target_path)
             .parent()
             .unwrap_or(std::path::Path::new("/usr/local/bin"));
@@ -899,20 +1381,12 @@ fn cmd_alias(remove: bool) -> Result<(), String> {
 }
 
 fn cmd_pause(target: &str) -> Result<(), String> {
-    let id = resolve_session_id(target)?;
-    let resp = ipc::post(&format!("/sessions/{id}/pause"), "{}").map_err(|e| e.to_string())?;
-    if !resp.is_success() {
-        return Err(format!("Failed to pause: {}", resp.body));
-    }
+    mcp_session_call("pause", target, serde_json::json!({}))?;
     Ok(())
 }
 
 fn cmd_resume(target: &str) -> Result<(), String> {
-    let id = resolve_session_id(target)?;
-    let resp = ipc::post(&format!("/sessions/{id}/resume"), "{}").map_err(|e| e.to_string())?;
-    if !resp.is_success() {
-        return Err(format!("Failed to resume: {}", resp.body));
-    }
+    mcp_session_call("resume", target, serde_json::json!({}))?;
     Ok(())
 }
 
@@ -993,7 +1467,7 @@ fn tmux_compat() {
         }
         "has-session" => {
             let target = find_flag(rest, "-t").unwrap_or_default();
-            match resolve_session_id(&target) {
+            match mcp_session_call("status", &target, serde_json::json!({})) {
                 Ok(_) => std::process::exit(0),
                 Err(_) => std::process::exit(1),
             }
@@ -1030,6 +1504,43 @@ fn resolve_path(path: &str) -> String {
     std::fs::canonicalize(&absolute)
         .map(|p| strip_verbatim(&p.to_string_lossy()))
         .unwrap_or(absolute)
+}
+
+/// Directories a repository can never legitimately be registered from.
+///
+/// `fastaf <dir>` registers the directory in `repositories.json` *permanently* —
+/// the sidebar keeps it across restarts. Handed a temp directory, that is a row
+/// pointing at something the OS deletes, and it outlives every trace of who
+/// created it: fifteen such rows accumulated in Boss's config between
+/// 2026-09-11 and 2026-09-13 (#763-d219).
+///
+/// The check lives in the CLI, not in the app, on purpose. `std::env::temp_dir`
+/// reads `TMPDIR`/`TEMP` from *this* process, so it resolves to the caller's
+/// shell — which is how `~/Gits/.tmp` (this repo's own `TMPDIR` convention for
+/// Rust suites) is caught. The app process has a different `TMPDIR` and cannot
+/// see it.
+fn disposable_roots() -> Vec<PathBuf> {
+    let roots =
+        std::iter::once(std::env::temp_dir()).chain(cfg!(unix).then_some(PathBuf::from("/tmp")));
+    roots
+        .into_iter()
+        .flat_map(|root| {
+            // Keep both forms: on macOS `/var/folders/…` canonicalizes to
+            // `/private/var/folders/…`, and a caller can hand us either.
+            std::fs::canonicalize(&root)
+                .ok()
+                .into_iter()
+                .chain(std::iter::once(root))
+        })
+        .collect()
+}
+
+/// `true` when `path` is one of `roots` or lives below it. Compares components,
+/// never string prefixes — `/tmpfoo` is not inside `/tmp`.
+fn is_disposable_root(path: &Path, roots: &[PathBuf]) -> bool {
+    let canonical = std::fs::canonicalize(path);
+    let candidate: &Path = canonical.as_deref().unwrap_or(path);
+    roots.iter().any(|root| candidate.starts_with(root))
 }
 
 /// Windows canonicalization yields verbatim paths (`\\?\C:\src`). The app stores
@@ -1070,61 +1581,6 @@ fn parse_goto(path: &str) -> (String, Option<u32>, Option<u32>) {
         _ => {}
     }
     (path.to_string(), None, None)
-}
-
-fn resolve_session_id(target: &str) -> Result<String, String> {
-    // If it looks like a UUID, use directly
-    if target.len() >= 32 && target.contains('-') {
-        return Ok(target.to_string());
-    }
-
-    // Otherwise search by name
-    let resp = ipc::get("/sessions").map_err(|e| e.to_string())?;
-    if !resp.is_success() {
-        return Err("Cannot list sessions".to_string());
-    }
-
-    let sessions: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-    let arr = sessions.as_array().ok_or("Invalid response")?;
-
-    // Try exact name match
-    for s in arr {
-        if s["display_name"].as_str() == Some(target) {
-            return s["session_id"]
-                .as_str()
-                .map(String::from)
-                .ok_or("Session has no ID".to_string());
-        }
-    }
-
-    // Then ID prefix (what `fastaf ls` prints) or name prefix, case-insensitive —
-    // typing `fastaf send buil…` should not require the full name.
-    let needle = target.to_lowercase();
-    let matches: Vec<_> = arr
-        .iter()
-        .filter(|s| {
-            let id_match = s["session_id"]
-                .as_str()
-                .map(|id| id.starts_with(target))
-                .unwrap_or(false);
-            let name_match = s["display_name"]
-                .as_str()
-                .map(|n| n.to_lowercase().starts_with(&needle))
-                .unwrap_or(false);
-            id_match || name_match
-        })
-        .collect();
-
-    match matches.len() {
-        0 => Err(format!("No session found matching '{target}'")),
-        1 => matches[0]["session_id"]
-            .as_str()
-            .map(String::from)
-            .ok_or("Session has no ID".to_string()),
-        n => Err(format!(
-            "Ambiguous target '{target}': {n} sessions match. Use full ID."
-        )),
-    }
 }
 
 /// Translate one argument if it is EXACTLY a key name, else `None`.
@@ -1279,10 +1735,175 @@ fn remove_with_elevation(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_send_parts, capture_query, resolve_path, session_status, short_id, short_repo,
-        strip_verbatim, translate_keys, truncate, without_flag,
+        Cli, Command, Path, PathBuf, agent_send_parts, capture_payload, disposable_roots,
+        is_disposable_root, resolve_path, session_status, short_id, short_repo, strip_verbatim,
+        translate_keys, truncate, without_flag,
     };
+    use clap::Parser;
+
+    #[test]
+    fn agent_spawn_payload_preserves_every_mcp_spawn_field() {
+        let payload = super::agent_spawn_payload(super::AgentSpawnInput {
+            agent_type: "codex",
+            prompt: "do work",
+            cwd: "/repo",
+            name: Some("worker"),
+            model: Some("gpt-5"),
+            args: &["exec".into(), "--full-auto".into()],
+            print_mode: true,
+            pty_description: Some("task worker"),
+            rows: Some(40),
+            cols: Some(120),
+            output_format: Some("json"),
+            binary_path: Some("/usr/local/bin/codex"),
+        });
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "action":"spawn", "agent_type":"codex", "prompt":"do work", "cwd":"/repo",
+                "name":"worker", "model":"gpt-5", "args":["exec","--full-auto"], "print_mode":true,
+                "pty_description":"task worker", "rows":40, "cols":120, "output_format":"json",
+                "binary_path":"/usr/local/bin/codex"
+            })
+        );
+    }
+
+    #[test]
+    fn session_target_is_forwarded_without_cli_resolution() {
+        for target in ["01234567", "reviewer"] {
+            let payload = super::session_payload("input", target, json!({"input":"echo ok"}))
+                .expect("payload");
+            assert_eq!(payload["session_id"], target);
+        }
+    }
     use serde_json::json;
+
+    // Catches: workflow CLI arguments parsed as story JSON or sent to automations.
+    #[test]
+    fn workflow_cli_accepts_the_grouped_action_envelope() {
+        for arguments in [r#"{"action":"story","input":{"action":"list_plans"}}"#, "-"] {
+            let cli =
+                Cli::try_parse_from(["tuic", "workflow", arguments]).expect("workflow command");
+            assert!(
+                matches!(cli.command, Some(Command::Workflow { arguments: Some(value) }) if value == arguments)
+            );
+        }
+        let cli = Cli::try_parse_from(["tuic", "automations", r#"{"action":"list"}"#]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Automations { .. })));
+    }
+
+    #[test]
+    fn story_cli_accepts_a_typed_action_and_project() {
+        let cli = Cli::try_parse_from([
+            "tuic",
+            "story",
+            "{\"action\":\"list_plans\"}",
+            "--project",
+            "/repo",
+        ])
+        .expect("parse story command");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Story { action, project: Some(project), session_id: None })
+                if action == "{\"action\":\"list_plans\"}" && project == "/repo"
+        ));
+    }
+
+    #[test]
+    fn agent_peer_filter_uses_path_name() {
+        let cli = Cli::try_parse_from(["tuic", "agent", "list-peers", "--path", "/repo"])
+            .expect("parse list-peers");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent {
+                action: super::AgentAction::ListPeers { path, .. }
+            }) if path.as_deref() == Some("/repo")
+        ));
+    }
+
+    #[test]
+    fn agent_spawn_keeps_positional_prompt_and_launcher_flags() {
+        let cli = Cli::try_parse_from([
+            "tuic",
+            "agent",
+            "spawn",
+            "codex",
+            "do work",
+            "--cwd",
+            "/repo",
+            "--model",
+            "gpt-5",
+            "--json",
+            "--args=--full-auto",
+        ])
+        .expect("parse agent spawn");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent {
+                action: super::AgentAction::Spawn(args)
+            }) if args.agent_type == "codex"
+                && args.prompt == "do work"
+                && args.cwd.as_deref() == Some("/repo")
+                && args.model.as_deref() == Some("gpt-5")
+                && args.args == ["--full-auto"]
+                && args.json
+        ));
+    }
+
+    #[test]
+    fn repo_worktree_list_keeps_its_command_spelling() {
+        let cli = Cli::try_parse_from(["tuic", "repo", "worktree-list", "/repo", "--json"])
+            .expect("parse worktree-list");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Repo { action: super::RepoAction::List { path, json } })
+                if path == "/repo" && json
+        ));
+    }
+
+    #[test]
+    fn repo_worktree_create_keeps_branch_and_base_flags() {
+        let cli = Cli::try_parse_from([
+            "tuic",
+            "repo",
+            "worktree-create",
+            "/repo",
+            "--branch",
+            "feature",
+            "--base-ref",
+            "main",
+            "--spawn-session",
+        ])
+        .expect("parse worktree-create");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Repo {
+                action: super::RepoAction::Create { path, branch, base_ref, spawn_session, .. }
+            }) if path == "/repo"
+                && branch.as_deref() == Some("feature")
+                && base_ref.as_deref() == Some("main")
+                && spawn_session
+        ));
+    }
+
+    #[test]
+    fn repo_worktree_remove_keeps_force_flag() {
+        let cli = Cli::try_parse_from([
+            "tuic",
+            "repo",
+            "worktree-remove",
+            "/repo",
+            "feature",
+            "--force",
+        ])
+        .expect("parse worktree-remove");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Repo {
+                action: super::RepoAction::Remove { path, branch, force, .. }
+            }) if path == "/repo" && branch == "feature" && force
+        ));
+    }
 
     fn tokens(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -1329,12 +1950,19 @@ mod tests {
     }
 
     #[test]
-    fn capture_query_combines_format_and_line_limit() {
-        assert_eq!(capture_query("text", None), "?format=text");
-        assert_eq!(capture_query("log", Some(50)), "?format=log&limit=50");
-        // raw means "give me the bytes"; only the limit may narrow it.
-        assert_eq!(capture_query("raw", None), "");
-        assert_eq!(capture_query("raw", Some(10)), "?limit=10");
+    fn capture_payload_rejects_log_and_omits_absent_limit() {
+        assert_eq!(
+            capture_payload("log", None).unwrap_err(),
+            "capture format 'log' is not supported; use raw or text"
+        );
+        assert_eq!(
+            capture_payload("text", None).expect("text payload"),
+            json!({"format":"text"})
+        );
+        assert_eq!(
+            capture_payload("raw", Some(10)).expect("raw payload"),
+            json!({"format":"raw", "limit":10})
+        );
     }
 
     #[test]
@@ -1362,6 +1990,62 @@ mod tests {
     fn resolve_path_keeps_paths_that_do_not_exist_yet() {
         let resolved = resolve_path("/definitely/not/here/new-file.rs");
         assert_eq!(resolved, "/definitely/not/here/new-file.rs");
+    }
+
+    // #763-d219 — `fastaf <dir>` registers a repository permanently. The fifteen
+    // rows it left in Boss's `repositories.json` were all temp roots, so the
+    // shapes below are the ones actually observed on disk, not invented.
+    #[test]
+    fn a_temp_root_and_everything_under_it_is_disposable() {
+        let roots = vec![
+            PathBuf::from("/private/var/folders/3h/abc/T"),
+            PathBuf::from("/Users/dev/Gits/.tmp"),
+        ];
+
+        for observed in [
+            "/private/var/folders/3h/abc/T/.tmpmq7MuH",
+            "/private/var/folders/3h/abc/T/.tmpmq7MuH/nested/deeper",
+            "/Users/dev/Gits/.tmp/.tmpcDMEC4",
+            // The root itself is no more registrable than its children.
+            "/private/var/folders/3h/abc/T",
+            "/Users/dev/Gits/.tmp",
+        ] {
+            assert!(
+                is_disposable_root(Path::new(observed), &roots),
+                "{observed} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_repository_is_not_disposable() {
+        let roots = vec![PathBuf::from("/tmp"), PathBuf::from("/Users/dev/Gits/.tmp")];
+
+        for keeper in [
+            "/Users/dev/Gits/personal/tuicommander",
+            // Shares a string prefix with a root but is a sibling of it, not a
+            // child. A `starts_with` on strings would refuse these.
+            "/tmpfoo",
+            "/Users/dev/Gits/.tmpfiles/repo",
+        ] {
+            assert!(
+                !is_disposable_root(Path::new(keeper), &roots),
+                "{keeper} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn disposable_roots_follow_this_process_tmpdir() {
+        // The whole reason the check lives in the CLI: it reads the *caller's*
+        // TMPDIR, which is what `~/Gits/.tmp` runs under in this repo.
+        let roots = disposable_roots();
+        let temp = std::env::temp_dir();
+        assert!(
+            is_disposable_root(&temp.join("scratch-repo"), &roots),
+            "a directory under {} was not recognised; roots were {roots:?}",
+            temp.display()
+        );
     }
 
     #[test]

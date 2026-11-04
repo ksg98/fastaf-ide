@@ -480,6 +480,81 @@ describe("globalWorkspaceStore", () => {
 		});
 	});
 
+	describe("resetActiveLayout", () => {
+		it("rebuilds the cached layout as a flat single pane holding every promoted terminal", () => {
+			testInScope(() => {
+				const id1 = terminalsStore.add(makeTerminal({ name: "T1" }));
+				const id2 = terminalsStore.add(makeTerminal({ name: "T2" }));
+				store.promote(id1);
+				store.promote(id2);
+				store.activate();
+
+				// Split it, matching the reported bug's shape (a stuck split the user
+				// wants "Reset Panel Sizes" to actually collapse).
+				const [g0] = paneLayoutStore.getAllGroupIds();
+				paneLayoutStore.split(g0, "vertical");
+				expect(paneLayoutStore.isSplit()).toBe(true);
+
+				store.resetActiveLayout();
+
+				expect(paneLayoutStore.isSplit()).toBe(false);
+				const groups = Object.values(paneLayoutStore.serialize().groups);
+				expect(groups.length).toBe(1);
+				const tabIds = groups[0].tabs.map((t) => t.id).sort();
+				expect(tabIds).toEqual([id1, id2].sort());
+			});
+		});
+	});
+
+	describe("focus reconciliation keeps a non-terminal active tab", () => {
+		it("resetActiveLayout keeps the already-active promoted terminal active (CodeRabbit finding)", () => {
+			testInScope(() => {
+				const id1 = terminalsStore.add(makeTerminal({ name: "T1" }));
+				const id2 = terminalsStore.add(makeTerminal({ name: "T2" }));
+				store.promote(id1);
+				store.promote(id2);
+				store.activate();
+				terminalsStore.setActive(id1);
+
+				store.resetActiveLayout();
+
+				expect(terminalsStore.state.activeId).toBe(id1);
+				const [g0] = paneLayoutStore.getAllGroupIds();
+				expect(paneLayoutStore.state.groups[g0]?.activeTabId).toBe(id1);
+			});
+		});
+
+		it("activate restores the real diff selection after deactivation", async () => {
+			const { diffTabsStore } = await import("../../stores/diffTabs");
+			testInScope(() => {
+				const term = terminalsStore.add(makeTerminal({ name: "terminal" }));
+				const diff = diffTabsStore.add("/repo/manual", "file.rs", "M");
+				store.promote(term);
+				store.setLayout({
+					root: { type: "leaf", id: "g20" },
+					groups: {
+						g20: {
+							id: "g20",
+							tabs: [
+								{ id: term, type: "terminal" },
+								{ id: diff, type: "diff" },
+							],
+							activeTabId: diff,
+						},
+					},
+					activeGroupId: "g20",
+				});
+				store.activate();
+				store.deactivate();
+				terminalsStore.setActive(term);
+				store.activate();
+				expect(diffTabsStore.state.activeId).toBe(diff);
+				expect(terminalsStore.state.activeId).toBeNull();
+				expect(paneLayoutStore.state.groups.g20?.activeTabId).toBe(diff);
+			});
+		});
+	});
+
 	describe("auto-deactivation restores repo layout", () => {
 		const repoKey = "/repo\0main";
 

@@ -1,10 +1,15 @@
 # Remote Access
 
+## Headless GitHub monitoring
+
+`tuic-remote` supports the same GitHub poller controls and repository status, PR and issue reads as the desktop server. Use `/repo/github-poller/start` and `/repo/github-poller/stop` over its Unix socket or authenticated HTTP API. Poller events reach `/events` without a WebView. GitHub account setup and mutation routes are not exposed by the headless router. A repository without a GitHub remote needs no GitHub credentials for a lifecycle check.
+
+
 Access FastAF from a browser on another device on your network.
 
 ## Setup
 
-1. Open **Settings** (`Cmd+,`) → **Services** → **Remote Access**
+1. Open **Settings** (`Cmd+,`) → **Remote Access**
 2. Configure:
    - **Port** — Default `9876` (range 1024–65535)
    - **Username** — Basic Auth username
@@ -12,6 +17,24 @@ Access FastAF from a browser on another device on your network.
 3. Enable remote access
 
 Once enabled, the settings panel shows the access URL: `http://<your-ip>:<port>`
+
+On macOS, FastAF can use the installed Tailscale app when no `tailscale`
+CLI is on its PATH, including launches from Finder. Status detection, peer lookup
+and certificate requests run the app executable with `TAILSCALE_BE_CLI=1`.
+You do not need to set this variable globally. A standalone CLI on PATH keeps
+its existing environment.
+
+The **Tailscale HTTPS** status reports **HTTPS active** only while the server
+has loaded a certificate and its TLS listener is running. Tailscale's HTTPS
+capability alone is not enough. If it says **Running (HTTPS unavailable)**,
+enable Remote Access and select **Recheck**. If it remains unavailable, inspect
+the Tailscale certificate errors in the app logs. Connect URLs use HTTPS only
+while that listener is active.
+
+The macOS app's CLI runs in a filesystem sandbox. FastAF reads certificate
+and key PEM from its stdout instead of asking it to write into the caller's
+temporary directory; this avoids `operation not permitted` on certificate writes.
+
 
 ## Connecting from Another Device
 
@@ -23,6 +46,46 @@ Once enabled, the settings panel shows the access URL: `http://<your-ip>:<port>`
 ### QR Code
 
 The settings panel shows a QR code for the access URL — scan it from a phone or tablet to connect quickly. The QR code uses your actual local IP address.
+It refreshes when the selected address, listener TLS state or port changes, or after
+you regenerate the access token. Unchanged status polls keep the current QR code.
+
+Every time remote access is turned on, FastAF issues a new session token and
+revokes the previous one. That holds however it is turned on: the **Enable
+remote access** switch, All settings, the settings API, an agent's MCP settings
+or config tool, or a direct config write. A QR code or pairing link shared
+before you last turned remote access on no longer works; scan the new one.
+
+### Picking a network interface
+
+**Network Interface** chooses where remote access listens: **All interfaces**,
+or one address (plus this machine, so `localhost` keeps working). Pick your
+Tailscale address to keep the server off the café Wi-Fi.
+
+If the picked address is not on this Mac when FastAF starts (for example a
+Tailscale address before Tailscale is up), FastAF does **not** fall back to all
+interfaces. Remote access is paused: only this machine can connect, and the page
+says **Remote access paused: <address> isn't on this Mac yet** ("this machine"
+on Windows and Linux). As soon as the address appears, FastAF rebinds by itself;
+you do not need to restart anything. If the saved value is not an IP address at
+all, it stays paused until you pick another address. After an automatic rebind,
+the link can be plain HTTP until the next Tailscale HTTPS recheck.
+
+If no port can be bound, the page says **Remote access could not start: no free
+port**. While remote access is paused or could not start, the QR code, its scan
+hint and the connection warnings are hidden, because nothing would answer the
+link.
+
+The pairing link carries the session token. While it is plain `http://`, a
+warning under it says the traffic is unencrypted on this network and that anyone
+on the same Wi-Fi can take over your terminals. Use **Tailscale HTTPS** for an
+encrypted link.
+
+The Remote Mobile Connection dialog shows the complete connection URL as selectable
+text. Use **Copy URL** to copy it; the action shows **Copied** after success.
+
+If local IP discovery fails, the settings controls and QR dialog remain open. The
+network address area shows the error and a **Retry** action. Retry repeats address
+discovery without changing the saved remote-access configuration.
 
 ## What Works Remotely
 
@@ -37,15 +100,32 @@ The browser client provides the same UI as the desktop app:
 - Notification sounds, including the distinct G4→G4→E5 Attention callback,
   through the browser audio fallback
 
+**The terminal stream is compressed over a remote link, and only over one.** A
+remote browser asks the daemon to deflate the WebSocket frames carrying the
+terminal, which takes a repainting agent's traffic to a few percent of its size —
+measured at 5.8% over a real session. A browser on the same machine asks for
+nothing and pays nothing, and a client reaching the daemon through an SSH tunnel
+is compressed by the tunnel instead (see **Compression** under SSH Tunnels below),
+never twice. Nothing to configure: the client decides from whether the session
+belongs to a remote connection. An older browser that cannot inflate simply reads
+the uncompressed stream, and so does a new browser talking to a daemon too old to
+compress — the daemon has to accept the request on the handshake before the
+browser uses it, so the two can never disagree about what is on the wire. The
+exact framing is in
+[`docs/api/http-api.md`](../api/http-api.md).
+
 ## Security
 
-- **Authentication** — Basic Auth with bcrypt-hashed passwords
+- **Authentication** — QR URL token, session cookie or Basic Auth with bcrypt-hashed passwords. HTTP requires credentials even from this computer or the LAN; the old LAN authentication bypass no longer applies. Local CLI/MCP IPC remains available without HTTP credentials.
+- **Token rotation** — Every time remote access is turned on, by any path, FastAF issues a fresh session token and revokes the old one, so a token that leaked from an earlier QR code or plain-HTTP link stops working.
+- **Fails closed** — A picked network interface that this machine does not have pauses remote access on loopback; it never widens to every interface.
+- **Cloud relay** — The **Cloud Relay** URL in Settings → Remote Access starts empty: FastAF runs no relay server and does not point at upstream's. Enter a relay you run yourself.
 - **Secret storage** — Session tokens, relay bearer tokens, and push VAPID
   private keys are stored in the OS keyring-backed credential vault; config
   files and `/config` responses expose only non-secret settings and existence
   flags
 - **Local network only** — The server binds to your machine's IP; it's not exposed to the internet unless you configure port forwarding (don't do this without a VPN)
-- **CORS** — When remote access is enabled, any origin is allowed (necessary for browser access from different IPs)
+- **Browser request protection** — The HTTP listener rejects foreign Origin headers and unknown Host names before authentication. Use its literal IP or detected Tailscale FQDN; browser/PWA requests from that same server and bundled/development WebViews remain supported. CORS does not allow arbitrary websites.
 
 ## MCP HTTP Server
 
@@ -54,11 +134,11 @@ Separate from remote access, FastAF runs an **HTTP API server** for AI tool inte
 - The server always listens on an IPC listener: Unix domain socket at `<config_dir>/mcp.sock` on macOS/Linux, or named pipe `\\.\pipe\tuicommander-mcp` on Windows
 - AI agents connect via the `tuic-bridge` sidecar binary, which translates MCP stdio transport to the IPC listener
 - Bridge configs are auto-installed on first launch for supported agents (Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini, Codex, Grok, opencode, Droid, goose, pi) — and only for the ones present on the machine, so FastAF never creates a config directory for a tool you do not have. On every subsequent launch, the bridge path is verified and updated if stale (from reinstalls, updates, or moves)
-- The `mcp_server_enabled` toggle in **Settings** → **Services** controls whether MCP protocol tools are exposed, not the server itself
-- Shows server status and active session count in settings
+- The `mcp_server_enabled` config key controls whether MCP protocol tools are exposed, not the server itself
+- **Settings** → **MCP** → **HTTP API Server** shows server status and active session count
 - Local MCP callers submit one managed-agent command with `session action=submit`; the same response reports child terminal movement or a precise timeout, so callers must not split text/Enter or poll afterward. Raw `session action=input` remains write-only. Mutating session actions, including `submit`, are not exposed to non-loopback MCP clients
 
-The Unix socket is accessible only to the current user (filesystem permissions) and requires no authentication — it's designed for local tool integration, not remote access.
+The Unix socket is accessible only to the current user (filesystem permissions) and requires no authentication — it's designed for local tool integration, not remote access. For the same reason it cannot steer the AI engine: cancelling, pausing, resuming or approving an AI conversation, its stream, and adding or replacing scheduled tasks need a signed-in client and return 403 over the socket. Reading the scheduled tasks still works.
 
 ## Mobile Companion
 
@@ -70,7 +150,21 @@ FastAF includes a phone-optimized interface for monitoring agents from your phon
 2. Navigate to `http://<your-ip>:<port>/mobile` from your phone
 3. Log in with your credentials
 
+Opening `/` also offers the form login. iPad Safari selects the touch interface, including when it requests the desktop website with a Mac user agent. Desktop browsers keep the full interface. In that interface, **Add Repository** browses folders on the computer running FastAF, starting at its home directory; it does not browse the device opening Safari.
+
+At widths of 768 px or more, tap **Markdown** in the session top bar to open a desktop Markdown tab from the same repository. On phones, open **More session actions → Markdown** instead. The list refreshes in place when desktop tabs change; ordinary session polls do not reset it. Each absolute file path appears once; files in different worktrees stay separate.
+
+The session actions menu scrolls within the available session area. Scroll down to reach **Copy session ID** and **Terminate session**. Claude/Codex account usage names the provider, plan and quota window, with the percentage used and reset time in your device’s local timezone. The desktop usage cards use the same descriptions.
+
+After you tick Markdown checkboxes, save source edits, or add block comments, use **Agent** and **Send** to request changes. The session you opened Files from is selected when available; you can choose another agent in the same repository. A transient toast says whether the request was delivered now or queued for the agent’s next idle window. Commented blocks use the same amber highlight as desktop Markdown. Failed requests keep the changes available to send again.
+
+In **Sessions → New session**, the Agent picker lists installed CLI agents from the shared registry, including ego. Git and direct API entries are excluded. The first installed agent is selected. Creation stays disabled while detection runs or when no agents are installed; detection failures show an error instead of a fallback list.
+
 ### Add to Home Screen
+
+The iOS PWA uses a non-overlay status bar. On the tested iPhone simulator, the previous translucent setting left a 62pt band outside the drawable content area; adding that height to the CSS shell only clipped the composer. The non-overlay setting removes the band while shell height and position continue to follow `visualViewport.height` and `visualViewport.offsetTop`. The CLI composer retains its compact 4px bottom padding; no extra safe-area gutter is added.
+
+**Existing iPhone Home Screen installs:** remove the installed PWA and add it from Safari again after this update. iOS reads the status-bar setting at installation; a normal page reload does not update that installed setting. Physical iPhone confirmation is still pending. If the band remains after reinstallation, capture the device screen, iOS version, orientation and keyboard state before reloading.
 
 The mobile UI supports PWA (Progressive Web App) installation:
 
@@ -79,12 +173,160 @@ The mobile UI supports PWA (Progressive Web App) installation:
 
 The app launches in standalone mode (no browser chrome) for a native-like experience.
 
-### Mobile Features
+**Historical title-fade report, before the non-overlay status-bar change.** In the installed PWA the "FastAF" title in the top bar may look soft or faded, strongest at the top edge. We attribute this to the iOS status-bar edge effect, not to the app. Evidence: in a 390x844 mobile emulation with a 62 px top safe-area inset, the computed styles of the title and every ancestor up to `html` have `opacity: 1`, and `filter`, `backdrop-filter`, `text-shadow`, `mask-image` and `mix-blend-mode` all `none`, so nothing in our CSS fades it. Limit: this is an inference from the absence of a CSS cause; no iPhone layer inspection was possible, so it is not confirmed on a device.
 
-- **Sessions list** — See all running agents with status (idle, busy, question, rate-limited, error)
-- **Session detail** — Live output streaming, quick-reply chips (Yes/No/Enter/Ctrl-C), text input
+Long file paths in mobile **CLI** output wrap inline with the surrounding text and keep the line's hanging indent. Tap a path to open it, or focus it and press Enter or Space.
+
+At phone widths up to 430 px, the session header keeps CLI/Chat one tap away.
+Open **More session actions** for **Start voice call** / **Stop voice call** (with the same handset icon as the header) and session tasks. Tablet
+headers keep these controls directly in the bar. Tap the session name for details.
+
+A choice answer stays bound to the terminal that showed the question, even if you
+leave the detail screen while its keys are being sent. A failed send shows an error
+and enables the choice buttons again. Send and Queue also keep their original terminal.
+
+For Claude sessions on a phone, tap **Chat** in the session header. This switches the reading surface without closing the terminal or
+clearing its history; returning to CLI follows the latest output. Expand the tool activity and edit to read its **Old**
+and **New** text. Tab stops align at four spaces. Swipe the edit block sideways
+for long lines rather than wrapping coloured terminal rows. Switch back with
+**CLI** for permission prompts. Startup trust, external-file imports, permission
+prompts and selection lists keep their option rows and interaction footer. Edit excerpts are bounded to 20,000 characters
+per version; an ellipsis marks a truncated excerpt. A failed tool card describes
+a proposed edit, not a successful file change.
+
+
+In a terminal, a down-arrow appears to the right of **Send** while CLI or Chat
+output is scrolled back. Tap it to return to the latest output. It does not send
+terminal input or cover the key-bar controls.
+
+Paste an HTTP(S) link into either mobile composer to add a separating space before you continue typing. Text that ends in a link gets the same treatment. Existing whitespace is kept without adding another space. Other text and image pastes are unchanged.
+
+Long session and file names use ellipsis inside their rows. Session badges, times and close controls keep their places; Progress text wraps within its sheet.
+
+Both mobile composers use **+**, a text box with a microphone when browser speech is available, and **Send**. Tap **+ → Attach file** to choose a file or **Take photo** to open the camera capture picker. In a terminal, the upload
+inserts its `@path` into the draft; review the draft and tap Send when ready.
+In mobile AI Chat, images join the image draft and other files appear as file
+chips until Send. Android Chrome can also share a file into the installed PWA;
+the shared file opens as an AI Chat draft. iOS Safari currently requires the
+**+ → Attach file** because it does not support Web Share Target.
+The + menu also offers **Queue** in terminals, **Commands (/)** in agent terminals, and **Park draft / Restore parked draft / Swap parked
+draft** in AI Chat. Chat shows **Queue** and **Stop** while a turn is running.
+Terminal long-press on Send still opens Queue. In terminal **CLI** and **Chat**, a **Queued** list above the input shows the pending prompt text, including prompts queued in CLI or on desktop. Entries disappear when delivered. Tap **Hide** beside the queued count to hide the list without removing work. The count stays visible and updates; tap it or **Show** to reopen the list. When the queue empties, the next queued prompt opens the list again. Tap **Cancel** to remove one or **Clear all** to remove the listed user prompts. Server mail wakes and spawned task prompts do not appear in this mobile list or count and are not removed by these actions. Ordinary **Send** still submits now; switching to Chat does not change that. If a host returns queue data that is not an array, the mobile list stays empty and the session remains usable. Failed queue requests still show the existing retry alert, except an unsupported endpoint with no pending work. Terminal parking is not offered:
+the existing parked-draft store belongs to AI Chat. Tap outside the menu or
+press Escape to close it. Desktop AI Chat and Ctrl+S retain their controls.
+
+See [Chrome's Share Target guide](https://developer.chrome.com/docs/capabilities/web-apis/web-share-target)
+and [WebKit's open support issue](https://bugs.webkit.org/show_bug.cgi?id=194593).
+
+### Receive and answer an agent's question away from the desk
+
+1. On the Mac, enable **Remote Access** and **Tailscale HTTPS** in FastAF
+   Settings. Connect both the Mac and phone to the same tailnet. Use the HTTPS
+   Tailscale URL shown in Settings; a plain LAN `http://` URL cannot register a
+   phone service worker for push. Do not expose the port to the public internet.
+2. Open `<Tailscale HTTPS URL>/mobile` on the phone and sign in. On iPhone, add
+   it to the Home Screen, then launch that installed PWA. In mobile **Settings**,
+   turn **Push notifications** on and grant notification permission. If it says
+   **Enabled** for an old subscription, turn it off and back on to re-subscribe.
+3. On the Mac, run an authenticated `POST /api/push/test` against that HTTPS
+   server. `sent` counts accepted push-service requests, not notification
+   display. A 404 means no subscription; `stale_removed` after HTTP 410 means
+   the phone must re-subscribe. A 503 means push is disabled or the VAPID key is
+   unavailable. Confirm the notification actually appears on the phone.
+4. If the agent was spawned by another agent, turn off **Settings → Notifications → Silence subagent sounds and notifications** on the host for this delivery check. This setting also controls mobile sounds and session Web Push; it defaults on. Have a managed agent report `progress type=blocked` with its question.
+   After the desktop is unfocused, or the Mac has had no HID input for two
+   minutes, the phone notification contains the question and opens that
+   session. Type one answer and tap Send. The PWA waits for the same submission
+   receipt as `session action=submit`; if the session closed or is busy, it
+   keeps the draft for review instead of blindly retrying.
+
+The question is encrypted to the phone's Web Push subscription. It does not
+pass through the content-blind cloud relay. FastAF sends at
+most one question or completion push per session every 30 seconds.
+Session notices use the session display name, or the agent and repository when no name is set. Progress notices show the progress message, not the tool arguments.
+Notifications from different sessions remain separate. A newer notification
+for one session can replace its earlier one; tapping either remaining session
+notification opens that session.
+
+### Reading and command size
+
+Mobile **Settings → Appearance** has independent **Terminal font** and **Chat font** controls. They apply only to this browser or installed PWA. All assistant prose, including earlier explanatory blocks and the newest answer, uses the selected Chat size (14px by default). Tool metadata and code retain their semantic sizes. Changing Terminal font does not change Chat text or the command editor.
+
+In terminal Chat, the answer Copy action has its own row below the message, so it does not cover text. The idle command editor, suggestion labels and special-key labels use 15px text with compact spacing. The editor retains 16px text while focused to keep its native input size at the iOS zoom threshold. Action hit targets remain at least 44px.
+
+### Keyboard correction
+
+Mobile **Settings → Input → Autocorrect and spellcheck** is on by default. It enables autocorrect, spellcheck and sentence capitalization in the terminal prompt composer. Turn it off for literal command entry. The choice stays in this browser or installed PWA across reloads. File and code editors keep spellcheck off. Keyboard suggestions still depend on your phone keyboard settings.
+
+### Connection loss and recovery
+
+If navigation cannot reach the server within five seconds, the service worker shows its cached connection-test landing instead of the cached app shell. The landing shows the server address, test state and last error. **Retry Now** tests immediately; automatic probes back off from five to 30 seconds. The probe checks both the server version and the original mobile address within one five-second deadline. It reopens that address, including its session deep link, only when both requests succeed. A failing mobile route keeps the landing visible even if the version endpoint is healthy. No network assets are needed to render this landing.
+
+Inside the running app, a failed API read or a terminal stream that stays disconnected for five seconds shows a visible connection-test card with **Retry now**. Session health reads have a five-second deadline; other RPC calls keep their own deadlines. Tabs remain available, but their content stays hidden until the connection returns; mounted views and unsent drafts are retained. A successful automatic session poll or manual retry reloads failed view reads without restarting the app. A session that ends during a terminal handshake does not report a server outage. Failed reads do not mean that repositories or ego are unconfigured. Files retains the repository and subdirectory you tried to open if the first read fails. After a linked file opens successfully, later recoveries do not reload it over an unsaved edit. An authentication refusal shows **Sign in** instead of repeating network retries.
+
+If terminal socket retries run out while the PWA is away, returning to the visible page starts a fresh stream for a session that still exists. Confirmed ended sessions are not reopened. Ordinary hide/show keeps the existing subscription and resumes its output cursor.
+
+### Automatic mobile resume diagnostics
+
+The mobile app saves up to 30 recent lifecycle snapshots in per-tab
+`sessionStorage`. Snapshots include visibility, pagehide/pageshow and their
+`persisted` flags, freeze/resume, root child count, shell geometry, visual
+viewport, CSS app height/top, and the mobile terminal connection phase. The
+recorder does not depend on animation frames, reload the page, or change the UI.
+It does not store terminal output, WebSocket URLs, query tokens or credentials.
+
+On the next boot, a prior document without a clean pagehide, or one that ended
+hidden, sends its saved trail automatically to the backend log ring as a warning
+with source `app` and message `Mobile previous document lifecycle trail`.
+A failed upload stays pending and retries on online/resume or another boot.
+The pending report is removed after the log API acknowledges it. This is evidence
+of the prior lifecycle, not proof of a crash: a normal reload after hiding can
+also produce a report. Session storage does not survive every form of browser
+storage eviction or a closed tab. No manual copy action is needed.
+
+The existing `Mobile resume has an empty or off-screen shell` warning still
+checks the resumed shell after an animation frame. A missing warning does not
+prove that the document or compositor was healthy. The reported iPhone grey
+screen still needs evidence from the failing device; these diagnostics do not
+claim to fix it.
+
+### Temporary Send diagnostics
+
+While investigating #2462-5839, the terminal composer can record one bounded
+`debug` log per Send press with source `mobile-send`. It uses the existing
+`perfDebug` gate: development builds default to on; release builds default to off.
+To enable it on the affected phone, run
+`localStorage.setItem("tuic.perfDebug", "true")` in that page's Web Inspector,
+then reload. Set the value to `"false"` and reload to stop capture. Enabling it
+on the desktop does not enable it on the phone.
+
+Read the host log with `GET /logs?level=debug&source=mobile-send`. Each summary
+includes ordered pointer/touch/click timings, held/timer flags, whether `send()`
+was called, and active element kind, visual viewport height/offset and Send bounds
+at pointerdown and click. It never includes draft text, DOM text or session names.
+The recorder retains at most 24 events per press, preserving the first and newest
+events and reporting any dropped count. It emits after a 400 ms release/click
+settling window, on the next press or unmount, or after a five-second deadline for
+an abandoned press. This is diagnostic evidence, not a fix for the reported missed
+taps. A deadline or truncated event sequence is not proof that no later click occurred.
+
+### Mobile Features
+Tap the attachment icon to the left of the session input to choose a photo or file. The
+file name appears while uploading, then its path is added to the draft. Queue
+is unavailable until the upload finishes. Smaller mic and Send controls sit inside the input border on the right.
+
+Hold Send with a finger or mouse, then select **Queue** to hold your current agent prompt until its next ready window. A normal tap still sends immediately. Queue clears the input after acceptance and shows a notice. If the result is uncertain, check the agent session before trying again. The pending list is shared by CLI and Chat. If an older host has no queue-read endpoint and there is no pending count or accepted local enqueue, the session does not show a queue error. Other read failures remain visible with Retry; a pending count or accepted local enqueue also keeps a missing-endpoint error visible.
+
+
+- **Sessions list** — See all running agents with status (idle, busy, question, rate-limited, error). Tap the Working, Idle and Awaiting counters to filter by one or more states. Tap an active counter again to clear it; no active counters shows every session. Counts always include all sessions. A zero-count state shows an empty result. State filters combine with the search field and the Default/Recent sort menu.
+- **Return to latest output** — Scroll back in a session’s CLI or Chat output to show the down-arrow at the right end of the key bar, above Send. Tap it to return to the bottom without sending terminal input. It hides when you reach the bottom, including by manual scrolling.
+- **Question cards** — Single-choice, multiple-choice and free-text cards use the selected theme and open above the terminal key bar, leaving its keys available. Native ego selectors open automatically; use the header question action to hide or reopen them. If a typed reply requires an option selection, the question controls reopen and the draft stays editable. Free-text cards still open on request.
+- **Session detail** — Opening an ego free-text question card preserves your unsent answer. Send submits the complete answer through the guarded human-reply path, whether the card is open or closed; a refused reply keeps the draft. Live output streaming, quick-reply chips (Yes/No/Enter/Ctrl-C), text input. The terminal keybar Ctrl button opens Ctrl+C, Ctrl+B, Ctrl+D and Ctrl+Enter. A choice sends once and closes; tap outside or press Escape to dismiss. Ctrl+C and Ctrl+D use danger colours. Ctrl+Enter is agent-aware: it submits in Claude Code, steers a busy turn in ego, and inserts a newline in Codex, OpenCode, Goose, Grok and pi. Other agents use documented or conservative fallback keys; ordinary Enter remains the submit key.
+- **Files** — Browse a configured repository, view `.md` files as rendered Markdown or other text as plain text, and tap Edit to change and save source files up to 1 MB
 - **Question banner** — Instant notification when any agent needs input, with quick-reply buttons
 - **Activity feed** — Chronological event feed grouped by time
+- **Progress** — Select a project with journal entries to read its recent reports
+- **Remote sessions** — Open live output and close a session on its connected owning machine from the same phone page
 - **Notification sounds** — Audio alerts for questions, errors, completions, and rate limits
 
 ### Tips
@@ -99,8 +341,8 @@ FastAF can manage persistent SSH tunnels with automatic reconnection, port forwa
 
 ### Creating a Tunnel Profile
 
-1. Open **Settings** (`Cmd+,`) → **Services** → **SSH Tunnels**
-2. Click **Add Tunnel** to open the editor
+1. Turn on **Experimental Features** in **Settings** → **General**, then open the **SSH Tunnels** panel (command palette → "SSH Tunnels")
+2. Click **+ New Tunnel** to open the editor
 3. Configure:
    - **Name** — A descriptive label (e.g., "prod-db-tunnel")
    - **Host** — Remote SSH host
@@ -108,10 +350,18 @@ FastAF can manage persistent SSH tunnels with automatic reconnection, port forwa
    - **User** — SSH username
    - **Identity File** — Optional path to SSH private key (use the Browse button to select)
    - **Port Forwards** — Local or remote port forwarding rules (e.g., local 8080 → remote 80). Local forwards target `remote_host`/`remote_port`; Remote forwards target `local_host`/`local_port`. The remote host is pre-populated from the tunnel host when adding a Local forward
-   - **Options** — ServerAliveInterval (default 15s), ServerAliveCountMax (default 3), StrictHostKeyChecking (Yes or AcceptNew)
+   - **Options** — ServerAliveInterval (default 15s), ServerAliveCountMax (default 3), StrictHostKeyChecking (Yes or AcceptNew), Compression (default on)
 4. Save the profile
 
+**Compression** is `ssh -C` on the tunnel channel, and it is on by default because
+a tunnel usually carries a terminal stream, which deflates to a few percent of
+itself. Turn it off for a tunnel to a machine on the same LAN, where the link is
+fast and the CPU is the scarcer thing. Profiles written before this option existed
+keep compressing.
+
 Tunnel profiles are stored as TOML files. **Global profiles** live in `<config_dir>/tunnels/` and are available across all repos. **Per-repo profiles** are stored in `<repo>/.tuic/tunnels/` and override global profiles with the same ID.
+
+A tunnel shows **Connected** only after SSH survives its initial 500 ms. With local forwards, every local port must also accept a TCP connection. If SSH exits first or a port does not start listening within 30 seconds, the tunnel reports the failure instead.
 
 ### Auto-Connect
 
@@ -130,7 +380,7 @@ Click the shield to open the Tunnels Panel.
 
 ### Command Palette
 
-Open the command palette (`Cmd+P` / `Ctrl+P`) and type "tunnels" to toggle the Tunnels Panel without navigating to Settings.
+Open the command palette (`Cmd+P` / `Ctrl+P`) and type "tunnels" to toggle the Tunnels Panel.
 
 ### Starting and Stopping Tunnels
 
@@ -190,29 +440,282 @@ Remote connections let you manage `tuic-remote` daemons running on other machine
 
 ### Adding an SSH Connection
 
-1. Open **Settings** → **Connections** → **Add Connection**
+1. Open **Settings** → **Remote Machines** and click **+**
 2. Select **SSH** transport
-3. Configure host, port (default 22), user, and optional identity file
-4. Set the remote daemon port (default 9877)
-5. Save — an SSH tunnel is automatically created to forward the daemon port
+3. Type a host or choose **Probe SSH hosts** to see the hosts from your SSH
+   config and whether each accepts a shell login
+4. Configure the port (default 22), user, and optional identity file
+5. Choose **Never deploy**, **Deploy on connect**, or **Installed service**, and
+   set how many minutes an ephemeral daemon should survive with no client
+6. Set the remote daemon port (default 9877)
+7. Set the auth username and password the daemon was configured with
+8. Save, then click **Connect**
+
+For an installed service, Connect waits for the SSH forwarding port and retries the daemon health check during startup before reporting it unavailable.
 
 ### Adding a Direct Connection
 
-1. Open **Settings** → **Connections** → **Add Connection**
+1. Open **Settings** → **Remote Machines** and click **+**
 2. Select **Direct** transport
 3. Enter the URL of the remote daemon (e.g., `http://10.0.0.5:9877`)
-4. Set the auth username
+4. Set the auth username and password
 5. Save — health polling begins immediately
+
+A URL that points back at the FastAF you are configuring is refused with
+"this very FastAF instance — a machine cannot mirror itself". The check
+compares the `instance_id` in `GET /health` against this process's own, so a
+second daemon on the same machine (a different port) is still a valid peer.
+
+### Adding a Relay Connection
+
+Use this when the remote machine accepts no inbound connection.
+
+1. On the remote machine run `tuic-remote --relay-pair <relay-url> --relay-register`, or set `TUIC_RELAY_TOKEN` instead of `--relay-register`. Add `--relay-out <file>` to write the bundle to a private file.
+2. Restart `tuic-remote` so it registers with the relay.
+3. Copy the printed `tuic-pair-v1:` bundle to this machine over a trusted channel. It holds the end-to-end secret.
+4. Open **Settings** → **Remote Machines**, click **+**, and select **Relay**.
+5. Paste the bundle and save, then click **Connect**.
+
+The relay publishes peer presence in admission order, before pending stats writes. Simultaneous daemon and desktop connections do not create duplicate attachment notifications.
+
+If the status shows `pairing_rejected`, the daemon was paired again: import the new bundle. `daemon_offline` means the daemon is not connected to the relay. After `link_lost` or `relay_unreachable` FastAF reconnects by itself. Running `--relay-pair` again replaces the pairing.
+
+### Connect or Install
+
+**Connect** with **Deploy on connect** is the zero-setup path. If no compatible
+daemon answers, FastAF downloads the release asset matching the host,
+caches it locally, copies it over the same SSH identity as the tunnel and starts
+it on `127.0.0.1`. The daemon keeps existing sessions alive for the configured
+survive time after the last client leaves, then exits. A later Connect reuses a
+matching binary already on the host and the pairing token in the local vault.
+
+**Install** uses the same binary but registers a persistent user service. Linux
+gets `~/.config/systemd/user/tuic-remote.service` plus the mode-0600
+`~/.config/tuic/remote.env`; macOS gets the mode-0600
+`~/Library/LaunchAgents/dev.tuicommander.remote.plist`. The service starts at
+login and restarts on failure, so later Connect operations only open the SSH
+tunnel. **Uninstall** stops and removes the service files but leaves the cached
+binary available for a future Connect.
+
+Both paths place the executable and log under `~/.cache/tuic/`. The ephemeral
+path also uses `tuic-remote.pid`; deleting an on-connect machine sends a
+best-effort stop, while deleting an installed connection deliberately leaves its
+service alone. The daemon is launched with `--no-agent-configs`, so deploying it
+does not rewrite the host's Claude, Codex, or other agent configuration.
+
+### Update and restart a remote machine
+
+When a connected daemon reports a different binary SHA-256 from the binary the
+desktop would deploy, **Remote out of date** appears beside the connection.
+Each connection has an **Auto-update remote daemons** option in Settings. It is
+off by default. When enabled, a connection to a newer available build updates
+automatically only if the daemon reports zero live PTY sessions. A daemon with
+live sessions stays on its current build; Settings shows the session count and
+offers the manual update. No update is queued. An automatic failure is shown
+once for that selected build, without a retry on each reconnect.
+The manual update button is disabled while an automatic update is running. The
+backend rejects concurrent manual requests from IPC, HTTP, or MCP, and skips an
+automatic update while a manual one is in progress. A stalled transfer reports
+a timeout, after which connection checks resume.
+For a connected Direct or SSH remote, **Update & restart remote** appears only
+while the backend reports that the remote build is out of date. The action and
+the warning use the same status flag. After an update, the desktop verifies the
+selected build through `/health` and clears both without requiring a reconnect.
+The preview reports the remote target and build, selected desktop build and source,
+and the number of live PTY sessions. Confirming ends those sessions. The
+desktop uses the matching release asset first; if that asset does not exist, a
+locally built `tuic-remote` beside the desktop executable is used only when its
+target triple matches the remote. A target mismatch names both targets; a
+missing local binary reports its expected path.
+For a development build, build the headless binary with
+`cargo build --bin tuic-remote --no-default-features` from `src-tauri` when the
+desktop-feature sibling is a stub. The preview names that cause and command.
+
+Direct updates stream the binary over the authenticated connection. The daemon
+accepts only the session cookie for binary and file uploads, and the update
+client sends it in the `Cookie` header; credentials never appear in the upload
+URL. A daemon from this release rejects an update from an older desktop with
+401, and a newer desktop cannot update an older daemon that still expects the
+URL token. Update desktop and daemon from the same release, or deploy the older
+daemon over SSH. The daemon
+verifies its target, size (512 MiB maximum), SHA-256 and confirmed session
+count, stages it in its own install directory, then starts the new build. SSH
+updates use the existing SCP deployment path. FastAF waits for `/health`
+to report the selected build after restart; the connection's status polling
+re-authenticates when the daemon mints a new token. A changed session count or
+binary between preview and confirmation cancels the update. In-process update
+on Windows is unavailable: a running `.exe` cannot be overwritten, and the
+daemon answers 501.
+
+An older daemon without `/health.build` is shown as out of date. Automatic
+updates require a build identity, so this daemon needs one manual installation.
+SSH can bootstrap it because the desktop probes the host target with `uname`; an older
+Direct daemon has no update endpoint or reported target, so it needs one manual
+installation of a compatible daemon before this action can update it.
+
+### Authentication
+
+`tuic-remote` authenticates **every** TCP request. The headless build has no
+loopback bypass and `run_remote` forces `lan_auth_bypass` off, so an SSH tunnel
+does not make the daemon local: `GET /health` is the only unauthenticated route.
+A connection without credentials therefore reaches `/health` and nothing else.
+
+The password is kept in the OS credential vault, keyed by the connection's UUID.
+`connections.json` holds the username only, and neither the vault entry nor the
+daemon's token ever appears in `GET /config`. Deleting a connection deletes its
+vault entry with it.
+
+For a manually managed daemon, FastAF trades the password for the daemon's
+session token over `GET /api/auth/session-token` (Basic Auth). For Connect and
+Install, the vault pairing token is the daemon session token itself and is sent
+to the launch process over SSH stdin, never in its command line. FastAF
+then puts the session token in the query
+string of every call — HTTP, the terminal WebSocket and the `/events` SSE
+stream alike. It has to be the query string: a WebSocket upgrade cannot carry an
+`Authorization` header, and the daemon answers `Access-Control-Allow-Origin: *`,
+which rules out credentialed cookies. The token lives in the daemon's memory and
+is never written to disk, so the client re-fetches it on every connect and after
+a daemon restart.
+
+Status tells the two failures apart:
+
+| Status | What it means |
+|---|---|
+| **Connected** | A route behind the auth middleware answered 200 |
+| **Not authenticated** | The daemon is reachable and `/health` answers, but the credentials were rejected. Fix the username or password — not the network |
+| **Error** | The daemon is unreachable, or the tunnel failed |
+
+An unauthenticated connection routes no traffic at all: no terminals, no repo
+calls, no event bridge. `/health` passing is not evidence that anything else
+will work, which is why it is not what the status is read from.
+
+### Where the connection runs
+
+The connection itself — the health probe, the token exchange, the five-second
+status poll, the SSH tunnel — runs in the FastAF backend, not in the
+window. Three consequences you can observe:
+
+- **Every client sees the same status.** Connecting from the desktop app shows
+  up in a browser tab pointed at the same FastAF, and the other way round.
+  The status is pushed as a `remote-connection-status` event.
+- **A daemon restart is recovered with the window closed.** The poll notices the
+  token it holds is no longer the daemon's, re-authenticates once, and the
+  connection stays Connected without anyone looking at it.
+- **Nothing is left behind.** The SSH tunnel a connection needs is built in
+  memory; it never appears as a saved profile in the Tunnels panel, and quitting
+  the app cannot orphan one.
+
+### A remote tab behaves like a local one
+
+While a connection is up, the backend follows the remote daemon's own event
+stream and repeats every event locally under the same name. A session on the
+other machine therefore raises the same idle / busy dot, the same question
+badge, the same notification and the same queued-command gate as a session on
+this one — there is no separate remote code path to fall behind.
+
+The remote sessions are listed beside the local ones, each tagged with the
+connection that owns it. Losing the connection announces them closed and drops
+them, so a badge cannot freeze on the last state the machine was in.
+
+Project Progress for a remote repository is stored on its owning machine.
+New entries also reach the connected desktop window, so its Progress bell and
+dialog update without moving the journal to the local machine.
 
 ### Remote Repositories and Terminals
 
 Once a remote connection is configured:
 
-- **Add remote repo** — When adding a repository, select a connection. The repo appears in the sidebar with a remote badge
-- **Open terminal** — Terminals on remote repos connect via WebSocket to the remote daemon. I/O works identically to local terminals
+- **Add remote repo** — Select a connection and browse from that machine's home directory. If a directory cannot be read, the picker explains the error and still allows entering a path or moving to its parent. The repo appears in the sidebar with a remote badge
+- **Open terminal** — Terminals on remote repos connect via WebSocket to the remote daemon. The desktop CSP explicitly allows `ws:` and `wss:` through its permissive `default-src`: SSH uses `ws://127.0.0.1:<dynamic tunnel port>`, and Direct uses the configured HTTP(S) host and port as WS(S). A failed launch displays its error in the terminal pane; a failed stream connection, a missing initial frame after 15 seconds, or an unreadable compressed frame shows a persistent error toast. The client retries the stream and replays the current viewport on reconnect; the toast remains until dismissed. An idle terminal whose viewport or explicit empty replay has arrived is not treated as stalled
 - **Health monitoring** — Connection health is polled periodically. Disconnected connections show a warning badge in the sidebar
 
 Connections are stored in `<config_dir>/connections.json` with SSH and Direct transport types.
+
+#### Remote agent notices
+
+An agent's MCP toast on a connected machine appears in the desktop notification
+bell under **Messages**, with `[connection name]` before its title. It keeps the
+requested level and sound. **Open terminal** switches to the originating remote
+tab when it is still open; an unknown or closed session leaves focus unchanged.
+Notices from a disconnected machine are not queued or replayed on reconnect.
+Connections with the same display name retain separate notices. Malformed remote
+notice text is discarded.
+
+#### What runs on which machine
+
+A call is routed by its own arguments, not by which panel made it. FastAF asks
+the repository registry which machine owns the path (or, for a session, which machine
+owns the repo its tab was opened in) and sends the call there. A path that no registered
+repository owns is local, and so is every repository with no connection.
+
+| Operation | Runs on |
+|---|---|
+| Git — status, diff, log, stage, commit, push, stashes, worktrees | the machine that holds the repo |
+| Filesystem — browse, read, write, search, watch | the machine that holds the repo |
+| Terminals — create, write, resize, close, and the output stream | the machine that holds the repo |
+| Repo change events (`repo-changed`) | the machine that holds the repo, over its own SSE stream |
+| Agent run configs (`agents.json`), the agent hook toggles, upstream MCP servers | the machine that holds the repo — they describe a machine, not this app |
+| Settings, keybindings, themes, pane layout, notification config | always local — they describe this app, not a repo |
+| The repository registry itself (add, remove, reorder, group) | always local — it is this machine's list of machines |
+| Native file pickers, window management, global hotkey, CLI install, dictation, plugin install | always local — they carry no repository path, so nothing routes them |
+| mdkb code intelligence — outline, go to definition, references | **local, and that is a gap** (see below) |
+| Plugin filesystem watches (`plugin_watch_path`) | **local, and that is a gap** (see below) |
+
+Those last two have no HTTP route at all, so they cannot be sent anywhere. Called with
+a path inside a remote repository they run against the local machine — which does not
+have that path — and log `"<command>" has no remote route and ran on the local machine`
+once per command. Check it with `GET http://localhost:9876/logs?source=network`. The
+mismatch is reported rather than silent, but the feature genuinely does not work on a
+remote repository yet.
+
+**Open in app** is routed: the IDE is launched on the machine that holds the file, which
+is right for a second desktop and useless for a headless `tuic-remote` — nothing there
+has a display to open it on.
+
+#### Which config follows the repo, and which stays here
+
+Two families, and the line between them is what the config describes.
+
+**Follows the repo — a machine owns it.** `claude`, `grok` and `codex` are installed on
+the box that runs them, with their own licences, their own paths and their own config
+directories, so a run config naming a Mac path cannot describe a Linux daemon. A tab
+opened on a remote repository launches with **that machine's** `agents.json`: the command,
+its arguments, its environment and the `CC_ENV_FLAGS` that reach the PTY. The same rule
+covers the agent hook toggles (`hook_instrumentation`, `native_status_signals`) and the
+upstream MCP servers, which are dialled by the backend that holds them.
+
+Adding an upstream MCP server saves its configuration and credentials on the selected machine. A rejected duplicate name preserves that machine’s existing credentials. Use the existing server’s Edit form to replace a credential.
+
+The frontend keeps one copy per machine, read the first time that machine is needed and
+dropped whenever its connection changes state — a daemon that went away and came back may
+have been reconfigured, or be a different box behind the same name. A local repository
+costs no round trip at all: its config is read once at boot.
+If a remote config cannot be read, the Agents tab shows the connection error and retries
+on the next load. It does not save a fallback empty config over the remote file. A 404
+for `/config/agents` means the remote daemon needs an update that includes this route.
+
+**Stays here — this app owns it.** Theme, keybindings, pane layout, notification config
+and the repository registry describe this window on this desktop. None of them is ever
+sent to a daemon, including when every registered repository is remote.
+
+**Settings edits the machine you pick.** The Agents tab and the upstream-MCP panel carry a
+machine selector; it defaults to the machine of the repository the settings nav is standing
+on, and an explicit pick overrides it, so a remote machine is editable from a local repo.
+
+Authenticated Settings actions are available on the headless daemon through the same
+`POST /settings/action` contract as the desktop server. The daemon also serves the
+authenticated `/config` snapshot used to load and refresh browser Settings. Successful durable edits publish
+`settings-changed` over SSE so connected Settings readers can refresh without saving.
+
+Three things stay local even while a remote machine is selected, because they cannot work
+anywhere else: installing or removing the TUIC MCP bridge (`install_agent_mcp`), opening an
+agent's config file in the editor, and the upstream OAuth flow — that one opens a browser
+and listens on a loopback redirect, and a headless daemon has neither. Their controls are
+hidden rather than shown pointing at the wrong machine.
+
+A call on a repository whose machine is not connected fails with
+`Remote connection <id> not connected`. It is never quietly answered by the local
+backend — an answer about the wrong disk is worse than an error.
 
 ## tuic-remote (Beta)
 
@@ -220,30 +723,114 @@ A standalone headless daemon for running FastAF on a Linux server without a desk
 
 ### Installation
 
-Download the `tuic-remote` binary for your platform from the [GitHub Releases](https://github.com/ksg98/fastaf/releases) page.
+Download the `tuic-remote` binary **and** the `tuic-bridge` binary for your
+platform from the [GitHub Releases](https://github.com/ksg98/fastaf-ide/releases)
+page. Both are published for every platform below. Tagged releases carry the
+stable build; the rolling [`nightly`](https://github.com/ksg98/fastaf-ide/releases/tag/nightly)
+release carries the same four targets, rebuilt on every push to `main`.
 
-| Platform | Artifact |
-|----------|----------|
-| Linux x64 | `tuic-remote-x86_64-unknown-linux-gnu` |
-| Linux ARM64 | `tuic-remote-aarch64-unknown-linux-gnu` |
-| macOS ARM (Apple Silicon) | `tuic-remote-aarch64-apple-darwin` |
-| Windows x64 | `tuic-remote-x86_64-pc-windows-msvc.exe` |
+| Platform | Daemon | MCP bridge |
+|----------|--------|------------|
+| Linux x64 | `tuic-remote-x86_64-unknown-linux-gnu` | `tuic-bridge-x86_64-unknown-linux-gnu` |
+| Linux ARM64 | `tuic-remote-aarch64-unknown-linux-gnu` | `tuic-bridge-aarch64-unknown-linux-gnu` |
+| macOS ARM (Apple Silicon) | `tuic-remote-aarch64-apple-darwin` | `tuic-bridge-aarch64-apple-darwin` |
+| Windows x64 | `tuic-remote-x86_64-pc-windows-msvc.exe` | `tuic-bridge-x86_64-pc-windows-msvc.exe` |
 
 ```bash
 # Example: Linux x64
-curl -fsSL -o tuic-remote https://github.com/ksg98/fastaf/releases/latest/download/tuic-remote-x86_64-unknown-linux-gnu
-chmod +x tuic-remote
+BASE=https://github.com/ksg98/fastaf-ide/releases/latest/download   # nightly: .../releases/download/nightly
+curl -fsSL -o tuic-remote "$BASE/tuic-remote-x86_64-unknown-linux-gnu"
+curl -fsSL -o tuic-bridge "$BASE/tuic-bridge-x86_64-unknown-linux-gnu"
+chmod +x tuic-remote tuic-bridge
 ```
+
+**Keep the two in the same directory, and keep those names.** At startup the
+daemon writes an MCP entry into the config of every agent installed on its
+machine, and that entry names the bridge by the path it finds next to itself. A
+daemon without `tuic-bridge` beside it configures agents to run a binary that is
+not there; an agent then starts with no `tuicommander` tools at all — no
+`session`, no `repo`, no `progress`, no peer mail.
+
+The same miss silently strips ego's tools: an AI Chat session granted by a
+process that found no bridge gets an empty `mcpServers`, and the only symptom is
+ego answering that it cannot see terminals or repositories. Since #809-724c the
+process says so instead — one `warn` at startup naming every path it checked:
+
+```
+No tuic-bridge binary found, so ego sessions start with no MCP server and ego
+cannot see terminals or repositories. Checked: /opt/tuic/tuic-bridge, tuic-bridge
+```
+
+Read it with `curl 'http://127.0.0.1:9876/logs?level=warn'`.
 
 ### Setup
 
-Set a password before first use:
+Set a password before first use. Omit `--instance` to use the existing default
+FastAF configuration and credential vault:
 
 ```bash
 ./tuic-remote --set-password
 ```
 
-This stores a bcrypt hash in the FastAF config directory (`~/.config/tuicommander/` on Linux).
+For an isolated daemon, pass the same named instance to password setup and every
+subsequent launch:
+
+```bash
+./tuic-remote --instance build-host --set-password
+./tuic-remote --instance build-host
+```
+
+An instance ID is one lowercase ASCII DNS label: 1–63 characters, letters or
+digits at both ends, with hyphens allowed internally. `default` is reserved;
+omit the option to select the default instance. Invalid IDs fail before any
+configuration or credentials are accessed.
+
+The default instance keeps the platform paths listed in
+[Configuration](../backend/config.md#config-directory) and the existing OS
+keyring entry. A named instance instead stores files in the corresponding
+`instances/<id>/` subdirectory and uses keyring service
+`tuicommander-instance-<id>`, user `vault`. It starts empty: it never falls back
+to, imports, changes, or deletes default or legacy files and credentials. The OS keyring remains the default in release builds. If a named instance's
+selected vault cannot be opened, the daemon exits before binding its network socket.
+
+#### Mounted credentials without an OS keyring
+
+For an unprivileged Linux daemon without a session bus, select a private JSON
+file explicitly. This option works in release builds and does not enable the
+debug credential store:
+
+```bash
+./tuic-remote --instance build-host --credential-file /run/secrets/tuic-vault.json --no-agent-configs
+```
+
+The file is a JSON object whose keys are vault slots and whose values are strings:
+
+```json
+{"remote/session-token": "replace-with-a-private-random-token"}
+```
+
+Use that session token to authenticate protected HTTP requests. Keep the file
+private and mount it read-only if possible. The daemon reads it once before any
+credential access. A missing, unreadable or malformed file stops boot with a
+content-free diagnostic; there is no keyring or legacy-vault fallback, even for
+missing slots. The option does not put credentials in config JSON or logs.
+
+This is a file-seeded **process-local** source: credential changes made through
+APIs remain in memory, never update the selected file, and are lost on restart.
+Other configuration changes can still be persisted normally. To rotate a token,
+replace the mounted file and restart the daemon; live file changes do not reload
+credentials. Each process reads its own snapshot. An automatic daemon relaunch
+uses the startup executable path after binary replacement, retains the file
+option and rereads the file; a service supervisor must retain it
+in its launch command. Do not share a seed across instances unless they are meant
+to share secrets. `--set-password` cannot be combined with this option; use a
+seeded session token, or the default keyring source for durable password setup.
+The desktop default is unchanged.
+
+Automation that depends on this isolation contract must pin and verify the
+digest of the release artifact it launches. Artifact verification belongs to
+the consuming harness; `tuic-remote` does not expose a separate capability or
+version endpoint for it.
 
 ### Running
 
@@ -253,22 +840,127 @@ This stores a bcrypt hash in the FastAF config directory (`~/.config/tuicommande
 
 # Custom port
 TUIC_PORT=8080 ./tuic-remote
+
+# Named instance, with the same port override
+TUIC_PORT=8080 ./tuic-remote --instance build-host
+
+# Loopback-only ephemeral daemon with a 30-minute idle lifetime
+TUIC_PAIRING_TOKEN=... ./tuic-remote --bind 127.0.0.1 \
+  --survive-secs 1800 --no-agent-configs
 ```
 
-The daemon binds to `0.0.0.0:<port>` and serves:
-- The FastAF web UI (PWA-capable)
+By default the daemon binds to `0.0.0.0:<port>` and runs until signalled. The
+desktop-managed form binds to loopback, skips agent config installation, writes
+`tuic-remote.pid` in its config directory, and exits after the survive time with
+no SSE or WebSocket clients. SIGINT, SIGTERM and SIGHUP all shut it down cleanly
+and remove that pid file.
+
+### Cluster workers: leave host agent configs untouched
+
+Start each cluster worker with `--no-agent-configs` when another FastAF
+process owns the same OS user's agent integration, or when the worker must not
+change that user's agent configuration:
+
+```bash
+TUIC_PORT=9877 ./tuic-remote --no-agent-configs
+```
+
+The flag sets `RemoteOptions.agent_configs` to `false`. Without the flag, this
+option defaults to `true`: startup can install or repair the FastAF MCP
+bridge entries in supported agents' configuration files, including
+`~/.claude.json` and `~/.codex/config.toml` (or the selected agent config roots).
+Those files belong to the OS user, not to a cluster task. Use the flag on every
+worker launch that must preserve them; otherwise a worker that owns config repair
+can redirect the user's bridge entry to its own installation.
+
+This flag skips only startup agent MCP config writes. It does not disable the
+daemon's MCP endpoint, local IPC listener, or normal writes to its own config
+directory. A named `--instance` isolates daemon state but is not a substitute for
+an explicit no-agent-config policy. If a worker needs to own agent integration,
+give it a separate OS user and HOME rather than sharing those files with another
+owner.
+
+The daemon serves:
+- The HTTP API (sessions, terminals, git, filesystem, agents)
 - WebSocket terminal streaming
 - MCP tool integration (for AI agents)
 
+It does **not** serve the web UI: `FRONTEND_DIST`, `serve_index` and
+`serve_static` are all `#[cfg(feature = "desktop")]` (`mcp_http/static_files.rs`)
+and `tuic-remote` is built `--no-default-features`, so `/` has no route.
+Point a desktop FastAF at the daemon; a browser has nothing to load.
+
+Every TCP request is authenticated — the headless build has no loopback bypass
+and `run_remote` forces `lan_auth_bypass` off — so an SSH tunnel does not make
+the daemon local. `GET /health` is the only unauthenticated route.
+
+The daemon also opens a local IPC endpoint that is **not** on the network: a
+Unix socket at `<config dir>/mcp.sock`, or the named pipe
+`\\.\pipe\tuicommander-mcp` on Windows. That is how `tuic-bridge` reaches it —
+an agent running on this machine starts the bridge as a child process and the
+bridge speaks HTTP over that socket. It carries no authentication because the OS
+user is the boundary; nothing outside the machine can open it.
+
+#### What the daemon runs, and what it deliberately does not
+
+The daemon is a whole machine, not a session server. It runs almost everything
+the desktop runs in the background:
+
+| Runs on the daemon | Why it has to |
+|---|---|
+| Session state accumulator, ACP notice pump, tombstone sweeper | the sessions live here |
+| Process snapshot refresher | agent session discovery reads argv and env off the processes on this machine; without it a tab cannot resume after a restart |
+| Standby checker (Unix) | a remote client reports tab visibility, so an idle hidden session parks here exactly as it would on the desktop |
+| Content index updater and boot pre-warm | see below |
+| Tool search index updater | the daemon now serves MCP |
+| Upstream MCP auto-connect and health checker | upstreams are per-machine configuration, so the machine that holds them connects them |
+| CPU watchdog | the daemon is precisely where nobody is watching |
+| Maintenance sweep (idle MCP sessions, expired auth rate limits, expired tasks) | the daemon authenticates every TCP request, so its rate-limit map grows with every port scanner that finds it |
+| MCP config install for the agents on this machine | so an agent launched here has the `tuicommander` tools |
+
+It deliberately does not run:
+
+- **The WebView recovery watchdog** — there is no WebView, so there is no blank
+  document to navigate back.
+- **The embedded assistant**: knowledge persistence, the job scheduler and the
+  watcher engine. Those are configured and read from the desktop UI, and the
+  daemon's router serves none of their routes, so a scheduler ticking here would
+  run jobs nobody on this machine can create, inspect or stop.
+
+**Content search needs an index, and an index needs a warm.** A cross-repo
+search (`/fs/search-content-all`) skips any repo whose index is not resident and
+starts no build of its own — the warm strategy owns scheduling. So the daemon
+watches every registered repo and pre-warms indices at boot, following the same
+`index_strategy` setting as the desktop: `active_and_switch` (the default) and
+`active_only` warm the active repo, `all_sequential` warms every repo with the
+active one first. Repos that are not yet indexed are reported back as pending
+and indexing counts, not as an empty result — a single-repo search
+(`/fs/search-content`) falls back to a full scan while its index builds, so it
+answers correctly either way.
+
 ### TLS
 
-Configure TLS via the FastAF config file (`~/.config/tuicommander/config.toml`):
+Configure TLS in the instance's `config.json` under `services.tls`:
 
-```toml
-[services.tls]
-cert_path = "/path/to/cert.pem"
-key_path = "/path/to/key.pem"
+```json
+{
+  "services": {
+    "tls": {
+      "mode": "manual",
+      "cert_path": "/path/to/cert.pem",
+      "key_path": "/path/to/key.pem"
+    }
+  }
+}
 ```
+
+Manual mode serves **HTTP and HTTPS** on the same daemon TCP port, like desktop
+remote access. HTTPS includes SSE and WebSocket (`wss://`) traffic; HTTP remains
+available for local relay and SSH clients.
+Missing or invalid PEM files stop startup before any listener binds; there is no
+plaintext fallback. With `mode: "off"` (the default), the port serves plain HTTP.
+Startup logs report the bound listener mode, and `tls_active` reflects the live
+TLS listener rather than the presence of certificate configuration.
 
 ### Differences from Desktop Remote Access
 
@@ -278,12 +970,16 @@ key_path = "/path/to/key.pem"
 | Runs headless | No | Yes |
 | Tauri dependency | Yes | No |
 | Default port | 9876 | 9877 |
-| LAN auth bypass | Configurable | Always disabled |
-| Signal handling | N/A | Graceful SIGINT/SIGTERM |
+| LAN auth bypass | Disabled | Disabled |
+| Signal handling | N/A | Graceful SIGINT/SIGTERM/SIGHUP |
+| MCP bridge for local agents | Bundled sidecar | Downloaded next to the daemon |
+| Embedded assistant (watchers, scheduler) | Yes | No |
 
 ### Status
 
 **Beta** — the core HTTP/WebSocket API is stable, but the standalone daemon is new and may have rough edges. Report issues on GitHub.
+
+Remote host cards name DNS, refused connections, timeout, TLS, and authentication failures. A 403 Untrusted Host explains that the daemon rejected the host name, including when the response arrives in multiple HTTP chunks. This refusal stops automatic connection retries and removes the retry delay. An outdated daemon is a possible cause: install the current `tuic-remote` and restart its service, then press **Connect**. If the refusal persists, check the daemon’s trusted names. The card shows the last known `tuic-remote` version and warns when its semantic version is older than this client, including while reconnecting or in an error state. Connected daemons also retain the selected-asset SHA-256 update check. Version information comes from a successful `/health.build` response. The recorded older daemon returns only plain `Untrusted Host` on 403, with no version. If `/health` is refused before any successful observation, the version is unknown and the message describes an outdated daemon as a possible cause, not a confirmed diagnosis. No alternative Host or IP probe bypasses the refusal. The last health observation is held only in runtime memory; explicit disconnect, deletion or an app restart discards it. The cause remains visible until that attempt. Unchanged failure states produce no additional warnings. When a short name cannot resolve, a matching running Tailscale peer supplies its advertised full DNS name. Retryable failures show the automatic retry delay; active attempts clear the previous failure.
 
 ## Troubleshooting
 
@@ -293,3 +989,92 @@ key_path = "/path/to/key.pem"
 | Connection refused | Verify the port isn't blocked by a firewall. The settings panel includes a reachability check. |
 | Authentication fails | Re-enter the password in settings — the stored bcrypt hash may be from a different password. |
 | Terminals not responding | WebSocket connection may have dropped. Refresh the browser page. |
+
+## Private secret entry on a phone
+
+A desktop secret request shows a full one-time URL in its private window.
+Open **Open on a trusted browser or phone** to select or copy the URL, open the
+link, or scan its QR code. The address uses the same network and HTTPS policy as
+Remote Mobile Connection. Both choose the first backend-ranked address: Tailscale
+with an active HTTPS listener, then Wi-Fi/LAN, then HTTP-only Tailscale, then
+another detected network address. Interface order breaks ties within each group.
+IPv6 literals use brackets. You can choose another address in Remote Access or
+the pairing dialog; detection does not guarantee that the phone can reach it.
+If no address is detected, the private form shows network setup guidance instead
+of a phone URL. If Remote Access is off, enable it in Settings and
+request a new form. Enter only the requested fields. Entry uses the existing server authentication and transport;
+use HTTPS to protect values in transit. No separate private listener is created. The headless daemon cannot originate requests in this slice.
+See [Private secret forms](secrets.md).
+
+## Address remote terminals and peers from desktop MCP
+
+Use `session action=list` to discover connected remote terminals. Their
+`connection_id` identifies the saved remote connection. Pass that field with
+`session_id`, or use the returned `address`, for output and semantic submit.
+Use `agent action=list_peers` to find remote peer addresses, then send mail to
+`<connection_id>/<peer-id>`. Replies to `local/<peer-id>` return through the
+desktop hub. Daemons can also address peers on another configured connection.
+All traffic follows the configured daemon connection and credentials.
+
+Both desktop and daemon need a version supporting remote peer mail. Local daemon
+mail remains usable if the desktop disconnects. A cross-host error is explicit;
+a timeout with uncertain delivery is not permission to resend the body.
+
+The read-only reproduction harness is `scripts/test-remote-mcp.py`. Run
+`python3 scripts/test-remote-mcp.py --connection <id> --session <alias-or-id>`
+against the desktop MCP. `--exercise` submits and sends mail and must target a
+disposable idle agent; `--second-connection` and `--second-session` check a
+remote-to-remote reply through the same hub.
+
+For a local protocol fixture, build a test-support headless binary and run
+`python3 scripts/test-remote-mcp.py --fixture-bin <binary> --fixture-launcher scripts/run-remote-fixture.sh`.
+This launches three actual isolated daemons, exercises the hub MCP, remote-to-remote
+mail and replies, semantic shell rejection, then verifies intrahost mail with the hub
+stopped. It does not claim to test a real agent composer; use `--exercise` for that.
+
+Connected daemon notices carry their host identity. MCP confirmation responses and ACP permission/elicitation answers return to that daemon; disconnected questions disappear without changing local connections. MCP confirmation dialogs appear on the desktop and close when another client answers. AI Chat shows remote questions separately, with their ACP connection identity. Completing an earlier answer preserves questions announced by newer notices. Remote GitHub transitions fetch PR data from the repository owner, notify once, and do not run local repository automation. GitHub polling also works on the headless daemon. MCP upstream health refreshes use a separate host snapshot rather than this machine’s editable configuration.
+
+MCP terminal output can be read in retained pages without running a command again.
+Follow the response's `continuation` instructions and `next_cursor` while
+`has_more` is true. Raw pages use byte positions; text pages use scrollback rows.
+The same paging works through a connected remote daemon. Buffer eviction can
+remove old output, and the response reports the resulting gap.
+
+Remote desktop terminal tabs consume the daemon's detected agent identity and
+OSC title updates, with the same custom-name and spawn-name protection as local
+tabs. Grid output streams over WebSocket; the text/log view batches rows at
+200 ms. Loopback timings do not establish latency on an SSH or Tailscale link.
+
+### Claude session CLI / Chat
+
+On a Claude session, select **Chat** in the session header to read the conversation.
+Use the same input below to reply. Select **CLI** for permission prompts or questions
+that are not in the transcript. If the backend cannot bind the transcript, the view
+returns to CLI and shows the reason. CLI returns to the latest output; its stream
+stays connected while Chat is open. Chat reads pause while the page is hidden.
+
+### Recovering a short Direct host name
+
+If DNS cannot resolve a short Direct host name, TUIC checks the advertised
+Tailscale peers. With exactly one matching peer, it retries once with that
+peer's full DNS name. Only the URL host changes; the scheme, port, path and TLS
+certificate checks stay unchanged. SSH aliases, IP addresses, full DNS names,
+and errors other than DNS failures do not use this fallback.
+
+A successful recovery uses the resolved endpoint for the current session.
+Remote Machines shows the effective address and **Save resolved address**.
+Select that action to update the saved connection without disconnecting it.
+Leaving the action alone keeps the original saved address.
+
+## Remote Settings startup limits
+
+The shared Settings HTTP endpoint retains local-or-authenticated access; MCP mutation remains loopback-only. A local request does not implicitly target a remote daemon. Select the owner explicitly, keep its read revision, and never treat a remote invalidation cursor as a local CAS token. [Startup workflows](../backend/settings-startup.md) covers confirmation, device-login state and readback after uncertain or partial persistence. Secrets remain write-only.
+
+Typed Ego startup login returns a session on the explicitly selected daemon.
+Open that session in the owning client's terminal view to authenticate, then
+request status and refresh providers on that same daemon. Never read a local
+credential owner to infer the result of remote authentication.
+
+### Remote session closure
+
+MCP `session action=close` accepts a remote `connection_id` or connection-qualified session reference. The host resolves aliases on the owning daemon and sends authenticated `DELETE /sessions/{id}`. The caller's own PTY remains protected from self-close, and non-loopback MCP callers cannot invoke destructive close actions. A disconnected connection reports an error; it never falls back to a local session. HTTP DELETE and local MCP close use the same teardown, session-closed events and retained output tombstone. Repeating a close of a retained tombstone succeeds. Explicit close remains user-directed and is not limited to abandoned shells.

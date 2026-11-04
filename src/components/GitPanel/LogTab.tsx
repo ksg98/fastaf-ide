@@ -371,7 +371,7 @@ export const LogTab: Component<LogTabProps> = (props) => {
 		const current = commits();
 		if (!repo || current.length === 0 || loadingMore()) return;
 
-		const lastHash = current[current.length - 1].hash;
+		const lastHash = current.at(-1)!.hash;
 		setLoadingMore(true);
 		setLoadMoreFailed(false);
 		try {
@@ -514,14 +514,19 @@ export const LogTab: Component<LogTabProps> = (props) => {
 	/** Remote names on this page, so `fork/x` folds into `x` like `origin/x` does. */
 	const remotes = createMemo(() => collectRemotes(commits().map((c) => c.refs)));
 
+	/** One graph gutter for the whole list, so every subject starts at the same x
+	 *  (the column the owner approved in v2.0.4). Upstream's per-row gutter (#1263)
+	 *  made the text column ragged and was dropped on purpose. */
+	const listGraphWidth = createMemo(() => graphWidth(graphNodes()));
+
 	/** Room for chips on line 1: 60% of it (.refs max-width), inside the row's padding
 	 *  (14px + the graph's lanes on the left, 14px on the right). */
-	const chipSpace = createMemo(() => 0.6 * Math.max(0, listWidth() - 28 - graphWidth(graphNodes())));
+	const chipSpace = createMemo(() => 0.6 * Math.max(0, listWidth() - 28 - listGraphWidth()));
 
 	// Load the next page once the last rendered row is within a few rows of the end.
 	createEffect(() => {
 		const items = virtualizer.getVirtualItems();
-		const last = items[items.length - 1];
+		const last = items.at(-1);
 		const total = commits().length;
 		if (!last || total === 0 || total - 1 - last.index > LOAD_AHEAD_ROWS) return;
 		if (!hasMore() || loadingMore() || loadMoreFailed() || loading()) return;
@@ -630,7 +635,7 @@ export const LogTab: Component<LogTabProps> = (props) => {
 					<Match when={true}>
 						<div
 							class={s.virtualList}
-							style={{ height: `${virtualizer.getTotalSize()}px`, "--graph-w": `${graphWidth(graphNodes())}px` }}
+							style={{ height: `${virtualizer.getTotalSize()}px`, "--graph-w": `${listGraphWidth()}px` }}
 						>
 							<For each={virtualizer.getVirtualItems()}>
 								{(virtualItem) => {

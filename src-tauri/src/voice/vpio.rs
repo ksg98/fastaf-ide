@@ -157,6 +157,12 @@ impl VpioCapture {
 
         let cb_buffer = Arc::clone(&buffer);
         let cb_level = Arc::clone(&level);
+        // The shared chunk processor counts what its bounded buffer drops and
+        // stops accepting samples once capture is no longer active. This
+        // capture is active for as long as the unit runs; dropping the unit
+        // stops the callback, so the flag never needs to clear.
+        let cb_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cb_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         // Scratch buffers owned by the callback, as in the cpal path — the
         // audio thread must not allocate per callback.
         let mut mono_buf: Vec<f32> = Vec::new();
@@ -165,12 +171,12 @@ impl VpioCapture {
             let samples = args.num_frames.min(args.data.buffer.len());
             process_audio_chunk(
                 &args.data.buffer[..samples],
-                SAMPLE_RATE,
-                1,
+                (SAMPLE_RATE, 1),
                 &cb_buffer,
                 &cb_level,
-                &mut mono_buf,
-                &mut resample_buf,
+                &cb_dropped,
+                &cb_active,
+                (&mut mono_buf, &mut resample_buf),
             );
             Ok(())
         })

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { tabOrderingStore } from "../../stores/tabOrdering";
+import { tabOrderingStore } from "../../stores/tabManager";
 
 describe("tabOrderingStore", () => {
 	beforeEach(() => {

@@ -10,8 +10,8 @@ function currentRepoLayoutKey(): string | undefined {
 	const repoPath = repositoriesStore.state.activeRepoPath;
 	if (!repoPath) return undefined;
 	const repo = repositoriesStore.state.repositories[repoPath];
-	if (!repo?.activeBranch) return undefined;
-	return paneLayoutKey(repoPath, repo.activeBranch);
+	if (!repo?.activeWorkspaceId) return undefined;
+	return paneLayoutKey(repoPath, repo.activeWorkspaceId);
 }
 
 export const GlobalWorkspaceEntry: Component = () => {

@@ -1,27 +1,46 @@
-//! Dedicated per-id WebSocket bridges for the high-frequency AI token streams —
-//! event-bridge plan Steps 3 (conversation) & 4 (chat). These deliberately do
+//! Dedicated per-session WebSocket bridge for FastAF's engine conversation
+//! token stream — event-bridge plan Step 3. It deliberately does
 //! NOT ride the global `event_bus`/SSE: a single conversation emits 20+ events/sec,
 //! which would exhaust the 256-cap broadcast and Lag unrelated SSE consumers.
 //! Each connection taps the same engine stream the desktop Tauri Channel uses, so
-//! browser/PWA clients get byte-identical `ConversationEvent`/`ChatEvent` frames.
+//! browser/PWA clients get byte-identical `ConversationEvent` frames.
+//!
+//! The chat-registry stream (`/ai/chat/{id}/stream`) is not restored: it had no
+//! producer and no frontend consumer.
 
 use std::sync::Arc;
 
+use axum::Extension;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use futures_util::stream::{SplitSink, StreamExt};
 use serde::{Deserialize, Serialize};
 
+use super::guards::UserAuthenticated;
 use crate::AppState;
 use crate::ai_agent::conversation_engine::{
     ConversationEvent, batched_conversation_stream, build_config,
     start_conversation as engine_start, subscribe_conversation,
 };
-use crate::ai_chat_registry::{ChatEvent, chat_registry, validate_id};
+
+/// A session id as a path segment: 1-64 characters of alphanumerics, `-`, `_`.
+fn validate_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 64 {
+        return Err("ID must be 1-64 characters".to_string());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("ID must be alphanumeric, dash, or underscore".to_string());
+    }
+    Ok(())
+}
 
 /// Serialize a frame to JSON and push it down the socket. Returns false if the
-/// client has disconnected. Shared by the conversation and chat bridges.
+/// client has disconnected.
 async fn send_json<T: Serialize>(sink: &mut SplitSink<WebSocket, Message>, frame: &T) -> bool {
     let Ok(json) = serde_json::to_string(frame) else {
         // Skip an unserializable frame but keep the stream alive — log it so a
@@ -53,18 +72,32 @@ struct StartConversationParams {
 }
 
 /// `GET /ai/conversation/{session_id}/stream` — WebSocket upgrade.
+///
+/// Starts a conversation (Autonomous included) or re-attaches to a running
+/// one, whose frames carry approval ids — so, like the other conversation
+/// routes, only a credential-checked caller may open it. Refused before the
+/// upgrade: a Unix-socket caller gets a plain 403.
 pub(super) async fn conversation_ws(
-    ws: WebSocketUpgrade,
+    user_auth: Option<Extension<UserAuthenticated>>,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| bridge_conversation(socket, session_id, state))
+    // Caller first, upgrade second: an unauthenticated caller learns nothing
+    // about the route, whatever its request looks like.
+    if let Some(denied) = super::ai_routes::deny_unless_user(user_auth.as_ref()) {
+        return denied;
+    }
+    match ws {
+        Ok(ws) => ws.on_upgrade(move |socket| bridge_conversation(socket, session_id, state)),
+        Err(rejection) => rejection.into_response(),
+    }
 }
 
 async fn bridge_conversation(socket: WebSocket, session_id: String, state: Arc<AppState>) {
     let (mut sink, mut stream) = socket.split();
 
-    // Validate the session id up front (mirrors `bridge_chat`'s `validate_id`).
+    // Validate the session id up front.
     if let Err(e) = validate_id(&session_id) {
         let _ = send_json(&mut sink, &ConversationEvent::Error { message: e }).await;
         return;
@@ -125,59 +158,4 @@ async fn bridge_conversation(socket: WebSocket, session_id: String, state: Arc<A
             break;
         }
     }
-}
-
-// ── Chat registry stream (event-bridge plan Step 4) ────────────────────
-
-/// `GET /ai/chat/{chat_id}/stream` — WebSocket upgrade. Mirrors the desktop
-/// `chat_subscribe` command: the first frame is a `ChatEvent::Snapshot`, then
-/// live `ChatEvent`s (chunk/error/cleared/snapshot) as they are fanned out.
-/// Closing the socket unsubscribes (no explicit `chat_unsubscribe` needed).
-pub(super) async fn chat_ws(ws: WebSocketUpgrade, Path(chat_id): Path<String>) -> Response {
-    ws.on_upgrade(move |socket| bridge_chat(socket, chat_id))
-}
-
-async fn bridge_chat(socket: WebSocket, chat_id: String) {
-    let (mut sink, mut stream) = socket.split();
-
-    if let Err(e) = validate_id(&chat_id) {
-        let _ = send_json(&mut sink, &ChatEvent::Error { message: e }).await;
-        return;
-    }
-
-    let reg = chat_registry();
-    let (result, mut rx) = reg.subscribe_ws(&chat_id).await;
-
-    // First frame: the state snapshot (carries `kind: "snapshot"` so a client can
-    // handle it like any other event). There is no client: the registry has no
-    // producer, so this snapshot is always the empty default and no event ever
-    // follows it — the frontend consumer was removed in story `600-d664` because
-    // applying it wiped the history loaded from disk.
-    if !send_json(&mut sink, &ChatEvent::Snapshot(result.snapshot)).await {
-        reg.unsubscribe(&chat_id, result.subscription_id).await;
-        return;
-    }
-
-    // Forward fan-out events; also watch the socket so an idle chat still detects
-    // a client disconnect promptly (send-failure alone wouldn't fire until the
-    // next event, which may be far off).
-    loop {
-        tokio::select! {
-            maybe = rx.recv() => match maybe {
-                Some(ev) => {
-                    if !send_json(&mut sink, &ev).await {
-                        break;
-                    }
-                }
-                None => break, // registry dropped the sender
-            },
-            incoming = stream.next() => match incoming {
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(_)) => break,
-                Some(Ok(_)) => {} // ignore other client→server frames
-            },
-        }
-    }
-
-    reg.unsubscribe(&chat_id, result.subscription_id).await;
 }

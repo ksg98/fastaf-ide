@@ -14,6 +14,18 @@ Thanks for your interest in contributing! This guide covers what we expect from 
 # Prerequisites: Node.js 24+, Rust stable, platform dependencies (see README)
 pnpm install --frozen-lockfile
 cd src-tauri && cargo build
+
+# Run the app in development mode (installs the git hooks on first run)
+make dev
+```
+
+On macOS, `make dev` also requires Python 3. It launches a stable executable
+copy outside Cargo/mbx targets; see [Development Setup](docs/guides/development-setup.md).
+
+`make check` also needs two cargo subcommands:
+
+```bash
+cargo install cargo-nextest cargo-audit
 ```
 
 ## Quality Gates
@@ -43,22 +55,49 @@ We have thousands of frontend and Rust tests. We expect that number to go up wit
 ### Run the Full Suite Locally
 
 ```bash
-# Frontend: typecheck + tests
-pnpm exec tsc --noEmit
-pnpm exec vitest run
-
-# Rust: clippy + tests
-cd src-tauri
-cargo clippy -- -D warnings
-cargo test
+make fmt    # auto-format the frontend (Biome) and Rust (rustfmt)
+make check  # every gate CI enforces
 ```
 
-All four commands must pass with zero errors, zero warnings.
+`make check` must pass with zero errors and zero warnings. It runs, in order:
+`tsc --noEmit`, Biome, the architecture cycle checks, the plugin capability doc
+sync check, `cargo fmt --check`, `cargo clippy --release -- -D warnings`,
+`cargo nextest run --workspace` plus doctests, Vitest, the plugin tests,
+`pnpm audit`, and `cargo audit`.
+
+Cargo owns the executables in `src-tauri/target/`: sidecar staging never
+copies back into that directory. `pnpm build:sidecar` builds the CLI and bridge
+with Cargo and stages them in `src-tauri/binaries/` for development and
+packaging. `build.rs` disables only tauri-build's reverse sidecar copy;
+`tauri.conf.json` and CLI packaging overrides keep the bundle entries.
+
+To run a single gate, copy its command out of the `check` target in the
+[Makefile](Makefile) — that target is the source of truth for what CI enforces.
+Prefix standalone test commands with `scripts/with-test-tmp.sh` from the
+repository root (`../scripts/with-test-tmp.sh` from `src-tauri/`). It creates
+a per-run directory under `.tmp/tuic-tests/` and removes it when the command
+ends, including when a test fails. `make check`, `make test-shell`, `make cov`, and
+`make mutants` do this automatically. `make dev` and `cargo run` retain their
+normal runtime temporary directory.
+
+When `src-tauri/src/design_mode/extract.js` changes, run `TUIC_DESIGN_BROWSER=/path/to/browser-stealth/ab-stealth.sh scripts/with-test-tmp.sh pnpm test:design-mode-browser`; this test requires real Chromium and is not in CI.
+
+Mutation testing runs on a change, not on the tree: `make mutants RANGE=<base>`
+(default `HEAD~1`) needs `cargo install --locked cargo-mutants` and reports the
+mutants of the changed Rust lines that no test caught. A surviving mutant is a
+missing test. Pass simple cargo-mutants filters as trailing goals, for example
+`make mutants RANGE=<base> -- --re parse_clean_lines`. For filters containing
+spaces or other complex arguments, use `MUTANTS_ARGS`.
+
+The Makefile prefixes each gate with `rtk`, an optional output compactor, when
+it is on your `PATH`. It is not a project dependency: with `rtk` absent every
+gate runs raw and unfiltered. Use `make RTK= check` to bypass it even when it
+is installed.
 
 ### Code Style
 
 - Match the style of surrounding code. Consistency within a file matters more than any external style guide.
-- Rust: `cargo clippy -- -D warnings` must be clean.
+- Rust: `cargo clippy --release -- -D warnings` must be clean — that is the exact gate in `make check`.
 - TypeScript: `tsc --noEmit` must be clean. No `any` types.
 - Use `appLogger` for logging, never `console.log`.
 
@@ -79,6 +118,8 @@ refactor(config): extract settings validation
 Include:
 - **Summary:** What changed and why (not how -- the diff shows how).
 - **Test plan:** Checklist of what was tested, both automated and manual.
+
+Add user-visible changes under `[Unreleased]` in `CHANGELOG.md`, and add manual checks to `to-test.md` when needed. Both files use Git's union merge driver so concurrent additions survive a merge. Review their final ordering and remove duplicate entries before landing.
 
 ### What We Look For in Review
 

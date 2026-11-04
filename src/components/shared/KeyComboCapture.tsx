@@ -2,14 +2,19 @@ import { type Component, createSignal, onCleanup, Show } from "solid-js";
 import { useNativeKeyCombo } from "../../hooks/useNativeKeyCombo";
 import { listen } from "../../invoke";
 import { normalizeCombo } from "../../keybindingDefaults";
+import type { SettingId } from "../../services/settingsCatalogue";
 import { keybindingsStore } from "../../stores/keybindings";
 import { isTauri } from "../../transport";
+import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
 import s from "./KeyComboCapture.module.css";
 
 /** Bare modifier keys — ignored when pressed alone */
 const BARE_MODIFIERS = new Set(["Meta", "Control", "Alt", "Shift"]);
 
 export interface KeyComboCaptureProps {
+	id?: string;
+	settingId?: SettingId;
 	/** Current key combo value (e.g. "Cmd+Shift+D") */
 	value: string;
 	/** Called with newly captured combo */
@@ -125,12 +130,20 @@ export const KeyComboCapture: Component<KeyComboCaptureProps> = (props) => {
 			<Show
 				when={capturing()}
 				fallback={
-					<button class={s.display} onClick={startCapture} title="Click to change shortcut">
+					<Button
+						id={props.id}
+						data-setting-id={props.settingId}
+						class={s.display}
+						onClick={startCapture}
+						title="Click to change shortcut"
+					>
 						{displayLabel()}
-					</button>
+					</Button>
 				}
 			>
-				<input
+				<Input
+					id={props.id}
+					data-setting-id={props.settingId}
 					class={s.input}
 					placeholder={props.placeholder ?? "Press a key combination..."}
 					onKeyDown={handleKeyDown}

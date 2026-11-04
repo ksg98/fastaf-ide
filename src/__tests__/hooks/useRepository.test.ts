@@ -71,12 +71,14 @@ describe("useRepository", () => {
 	});
 
 	describe("removeWorktree()", () => {
-		it("calls invoke with repo path, branch name, and deleteBranch", async () => {
+		// Addressed by workspace id, not branch: a minted id proves the value is
+		// forwarded opaquely rather than re-derived from a branch (#726-5ac7).
+		it("calls invoke with repo path, workspace id, and deleteBranch", async () => {
 			mockInvoke.mockResolvedValueOnce(undefined);
-			await repo.removeWorktree("/repos/my-repo", "feature-x", true);
+			await repo.removeWorktree("/repos/my-repo", "feature-x~a1b2c3d4", true);
 			expect(mockInvoke).toHaveBeenCalledWith("remove_worktree", {
 				repoPath: "/repos/my-repo",
-				branchName: "feature-x",
+				workspaceId: "feature-x~a1b2c3d4",
 				deleteBranch: true,
 				force: false,
 			});
@@ -84,10 +86,10 @@ describe("useRepository", () => {
 
 		it("passes deleteBranch=false when requested", async () => {
 			mockInvoke.mockResolvedValueOnce(undefined);
-			await repo.removeWorktree("/repos/my-repo", "feature-x", false);
+			await repo.removeWorktree("/repos/my-repo", "feature-x~a1b2c3d4", false);
 			expect(mockInvoke).toHaveBeenCalledWith("remove_worktree", {
 				repoPath: "/repos/my-repo",
-				branchName: "feature-x",
+				workspaceId: "feature-x~a1b2c3d4",
 				deleteBranch: false,
 				force: false,
 			});
@@ -113,8 +115,13 @@ describe("useRepository", () => {
 	});
 
 	describe("getWorktreePaths()", () => {
-		it("returns record on success", async () => {
-			const paths = { "feature-a": "/wt/feature-a", "feature-b": "/wt/feature-b" };
+		// Keyed by workspace id with the branch as a field, so two workspaces on one
+		// branch stay distinct instead of collapsing (#726-5ac7).
+		it("returns the workspace records on success", async () => {
+			const paths = {
+				"feature-a": { branch: "feature-a", path: "/wt/feature-a" },
+				"feature-a~a1b2c3d4": { branch: "feature-a", path: "/clones/feature-a-2" },
+			};
 			mockInvoke.mockResolvedValueOnce(paths);
 			const result = await repo.getWorktreePaths("/repos/my-repo");
 			expect(result).toEqual(paths);

@@ -1,6 +1,23 @@
 import { defineConfig } from "vitest/config";
 import solid from "vite-plugin-solid";
 import path from "node:path";
+import { mkdirSync } from "node:fs";
+
+// Vitest workers and their dependencies inherit this path. Vite's dev/build
+// configuration is separate, so normal app processes retain the OS temp dir.
+const repoTmp = path.resolve(import.meta.dirname, ".tmp/tuic-tests");
+const requestedTmp = process.env.TMPDIR;
+const gitsRoot = process.env.HOME && path.join(process.env.HOME, "Gits");
+const testTmp = requestedTmp && (
+  requestedTmp.startsWith(`${import.meta.dirname}${path.sep}`)
+  || (gitsRoot && requestedTmp.startsWith(`${gitsRoot}${path.sep}`))
+)
+  ? requestedTmp
+  : repoTmp;
+mkdirSync(testTmp, { recursive: true });
+process.env.TMPDIR = testTmp;
+process.env.TMP = testTmp;
+process.env.TEMP = testTmp;
 
 export default defineConfig({
   plugins: [solid()],
@@ -11,13 +28,12 @@ export default defineConfig({
     conditions: ["development", "browser"],
     alias: {
       // Mock SVG imports in tests
-      "^.+\\.svg$": path.resolve(__dirname, "src/__tests__/mocks/svg.ts"),
+      "^.+\\.svg$": path.resolve(import.meta.dirname, "src/__tests__/mocks/svg.ts"),
     },
   },
   test: {
-    // App tests only. Plugins ship their own `node:test` suites, which vitest
-    // collects by default and then reports as "no test suite found" — run them
-    // with `pnpm test:plugins` instead.
+    // App tests only. scripts/ holds `node:test` suites (*.test.mjs), which
+    // vitest collects by default and then reports as "no test suite found".
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     css: {
       modules: {
@@ -37,7 +53,7 @@ export default defineConfig({
     maxWorkers: 4,
     setupFiles: ["src/__tests__/setup.ts", "src/__tests__/mocks/tauri.ts"],
     alias: {
-      "\\.svg$": path.resolve(__dirname, "src/__tests__/mocks/svg.ts"),
+      "\\.svg$": path.resolve(import.meta.dirname, "src/__tests__/mocks/svg.ts"),
     },
     coverage: {
       provider: "v8",

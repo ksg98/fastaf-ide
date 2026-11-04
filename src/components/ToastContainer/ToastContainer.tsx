@@ -1,31 +1,20 @@
-import { type Component, For, Show } from "solid-js";
+import { batch, type Component } from "solid-js";
+import { appLogger } from "../../stores/appLogger";
+import { globalWorkspaceStore } from "../../stores/globalWorkspace";
+import { paneLayoutStore } from "../../stores/paneLayout";
 import { repositoriesStore } from "../../stores/repositories";
+import { paneLayoutKey, savedPaneLayouts } from "../../stores/savedPaneLayouts";
+import { activatePaneExclusively } from "../../stores/tabManager";
 import { terminalsStore } from "../../stores/terminals";
 import { type Toast, toastsStore } from "../../stores/toasts";
-import { onClickKeyDown } from "../../utils/a11y";
+import { uiStore } from "../../stores/ui";
 import { navigateToTerminal } from "../../utils/navigateToTerminal";
 import { pathBasename } from "../../utils/pathUtils";
-import styles from "./ToastContainer.module.css";
+import { type RepoAction, ToastList } from "./ToastList";
 
-/**
- * Dismiss, and take the user to the terminal that raised the toast when there
- * is one to go to. An agent's `ui action=toast` says something happened in one
- * of ~25 open tabs; without this the user is told the news and then left to
- * find the speaker. A toast with no session, or one whose tab has since closed,
- * still just dismisses — the lookup happens here rather than in setActive so a
- * closed tab is a silent no-op instead of a warning.
- *
- * `navigateToTerminal`, not `terminalsStore.setActive`: the speaker is usually in
- * ANOTHER repo, and setActive moves only the active terminal. The sidebar and the
- * tab strip filter on `activeRepoPath`, so on its own it left the pane drawing a
- * terminal from a repo the user was not looking at, with no tab for it in the
- * strip — the same three-state split a cd used to cause.
- */
-function dismissAndReveal(toast: Toast): void {
+/** Closing the toast never navigates; the explicit repo action owns navigation. */
+function dismiss(toast: Toast): void {
 	toastsStore.remove(toast.id);
-	if (!toast.sessionId) return;
-	const terminalId = terminalsStore.findBySessionId(toast.sessionId);
-	if (terminalId) navigateToTerminal(terminalId);
 }
 
 /** The repo a toast came from, for the badge. Prefers what the backend resolved
@@ -40,42 +29,80 @@ function toastRepoName(toast: Toast): string | null {
 	return repoPath ? pathBasename(repoPath) : null;
 }
 
+const repoActions = new WeakMap<Toast, RepoAction>();
+
+function toastRepoAction(toast: Toast): RepoAction | null {
+	const repoPath = toast.repoPath;
+	if (!repoPath || repoPath === repositoriesStore.state.activeRepoPath || !repositoriesStore.get(repoPath)) {
+		return null;
+	}
+
+	let action = repoActions.get(toast);
+	if (!action) {
+		action = {
+			label: "Go to repo",
+			onClick: () => {
+				// The repository can disappear while the toast is visible. Re-check at
+				// activation time so the button never selects a stale path. Returning
+				// false keeps the toast visible so the failed navigation is not silent.
+				if (!repositoriesStore.get(repoPath)) {
+					appLogger.warn("app", "Go to repo: the repository is no longer registered", { repoPath });
+					return false;
+				}
+				if (toast.sessionId) {
+					const terminalId = terminalsStore.findBySessionId(toast.sessionId);
+					if (terminalId) {
+						navigateToTerminal(terminalId);
+						return true;
+					}
+					appLogger.warn("app", "Go to repo: the originating terminal is no longer open", {
+						repoPath,
+						sessionId: toast.sessionId,
+					});
+				}
+				// A repo-only switch must not leave a foreign terminal (and its Chat
+				// composer) active. Reuse terminal navigation for a surviving tab.
+				const repo = repositoriesStore.get(repoPath)!;
+				const workspace = repo.activeWorkspaceId ? repo.workspaces[repo.activeWorkspaceId] : undefined;
+				const liveIds = (workspace?.terminals ?? []).filter(
+					(id) => terminalsStore.get(id) && !terminalsStore.isDetached(id),
+				);
+				const remembered = workspace?.lastActiveTerminal;
+				const target = remembered && liveIds.includes(remembered) ? remembered : liveIds[0];
+				if (target) {
+					navigateToTerminal(target);
+				} else {
+					batch(() => {
+						globalWorkspaceStore.deactivate();
+						const previous = repositoriesStore.getActive();
+						if (paneLayoutStore.isSplit() && previous?.activeWorkspaceId) {
+							savedPaneLayouts.set(
+								paneLayoutKey(previous.path, previous.activeWorkspaceId),
+								paneLayoutStore.serialize(),
+							);
+						}
+						repositoriesStore.setActive(repoPath);
+						paneLayoutStore.reset();
+						activatePaneExclusively("terminals");
+						terminalsStore.setActive(null);
+					});
+				}
+				return true;
+			},
+		};
+		repoActions.set(toast, action);
+	}
+
+	return action;
+}
+
 export const ToastContainer: Component = () => {
 	return (
-		<div class={styles.container}>
-			<For each={toastsStore.toasts}>
-				{(toast) => (
-					<div
-						class={styles.toast}
-						data-level={toast.level}
-						role="button"
-						tabIndex={0}
-						onClick={() => dismissAndReveal(toast)}
-						onKeyDown={onClickKeyDown(() => dismissAndReveal(toast))}
-					>
-						<span class={styles.level} data-level={toast.level} />
-						<span class={styles.body}>
-							<span class={styles.titleRow}>
-								<Show when={toastRepoName(toast)}>{(name) => <span class={styles.repo}>{name()}</span>}</Show>
-								<span class={styles.title}>{toast.title}</span>
-							</span>
-							{toast.message && <span class={styles.message}>{toast.message}</span>}
-						</span>
-						<Show when={toast.action}>
-							<button
-								class={styles.action}
-								onClick={(e) => {
-									e.stopPropagation();
-									toast.action!.onClick();
-									toastsStore.remove(toast.id);
-								}}
-							>
-								{toast.action!.label}
-							</button>
-						</Show>
-					</div>
-				)}
-			</For>
-		</div>
+		<ToastList
+			onDismiss={dismiss}
+			repoName={toastRepoName}
+			repoAction={toastRepoAction}
+			rightInset={uiStore.state.aiChatPanelMeasuredWidth}
+		/>
 	);
 };

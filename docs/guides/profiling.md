@@ -95,7 +95,6 @@ Measures round-trip latency for key git commands via the HTTP API on port 9877. 
 
 **Endpoints measured:**
 - `repo_info` (cached after first call, 5s TTL)
-- `git_panel_context` (cached, 5s TTL)
 - `diff_stats`, `changed_files`, `branches`
 - `recent_commits`, `stash_list`, `remote_url`
 

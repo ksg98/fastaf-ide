@@ -1,6 +1,8 @@
 import { createStore, reconcile } from "solid-js/store";
 import { invoke } from "../invoke";
+import { reportSettingsConflicts, settingsRefresh } from "../services/settingsRefresh";
 import { toCamelKeys, toSnakeKeys } from "../utils/caseKeys";
+import { createConfigDeltaWriter } from "../utils/configDeltaWriter";
 import { appLogger } from "./appLogger";
 import type {
 	AutoDeleteOnPrClose,
@@ -33,6 +35,8 @@ export interface RepoSettings {
 	 *  Repo-specific, not inheritable — it describes how you want to look at THIS
 	 *  repo, and a global default would consolidate repos you never asked about. */
 	autoConsolidateWorktrees: boolean;
+	/** Repo-specific URL opened by Design Mode; null opens about:blank. */
+	devServerUrl: string | null;
 	/** null = inherit global default (true on macOS). When false: left-Option sends composition chars instead of meta sequences */
 	terminalMetaHotkeys: boolean | null;
 	/** null = inherit from repoDefaultsStore */
@@ -43,6 +47,7 @@ export interface RepoSettings {
 	deleteBranchOnRemove: boolean | null;
 	/** null = inherit from repoDefaultsStore */
 	autoArchiveMerged: boolean | null;
+	archiveRetentionDays: number | null;
 	/** null = inherit from repoDefaultsStore */
 	orphanCleanup: OrphanCleanup | null;
 	/** null = inherit from repoDefaultsStore */
@@ -55,11 +60,8 @@ export interface RepoSettings {
 	autoDeleteOnPrClose: AutoDeleteOnPrClose | null;
 	/** Allowlist of upstream MCP server names for this repo (null = all servers) */
 	mcpUpstreams: string[] | null;
-	// DEFERRED (2026-08-30) — `terminalMetaHotkeys` and the three `prHide*` fields
-	// below are override slots with no writer: no UI sets them, and `config.rs`
-	// has no matching field on `RepoSettingsEntry`, so a value set here would be
-	// dropped by the backend. Either wire them up or delete them; leaving them is
-	// what let the camelCase persistence bug hide.
+	// DEFERRED (2026-08-30) — terminalMetaHotkeys remains transient: the Rust
+	// RepoSettingsEntry has no matching field. PR visibility overrides persist.
 	/** null = inherit from settingsStore (global) */
 	prHideDrafts: boolean | null;
 	/** null = inherit from settingsStore (global) */
@@ -86,6 +88,7 @@ export interface EffectiveRepoSettings {
 	promptOnCreate: boolean;
 	deleteBranchOnRemove: boolean;
 	autoArchiveMerged: boolean;
+	archiveRetentionDays: number;
 	orphanCleanup: OrphanCleanup;
 	prMergeStrategy: MergeStrategy;
 	afterMerge: WorktreeAfterMerge;
@@ -114,6 +117,7 @@ const OVERRIDABLE_NULL_DEFAULTS: Pick<
 	| "promptOnCreate"
 	| "deleteBranchOnRemove"
 	| "autoArchiveMerged"
+	| "archiveRetentionDays"
 	| "orphanCleanup"
 	| "prMergeStrategy"
 	| "afterMerge"
@@ -135,6 +139,7 @@ const OVERRIDABLE_NULL_DEFAULTS: Pick<
 	promptOnCreate: null,
 	deleteBranchOnRemove: null,
 	autoArchiveMerged: null,
+	archiveRetentionDays: null,
 	orphanCleanup: null,
 	prMergeStrategy: null,
 	afterMerge: null,
@@ -148,6 +153,7 @@ const OVERRIDABLE_NULL_DEFAULTS: Pick<
 
 /** Repo-local config loaded from .tuic.json (team-shareable, snake_case from Rust) */
 interface RepoLocalConfig {
+	ego_profile?: string;
 	base_branch?: string;
 	copy_ignored_files?: boolean;
 	copy_untracked_files?: boolean;
@@ -155,6 +161,7 @@ interface RepoLocalConfig {
 	worktree_storage?: WorktreeStorage;
 	delete_branch_on_remove?: boolean;
 	auto_archive_merged?: boolean;
+	archive_retention_days?: number;
 	orphan_cleanup?: OrphanCleanup;
 	pr_merge_strategy?: MergeStrategy;
 	after_merge?: WorktreeAfterMerge;
@@ -170,6 +177,7 @@ interface RepoSettingsState {
 }
 
 const LEGACY_STORAGE_KEY = "tui-commander-repo-settings";
+const repoSettingsWriter = createConfigDeltaWriter<{ repos: Record<string, unknown> }>("save_repo_settings");
 
 /**
  * Persist settings to Rust backend (fire-and-forget).
@@ -184,9 +192,7 @@ const LEGACY_STORAGE_KEY = "tui-commander-repo-settings";
 function saveSettings(settings: Record<string, RepoSettings>): void {
 	const repos: Record<string, unknown> = {};
 	for (const [path, entry] of Object.entries(settings)) repos[path] = toSnakeKeys(entry);
-	invoke("save_repo_settings", { config: { repos } }).catch((err) =>
-		appLogger.error("config", "Failed to save repo settings", err),
-	);
+	repoSettingsWriter.save({ repos }).catch((err) => appLogger.error("config", "Failed to save repo settings", err));
 }
 
 /** An entry with no overrides set — every field present, every override null. */
@@ -196,6 +202,7 @@ function blankSettings(path: string, displayName: string): RepoSettings {
 		displayName,
 		color: "",
 		autoConsolidateWorktrees: false,
+		devServerUrl: null,
 		branchLabels: {},
 		...OVERRIDABLE_NULL_DEFAULTS,
 	};
@@ -210,6 +217,13 @@ function fromWire(repos: Record<string, Record<string, unknown>>): Record<string
 		out[path] = { ...blankSettings(path, ""), ...toCamelKeys(entry) } as RepoSettings;
 	}
 	return out;
+}
+
+/** Use the same defaults for the acknowledged baseline, local intent and peer snapshots. */
+function normalizedWire(repos: Record<string, Record<string, unknown>>) {
+	return {
+		repos: Object.fromEntries(Object.entries(fromWire(repos)).map(([path, entry]) => [path, toSnakeKeys(entry)])),
+	};
 }
 
 /**
@@ -256,6 +270,8 @@ function createRepoSettingsStore() {
 		promptOnCreate: (s) => s.promptOnCreate ?? repoDefaultsStore.state.promptOnCreate,
 		deleteBranchOnRemove: (s, local) =>
 			s.deleteBranchOnRemove ?? local()?.delete_branch_on_remove ?? repoDefaultsStore.state.deleteBranchOnRemove,
+		archiveRetentionDays: (s, local) =>
+			s.archiveRetentionDays ?? local()?.archive_retention_days ?? repoDefaultsStore.state.archiveRetentionDays,
 		autoArchiveMerged: (s, local) =>
 			s.autoArchiveMerged ?? local()?.auto_archive_merged ?? repoDefaultsStore.state.autoArchiveMerged,
 		orphanCleanup: (s, local) => s.orphanCleanup ?? local()?.orphan_cleanup ?? repoDefaultsStore.state.orphanCleanup,
@@ -272,7 +288,53 @@ function createRepoSettingsStore() {
 		branchLabels: (s) => s.branchLabels ?? {},
 	};
 
+	async function readLocalConfig(path: string): Promise<{ config: RepoLocalConfig | null; failed: boolean }> {
+		try {
+			return {
+				config: (await invoke<RepoLocalConfig | null>("load_repo_local_config", { repoPath: path })) ?? null,
+				failed: false,
+			};
+		} catch (err) {
+			appLogger.debug("config", "Failed to load .tuic.json", { path, err });
+			return { config: state.localConfigs[path] ?? null, failed: true };
+		}
+	}
+
 	const actions = {
+		startRemoteSync(): () => void {
+			const stopSettings = settingsRefresh.register({
+				section: "repositories",
+				read: () => invoke<{ repos: Record<string, Record<string, unknown>> }>("load_repo_settings"),
+				apply: (remote) => {
+					const local = {
+						repos: Object.fromEntries(
+							Object.entries(state.settings).map(([path, value]) => [path, toSnakeKeys(value)]),
+						),
+					};
+					const merged = repoSettingsWriter.adopt(normalizedWire(remote?.repos ?? {}), local);
+					setState("settings", reconcile(fromWire(merged.value.repos as Record<string, Record<string, unknown>>)));
+					reportSettingsConflicts(merged.conflicts);
+				},
+			});
+			const stopLocal = settingsRefresh.register({
+				section: "repo_local",
+				read: async () => {
+					const entries = await Promise.all(
+						Object.keys(state.localConfigs).map(async (path) => [path, await readLocalConfig(path)] as const),
+					);
+					return {
+						configs: Object.fromEntries(entries.map(([path, result]) => [path, result.config])),
+						failed: entries.some(([, result]) => result.failed),
+					};
+				},
+				apply: ({ configs }) => setState("localConfigs", reconcile(configs)),
+				retryWhen: ({ failed }) => failed,
+			});
+			return () => {
+				stopSettings();
+				stopLocal();
+			};
+		},
 		/** Load settings from Rust backend; migrate from localStorage on first run */
 		async hydrate(): Promise<void> {
 			try {
@@ -286,7 +348,9 @@ function createRepoSettingsStore() {
 						const parsed = JSON.parse(legacy) as Record<string, RepoSettings>;
 						const repos: Record<string, unknown> = {};
 						for (const [path, entry] of Object.entries(parsed)) repos[path] = toSnakeKeys(entry);
-						await invoke("save_repo_settings", { config: { repos } });
+						const current = (await invoke<{ repos: Record<string, unknown> }>("load_repo_settings")) ?? { repos: {} };
+						repoSettingsWriter.loaded(normalizedWire(current.repos as Record<string, Record<string, unknown>>));
+						await repoSettingsWriter.save({ repos: { ...current.repos, ...repos } });
 					} catch {
 						/* ignore corrupt legacy data */
 					}
@@ -294,6 +358,7 @@ function createRepoSettingsStore() {
 				}
 
 				const loaded = await invoke<{ repos?: Record<string, Record<string, unknown>> }>("load_repo_settings");
+				repoSettingsWriter.loaded(normalizedWire(loaded?.repos ?? {}));
 				if (loaded?.repos) {
 					setState("settings", fromWire(loaded.repos));
 				}
@@ -323,13 +388,7 @@ function createRepoSettingsStore() {
 
 		/** Load .tuic.json for a repository and cache the result */
 		async loadLocalConfig(path: string): Promise<void> {
-			try {
-				const config = await invoke<RepoLocalConfig | null>("load_repo_local_config", { repoPath: path });
-				setState("localConfigs", path, config ?? null);
-			} catch (err) {
-				appLogger.debug("config", "Failed to load .tuic.json", { path, err });
-				setState("localConfigs", path, null);
-			}
+			setState("localConfigs", path, (await readLocalConfig(path)).config);
 		},
 
 		/** Get fully resolved settings: per-repo > .tuic.json > global defaults */
@@ -356,6 +415,7 @@ function createRepoSettingsStore() {
 				promptOnCreate: resolvers.promptOnCreate(settings, local),
 				deleteBranchOnRemove: resolvers.deleteBranchOnRemove(settings, local),
 				autoArchiveMerged: resolvers.autoArchiveMerged(settings, local),
+				archiveRetentionDays: resolvers.archiveRetentionDays(settings, local),
 				orphanCleanup: resolvers.orphanCleanup(settings, local),
 				prMergeStrategy: resolvers.prMergeStrategy(settings, local),
 				afterMerge: resolvers.afterMerge(settings, local),
@@ -405,6 +465,18 @@ function createRepoSettingsStore() {
 			invoke("set_branch_label", { repoPath, branchName, label: label?.trim() || null }).catch((err) =>
 				appLogger.error("config", "Failed to set branch label", err),
 			);
+		},
+
+		/**
+		 * Follow a branch rename: the label moves to the new name. In-memory only —
+		 * the backend `rename_branch` command already moved it in the config file.
+		 */
+		moveLabel(repoPath: string, oldName: string, newName: string): void {
+			const current = state.settings[repoPath];
+			const label = current?.branchLabels[oldName];
+			if (!current || label === undefined) return;
+			const { [oldName]: _, ...rest } = current.branchLabels;
+			setState("settings", repoPath, "branchLabels", reconcile({ ...rest, [newName]: label }));
 		},
 
 		/** Remove settings for a repository */

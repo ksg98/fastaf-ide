@@ -605,6 +605,7 @@
   border-radius: 8px;
   position: relative;
   color: var(--sidebar-branch-fg);
+  touch-action: pan-y;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
@@ -625,6 +626,18 @@
 
 .branchItem.active .branchName {
   color: var(--fg-primary);
+}
+
+/* Tooltips inside a branch row anchor to the row, not to the badge: a bubble
+   right-aligned to a marker well left of the sidebar edge ran off the window.
+   The row spans the sidebar, so capping the bubble at its width keeps it in. */
+.branchItem [data-tooltip] {
+  position: static;
+}
+
+.branchItem [data-tooltip]::after {
+  box-sizing: border-box;
+  max-width: 100%;
 }
 
 /* Diff counts are detail, not chrome: they show on hover and on the selected row. */
@@ -772,28 +785,6 @@
 }
 
 /* Branch tab list — collapsible terminal tab list under branch row */
-.branchTabsChevron {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  font-size: var(--font-lg);
-  cursor: pointer;
-  padding: 0 2px;
-  line-height: 1;
-  flex-shrink: 0;
-  transition: transform 150ms ease, color 0.1s;
-  transform: rotate(0deg);
-}
-
-.branchTabsChevron:hover {
-  color: var(--fg-primary);
-}
-
-.branchTabsChevron.expanded {
-  transform: rotate(90deg);
-  color: var(--fg-secondary);
-}
-
 .branchTabList {
   display: flex;
   flex-direction: column;
@@ -874,12 +865,6 @@
 .branchTabDotQuestion {
   background: var(--attention);
   opacity: 1;
-}
-
-.branchTabName {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .mergedBadge {
@@ -988,6 +973,18 @@
     opacity: 1;
     pointer-events: auto;
   }
+
+  /* Rich rows carry wider chips; still only reveal on hover, never reserve. */
+  .sidebar[data-density="rich"] .branchItem:hover .branchActions {
+    max-width: 48px;
+  }
+}
+
+/* Touch actions live in the swipe tray instead of crowding the row. */
+@media (hover: none) {
+  .branchActions {
+    display: none;
+  }
 }
 
 .branchAddBtn,
@@ -1007,6 +1004,13 @@
   color: var(--fg-muted);
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
+}
+
+.branchAddBtn {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .branchAddBtn:hover {
@@ -1276,13 +1280,21 @@
   }
 }
 
-/* ── Remote-only PR popover ── */
-.remoteOnlyOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
+/* No hover on touch: ⋯ and + stay visible in the header's flex flow, so the
+   repo name gives way instead of being covered. */
+@media (hover: none) {
+  .repoActions {
+    max-width: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .repoActionsWithBadge .repoActionBtn {
+    display: inline-flex;
+  }
 }
 
+/* ── Remote-only PR popover ── */
 .remoteOnlyPopover {
   position: fixed;
   left: var(--sidebar-width, 240px);
@@ -1381,6 +1393,13 @@
   padding: 0 4px 8px;
   background: var(--wash-0);
   border-top: 1px solid var(--border-subtle);
+}
+
+/* The global [data-tooltip] rule sets position: relative at equal specificity;
+   keep these anchored to the corner. */
+.remoteOnlyDetailDismiss[data-tooltip],
+.ghItemDismiss[data-tooltip] {
+  position: absolute;
 }
 
 .remoteOnlyDetailDismiss {
@@ -1519,14 +1538,6 @@
 /* ---------------------------------------------------------------------------
    Unified GitHub Panel (replaces RemoteOnlyPrPopover)
    --------------------------------------------------------------------------- */
-
-.ghPanelOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  outline: none;
-  -webkit-app-region: no-drag;
-}
 
 .ghPanel {
   position: fixed;
@@ -2107,4 +2118,692 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Upstream 2.0 behaviour, drawn in FastAF's system. Everything below backs an
+   element or state upstream added (swipe tray, branch "more", agent toggle,
+   agent rows, lifecycle and PR markers, rich detail lines, detached
+   checkouts, stale-temp repair). Geometry stays FastAF's: 30px rows, 8px
+   radius, 22px row buttons, muted chips; colours come from FastAF tokens.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Stale-temp footer action (#763-d219): the error colour says "needs repair". */
+.footerActionError {
+  color: var(--error);
+}
+
+.parkedBadgeError {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+/* ── Branch row: "more" (touch tray only), agent toggle, markers ── */
+
+/* Hidden in the hover cluster (right-click opens the same menu); the swipe
+   tray shows it as "More". */
+.branchMoreBtn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.branchMoreBtn:hover {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+/* Disclosure for the branch's agent rows, beside the state dot. Separate from
+   the row click, which only opens the branch. */
+.branchIconToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex-shrink: 0;
+  height: 20px;
+  min-width: 16px;
+  margin: 0 -4px;
+  padding: 0 2px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.branchIconToggle:hover {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+.branchIconToggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.4);
+}
+
+.branchIconChevron {
+  /* A decorative chevron must not intercept clicks on the branch below it. */
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.branchIconChevron svg {
+  transition: transform 150ms ease;
+}
+
+.branchIconToggle.expanded .branchIconChevron svg {
+  transform: rotate(90deg);
+}
+
+.branchAgentCount {
+  color: var(--fg-secondary);
+  font-size: var(--font-3xs);
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* PR number and diff take only their real width. */
+.branchBadgeStack {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.branchBadgeStack .branchStats,
+.branchBadgeStack .prBadge {
+  margin-left: 0;
+}
+
+/* Commits not merged into the default branch: a quiet arrow, explained in the tooltip. */
+.branchUnmergedMarker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+/* "What would removing this lose?" — one muted chip, error-tinted when risky. */
+.lifecycleBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 4px;
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  flex-shrink: 0;
+  background: var(--wash-1);
+  color: var(--fg-muted);
+}
+
+.lifecycleRisk {
+  background: color-mix(in srgb, var(--attention) 16%, transparent);
+  color: var(--attention);
+}
+
+.lifecycleMerged {
+  background: var(--wash-1);
+  color: var(--fg-muted);
+}
+
+/* Remote repo whose machine is not answering: the badge says so in place. */
+.remoteBadgeError {
+  color: var(--error);
+}
+
+.remoteBadgeConnecting {
+  color: var(--warning);
+}
+
+/* Compact PR marker for branch rows: a small square plus the number, in the
+   state colour; the state word lives in the tooltip. Same tinted-pill family
+   as .prBadge. */
+.prBadgeCompact {
+  gap: 4px;
+  padding: 0 6px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  box-shadow: none;
+}
+
+.prMark {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.prMarkOpen { color: var(--success); }
+
+.prMarkMerged { color: var(--merged); }
+
+.prMarkClosed { color: var(--error); }
+
+.prMarkChanges { color: var(--changes); }
+
+/* Review required: same hue as Changes requested, outlined instead of filled. */
+.prMarkReview { color: var(--changes); }
+
+.prMarkReview .prMark {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+
+.prMarkDraft { color: var(--fg-muted); }
+
+.prMarkDraft .prMark {
+  background: none;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+/* The one state that also changes shape, so it does not rely on colour. */
+.prMarkConflict { color: var(--error); }
+
+.prMarkConflict .prMark {
+  transform: rotate(45deg) scale(0.85);
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+.prMarkPending { color: var(--changes); }
+
+.prMarkPending .prMark {
+  animation: pulse-opacity 2s ease-in-out infinite;
+}
+
+/* ── Merged worktree summary + cleanup (rich) ── */
+.mergedSummary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--font-2xs);
+  white-space: nowrap;
+}
+
+.mergedCleanup {
+  height: 20px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--font-2xs);
+  cursor: pointer;
+}
+
+.mergedCleanup:hover {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+/* ── Rich density: detail lines under a branch / repo ── */
+
+/* Forces the wrap between the name line and the detail line; only touch uses it. */
+.branchBreak {
+  display: none;
+}
+
+.branchRichDetail {
+  flex: 0 1 auto;
+  max-width: 55%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.branchRichLine {
+  display: none;
+}
+
+.branchRichMeta,
+.repoRichMeta {
+  display: flex;
+  align-items: center;
+  gap: 3px 6px;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+}
+
+.branchRichMeta {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.repoRichMeta {
+  flex-wrap: wrap;
+  margin: 0 8px;
+  padding: 0 8px 4px 34px;
+}
+
+.richChip {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+}
+
+.richChipWarn {
+  color: var(--warning);
+}
+
+.richChipRisk {
+  color: var(--error);
+}
+
+.richChipMerged {
+  color: var(--success);
+}
+
+/* The PR state word ("Draft", "Merged") leads the title in its own case. */
+.branchRichPrState {
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  font-weight: 500;
+}
+
+.sidebar[data-density="rich"] .branchContent {
+  min-width: 30px;
+}
+
+/* ── Agent rows under a branch ── */
+.branchTabItemRich {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 24px;
+  row-gap: 1px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.branchTabItem.branchTabNested {
+  margin-left: 14px;
+  width: calc(100% - 14px);
+}
+
+.branchAgentIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--fg-secondary);
+  flex-shrink: 0;
+}
+
+.branchAgentActivity {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+/* Parent of a spawned sub-agent PTY. Muted metadata, shrinks before the title. */
+.branchSubAgentTag {
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: var(--font-2xs);
+  flex-shrink: 1;
+}
+
+.branchSubAgentIcon {
+  vertical-align: -1px;
+}
+
+.branchAgentTime {
+  color: var(--fg-muted);
+  font-size: var(--font-2xs);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.branchTabDetail {
+  flex-basis: 100%;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 15px;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+}
+
+.branchTabLine {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reserve two intent lines while the agent is working. */
+.branchTabLine.branchTabIntent {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  height: 2.8em;
+  flex: 1;
+}
+
+.branchTabState {
+  flex-shrink: 0;
+}
+
+.branchTabState_working {
+  color: var(--activity);
+}
+
+.branchTabState_input {
+  color: var(--attention);
+}
+
+.branchTabState_error {
+  color: var(--error);
+}
+
+.subagentList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 8px 2px 25px;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+}
+
+.subagentRow {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.subagentMeta {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* "N subagents", "N returned", "N idle sessions" fold toggles. */
+.subagentFold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  height: 20px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: var(--font-2xs);
+  cursor: pointer;
+}
+
+.subagentFold:hover {
+  background: var(--wash-0);
+  color: var(--fg-primary);
+}
+
+.subagentFold[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+/* Children of this agent that live in another repo: one link per repo. */
+.crossRepoChildren {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: calc(100% - 25px);
+  height: 22px;
+  margin-left: 25px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--font-2xs);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.crossRepoChildren:hover {
+  background: var(--wash-0);
+  color: var(--fg-primary);
+}
+
+.crossRepoChildren svg {
+  flex-shrink: 0;
+}
+
+.crossRepoChildren span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Detached checkouts and worktree diagnostics (inventory only) ── */
+
+/* No selection, branch actions or hover state: these are facts, not targets. */
+.detachedWorktree {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  margin: 0 8px;
+  padding: 0 8px 0 34px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.detachedName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detachedState {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+}
+
+.worktreeDiagnostic {
+  margin: 2px 8px;
+  padding: 4px 8px 4px 34px;
+  font-size: var(--font-sm);
+  color: var(--warning);
+}
+
+.diagnosticGuidance {
+  margin-top: 2px;
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* ── Stale-temp repair popover (#763-d219) ── */
+.staleTempActions {
+  padding: 6px 4px 2px;
+  border-top: var(--hairline-w) solid var(--hairline);
+  margin-top: 2px;
+}
+
+.staleTempRepairButton {
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  background: var(--error);
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--text-on-error);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.staleTempRepairButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.staleTempError {
+  margin-top: 6px;
+  color: var(--error);
+  font-size: var(--font-2xs);
+  white-space: normal;
+}
+
+/* Stale PR age marker in the GitHub panel rows. */
+.ghAgeMarker {
+  font-size: var(--font-xs);
+  color: var(--warning);
+  flex-shrink: 0;
+}
+
+/* ── Touch: swipe a branch row left to reveal More / + / × ── */
+.branchSwipeRow {
+  display: contents;
+  position: relative;
+  --swipe-width: 152px;
+}
+
+.branchSwipeRow:has(.branchSwipeDelete) {
+  --swipe-width: 208px;
+}
+
+.branchSwipeRow[data-touch="true"] {
+  display: block;
+  margin: 0 8px;
+  overflow: hidden;
+  border-radius: 8px;
+  touch-action: pan-y;
+}
+
+.branchSwipeRow[data-touch="true"] > .branchItem {
+  margin: 0;
+}
+
+.branchSwipeRow[data-touch="true"] .branchActions {
+  display: none;
+}
+
+.branchSwipeRow > .branchItem {
+  transition: background var(--duration-fast) var(--ease-out), transform 0.15s ease;
+}
+
+/* Both layers share one grid cell, so the open tray is exactly as tall as the row. */
+.branchSwipeRow.branchSwipeOpen {
+  display: grid;
+}
+
+.branchSwipeOpen > .branchItem {
+  grid-area: 1 / 1;
+  transform: translateX(calc(-1 * var(--swipe-width)));
+}
+
+.branchSwipeOpen > .branchSwipeActions {
+  position: relative;
+  inset: auto;
+  grid-area: 1 / 1;
+  justify-self: end;
+}
+
+.branchSwipeOpen > .branchItem:not(.active) {
+  background: var(--bg-secondary);
+}
+
+.branchSwipeActions {
+  display: flex;
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: var(--swipe-width);
+  gap: 0;
+}
+
+.sidebar[data-density] .branchSwipeActions > button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  height: auto;
+  min-height: 30px;
+  border-radius: 0;
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.branchSwipeActions > .branchMoreBtn {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.branchSwipeActions > .branchAddBtn {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.branchSwipeActions > .branchSwipeDelete {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+@media (hover: none) {
+  .branchSwipeRow {
+    display: block;
+    margin: 0 8px;
+    overflow: hidden;
+    border-radius: 8px;
+    touch-action: pan-y;
+  }
+
+  .branchSwipeRow > .branchItem {
+    margin: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .branchSwipeRow > .branchItem {
+    transition: none;
+  }
 }

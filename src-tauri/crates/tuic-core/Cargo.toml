@@ -1,0 +1,33 @@
+[package]
+name = "tuic-core"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = []
+audio-output = ["dep:rodio"]
+test-support = ["dep:tempfile", "dep:tuic-test-support"]
+
+[dependencies]
+rodio = { version = "0.23", default-features = false, features = ["playback"], optional = true }
+tuic-ipc = { path = "../tuic-ipc" }
+bm25 = { path = "../../patches/bm25" }
+dirs = "7"
+jsonc-parser = { version = "0.33", features = ["cst", "serde", "serde_json"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+lazy_static = "1"
+libc = "0.2"
+parking_lot = "0.12"
+rand = "0.10"
+regex = "1"
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+tempfile = { version = "3", optional = true }
+tuic-test-support = { path = "../tuic-test-support", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Wdk_System_Threading"] }
+
+[lints]
+workspace = true

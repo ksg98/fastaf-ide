@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>Anywhere — FastAF</title>
+  <meta name="description" content="Follow and answer your agents from your phone, talk to them by voice, and run them on other machines with tuic-remote." />
+  <meta property="og:title" content="Anywhere — FastAF" />
+  <meta property="og:description" content="Phone companion, voice, remote machines and Telegram." />
+  <meta property="og:url" content="https://tuicommander.com/features/anywhere.html" />
+  <meta name="twitter:title" content="Anywhere — FastAF" />
+  <meta name="twitter:description" content="Phone companion, voice, remote machines and Telegram." />
+  <link rel="canonical" href="https://tuicommander.com/features/anywhere.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Anywhere</p>
+      <h1>Even when you're <em>out</em>.</h1>
+      <p>Your agents keep working when you leave the desk. FastAF comes with you, and it pings you only when it matters.</p>
+    </div>
+  </header>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Your sessions, <em>in your pocket</em>.</h2>
+        <p>The mobile companion is a web app you add to your home screen. It lists every session with its state, opens the Chat view for Claude, Codex, Grok and ego, and shows an agent's question as a card you answer with one tap.</p>
+        <ul class="points">
+          <li><strong>Connect</strong> over your network with a QR code, over Tailscale with automatic HTTPS, or through the end-to-end encrypted cloud relay.</li>
+          <li><strong>Push notifications</strong> when an agent asks you something, over Tailscale HTTPS.</li>
+          <li>A keyboard bar with Ctrl, Tab, Esc and the arrows for the moments you need the CLI.</li>
+        </ul>
+        <a class="more" href="/docs/user-guide/remote-access.html">Read the Remote Access guide &rarr;</a>
+      </div>
+      <figure class="shot shot-phone">
+        <img src="/shots/a-phone.webp" alt="Phone companion with the session list" width="560" height="1173" loading="lazy" />
+        <img src="/shots/a-merge.webp" alt="Phone notification and a merge confirmation" width="560" height="1173" loading="lazy" />
+      </figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Plan your day <em>out loud</em>.</h2>
+        <p>Push-to-talk sends one dictation to whatever has focus. For a hands-free conversation, the voice agent keeps the microphone open and talks to AI Chat, which drives your terminals. Transcription runs on your machine with Whisper.</p>
+        <p>The agent can answer out loud with on-device voices (Kokoro). No reply text is sent to an online speech service.</p>
+        <a class="more" href="/docs/user-guide/dictation.html">Read the Voice Dictation guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/a-voice.webp" alt="A dictated prompt in the terminal composer" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Agents on <em>other machines</em>. <span class="badge-beta">beta</span></h2>
+        <p><code>tuic-remote</code> is the FastAF backend without a desktop: run it on a build host, a server or a GPU box, and its repositories, terminals and agents appear in your sidebar like local ones. Add and manage these machines over SSH or a direct URL in <strong>Settings → Remote Machines</strong>. With it, dozens of agents can run across machines while you follow them from one window.</p>
+        <a class="more" href="/docs/user-guide/remote-access.html">Read the Remote Access guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/a-remote.webp" alt="Settings page for remote machines" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="more-features">
+    <div class="container">
+      <div class="card-grid">
+        <div class="card">
+          <h3>Telegram</h3>
+          <p>Link a private chat to a bot and send text to the registered agent, or to AI Chat, from Telegram.</p>
+        </div>
+        <div class="card">
+          <h3>Secrets from the phone</h3>
+          <p>When an agent asks for a password or a code, the private form can open on your trusted FastAF address, on any device.</p>
+        </div>
+        <div class="card">
+          <h3>Browser mode</h3>
+          <p>Most of the interface also runs in a plain browser against a running FastAF or <code>tuic-remote</code>; desktop-only features stay on the desktop.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

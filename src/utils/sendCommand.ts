@@ -10,10 +10,8 @@ export type ShellFamily = "posix" | "windows-native" | "unknown";
  *  use and reused afterwards — the shell doesn't change mid-session. */
 const shellFamilyCache = new Map<string, ShellFamily>();
 
-/** Real-time gap between the payload write and the Enter write when an agent
- *  is attached. Mirrors `INJECT_ENTER_GAP` in `pty.rs`, which documented the
- *  same 50ms as "verified live against Codex: back-to-back hangs, CR after a
- *  gap submits".
+/** Real-time gap between Ctrl-U and payload, and between payload and Enter
+ *  for every verified agent. Mirrors `INJECT_ENTER_GAP` in `pty.rs`.
  *
  *  That constant's comment used to claim the frontend "gets this gap for free —
  *  its two `writeFn` calls are separate IPC round-trips". It does not: a Tauri
@@ -22,8 +20,55 @@ const shellFamilyCache = new Map<string, ShellFamily>();
  *  instead of submitting. Separate flushes never guaranteed separate reads —
  *  only elapsed time does. */
 export const AGENT_ENTER_GAP_MS = 50;
+/** Gap for an agent type whose input semantics are not verified. Mirrors
+ *  `UNVERIFIED_ENTER_GAP` in `pty.rs`. */
+export const UNVERIFIED_ENTER_GAP_MS = 200;
+
+/** Codex ingests a long plain write as a paste burst for hundreds of
+ *  milliseconds, and an Enter inside that burst is swallowed (measured live on
+ *  0.159.0: 1000 chars at a 200ms gap stay in the composer). No fixed gap
+ *  covers a payload whose ingestion time grows with its length, so a long
+ *  Codex payload is a bracketed paste. Shorter text stays plain keystrokes:
+ *  Codex approval and choice overlays ignore a paste event. Mirrors
+ *  `CODEX_PASTE_FRAME_MIN_CHARS` in `pty.rs`. */
+export const CODEX_PASTE_FRAME_MIN_CHARS = 500;
+
+// Keep in step with Rust's agent_submit_profile: an unrecognized type must use
+// the longer gap until its input semantics are known.
+const SHORT_ENTER_GAP_AGENTS = new Set([
+	"claude",
+	"codex",
+	"gemini",
+	"opencode",
+	"amp",
+	"cursor",
+	"goose",
+	"grok",
+	"droid",
+	"pi",
+]);
+
+/** Claude 2.1.311 drops the initial read of a long unframed paste. A native
+ *  1159-byte probe retained only its last 137 bytes. Frame above 500 UTF-8
+ *  bytes, before that observed read boundary, including multibyte dictation.
+ *  Short dialog replies remain key events. Mirrors claude_payload in Rust. */
+const CLAUDE_PASTE_FRAME_MIN_BYTES = 500;
+
+/** Encode pasted text identically for submission and review-only dictation. */
+export function agentInputPayload(text: string, agentType?: string | null): string {
+	const bracketed =
+		text.includes("\n") ||
+		(agentType === "codex" && text.length > CODEX_PASTE_FRAME_MIN_CHARS) ||
+		(agentType === "claude" && new TextEncoder().encode(text).length > CLAUDE_PASTE_FRAME_MIN_BYTES);
+	return bracketed ? `\x1b[200~${text}\x1b[201~` : text;
+}
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Keep Enter in its own read after the last input write. */
+export function waitForAgentEnterGap(agentType?: string | null): Promise<void> {
+	return delay(agentType && SHORT_ENTER_GAP_AGENTS.has(agentType) ? AGENT_ENTER_GAP_MS : UNVERIFIED_ENTER_GAP_MS);
+}
 
 /** Fetch (and cache) the shell family for a PTY session. Returns "unknown"
  *  if the backend can't tell us — `sendCommand` then falls back to the
@@ -50,8 +95,9 @@ export function clearShellFamilyCache(sessionId: string): void {
 
 /** Send a command to a PTY session with split writes.
  *
- *  Splits into two writes:
- *  1. Ctrl-U + text (clears any existing input, then types the command)
+ *  Splits into separate writes:
+ *  1. Ctrl-U + text (clears any existing input, then types the command) — with
+ *     an agent attached, Ctrl-U and text are two writes a real gap apart
  *  2. \r (Enter — sent separately)
  *
  *  The Ctrl-U prefix is required for Ink-based agents (Claude Code, Codex, etc.)
@@ -76,6 +122,7 @@ export function clearShellFamilyCache(sessionId: string): void {
  *                      Used by reviewable Smart Prompts and by suggestion chips
  *                      carrying shell metacharacters (spoofable via OSC 7770
  *                      from untrusted output). Default true.
+ *  @param sessionId    PTY to probe when the foreground agent type is unknown.
  */
 export async function sendCommand(
 	writeFn: (data: string) => Promise<void>,
@@ -83,18 +130,36 @@ export async function sendCommand(
 	agentType?: string | null,
 	shellFamily?: ShellFamily,
 	submit = true,
+	sessionId?: string,
 ): Promise<void> {
-	const skipPrefix = !agentType && isWindowsNative(shellFamily);
+	let unknownForeground = false;
+	let foregroundProbeFailed = false;
+	if (!agentType && sessionId) {
+		try {
+			unknownForeground = Boolean(await rpc<string | null>("has_foreground_process", { sessionId }));
+		} catch (err) {
+			appLogger.warn("terminal", "Failed to identify foreground process; keeping a safe Enter gap", err);
+			foregroundProbeFailed = true;
+		}
+	}
+	const agentInput = Boolean(agentType) || unknownForeground;
+	const skipPrefix = !agentInput && isWindowsNative(shellFamily);
 	const prefix = skipPrefix ? "" : "\x15";
-	const payload = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
-	await writeFn(prefix + payload);
+	const payload = agentInputPayload(text, agentType);
+	if (agentInput) {
+		// Ctrl-U must reach an agent in its own read. Claude Code treats a long
+		// input chunk as a paste: a Ctrl-U inside it is stripped as an invisible
+		// character, and Claude then refuses the Enter that follows ("review and
+		// press Enter to send") — dictated text sat unsent even with a 500ms gap.
+		await writeFn(prefix);
+		await delay(AGENT_ENTER_GAP_MS);
+		await writeFn(payload);
+	} else {
+		await writeFn(prefix + payload);
+	}
 	if (!submit) return;
-	// Two writes are not two reads. An Ink/raw-mode agent only treats the CR as
-	// submit when it arrives in a SEPARATE read() from the text; back-to-back
-	// writes — even flushed individually — are coalesced by the PTY into one
-	// read and the CR is swallowed into the composer as a newline, leaving the
-	// command typed but unsent. A plain shell is line-buffered and does not care.
-	if (agentType) await delay(AGENT_ENTER_GAP_MS);
+	// Two writes are not two reads. Keep a scheduling gap for raw-mode agents.
+	if (agentInput || foregroundProbeFailed) await waitForAgentEnterGap(agentType);
 	await writeFn("\r");
 }
 

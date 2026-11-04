@@ -1,10 +1,22 @@
-import { type Component, onMount } from "solid-js";
-import { AIChatPanel, type AIChatTerminalBinding } from "../components/AIChatPanel/AIChatPanel";
+import { emitTo } from "@tauri-apps/api/event";
+import { type Component, lazy, onCleanup, onMount, Suspense } from "solid-js";
+import type { AIChatTerminalBinding } from "../components/AIChatPanel/AIChatPanel";
+import { openChatTableDocument } from "../components/AIChatPanel/tableDocument";
 import { initPanelWindow } from "../hooks/initPanelWindow";
+import { useDictation } from "../hooks/useDictation";
+import { useDictationHotkey } from "../hooks/useDictationHotkey";
+import { invoke } from "../invoke";
 import type { PanelAdapter } from "../panelRouter";
+import { appLogger } from "../stores/appLogger";
 import { conversationStore } from "../stores/conversationStore";
+import { dictationStore } from "../stores/dictation";
 import { terminalsStore } from "../stores/terminals";
 import { uiStore } from "../stores/ui";
+import { openTerminalFilePath } from "../utils/filePreview";
+
+const AIChatPanel = lazy(() =>
+	import("../components/AIChatPanel/AIChatPanel").then((module) => ({ default: module.AIChatPanel })),
+);
 
 const DetachedAIChatPanel: Component<{ params: URLSearchParams }> = (props) => {
 	const chatId = props.params.get("chatId");
@@ -36,14 +48,42 @@ const DetachedAIChatPanel: Component<{ params: URLSearchParams }> = (props) => {
 		attached: sessionId !== null,
 	});
 
+	// Each WebView owns its DOM and captured target. Main-window hooks cannot
+	// insert into this composer, even though both windows share the microphone.
+	const dictation = useDictation({
+		fallbackInput: () => document.querySelector<HTMLTextAreaElement>("#ai-chat-panel textarea"),
+		pty: {
+			write: async () => {
+				throw new Error("Detached AI Chat has no PTY");
+			},
+		},
+		dictation: dictationStore,
+		setStatusInfo: (message) => appLogger.info("dictation", message),
+		openSettings: () => {
+			void emitTo("main", "panel-action", { panelId: "ai-chat", action: "configure-dictation", data: {} })
+				.then(() => invoke("focus_main_window"))
+				.catch((error) => appLogger.error("dictation", "Failed to open Voice settings", error));
+		},
+	});
+	useDictationHotkey({
+		onStart: () => void dictation.handleDictationStart(dictationStore.state.hotkey === "Fn" ? "fn" : "hotkey"),
+		onStop: dictation.handleDictationStop,
+	});
+
 	onMount(() => {
 		void initPanelWindow();
+		void dictationStore.refreshConfig();
+		onCleanup(dictationStore.startRemoteSync());
 		// Best effort: a missing conversation is swallowed inside the store, so
 		// an unknown id just opens an empty chat under that id.
 		if (chatId) void conversationStore.loadConversation(chatId);
 	});
 
-	return <AIChatPanel visible={true} onClose={() => window.close()} terminal={binding} />;
+	return (
+		<Suspense>
+			<AIChatPanel visible={true} onClose={() => window.close()} terminal={binding} />
+		</Suspense>
+	);
 };
 
 /** conversationStore's key for the terminal focused right now, null when none is. */
@@ -65,6 +105,31 @@ export const aiChatPanelAdapter: PanelAdapter = {
 	title: "AI Chat",
 	defaultSize: { width: 500, height: 700 },
 	toggle: () => uiStore.toggleAiChatPanel(),
+	onDetach: () => uiStore.setAiChatPanelVisible(false),
+	handleAction: (action, data) => {
+		if (
+			action === "open-table" &&
+			data &&
+			typeof data === "object" &&
+			"source" in data &&
+			typeof data.source === "string"
+		) {
+			openChatTableDocument(data.source);
+			return;
+		}
+		if ((action !== "open-file" && action !== "open-directory") || !data || typeof data !== "object") return;
+		const { path, line, col } = data as { path?: unknown; line?: unknown; col?: unknown };
+		if (typeof path !== "string" || !path) return;
+		if (action === "open-directory") {
+			uiStore.setFileBrowserExternalRoot(path);
+			uiStore.setFileBrowserPanelVisible(true);
+			return;
+		}
+		if (line !== undefined && (!Number.isInteger(line) || Number(line) < 1)) return;
+		if (col !== undefined && (!Number.isInteger(col) || Number(col) < 1)) return;
+		if (line !== undefined) openTerminalFilePath(path, undefined, line as number, col as number | undefined);
+		else openTerminalFilePath(path);
+	},
 	detachParams: () => {
 		const activeId = terminalsStore.state.activeId;
 		const terminal = activeId ? terminalsStore.get(activeId) : undefined;

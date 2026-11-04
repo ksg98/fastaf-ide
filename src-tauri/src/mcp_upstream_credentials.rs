@@ -6,7 +6,7 @@
 //! - Linux: keyutils / Secret Service
 //!
 //! The config file (`mcp-upstreams.json`) never contains secrets — only the
-//! upstream name is needed to look up the credential at runtime.
+//! upstream name identifies a vault entry containing the secret and its saved origin.
 //!
 //! ## Storage format
 //!
@@ -120,26 +120,69 @@ pub(crate) fn parse_credential(raw: &str) -> StoredCredential {
     }
 }
 
-/// Read and parse a credential for an upstream MCP server.
-/// Returns `None` if no credential is stored (not an error).
-pub(crate) fn read_stored_credential(
-    upstream_name: &str,
-) -> Result<Option<StoredCredential>, String> {
-    match read_upstream_credential(upstream_name)? {
-        Some(raw) => Ok(Some(parse_credential(&raw))),
-        None => Ok(None),
+/// The origin and secret are one vault write: config edits cannot rebind it.
+#[derive(Serialize, Deserialize)]
+struct OriginBoundCredential {
+    origin: String,
+    value: String,
+}
+
+fn credential_origin(url: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(url).map_err(|_| "Invalid credential origin URL")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("Credential origin must be HTTP or HTTPS".into());
     }
+    Ok(url.origin().ascii_serialization())
+}
+
+/// Resolve a secret only for the origin selected when the secret was saved.
+/// Old unbound entries require re-saving or re-authorization, never lazy binding.
+pub(crate) fn read_credential_for_url(name: &str, url: &str) -> Result<Option<String>, String> {
+    let Some(raw) = crate::credentials::get(Credential::McpUpstream(name))? else {
+        return Ok(None);
+    };
+    let bound: OriginBoundCredential = serde_json::from_str(&raw).map_err(
+        |_| "Stored credential has no origin binding. Save the credential or authorize again.",
+    )?;
+    if bound.origin != credential_origin(url)? {
+        return Err("Stored credential origin differs from the upstream URL. Save a credential for this provider or authorize again.".into());
+    }
+    Ok(Some(bound.value))
+}
+
+pub(crate) fn save_credential_for_url(name: &str, value: &str, url: &str) -> Result<(), String> {
+    let bound = OriginBoundCredential {
+        origin: credential_origin(url)?,
+        value: value.into(),
+    };
+    let raw =
+        serde_json::to_string(&bound).map_err(|_| "Failed to serialize upstream credential")?;
+    save_upstream_credential(name, &raw)
+}
+
+pub(crate) fn read_stored_credential_for_url(
+    name: &str,
+    url: &str,
+) -> Result<Option<StoredCredential>, String> {
+    Ok(read_credential_for_url(name, url)?.map(|raw| parse_credential(&raw)))
+}
+
+/// Presence check used to enable OAuth discovered during the handshake.
+/// Resolution and origin validation still happen in HttpMcpClient.
+pub(crate) fn has_upstream_credential(name: &str) -> Result<bool, String> {
+    Ok(crate::credentials::get(Credential::McpUpstream(name))?.is_some())
 }
 
 /// Save an [`OAuthTokenSet`] to the keyring as a structured JSON blob.
 pub(crate) fn save_oauth_tokens(
     upstream_name: &str,
     token_set: &OAuthTokenSet,
+    upstream_url: &str,
 ) -> Result<(), String> {
     let cred = StoredCredential::Oauth2(token_set.clone());
     let json = serde_json::to_string(&cred)
         .map_err(|e| format!("Failed to serialize OAuth tokens: {e}"))?;
-    save_upstream_credential(upstream_name, &json)
+    save_credential_for_url(upstream_name, &json, upstream_url)
 }
 
 /// Validate that an upstream name is safe for use as a keyring key.
@@ -161,8 +204,15 @@ fn validate_keyring_name(name: &str) -> Result<(), String> {
 
 /// Read a credential for an upstream MCP server.
 /// Returns `None` if no credential is stored (not an error).
+#[cfg(test)]
 pub(crate) fn read_upstream_credential(upstream_name: &str) -> Result<Option<String>, String> {
-    crate::credentials::get(Credential::McpUpstream(upstream_name))
+    Ok(
+        crate::credentials::get(Credential::McpUpstream(upstream_name))?.map(|raw| {
+            serde_json::from_str::<OriginBoundCredential>(&raw)
+                .map(|bound| bound.value)
+                .unwrap_or(raw)
+        }),
+    )
 }
 
 pub(crate) fn save_upstream_credential(upstream_name: &str, token: &str) -> Result<(), String> {
@@ -177,16 +227,126 @@ pub(crate) fn delete_upstream_credential(upstream_name: &str) -> Result<(), Stri
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_mcp_upstream_credential(name: String, token: String) -> Result<(), String> {
-    validate_keyring_name(&name)?;
-    save_upstream_credential(&name, &token)
+pub(crate) fn save_mcp_upstream_credential(
+    name: String,
+    token: String,
+    header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+    url: String,
+) -> Result<(), String> {
+    save_mcp_upstream_credential_with_replace(name, token, header, url, false)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn delete_mcp_upstream_credential(name: String) -> Result<(), String> {
+pub(crate) fn save_mcp_upstream_credential_with_replace(
+    name: String,
+    token: String,
+    header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+    url: String,
+    replace: bool,
+) -> Result<(), String> {
+    crate::config::ConfigFile::<crate::mcp_upstream_config::UpstreamMcpConfig>::new(
+        crate::mcp_upstream_config::UPSTREAMS_FILE,
+    )
+    .update_with_strict(|config| {
+        if !replace && header.is_none() && config.servers.iter().any(|s| s.name == name) {
+            return Err(
+                "Upstream already exists; saving its credential requires an explicit edit".into(),
+            );
+        }
+        write_credential(&name, &token, header.as_ref(), &url, replace)?;
+        Ok(((), false))
+    })
+}
+
+/// Caller holds the upstream config lock, including across vault check/write.
+pub(crate) fn write_credential(
+    name: &str,
+    token: &str,
+    header: Option<&crate::mcp_upstream_config::UpstreamHeader>,
+    url: &str,
+    replace: bool,
+) -> Result<String, String> {
+    validate_keyring_name(name)?;
+    let key = if let Some(header) = header {
+        header.validate()?;
+        reqwest::header::HeaderValue::from_str(token)
+            .map_err(|_| "Invalid custom header value".to_string())?;
+        header.credential_key(name)
+    } else {
+        name.to_string()
+    };
+    if !replace && crate::credentials::get(Credential::McpUpstream(&key))?.is_some() {
+        return Err(
+            "Upstream credential already exists; replacement requires an explicit edit".into(),
+        );
+    }
+    save_credential_for_url(&key, token, url)
+        .map_err(|_| "Failed to save upstream credential".to_string())?;
+    Ok(key)
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) mod commands {
+    #[tauri::command]
+    pub(crate) fn save_mcp_upstream_credential(
+        name: String,
+        token: String,
+        header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+        url: String,
+        replace: Option<bool>,
+        state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
+    ) -> Result<(), String> {
+        super::save_with_refresh(&state, name, token, header, url, replace.unwrap_or(false))
+    }
+
+    #[tauri::command]
+    pub(crate) fn delete_mcp_upstream_credential(
+        name: String,
+        header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+        state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
+    ) -> Result<(), String> {
+        super::delete_with_refresh(&state, name, header)
+    }
+}
+
+pub(crate) fn save_with_refresh(
+    state: &crate::AppState,
+    name: String,
+    token: String,
+    header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+    url: String,
+    replace: bool,
+) -> Result<(), String> {
+    if replace {
+        save_mcp_upstream_credential_with_replace(name, token, header, url, true)
+    } else {
+        save_mcp_upstream_credential(name, token, header, url)
+    }?;
+    crate::settings::api::publish_change(state, "upstreams", true);
+    Ok(())
+}
+
+pub(crate) fn delete_with_refresh(
+    state: &crate::AppState,
+    name: String,
+    header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+) -> Result<(), String> {
+    delete_mcp_upstream_credential(name, header)?;
+    crate::settings::api::publish_change(state, "upstreams", true);
+    Ok(())
+}
+
+pub(crate) fn delete_mcp_upstream_credential(
+    name: String,
+    header: Option<crate::mcp_upstream_config::UpstreamHeader>,
+) -> Result<(), String> {
     validate_keyring_name(&name)?;
-    delete_upstream_credential(&name)
+    let key = if let Some(header) = header {
+        header.validate()?;
+        header.credential_key(&name)
+    } else {
+        name
+    };
+    delete_upstream_credential(&key).map_err(|_| "Failed to delete upstream credential".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +356,113 @@ pub(crate) fn delete_mcp_upstream_credential(name: String) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: publishing before vault persistence, failing to publish clears, or IPC/HTTP owner drift.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn legacy_upstream_owner_rejection_and_clear_publish_only_durable_changes() {
+        let tmp = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        crate::credentials::reset_test_faults();
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut events = state.event_bus.subscribe();
+        let save = |name: &str| {
+            save_with_refresh(
+                &state,
+                name.into(),
+                "legacy-owner-canary".into(),
+                None,
+                "https://example.com/mcp".into(),
+                false,
+            )
+        };
+        assert!(save("../invalid").is_err());
+        assert!(events.try_recv().is_err());
+        crate::credentials::MOCK_FAIL_WRITES.store(true, std::sync::atomic::Ordering::SeqCst);
+        let rejected = save("legacy-owner-refresh");
+        crate::credentials::reset_test_faults();
+        assert!(rejected.is_err());
+        assert!(events.try_recv().is_err());
+        save("legacy-owner-refresh").unwrap();
+        let first = events.try_recv().unwrap();
+        delete_with_refresh(&state, "legacy-owner-refresh".into(), None).unwrap();
+        let second = events.try_recv().unwrap();
+        let (
+            crate::state::AppEvent::SettingsChanged(first),
+            crate::state::AppEvent::SettingsChanged(second),
+        ) = (first, second)
+        else {
+            panic!("expected settings changes")
+        };
+        assert_eq!(first.section, "upstreams");
+        assert_eq!(second.section, "upstreams");
+        assert!(first.persisted && first.applied && second.persisted && second.applied);
+        assert!(first.generation < second.generation);
+        assert!(events.try_recv().is_err());
+        assert!(
+            !serde_json::to_string(&(first, second))
+                .unwrap()
+                .contains("legacy-owner-canary")
+        );
+    }
+
+    // Catches: a duplicate add replacing the existing upstream's vault entry
+    // before config validation rejects the duplicate name.
+    #[test]
+    #[serial_test::serial]
+    fn duplicate_upstream_credential_write_preserves_existing_secret() {
+        let tmp = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let name = "duplicate-add-regression";
+        let original_url = "https://original.example/mcp";
+        save_credential_for_url(name, "original-secret", original_url).unwrap();
+
+        let result = save_mcp_upstream_credential(
+            name.into(),
+            "replacement-secret".into(),
+            None,
+            "https://different.example/mcp".into(),
+        );
+
+        assert_eq!(
+            read_credential_for_url(name, original_url).unwrap(),
+            Some("original-secret".into()),
+            "a rejected add must preserve the original secret and origin",
+        );
+        assert!(result.is_err(), "replacement requires an explicit edit");
+        delete_upstream_credential(name).unwrap();
+    }
+
+    // Catches: same-origin duplicate writes replacing OAuth, or the explicit
+    // edit path becoming unable to replace a credential after safe defaults.
+    #[test]
+    #[serial_test::serial]
+    fn same_origin_duplicate_requires_explicit_credential_replacement() {
+        let tmp = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let name = "explicit-replacement-regression";
+        let url = "https://example.com/mcp";
+        save_oauth_tokens(name, &sample_oauth_token_set(), url).unwrap();
+        let original = read_credential_for_url(name, url).unwrap();
+        assert!(
+            save_mcp_upstream_credential(name.into(), "replacement".into(), None, url.into())
+                .is_err()
+        );
+        assert_eq!(read_credential_for_url(name, url).unwrap(), original);
+        save_mcp_upstream_credential_with_replace(
+            name.into(),
+            "replacement".into(),
+            None,
+            url.into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            read_credential_for_url(name, url).unwrap().as_deref(),
+            Some("replacement")
+        );
+        delete_upstream_credential(name).unwrap();
+    }
 
     // These tests interact with the real OS keyring. Write tests are #[ignore]
     // because macOS prompts for Keychain access interactively, blocking CI/automated runs.

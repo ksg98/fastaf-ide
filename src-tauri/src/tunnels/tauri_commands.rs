@@ -26,11 +26,8 @@ pub(crate) fn save_tunnel_profile(
     {
         profile["id"] = serde_json::Value::String(uuid::Uuid::new_v4().to_string());
     }
-    let mut profile: TunnelProfile = serde_json::from_value(profile).map_err(|e| e.to_string())?;
-    profile.validate()?;
-    let id = profile.id.clone();
-    ProfileStore::save(&state.data_dir, &profile).map_err(|e| e.to_string())?;
-    Ok(id)
+    let profile: TunnelProfile = serde_json::from_value(profile).map_err(|e| e.to_string())?;
+    super::commands::save_profile(&state, profile)
 }
 
 #[tauri::command]
@@ -38,8 +35,7 @@ pub(crate) fn delete_tunnel_profile(
     state: tauri::State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<bool, String> {
-    state.tunnel_manager.stop_if_running(&id);
-    ProfileStore::delete(&state.data_dir, None, &id).map_err(|e| e.to_string())
+    super::commands::delete_profile(&state, &id)
 }
 
 #[tauri::command]
@@ -101,37 +97,26 @@ pub(crate) fn get_tunnel_status(
 
 #[tauri::command]
 pub(crate) fn list_ssh_config_hosts() -> Vec<String> {
-    let config_path = match dirs::home_dir() {
-        Some(h) => h.join(".ssh").join("config"),
-        None => return Vec::new(),
-    };
+    super::commands::load_ssh_config_hosts().unwrap_or_default()
+}
 
-    let file = match std::fs::File::open(&config_path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
+#[tauri::command]
+pub(crate) fn list_discovered_ssh_hosts() -> Result<super::discovery::DiscoveredHosts, String> {
+    super::commands::load_discovered_hosts()
+}
 
-    let mut reader = std::io::BufReader::new(file);
-    let config = match ssh2_config::SshConfig::default()
-        .parse(&mut reader, ssh2_config::ParseRule::ALLOW_UNKNOWN_FIELDS)
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+#[tauri::command]
+pub(crate) async fn probe_discovered_ssh_host(
+    target: String,
+    port: Option<u16>,
+) -> Result<super::commands::SshHostStatus, String> {
+    super::commands::probe_discovered_host(&target, port).await
+}
 
-    config
-        .get_hosts()
-        .iter()
-        .flat_map(|host| {
-            host.pattern.iter().filter_map(|clause| {
-                if clause.negated || clause.pattern == "*" {
-                    None
-                } else {
-                    Some(clause.pattern.clone())
-                }
-            })
-        })
-        .collect()
+#[tauri::command]
+pub(crate) async fn probe_ssh_config_hosts() -> Result<Vec<super::commands::SshHostStatus>, String>
+{
+    super::commands::probe_ssh_config_hosts().await
 }
 
 #[tauri::command]

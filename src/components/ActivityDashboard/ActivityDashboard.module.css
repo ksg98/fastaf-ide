@@ -22,7 +22,7 @@
 }
 
 .dashboard {
-  width: 700px;
+  width: 600px;
   max-width: 90vw;
   max-height: 70vh;
   background: var(--surface-overlay);
@@ -44,6 +44,7 @@
 }
 
 .header {
+ composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -60,6 +61,7 @@
 }
 
 .headerActions {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   gap: 4px;
@@ -107,16 +109,19 @@
   opacity: 1;
 }
 
+/* The status column fits the widest badge, "Waiting for input" (109.4px at 12px system UI
+ * including padding, measured in Chrome); the name column absorbs the difference. */
 .rowMain {
   display: grid;
-  grid-template-columns: 1fr 80px 120px 80px 28px;
+  grid-template-columns: minmax(0, 1fr) 60px 112px 60px auto;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 /* Terminal name + optional project badge — both in the 1fr column */
 .nameCell {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -131,17 +136,38 @@
   text-overflow: ellipsis;
 }
 
+/* Marks a PTY another agent spawned; names the parent so the pair reads at a glance. */
+.subAgentTag {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
 .project {
   font-size: var(--font-xs);
   color: var(--fg-muted);
   background: var(--surface-hover);
   padding: 1px 6px;
   border-radius: var(--radius-sm);
-  max-width: 120px;
-  white-space: nowrap;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
   overflow: hidden;
   text-overflow: ellipsis;
   flex-shrink: 0;
+}
+
+@media (max-width: 540px) {
+  .rowMain {
+    grid-template-columns: minmax(0, 1fr) 112px auto;
+  }
+
+  .project,
+  .agent,
+  .lastActivity {
+    display: none;
+  }
 }
 
 .agent {
@@ -198,11 +224,8 @@
   align-items: center;
   justify-content: center;
   background: none;
-  border: none;
   color: var(--fg-muted);
   cursor: pointer;
-  padding: 2px;
-  border-radius: var(--radius-sm);
   opacity: 0.4;
   transition: opacity var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out),

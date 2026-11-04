@@ -13,6 +13,14 @@
   overflow: hidden;
 }
 
+/* Detached into its own window: fill it, no divider. */
+.detached {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  border-left: none;
+}
+
 /* Compound selector: `.panel` sets its own `display`, which ties with a bare
    `.hidden` on specificity and would be decided by rule order alone. */
 .panel.hidden,

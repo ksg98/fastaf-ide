@@ -1,0 +1,8 @@
+{"fixture":"src-tauri/src/fixtures/agent_prompts/ego-trust-2461.tcap","agent":"ego","geometry":[24,48]}
+{"record":0,"event":{"type":"shell-state","state":"busy","agent_type":"ego"}}
+{"record":0,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":1,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":2,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":4,"event":{"type":"question","prompt_text":"Trust project files in /Users/stefano.straus/Gits/.tmp/tuic-2461-evidence/untrusted-project-with-a-long-name-for-mobile-wrapping? [y/N]","confident":true,"_turn_epoch":0}}
+{"record":4,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Trust project files in /Users/stefano.straus/Gits/.tmp/tuic-2461-evidence/untrusted-project-with-a-long-name-for-mobile-wrapping? [y/N]","confident":true,"last_question":"Trust project files in /Users/stefano.straus/Gits/.tmp/tuic-2461-evidence/untrusted-project-with-a-long-name-for-mobile-wrapping? [y/N]","choice_sig":null,"fullscreen":false}}
+{"ring_len":644}

@@ -28,9 +28,13 @@ interface CommandPaletteState {
 	contentError: string | null;
 	/** When true, content search (? prefix) spans all indexed repos, not just the active one */
 	contentAllRepos: boolean;
-	/** Cross-repo search: repos whose index was still building, so they were not searched.
+	/** Cross-repo search: repos that could not be searched, so they were skipped.
 	 *  Non-zero means an empty result is "not searched yet", NOT a confirmed miss. */
 	contentReposPending: number;
+	/** Subset of `contentReposPending` with a build in flight. Only these can be
+	 *  resolved by waiting — the rest are pending on a repo switch that may never
+	 *  happen. */
+	contentReposIndexing: number;
 	/** Cross-repo search: repos actually searched. */
 	contentReposSearched: number;
 	/** Filename search results (! prefix) */
@@ -62,6 +66,7 @@ function createCommandPaletteStore() {
 		contentError: null,
 		contentAllRepos: false,
 		contentReposPending: 0,
+		contentReposIndexing: 0,
 		contentReposSearched: 0,
 		filenameResults: [],
 		filenameSearching: false,
@@ -129,6 +134,7 @@ function createCommandPaletteStore() {
 			contentSearching: true,
 			contentError: null,
 			contentReposPending: 0,
+			contentReposIndexing: 0,
 			contentReposSearched: 0,
 		});
 
@@ -145,6 +151,7 @@ function createCommandPaletteStore() {
 					});
 					setState({
 						contentReposPending: batch.repos_pending ?? 0,
+						contentReposIndexing: batch.repos_indexing ?? 0,
 						contentReposSearched: batch.repos_searched ?? 0,
 					});
 					if (batch.is_final) {

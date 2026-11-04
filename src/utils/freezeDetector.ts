@@ -1,3 +1,4 @@
+import { dumpFrameWorkload } from "../components/Terminal/frameWorkload";
 import { appLogger } from "../stores/appLogger";
 import { isPerfDebug } from "./perfDebug";
 import { getLastCrumb } from "./perfTrace";
@@ -59,10 +60,14 @@ function timerTick() {
 	if (isBackgroundTimerGap(gap, document.hidden, document.hasFocus())) return;
 	if (gap > THRESHOLD_MS) {
 		record("main", Math.round(gap), now);
+		void dumpFrameWorkload("main-thread-freeze", true).catch(() => {});
 		if (now - lastMainLogAt > LOG_COOLDOWN_MS) {
 			lastMainLogAt = now;
 			const crumb = getLastCrumb();
-			appLogger.diag.warn("app", `UI freeze: ${Math.round(gap)}ms main-thread block`, crumb ?? undefined);
+			appLogger.diag.warn("app", `UI freeze: ${Math.round(gap)}ms main-thread block`, {
+				...crumb,
+				gap_ms: Math.round(gap),
+			});
 		}
 	}
 }

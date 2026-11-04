@@ -52,7 +52,7 @@ describe("native event bridges", () => {
 
 	it("relativizes against the worktree of the branch that owns the file", async () => {
 		repositoriesStore.add({ path: "/repo", displayName: "repo" });
-		repositoriesStore.setBranch("/repo", "feature", { worktreePath: "/repo-worktree" });
+		repositoriesStore.setWorkspace("/repo", "feature", { worktreePath: "/repo-worktree" });
 		createRoot((rootDispose) => {
 			dispose = rootDispose;
 			useFileOpenBridge();
@@ -69,7 +69,7 @@ describe("native event bridges", () => {
 
 	it("uses the repository root when the file is owned at the root", async () => {
 		repositoriesStore.add({ path: "/repo", displayName: "repo" });
-		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+		repositoriesStore.setWorkspace("/repo", "main", { worktreePath: "/repo" });
 		createRoot((rootDispose) => {
 			dispose = rootDispose;
 			useFileOpenBridge();

@@ -1,16 +1,14 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	authFromUpstreamForm,
 	shouldShowAuthorize,
 	startAuthorizeFlow,
-} from "../../../components/SettingsPanel/tabs/ServicesTab";
+} from "../../../components/SettingsPanel/tabs/services/UpstreamMcpPanel";
 import { mockInvoke } from "../../mocks/tauri";
 
 describe("startAuthorizeFlow", () => {
 	beforeEach(() => {
-		mockInvoke.mockReset();
-		vi.mocked(openUrl).mockClear();
+		mockInvoke.mockReset().mockResolvedValue(undefined);
 	});
 
 	it("opens the authorization URL only after the in-app confirmation resolves true", async () => {
@@ -24,7 +22,10 @@ describe("startAuthorizeFlow", () => {
 		await startAuthorizeFlow("example", confirmAuthorization);
 
 		expect(confirmAuthorization).toHaveBeenCalledWith("https://auth.example.com", "example", false);
-		expect(openUrl).toHaveBeenCalledWith("https://auth.example.com/oauth?state=nonce");
+		expect(mockInvoke).toHaveBeenCalledWith("open_default_app", {
+			target: "https://auth.example.com/oauth?state=nonce",
+			kind: "url",
+		});
 	});
 
 	it("cancels the pending backend flow when confirmation is declined", async () => {
@@ -39,7 +40,7 @@ describe("startAuthorizeFlow", () => {
 		await startAuthorizeFlow("example", vi.fn().mockResolvedValue(false));
 
 		expect(mockInvoke).toHaveBeenLastCalledWith("cancel_mcp_upstream_oauth", { name: "example" });
-		expect(openUrl).not.toHaveBeenCalled();
+		expect(mockInvoke).not.toHaveBeenCalledWith("open_default_app", expect.anything());
 	});
 
 	it("forwards the cross-domain flag so the dialog can warn instead of blocking", async () => {
@@ -53,7 +54,10 @@ describe("startAuthorizeFlow", () => {
 		await startAuthorizeFlow("gateway", confirmAuthorization);
 
 		expect(confirmAuthorization).toHaveBeenCalledWith("https://auth.example-idp.com", "gateway", true);
-		expect(openUrl).toHaveBeenCalledWith("https://auth.example-idp.com/authorize?state=nonce");
+		expect(mockInvoke).toHaveBeenCalledWith("open_default_app", {
+			target: "https://auth.example-idp.com/authorize?state=nonce",
+			kind: "url",
+		});
 	});
 });
 

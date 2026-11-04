@@ -1,0 +1,13 @@
+import { createStore } from "solid-js/store";
+export { settingsStore, appLogger, isTauri, rpc, invoke, listen, ExpertSetting } from "./application-preview-state.js";
+const [state,setState] = createStore({agents:{claude:{run_configs:[{name:"Daily development",command:"claude",args:["--model","sonnet"],model:"sonnet",env:{PROJECT_MODE:"development"},is_default:true}]},ego:{run_configs:[],ego_mode:"default",ego_sandbox:"workspace"}},hibernate_idle_minutes:60,hibernate_scope:"background_only",loaded:true});
+export const agentConfigsStore = new Proxy({state,getRunConfigs:type=>state.agents[type]?.run_configs??[],getEnvFlags:()=>({}),getHeadlessTemplate:()=>undefined,getLaunchInstructions:()=>undefined,getAgentLaunchInstructions:()=>undefined,getIdleCloseMinutes:()=>15,getPreventAltScreen:()=>true,getSkipTrustDialog:()=>true,getNativeStatusSignals:()=>true}, {get(target,key){if(key in target)return target[key];if(key.startsWith("set")||key.startsWith("sync"))return async()=>{};return ()=>false;}});
+export const agentConfigsFor=()=>agentConfigsStore;
+export const ensureAgentConfigs=async()=>{};
+export const useAgentDetection=()=>({detectAll:()=>{},detectVersion:()=>{},isAvailable:type=>["claude","codex","ego"].includes(type),getDetection:type=>({available:["claude","codex","ego"].includes(type),version:["claude","codex","ego"].includes(type)?"fixture":""})});
+export const remoteConnectionsStore={getConnections:()=>({}),getConnectionState:()=>undefined};
+export const editorTabsStore={add:()=>{}};
+export const settingsExpertStore={launchInstructions:()=>({default_text:"intent: Describe the task\nsuggest: [ A | B | C ]",required_markers:["intent:","suggest:"]})};
+export const setClaudeUsageEnabled=()=>{};
+export const isPluginDisabled=()=>false;
+export const setPluginEnabled=async()=>{};

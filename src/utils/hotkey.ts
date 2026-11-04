@@ -70,8 +70,54 @@ export function comboToDisplay(combo: string): string {
 		}
 	}
 
-	displayParts.push(key.toUpperCase());
+	displayParts.push(keyToDisplay(key, mac));
 	return displayParts.join("");
+}
+
+/** Named keys as macOS menus draw them. */
+const MAC_KEY_GLYPHS: Record<string, string> = {
+	ArrowLeft: "←", // ←
+	ArrowRight: "→", // →
+	ArrowUp: "↑", // ↑
+	ArrowDown: "↓", // ↓
+	Escape: "⎋", // ⎋
+	Enter: "↩", // ↩ (Return)
+	Return: "↩",
+	Backspace: "⌫", // ⌫
+	Delete: "⌦", // ⌦ (forward delete)
+	Tab: "⇥", // ⇥
+	Space: "Space",
+	PageUp: "⇞", // ⇞
+	PageDown: "⇟", // ⇟
+	Home: "↖", // ↖
+	End: "↘", // ↘
+	CapsLock: "⇪", // ⇪
+};
+
+/** The same keys on Windows and Linux: arrows as arrows, the rest as short words. */
+const OTHER_KEY_LABELS: Record<string, string> = {
+	ArrowLeft: "←",
+	ArrowRight: "→",
+	ArrowUp: "↑",
+	ArrowDown: "↓",
+	Escape: "Esc",
+	Enter: "Enter",
+	Return: "Enter",
+	Backspace: "Backspace",
+	Delete: "Del",
+	Tab: "Tab",
+	Space: "Space",
+	PageUp: "PgUp",
+	PageDown: "PgDn",
+	Home: "Home",
+	End: "End",
+	CapsLock: "Caps Lock",
+};
+
+/** One non-modifier key for display: a named key by its label, anything else (letters, F-keys) upper-cased. */
+function keyToDisplay(key: string, mac: boolean): string {
+	const labels = mac ? MAC_KEY_GLYPHS : OTHER_KEY_LABELS;
+	return Object.hasOwn(labels, key) ? labels[key] : key.toUpperCase();
 }
 
 // --- DOM event.code key matching ---

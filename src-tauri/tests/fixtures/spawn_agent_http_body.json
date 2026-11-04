@@ -1,0 +1,13 @@
+{
+  "rows": 30,
+  "cols": 100,
+  "cwd": "/agent",
+  "env": { "PROFILE": "work" },
+  "prompt": "fix it",
+  "agent_type": "codex",
+  "model": "gpt-5",
+  "print_mode": false,
+  "output_format": null,
+  "binary_path": null,
+  "args": null
+}

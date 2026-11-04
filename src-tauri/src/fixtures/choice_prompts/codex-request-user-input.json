@@ -1,0 +1,32 @@
+{
+  "type": "choice-prompt",
+  "title": "Pick a color.",
+  "options": [
+    {
+      "key": "1",
+      "label": "Red",
+      "highlighted": true,
+      "destructive": false
+    },
+    {
+      "key": "2",
+      "label": "Green",
+      "highlighted": false,
+      "destructive": false
+    },
+    {
+      "key": "3",
+      "label": "Blue",
+      "highlighted": false,
+      "destructive": false
+    },
+    {
+      "key": "4",
+      "label": "Other",
+      "highlighted": false,
+      "destructive": false
+    }
+  ],
+  "dismiss_key": "ctrl+]",
+  "amend_key": "shift+right"
+}

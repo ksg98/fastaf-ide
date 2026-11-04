@@ -1,8 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
-import "../mocks/tauri";
 import { useDictation } from "../../hooks/useDictation";
 import { dictationStore } from "../../stores/dictation";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
+import { mockInvoke } from "../mocks/tauri";
+
+/** Set auto-send for real. `setAutoSend` goes through a load-modify-save that
+ * refuses to save when the stored config cannot be read, so it needs the
+ * stored config to exist. */
+async function setAutoSend(value: boolean) {
+	mockInvoke.mockResolvedValueOnce({}).mockResolvedValueOnce(undefined);
+	await dictationStore.saveConfig({ auto_send: value });
+	expect(dictationStore.state.autoSend).toBe(value);
+}
+
+/** Set AI rewrite for real, through the same load-modify-save as `setAutoSend`. */
+async function setRewriteEnabled(value: boolean) {
+	mockInvoke.mockResolvedValueOnce({}).mockResolvedValueOnce(undefined);
+	await dictationStore.saveConfig({ rewrite_enabled: value });
+	expect(dictationStore.state.rewriteEnabled).toBe(value);
+}
 
 function resetStores() {
 	for (const id of terminalsStore.getIds()) {
@@ -32,10 +49,13 @@ describe("useDictation", () => {
 			processing: false,
 			loading: false,
 			modelStatus: "ready" as "not_downloaded" | "downloaded" | "ready",
+			handsFree: null as { armed: boolean } | null,
 		},
 		refreshStatus: vi.fn().mockResolvedValue(undefined),
 		startRecording: vi.fn().mockResolvedValue(undefined),
 		stopRecording: vi.fn().mockResolvedValue(transcribeOk("hello world")),
+		refreshHandsFree: vi.fn().mockResolvedValue(undefined),
+		disarmHandsFree: vi.fn().mockResolvedValue(undefined),
 	};
 
 	const mockSetStatusInfo = vi.fn();
@@ -43,11 +63,14 @@ describe("useDictation", () => {
 
 	let dictation: ReturnType<typeof useDictation>;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		// The Messages bell persists through a debounced timer that outlives the test.
+		vi.spyOn(toastsStore, "addToBell").mockReturnValue(-1);
 		resetStores();
 		vi.clearAllMocks();
 
-		dictationStore.setAutoSend(false);
+		// Auto-send defaults on; the plain-insertion tests below need it off.
+		await setAutoSend(false);
 
 		// Reset mock state
 		mockDictationStore.state = {
@@ -56,6 +79,7 @@ describe("useDictation", () => {
 			processing: false,
 			loading: false,
 			modelStatus: "ready",
+			handsFree: null,
 		};
 
 		// Default: startRecording sets recording=true (mimics real store behavior)
@@ -75,11 +99,31 @@ describe("useDictation", () => {
 	});
 
 	describe("handleDictationStart", () => {
+		// Catches: a refused overlapping mic/hotkey start makes release skip the active recording.
+		it("stops and delivers the original recording after a second start is refused", async () => {
+			const input = document.createElement("textarea");
+			document.body.appendChild(input);
+			input.focus();
+			mockDictationStore.stopRecording.mockImplementationOnce(async () => {
+				mockDictationStore.state.recording = false;
+				return transcribeOk("hello world");
+			});
+			try {
+				await dictation.handleDictationStart("fn");
+				await dictation.handleDictationStart("hotkey");
+				await dictation.handleDictationStop();
+				expect(mockDictationStore.state.recording).toBe(false);
+				expect(input.value).toBe("hello world");
+			} finally {
+				input.remove();
+			}
+		});
+
 		it("starts recording when enabled and ready", async () => {
-			await dictation.handleDictationStart();
+			await dictation.handleDictationStart("fn");
 
 			expect(mockDictationStore.refreshStatus).toHaveBeenCalled();
-			expect(mockDictationStore.startRecording).toHaveBeenCalled();
+			expect(mockDictationStore.startRecording).toHaveBeenCalledWith("fn");
 			expect(mockSetStatusInfo).toHaveBeenCalledWith("Dictation: recording…");
 		});
 
@@ -90,6 +134,34 @@ describe("useDictation", () => {
 
 			expect(mockDictationStore.refreshStatus).not.toHaveBeenCalled();
 			expect(mockDictationStore.startRecording).not.toHaveBeenCalled();
+		});
+
+		// Criterion 2: the hotkey is the stop control for a conversation, not a
+		// second microphone opened on top of the one hands-free already holds.
+		it("stops a running hands-free conversation instead of recording", async () => {
+			mockDictationStore.refreshHandsFree.mockImplementation(async () => {
+				mockDictationStore.state.handsFree = { armed: true };
+			});
+
+			await dictation.handleDictationStart();
+
+			expect(mockDictationStore.disarmHandsFree).toHaveBeenCalled();
+			expect(mockDictationStore.startRecording).not.toHaveBeenCalled();
+			expect(mockSetStatusInfo).toHaveBeenCalledWith("Hands-free: stopped");
+		});
+
+		// The mode ends by itself when its terminal closes. Trusting the stored
+		// flag would eat the keypress that was meant to start a recording.
+		it("re-reads hands-free state rather than trusting a stale armed flag", async () => {
+			mockDictationStore.state.handsFree = { armed: true };
+			mockDictationStore.refreshHandsFree.mockImplementation(async () => {
+				mockDictationStore.state.handsFree = { armed: false };
+			});
+
+			await dictation.handleDictationStart();
+
+			expect(mockDictationStore.disarmHandsFree).not.toHaveBeenCalled();
+			expect(mockDictationStore.startRecording).toHaveBeenCalled();
 		});
 
 		it("does nothing when already recording", async () => {
@@ -121,7 +193,7 @@ describe("useDictation", () => {
 
 			await dictation.handleDictationStart();
 
-			expect(mockSetStatusInfo).toHaveBeenCalledWith("Dictation: model not downloaded — open Settings > Dictation");
+			expect(mockSetStatusInfo).toHaveBeenCalledWith("Dictation: model not downloaded — open Settings > Voice");
 			expect(mockOpenSettings).toHaveBeenCalledWith("dictation");
 			expect(mockDictationStore.startRecording).not.toHaveBeenCalled();
 		});
@@ -195,9 +267,7 @@ describe("useDictation", () => {
 
 			// The text still lands — it is the part that was transcribed.
 			expect(mockPty.write).toHaveBeenCalledWith("sess-trunc", "tail of a long recording");
-			expect(mockSetStatusInfo).toHaveBeenCalledWith(
-				"Dictation: recording too long — the first 42s were not transcribed",
-			);
+			expect(mockSetStatusInfo).toHaveBeenCalledWith("Dictation: 42s of audio were lost before transcription");
 			expect(mockSetStatusInfo).not.toHaveBeenCalledWith("Ready");
 		});
 
@@ -366,7 +436,7 @@ describe("useDictation", () => {
 
 	describe("autoSend", () => {
 		it("sends command to terminal when autoSend is enabled", async () => {
-			dictationStore.setAutoSend(true);
+			await setAutoSend(true);
 			const id = terminalsStore.add({
 				sessionId: "sess-1",
 				fontSize: 14,
@@ -386,7 +456,7 @@ describe("useDictation", () => {
 		});
 
 		it("does NOT auto-submit when focused on a textarea", async () => {
-			dictationStore.setAutoSend(true);
+			await setAutoSend(true);
 			const textarea = document.createElement("textarea");
 			textarea.value = "";
 			document.body.appendChild(textarea);
@@ -408,7 +478,7 @@ describe("useDictation", () => {
 		});
 
 		it("does NOT auto-submit when focused on an input", async () => {
-			dictationStore.setAutoSend(true);
+			await setAutoSend(true);
 			const input = document.createElement("input");
 			input.type = "text";
 			document.body.appendChild(input);
@@ -437,11 +507,11 @@ describe("useDictation", () => {
 			rewriteSpy?.mockRestore();
 			rewriteSpy = undefined;
 			// rewriteEnabled lives on the real (module-singleton) store — reset it
-			await dictationStore.saveConfig({ rewrite_enabled: false });
+			await setRewriteEnabled(false);
 		});
 
 		it("does not call rewriteText when disabled and inserts the raw transcript", async () => {
-			await dictationStore.saveConfig({ rewrite_enabled: false });
+			await setRewriteEnabled(false);
 			rewriteSpy = vi.spyOn(dictationStore, "rewriteText");
 
 			const id = terminalsStore.add({
@@ -461,7 +531,7 @@ describe("useDictation", () => {
 		});
 
 		it("inserts the rewritten text into the PTY when rewrite succeeds", async () => {
-			await dictationStore.saveConfig({ rewrite_enabled: true });
+			await setRewriteEnabled(true);
 			rewriteSpy = vi.spyOn(dictationStore, "rewriteText").mockResolvedValue("a clean prompt");
 
 			const id = terminalsStore.add({
@@ -482,7 +552,7 @@ describe("useDictation", () => {
 		});
 
 		it("falls back to the raw transcript with a failure status when rewrite returns null", async () => {
-			await dictationStore.saveConfig({ rewrite_enabled: true });
+			await setRewriteEnabled(true);
 			rewriteSpy = vi.spyOn(dictationStore, "rewriteText").mockResolvedValue(null);
 
 			const id = terminalsStore.add({

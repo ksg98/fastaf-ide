@@ -1,0 +1,19 @@
+// A question that is answered, after which the agent says nothing at all.
+//
+// The silence is the whole scenario. Everywhere else the agent goes on talking
+// once it has its answer, and every update it sends republishes the attachment
+// — so a client that failed to publish when the answer was taken would still
+// look right by the time anyone read it, masked by the next chunk. Here nothing
+// follows the answer, so the attachment can only show what answering itself
+// published.
+//
+// The turn is deliberately left running. What is being proved is the state a
+// host would poll while it waits, not how the turn ends.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"request","id":7,"method":"session/request_permission","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","toolCall":{"toolCallId":"call-1","title":"Write a file"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}
+{"step":"expect_response","id":7,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}
+{"step":"expect_no_frame"}

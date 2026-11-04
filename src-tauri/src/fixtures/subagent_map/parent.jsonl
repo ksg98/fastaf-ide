@@ -1,0 +1,4 @@
+{"type":"user","uuid":"p0","timestamp":"2026-09-21T09:59:50.000Z","message":{"role":"user","content":"go"}}
+{"type":"assistant","uuid":"p1","timestamp":"2026-09-21T09:59:58.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_FIXTURE_TEAMMATE","name":"Agent","input":{"description":"Review the diff","name":"reviewer-x","subagent_type":"reviewer","prompt":"Review the diff and report"}}]}}
+{"type":"assistant","uuid":"p2","timestamp":"2026-09-21T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_PLAIN_READ","name":"Read","input":{}}]}}
+{"type":"user","uuid":"p3","timestamp":"2026-09-21T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_FIXTURE_TEAMMATE","content":"{\"status\":\"teammate_spawned\"}"}]}}

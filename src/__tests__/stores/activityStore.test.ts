@@ -291,6 +291,56 @@ describe("activityStore persistence", () => {
 	});
 
 	describe("hydrate()", () => {
+		it("loads active items from the array returned by the Activity API", async () => {
+			store.addItem({
+				id: "live",
+				pluginId: "core",
+				sectionId: "messages",
+				title: "Live notice",
+				icon: "<svg/>",
+				dismissible: true,
+			});
+			mockInvoke.mockResolvedValueOnce([
+				{
+					id: "saved",
+					pluginId: "core",
+					sectionId: "messages",
+					title: "Saved notice",
+					icon: "<svg/>",
+					dismissible: true,
+					createdAt: 1000,
+				},
+				{
+					id: "hidden",
+					pluginId: "core",
+					sectionId: "messages",
+					title: "Dismissed notice",
+					icon: "<svg/>",
+					dismissible: true,
+					dismissed: true,
+					createdAt: 900,
+				},
+				{
+					id: "live",
+					pluginId: "core",
+					sectionId: "messages",
+					title: "Stale notice",
+					icon: "<svg/>",
+					dismissible: true,
+					createdAt: 800,
+				},
+			]);
+
+			await store.hydrate();
+			expect(
+				store
+					.getActive()
+					.map((item) => item.title)
+					.sort(),
+			).toEqual(["Live notice", "Saved notice"]);
+			expect(store.state.items.find((item) => item.id === "hidden")?.dismissed).toBe(true);
+		});
+
 		it("loads items from backend", async () => {
 			const savedItems = [
 				{
@@ -324,7 +374,7 @@ describe("activityStore persistence", () => {
 			mockInvoke.mockRejectedValueOnce(new Error("backend error"));
 			await store.hydrate();
 			expect(store.getActive()).toEqual([]);
-			expect(consoleSpy).toHaveBeenCalledWith("[store]", "Failed to hydrate activity", expect.any(Error));
+			expect(consoleSpy).toHaveBeenCalledWith("[store]", "Failed to hydrate activity");
 			consoleSpy.mockRestore();
 		});
 
@@ -402,7 +452,9 @@ describe("activityStore persistence", () => {
 
 	describe("save on mutations", () => {
 		// saveActivity is debounced (300ms) — use fake timers to flush
-		beforeEach(() => {
+		beforeEach(async () => {
+			await store.hydrate();
+			mockInvoke.mockClear();
 			vi.useFakeTimers();
 		});
 		afterEach(() => {
@@ -412,43 +464,43 @@ describe("activityStore persistence", () => {
 		it("persists after addItem", () => {
 			store.addItem({ id: "x", pluginId: "p1", sectionId: "s", title: "T", icon: "<svg/>", dismissible: true });
 			vi.advanceTimersByTime(300);
-			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { items: expect.any(Array) });
+			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { base: expect.anything(), items: expect.any(Array) });
 		});
 
-		it("persists after removeItem", () => {
+		it("persists after removeItem", async () => {
 			store.addItem({ id: "x", pluginId: "p1", sectionId: "s", title: "T", icon: "<svg/>", dismissible: true });
-			vi.advanceTimersByTime(300);
+			await vi.advanceTimersByTimeAsync(300);
 			mockInvoke.mockClear();
 			store.removeItem("x");
-			vi.advanceTimersByTime(300);
-			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { items: expect.any(Array) });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { base: expect.anything(), items: expect.any(Array) });
 		});
 
-		it("persists after dismissItem", () => {
+		it("persists after dismissItem", async () => {
 			store.addItem({ id: "x", pluginId: "p1", sectionId: "s", title: "T", icon: "<svg/>", dismissible: true });
-			vi.advanceTimersByTime(300);
+			await vi.advanceTimersByTimeAsync(300);
 			mockInvoke.mockClear();
 			store.dismissItem("x");
-			vi.advanceTimersByTime(300);
-			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { items: expect.any(Array) });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { base: expect.anything(), items: expect.any(Array) });
 		});
 
-		it("persists after dismissSection", () => {
+		it("persists after dismissSection", async () => {
 			store.addItem({ id: "x", pluginId: "p1", sectionId: "s", title: "T", icon: "<svg/>", dismissible: true });
-			vi.advanceTimersByTime(300);
+			await vi.advanceTimersByTimeAsync(300);
 			mockInvoke.mockClear();
 			store.dismissSection("s");
-			vi.advanceTimersByTime(300);
-			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { items: expect.any(Array) });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { base: expect.anything(), items: expect.any(Array) });
 		});
 
-		it("persists after updateItem", () => {
+		it("persists after updateItem", async () => {
 			store.addItem({ id: "x", pluginId: "p1", sectionId: "s", title: "T", icon: "<svg/>", dismissible: true });
-			vi.advanceTimersByTime(300);
+			await vi.advanceTimersByTimeAsync(300);
 			mockInvoke.mockClear();
 			store.updateItem("x", { title: "Updated" });
-			vi.advanceTimersByTime(300);
-			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { items: expect.any(Array) });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(mockInvoke).toHaveBeenCalledWith("save_activity", { base: expect.anything(), items: expect.any(Array) });
 		});
 
 		it("strips onClick from persisted items", () => {

@@ -1,0 +1,6 @@
+// An ego that predates MCP-over-ACP: it advertises http and sse but no acp, and
+// would answer session/new with a session id while dropping the acp server.
+// Nothing may be sent to it after initialize.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result":{"protocolVersion":1,"agentInfo":{"name":"ego","version":"0.1.0"},"agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false}}}}
+{"step":"expect_no_frame"}

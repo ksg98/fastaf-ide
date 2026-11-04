@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "window-background",
+  "description": "Allow themed app windows to update their native backing colors",
+  "windows": ["main", "secondary", "floating-*", "panel-*"],
+  "permissions": [
+    "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-background-color"
+  ]
+}

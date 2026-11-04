@@ -8,13 +8,6 @@ import type { JSX } from "solid-js";
  * button read as one family at any size. Size is the only knob: 16px in
  * toolbars and rows, 14px in dense chips. Monochrome always; colour comes
  * from the surrounding text colour, never from the icon.
- *
- * Path data is adapted from Lucide (https://lucide.dev), ISC License:
- * Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
- * of Feather (MIT). All other copyright (c) for Lucide are held by Lucide
- * Contributors 2022. Permission to use, copy, modify, and/or distribute this
- * software for any purpose with or without fee is hereby granted, provided that
- * the above copyright notice and this permission notice appear in all copies.
  */
 
 export interface IconProps {
@@ -26,6 +19,31 @@ export interface IconProps {
 	"aria-label"?: string;
 }
 
+// The notice below is a legal comment (`/*!`, `@license`), so a build that keeps
+// legal comments ships it in dist/ beside the path data it covers. It sits on
+// `icon()` because a comment on a type-only declaration is erased with it.
+/*!
+ * @license ISC
+ * Icon path data in FastAF is adapted from Lucide (https://lucide.dev).
+ *
+ * ISC License
+ *
+ * Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
+ * of Feather (MIT). All other copyright (c) for Lucide are held by Lucide
+ * Contributors 2022.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
+ * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
+ * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
 function icon(body: () => JSX.Element) {
 	return (props: IconProps) => (
 		<svg

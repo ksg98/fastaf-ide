@@ -1,7 +1,26 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import "../mocks/tauri";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type ActionEntry, getActionEntries } from "../../actions/actionRegistry";
+import { listDemo } from "../../components/Tasks/list/demo";
 import type { ShortcutHandlers } from "../../hooks/useKeyboardShortcuts";
+import { workItemProviderRegistry } from "../../plugins/workItemProviderRegistry";
+import { automationsUi } from "../../stores/automations";
+import { dictationStore } from "../../stores/dictation";
+import { pluginStore } from "../../stores/pluginStore";
+import { progressStore } from "../../stores/progress";
+import { repositoriesStore } from "../../stores/repositories";
+import { storiesUi } from "../../stores/storiesUi";
+import { mockInvoke } from "../mocks/tauri";
+
+afterEach(() => repositoriesStore._testCancelPendingSave());
+
+/** Turn dictation on the way the app does: by reading the backend config. */
+async function enableDictation() {
+	mockInvoke.mockImplementation(async (cmd: string) =>
+		cmd === "get_dictation_config" ? { enabled: true, hotkey: "F5", language: "auto" } : undefined,
+	);
+	await dictationStore.refreshConfig();
+	mockInvoke.mockReset().mockResolvedValue(undefined);
+}
 
 function createMockHandlers(): ShortcutHandlers {
 	return {
@@ -16,12 +35,15 @@ function createMockHandlers(): ShortcutHandlers {
 		reopenClosedTab: vi.fn(),
 		navigateTab: vi.fn(),
 		focusLastTerminal: vi.fn(),
+		historyBack: vi.fn(),
+		historyForward: vi.fn(),
 		jumpWaitingTerminal: vi.fn(),
 		clearTerminal: vi.fn(),
 		terminalIds: vi.fn().mockReturnValue([]),
 		handleTerminalSelect: vi.fn(),
 		handleSplit: vi.fn(),
 		handleRunCommand: vi.fn(),
+		reloadActiveTab: vi.fn(),
 		switchToBranchByIndex: vi.fn(),
 		isQuickSwitcherOpen: vi.fn().mockReturnValue(false),
 		toggleMarkdownPanel: vi.fn(),
@@ -30,7 +52,7 @@ function createMockHandlers(): ShortcutHandlers {
 		toggleTaskQueue: vi.fn(),
 		toggleGitOpsPanel: vi.fn(),
 		toggleHelpPanel: vi.fn(),
-		toggleNotesPanel: vi.fn(),
+		toggleIdeasPanel: vi.fn(),
 		toggleFileBrowserPanel: vi.fn(),
 		requestFileBrowserContentSearch: vi.fn(),
 		toggleOutlinePanel: vi.fn(),
@@ -63,7 +85,7 @@ function createMockHandlers(): ShortcutHandlers {
 		copyRelativeFilePath: vi.fn(),
 		openSecondaryWindow: vi.fn(),
 		toggleCommandOverview: vi.fn(),
-		openAiTriage: vi.fn(),
+		openTasks: vi.fn(),
 		toggleComposePanel: vi.fn(),
 		detachActivityDashboard: vi.fn(),
 		toggleProcessManager: vi.fn(),
@@ -108,6 +130,64 @@ describe("actionRegistry", () => {
 			expect(ids).toContain("command-palette");
 			expect(ids).toContain("quick-branch-switch");
 			expect(ids).toContain("toggle-focus-mode");
+		});
+
+		describe("open-tasks", () => {
+			const ids = () => getActionEntries(createMockHandlers()).map((entry) => entry.id);
+			afterEach(() => pluginStore.clear());
+
+			// Catches: the palette opening a Tasks tab that can only offer installs this build does not bundle.
+			it("is not offered with no provider and no work-item plugin installed", () => {
+				expect(ids()).not.toContain("open-tasks");
+			});
+
+			// Catches: Open Tasks missing while a provider has tasks to show.
+			it("is offered while a work-item provider is registered", () => {
+				const registration = workItemProviderRegistry.register(listDemo(1));
+				try {
+					expect(ids()).toContain("open-tasks");
+				} finally {
+					registration.dispose();
+				}
+				expect(ids()).not.toContain("open-tasks");
+			});
+
+			// Catches: an installed but unconfigured provider plugin with no way to its setup form from the palette.
+			it("is offered while a work-item plugin is installed but not set up", () => {
+				pluginStore.registerPlugin("jira", { builtIn: false, enabled: true, loaded: true });
+				expect(ids()).toContain("open-tasks");
+			});
+
+			// Catches: gating on the manifest's account providers, which plugins that are no Tasks source declare too.
+			it("is not offered for a plugin that only uses a GitHub account", () => {
+				pluginStore.registerPlugin("pr-notifier", {
+					manifest: {
+						id: "pr-notifier",
+						name: "PR notifier",
+						version: "1.0.0",
+						minAppVersion: "0.0.0",
+						main: "main.js",
+						capabilities: ["net:http"],
+						providers: ["github"],
+					},
+					loaded: true,
+				});
+				expect(ids()).not.toContain("open-tasks");
+			});
+		});
+
+		it("Progress action advertises its shortcut and opens the active repository", () => {
+			progressStore.resetForTests();
+			repositoriesStore.add({ path: "/repo/progress", displayName: "Progress Repo" });
+			repositoriesStore.setActive("/repo/progress");
+			const action = getActionEntries(createMockHandlers()).find((entry) => entry.id === "progress");
+			expect(action?.keybinding).toBeTruthy();
+			action?.execute();
+			expect(progressStore.dialogVisible()).toBe(true);
+			expect(progressStore.requestedProject()).toBe("/repo/progress");
+			progressStore.resetForTests();
+			repositoriesStore.remove("/repo/progress");
+			repositoriesStore._testCancelPendingSave();
 		});
 
 		it("toggle-focus-mode executes toggleFocusMode handler", () => {
@@ -173,6 +253,15 @@ describe("actionRegistry", () => {
 			expect(handlers.closeTerminal).not.toHaveBeenCalled();
 		});
 
+		// Catches: upstream's dictation hands-free conversation competing in the palette
+		// with FastAF's voice agent, its one hands-free mode.
+		it("never offers the upstream hands-free toggle, even with dictation on", async () => {
+			await enableDictation();
+			const ids = getActionEntries(createMockHandlers()).map((entry) => entry.id);
+			expect(ids).not.toContain("toggle-hands-free");
+			expect(dictationStore.state.enabled).toBe(true);
+		});
+
 		it("execute calls the corresponding handler", () => {
 			const handlers = createMockHandlers();
 			const handlerEntries = getActionEntries(handlers);
@@ -206,4 +295,25 @@ describe("actionRegistry", () => {
 			expect(searchEntries.map((e) => e.id)).toEqual(["search-terminals", "search-files", "search-file-contents"]);
 		});
 	});
+});
+
+// A discoverable palette entry is the dialog's public entry point.
+it("does not strand scheduled runs without an Automations palette entry", () => {
+	const entry = getActionEntries(createMockHandlers()).find((action) => action.id === "automations");
+	expect(entry?.label).toBe("Automations");
+	entry?.execute();
+	expect(automationsUi.visible()).toBe(true);
+	automationsUi.close();
+});
+
+// Catches: Plans and Stories is reachable only from the toolbar button, so the palette cannot open it.
+it("opens Plans and Stories for the active repo from the palette", () => {
+	const entry = getActionEntries(createMockHandlers()).find((action) => action.id === "plans-stories");
+	expect(entry?.label).toBe("Plans and Stories");
+	repositoriesStore.add({ path: "/repo-stories", displayName: "Stories Repo" });
+	repositoriesStore.setActive("/repo-stories");
+	entry?.execute();
+	expect(storiesUi.visible()).toBe(true);
+	expect(storiesUi.project()).toBe("/repo-stories");
+	storiesUi.close();
 });

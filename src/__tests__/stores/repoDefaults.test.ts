@@ -19,6 +19,8 @@ describe("repoDefaultsStore", () => {
 		}));
 
 		store = (await import("../../stores/repoDefaults")).repoDefaultsStore;
+		await store.hydrate();
+		mockInvoke.mockClear();
 	});
 
 	describe("initial state", () => {
@@ -51,6 +53,17 @@ describe("repoDefaultsStore", () => {
 				expect(store.state.copyUntrackedFiles).toBe(true);
 				expect(store.state.setupScript).toBe("npm install");
 				expect(store.state.runScript).toBe("npm run dev");
+			});
+		});
+
+		it("falls back to squash when repo defaults predate pr_merge_strategy", async () => {
+			// Rust `MergeStrategy` defaults to Squash; a payload without the field
+			// must resolve to the same strategy, not a plain merge.
+			mockInvoke.mockResolvedValueOnce({ base_branch: "main" });
+			await store.hydrate();
+
+			testInScope(() => {
+				expect(store.state.prMergeStrategy).toBe("squash");
 			});
 		});
 
@@ -139,6 +152,7 @@ describe("repoDefaultsStore", () => {
 			testInScope(() => {
 				store.setBaseBranch("develop");
 				expect(mockInvoke).toHaveBeenCalledWith("save_repo_defaults", {
+					base: expect.anything(),
 					config: {
 						base_branch: "develop",
 						copy_ignored_files: false,
@@ -150,8 +164,10 @@ describe("repoDefaultsStore", () => {
 						prompt_on_create: true,
 						delete_branch_on_remove: true,
 						auto_archive_merged: false,
+						archive_retention_days: 0,
 						orphan_cleanup: "ask",
-						pr_merge_strategy: "merge",
+						orphan_cleanup_countdown_seconds: 10,
+						pr_merge_strategy: "squash",
 						after_merge: "archive",
 						auto_fetch_interval_minutes: 0,
 						auto_delete_on_pr_close: "off",

@@ -6,20 +6,23 @@ export interface QuickSwitcherDeps {
 }
 
 /** Quick switcher: resolve shortcut index to repo+branch.
- * Uses the shared visible-repo sequence (workspace/filter/search/sort aware)
+ * Uses the shared visible-repo sequence (named-workspace/filter/search/sort aware)
  * so the numbering always matches Sidebar.repoShortcutStarts. */
 export function useQuickSwitcher(deps: QuickSwitcherDeps) {
 	const switchToBranchByIndex = (index: number) => {
 		let counter = 1;
 		for (const repo of getVisibleRepoSequence()) {
-			const branches = Object.values(repo.branches).sort((a, b) => {
+			// Sorted for display by branch, selected by KEY: `handleBranchSelect`
+			// indexes the workspace map, and passing `branchName` there picked
+			// whichever row happened to be keyed by the bare branch.
+			const workspaces = Object.entries(repo.workspaces).sort(([, a], [, b]) => {
 				if (a.isMain && !b.isMain) return -1;
 				if (!a.isMain && b.isMain) return 1;
-				return a.name.localeCompare(b.name);
+				return a.branchName.localeCompare(b.branchName);
 			});
-			for (const branch of branches) {
+			for (const [workspaceId] of workspaces) {
 				if (counter === index) {
-					deps.handleBranchSelect(repo.path, branch.name);
+					deps.handleBranchSelect(repo.path, workspaceId);
 					return;
 				}
 				counter++;

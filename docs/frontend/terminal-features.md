@@ -1,8 +1,36 @@
 # Terminal Features & Keyboard Shortcuts
 
+## Pending Session Chat prompts
+
+Busy Session Chat sends wait in TUIC’s existing idle-gate queue on desktop and mobile. Each host-owned Pending prompt has Cancel and, for Claude, Codex and ego, a compact return-key action labelled **Send now: stop the current request**. Send now claims its queue id once; a prompt already taken by the idle gate is not sent again. Claude and Codex use Escape followed by confirmed idle; ego uses native Ctrl+Enter. Native CLI receipts from earlier direct sends remain read-only.
+
+Mobile keeps the visible draft when you switch between Chat and CLI. Chat holds the draft locally; CLI streams it to the native composer. A switch transfers this composer's known native draft without submitting it. Tab and history temporarily use the native composer, then return the result to the local Chat draft before a queued send.
+
+On desktop, returning from Chat to CLI focuses the terminal input. You can type immediately after using the switch, closing Chat Compose, answering in CLI, or falling back from unavailable Chat. Only the active terminal restores focus, and an automatic fallback does not take the caret from an editable field outside that terminal.
+
+Session Chat shows a pulsing **Working…** row after Send and while the terminal reports busy. It disappears when the terminal reports idle or awaits a question or permission answer. Desktop and mobile use the existing session state; Chat does not infer activity from the conversation text.
+
 Consolidated reference for all terminal behaviors, keyboard shortcuts, and configurable features.
 
+The desktop CLI | Chat switch uses shared toolbar density. In both modes it is centred on the Context header and stays above its bottom divider, without adding a separate row. Without Context, the switch floats over the content's top-right corner and reserves no row: the CLI grid keeps its full height (multiview tiles too), the CLI search bar opens below the switch, and the Chat transcript adds top padding so its first turn starts below it. At touch widths up to 600px, the Context header and collapsed bar reserve a 48px row for the shared 44px switch; expanded Context keeps the same header clearance.
+
+Terminal Find overlays the grid below the Context row, or just below the floating CLI/Chat switch when there is no Context. Search controls wrap within narrow panes without covering the view switch.
+
+## Answer gutters after resize
+
+When scrollback reflow is disabled, widening a terminal keeps existing text in
+its original physical rows. Green answer gutters still cover the retained
+soft-wrapped continuation rows. This does not enable reflow or join the text
+into wider rows. MCP session creation without dimensions starts at 80 columns
+and 24 rows; callers can supply dimensions before starting output.
+
+## Mobile composer focus
+
+The composer border highlights only while its textarea has focus. Tapping the mic releases editor focus without changing the insertion range. Recording uses the red mic icon, not an extra accent border. Keyboard navigation retains the mic focus ring. The blue slash key marks an available action, not retained focus.
+
 ## Keyboard Shortcuts
+
+With terminal input focused, Ctrl+Enter sends `ESC [ 13 ; 5 u` when Kitty keyboard flag 1 is active. Identified ego sessions receive the same encoding without negotiation to preserve BusySteer; current ego does not enable its Reedline Kitty guard. Legacy shells and other nonnegotiating agents receive CR. In enhanced mode, Control plus Shift or Alt retains those modifiers in the CSI u parameter. Plain Enter remains CR, Shift+Enter remains ESC CR, legacy Alt+Enter remains CR, and Cmd+Enter stays available to app shortcuts. This applies to desktop and browser/remote grid terminals; Compose has its own editor shortcuts.
 
 ### Terminal Management
 
@@ -39,12 +67,28 @@ Consolidated reference for all terminal behaviors, keyboard shortcuts, and confi
 | Shift+Wheel | Force scrollback scroll, never sent to the app |
 
 **Wheel vs. mouse-reporting apps.** When an app enables mouse tracking, the wheel
-is forwarded to it as SGR mouse codes — both in the alternate screen (vim,
-lazygit, htop) **and** on the primary screen (e.g. `grok --no-alt-screen`).
-Those apps own the viewport and scroll their own conversation. Hold **Shift**
-to force TUIC scrollback scrolling regardless of mouse mode (consistent with
-Shift bypassing mouse reporting for clicks/selection). The scrollbar thumb
-always moves TUIC history.
+is forwarded to it as SGR mouse codes whenever mouse reporting is on, in **either**
+buffer — the alternate screen (vim, lazygit, htop) and inline fullscreen TUIs in the
+main buffer alike (e.g. `grok --no-alt-screen`, or Claude Code, which enables mouse
+tracking without switching to the alt screen). Hold **Shift** to force scrollback
+scrolling regardless of mouse mode (consistent with Shift bypassing mouse reporting
+for clicks/selection). The scrollbar thumb always moves TUIC history.
+
+**Quantization (forwarded to an app).** A physical wheel notch or trackpad flick
+delivers a burst of many small-delta DOM wheel events (macOS reports the whole
+momentum decay, not just the initial motion). The forwarded path accumulates those
+pixel deltas and emits one SGR notch per full line height crossed, capped at 3 notches
+per event in pixel mode (to match native terminal behavior for a single discrete mouse
+click); the residual resets on direction reversal and when the gesture goes idle
+(200 ms). Line-mode devices (`deltaMode` 1) are rounded to whole lines and clamped to
+the viewport row count; page-mode devices (`deltaMode` 2) emit `viewportRows - 1`
+notches per event.
+
+**Scrollback scrolling.** The scrollback path (no mouse reporting, or Shift held) is
+not quantized: pixel deltas, normalized from line/page mode, drive smooth fractional
+scrolling. Gesture acceleration ramps from 0.5x (first screenful of travel) to 1.0x
+(after 2 screens) and is capped at 2.0x (after 4 screens); it resets on direction
+reversal and when the gesture ends.
 
 ### Split Panes
 
@@ -84,12 +128,14 @@ always moves TUIC history.
 |----------|--------|
 | Cmd+P | Command palette |
 | Cmd+Shift+K | Prompt library |
-| Cmd+R | Run saved command |
-| Cmd+Shift+R | Edit saved command |
+| Cmd+Shift+R | Run saved command |
+| Cmd+R | Reload active web/preview tab |
 | Cmd+Shift+F | Search file contents |
-| Cmd+Ctrl+1–9 | Quick branch switch (hold Cmd+Ctrl, press number) |
+| Cmd+Ctrl+1–9 | Quick branch switch (hold Cmd+Ctrl, press number); in the Global Workspace it switches to tab N |
 
 ### Zoom
+
+Desktop terminal Chat and AI Chat use the shared scale in `styles/chat-tokens.css`: 14px plus the terminal font-size delta from the configured default, bounded to 8–32px. Terminal Chat reads its own terminal; AI Chat reads the active terminal and uses zero delta when none is active. Reset restores the 14px reading size. Mobile retains its device-local reading preference.
 
 | Shortcut | Action |
 |----------|--------|
@@ -103,10 +149,10 @@ always moves TUIC history.
 Auto-copies selected text to clipboard when text is selected in terminal. Configurable in settings (`copy_on_select`, default: on).
 
 ### URL Click
-Cmd+Click on URLs in terminal output opens them in the system browser. URL detection handled by the native terminal link parser.
+Cmd+Click on URLs in terminal output opens them in the system browser. URL detection handled by the native terminal link parser. Dotted link underlines and solid hover underlines, including soft-wrapped file URLs, follow the text during smooth scrolling. Verified underlines remain visible when unrelated cells or full grid frames redraw; changed link text removes the old underline before asynchronous verification completes.
 
 ### File Path Click
-Clickable file paths in terminal output (absolute and relative paths with known extensions). Opens in IDE or markdown viewer.
+Clickable file paths in terminal output resolve against the terminal working directory when relative. Sentence periods are excluded from heuristic path targets, including paths in soft-wrapped lines. Existing files open in their viewer or editor; directories open in the File Browser.
 
 ### Tab Features
 - **Middle-click** closes tab
@@ -134,3 +180,64 @@ Clickable file paths in terminal output (absolute and relative paths with known 
 | `suggest_followups` | `true` | Show suggested follow-up actions from agents |
 | `bell_style` | `"visual"` | Terminal bell: "none", "visual", "sound", "both" |
 | `prevent_sleep_when_busy` | `false` | Prevent system sleep while terminal is busy |
+
+### Mobile queued prompt disclosure
+
+The mobile CLI/Chat queued panel shows only entries whose server origin is `user_command`; server notices and spawned initial prompts stay in the FIFO but do not appear or count here. Clear all removes only the listed user prompt IDs. Hide/Show folds the item list into one count control. It retains the existing server FIFO snapshot and count, with no second queue. Successful snapshots with no user prompts reset the local disclosure; newly queued work opens again. Cancel and Clear all remain available after reopening, and read/action errors remain visible while hidden.
+
+### Collapsed Compose queue count
+
+The collapsed handle has transparent chrome and muted text at rest. Hover or keyboard focus reveals its background and border. The label and queue count stay fully opaque.
+
+The CLI Compose button shows a muted count pill for all pending FIFO entries,
+including user commands and TUIC messages. It hides at zero and follows the
+backend session state without opening the editor. Hover or keyboard focus loads
+the command/message breakdown; the count remains available if details fail.
+
+### Compose editor size
+
+Terminal Compose uses the shared auto-grow control bounds: one control line when empty (36px desktop, 44px touch), intrinsic CodeMirror growth for newlines and wrapping, and the existing 96px editor maximum. Longer drafts scroll inside the editor. Clearing or successfully submitting a draft restores the minimum. The queue list keeps its independent height cap.
+
+### Compose editor shortcuts
+
+The newline legend shows only Ctrl+Enter. A panel-relative CSS container query hides shortcut hints at widths up to 640px, including split terminals inside a wide window. The footer does not wrap its hints around the action controls.
+
+In the terminal Compose panel, Enter sends the draft. Ctrl+Enter and Shift+Enter insert a new line. Shift+Ctrl+Enter queues for the next idle moment when an agent is detected. Enter used to confirm an IME candidate does not submit the draft. These shortcuts do not change native terminal keybar controls.
+
+## Mobile stream recovery
+
+Mobile CLI output releases a terminal subscription when the transport reports exit, including retry exhaustion. Visibility resume starts a fresh subscription if none remains and the session poll has not confirmed the session ended. Retired stream callbacks cannot close a newer subscription or change its connection error state. Handshake retries retain their three-second initial delay and 30-second backoff cap; hidden pages do not start a scheduled retry.
+
+### Unsized pane diagnostics
+
+Canvas sizing retries run only for a visible pane connected to the layout. A pane
+that stays unsized for 120 animation frames logs a warning. Hiding or closing the
+pane cancels the retry; showing it starts a new measurement.
+
+Restored PTY sessions attach their event listeners before the first layout pass.
+The reconnect resize waits for that attachment and reuses successful listeners
+instead of adding another API-error consumer. If the initial handshake failed,
+reconnect retries the attachment once. Suspend detaches them; resume attaches the replacement PTY once.
+
+Claude native question cards in desktop PTY Chat and mobile keep wrapped answer
+labels separate from the selected option's monospace preview. They retain the
+question tabs and the native Chat about this action. Hidden options still use
+explicit previous/next/select controls rather than guessed labels.
+
+### Expanded Chat tool rows
+
+Expanded tool rows use theme colours for Bash/execute commands, flags, strings and operators. Read, Edit and Write keep the tool name separate from the path; other tools retain readable text. The collapsed activity summary and row sizing are unchanged.
+
+### Pending Chat prompts
+
+In an open terminal Chat view, a submitted composer prompt appears immediately as a muted **Pending** bubble. Several prompts stay in send order while the agent works. A matching new user message from the native transcript replaces its bubble and removes older unmatched bubbles, since the CLI handles sends in order. A local slash command or rewritten prompt therefore cannot block later receipts. Adapter-redacted or truncated text can remain pending until a later matching prompt arrives or Chat closes. Failed sends remove their own feedback; ordinary activity and idle signals do not. This applies to the shared Claude, Codex, Grok and ego transcript presentation, but does not add queueing support to a CLI that lacks it. TUIC cannot preview prompts typed in the hidden CLI or sent outside this client. The CLI owns its queue; pending bubbles have no Cancel action and are not persisted when Chat closes.
+
+### Recall a host-owned pending prompt
+
+With an empty desktop Compose editor, press **ArrowUp** to withdraw the newest
+user command from TUIC's idle-gate queue and edit it. Notices and initial prompts
+are not recalled. The command is restored only if queue removal succeeds before
+delivery. A normal Send's muted **Pending** bubble belongs to the native CLI and
+cannot be withdrawn by this action. AI Chat's shared ACP composer supports the
+same shortcut for text-only queued turns. Nonempty drafts and slash menus keep
+their normal arrow-key behavior. See [coverage and evidence](chat-wrap-recall-evidence.md).

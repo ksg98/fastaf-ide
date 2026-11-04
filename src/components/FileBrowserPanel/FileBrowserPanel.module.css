@@ -28,6 +28,7 @@
 /* Its own window: fill it, and no divider — nothing sits to its left. */
 .detached {
   width: 100%;
+  min-width: 0;
   max-width: 100%;
   border-left: none;
 }
@@ -90,6 +91,67 @@
   .headerTools .headerBtn {
     width: 26px;
   }
+}
+
+/* ── Outside folder ──────────────────────────────────────────────────── */
+
+/* Browsing a folder outside the repository: its path (the end of it, where
+   the name is) and the way back, in one quiet strip 10px from both edges. */
+.externalRoot {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-h);
+  margin: 8px 10px 0;
+  padding: 0 3px 0 8px;
+  background: var(--wash-0);
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+}
+
+.externalRootIcon {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.externalRootPath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.externalRootBack {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.externalRootBack:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.externalRootBack:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
 }
 
 /* ── Search row ──────────────────────────────────────────────────────── */
@@ -322,6 +384,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A symbolic link: "file link → /target" after the name, muted, in the same
+   line (rows stay 28px); the name's ellipsis cuts it first. */
+.entryLink {
+  margin-left: 6px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
 }
 
 /* Filename results: the basename, then its folder in muted 12px (Codex's

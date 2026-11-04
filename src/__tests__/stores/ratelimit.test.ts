@@ -31,7 +31,7 @@ describe("rateLimitStore", () => {
 			testInScope(() => {
 				const info = makeInfo("sess-1");
 				store.addRateLimit(info);
-				expect(store.getRateLimitInfo("sess-1")).toBeDefined();
+				expect(store.getRateLimitInfo("sess-1")).toEqual(info);
 			});
 		});
 	});

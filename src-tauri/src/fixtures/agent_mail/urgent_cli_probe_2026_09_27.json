@@ -1,0 +1,22 @@
+{
+  "capture_date": "2026-09-27",
+  "surface": "TUICommander :9876 managed PTY, session input and output",
+  "scenario": "Send a payload-free notice plus Enter while the CLI is working on sleep 45; then send its immediate-submit key while a second sleep 45 is active.",
+  "urgent_delivery_contract": "Use Enter only. The CLI presents the queued notice at its next tool boundary. Immediate-submit gestures were measured for a possible separate interrupt feature and are not used for urgent mail.",
+  "claude": {
+    "version": "2.1.280",
+    "enter_observation": "Press up to edit queued messages; ctrl+enter to send now",
+    "enter_effect": "Notice reached the model only after the sleep result.",
+    "immediate_key": "\u001b[13;5u",
+    "immediate_observation": "Bash(sleep 45) -> Interrupted · What should Claude do instead?; notice entered the new turn.",
+    "limit": "The interrupted shell command did not complete, so the probe proves interruption and notice processing, not continuation of that command."
+  },
+  "codex": {
+    "version": "0.157.1",
+    "enter_observation": "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+    "enter_effect": "Notice reached the model at a tool boundary; the agent reported reading the inbox before the background sleep completed.",
+    "immediate_key": "\u001b",
+    "immediate_observation": "Model interrupted to submit steer instructions; inbox read occurred while ps still showed sleep 45 at 26 seconds.",
+    "limit": "The model turn was interrupted; the child sleep process continued and then exited normally."
+  }
+}

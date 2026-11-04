@@ -71,8 +71,8 @@ export const McpPopup: Component<{ onOpenSettings: (tab: string, section?: strin
 
 	const openServicesTab = () => {
 		mcpPopupStore.close();
-		// The upstream MCP block is far below the fold of the Services tab.
-		props.onOpenSettings("services", SETTINGS_SECTION_UPSTREAM_MCP);
+		// The upstream MCP block is far below the fold of the MCP tab.
+		props.onOpenSettings("mcp", SETTINGS_SECTION_UPSTREAM_MCP);
 	};
 
 	// Merge config servers with status for display — config is source of truth for the list
@@ -166,7 +166,7 @@ export const McpPopup: Component<{ onOpenSettings: (tab: string, section?: strin
 					</div>
 
 					<div class={s.footer}>
-						<button class={s.footerLink} onClick={openServicesTab}>
+						<button type="button" class={s.footerLink} onClick={openServicesTab}>
 							Manage in Settings
 						</button>
 					</div>

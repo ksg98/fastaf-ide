@@ -1,36 +1,26 @@
 import { describe, expect, it } from "vitest";
-import type { FileClassification, Finding } from "../../stores/aiTriageStore";
 import { flattenReviewFindings, isPostable, postableFindings } from "../../stores/prReview";
+import type { ReviewedFile, ReviewFinding } from "../../types";
 
-function finding(overrides: Partial<Finding> = {}): Finding {
+function finding(overrides: Partial<ReviewFinding> = {}): ReviewFinding {
 	return {
 		path: "src/a.ts",
 		line: 10,
 		hunk: null,
 		severity: "bug",
-		message: "boom",
 		confidence: 0.9,
+		message: "boom",
 		...overrides,
 	};
 }
 
-function file(overrides: Partial<FileClassification> = {}): FileClassification {
-	return {
-		path: "src/a.ts",
-		relevance: "high",
-		category: "business-logic",
-		risk: "behavioral-change",
-		summary: "the file",
-		source: "llm",
-		additions: 1,
-		deletions: 0,
-		...overrides,
-	};
+function file(overrides: Partial<ReviewedFile> = {}): ReviewedFile {
+	return { path: "src/a.ts", summary: "the file", findings: [], ...overrides };
 }
 
 describe("flattenReviewFindings", () => {
 	it("flattens per-file findings into an ordered list, preserving severity/confidence/message", () => {
-		const files: FileClassification[] = [
+		const files: ReviewedFile[] = [
 			file({ path: "src/a.ts", summary: "A", findings: [finding({ path: "src/a.ts", severity: "bug" })] }),
 			file({
 				path: "src/b.ts",
@@ -44,7 +34,7 @@ describe("flattenReviewFindings", () => {
 		const out = flattenReviewFindings(files);
 		expect(out).toHaveLength(3);
 		expect(out.map((f) => f.severity)).toEqual(["bug", "risk", "nit"]);
-		// confidence and message survive the flatten unchanged (no re-filtering)
+		// The confidence gate already ran in Rust; this side re-filters nothing.
 		expect(out[1].confidence).toBe(0.75);
 		expect(out[1].message).toBe("boom");
 		// each finding carries its owning file's summary for context
@@ -53,7 +43,7 @@ describe("flattenReviewFindings", () => {
 	});
 
 	it("produces stable, unique ids per (path, line, per-file index)", () => {
-		const files: FileClassification[] = [
+		const files: ReviewedFile[] = [
 			file({
 				path: "src/a.ts",
 				findings: [
@@ -76,7 +66,11 @@ describe("flattenReviewFindings", () => {
 	});
 
 	it("returns an empty list when no file has findings", () => {
-		expect(flattenReviewFindings([file({ findings: [] }), file({ findings: undefined })])).toEqual([]);
+		expect(flattenReviewFindings([file({ findings: [] }), file({ path: "src/b.ts", findings: [] })])).toEqual([]);
+	});
+
+	it("is empty rather than undefined when ego reviewed nothing", () => {
+		expect(flattenReviewFindings([])).toEqual([]);
 	});
 });
 

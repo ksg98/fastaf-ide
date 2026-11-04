@@ -114,6 +114,37 @@ describe("panelSync", () => {
 			createPanelSyncReceiver("activity");
 			expect(mockOnCloseRequested).not.toHaveBeenCalled();
 		});
+
+		it("disposing the panel-sync listener twice does not surface an unhandled rejection", async () => {
+			// win.listen() (Window/WebviewWindow) returns Tauri's raw UnlistenFn —
+			// `async () => _unlisten(...)`. A second dispose after the backend already
+			// dropped the eventId (duplicate cleanup, or a webview reload racing
+			// onCleanup) rejects *inside* that async fn, surfacing as the
+			// "[boot rejection] undefined is not an object (listeners[eventId].handlerId)"
+			// unhandled rejection unless this caller guards it the way invoke.ts's
+			// listen() already does.
+			mockWindowListen.mockImplementation(() =>
+				Promise.resolve(() =>
+					Promise.reject(new Error("undefined is not an object (evaluating 'listeners[eventId].handlerId')")),
+				),
+			);
+
+			const { destroy } = createPanelSyncReceiver("activity");
+			// Let win.listen()'s promise resolve and push its cleanup into `cleanups`
+			// (fake timers active in this suite: advance to flush microtasks).
+			await vi.advanceTimersByTimeAsync(0);
+
+			const seen: unknown[] = [];
+			const onUnhandled = (reason: unknown) => seen.push(reason);
+			process.on("unhandledRejection", onUnhandled);
+
+			expect(() => destroy()).not.toThrow();
+			expect(() => destroy()).not.toThrow();
+
+			await vi.advanceTimersByTimeAsync(20);
+			process.off("unhandledRejection", onUnhandled);
+			expect(seen).toEqual([]);
+		});
 	});
 
 	describe("createPanelSyncProvider", () => {

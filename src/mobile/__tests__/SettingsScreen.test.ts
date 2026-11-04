@@ -22,3 +22,11 @@ describe("SettingsScreen connection status", () => {
 		expect(source).toMatch(/props\.isConnected\s*\?\s*"Connected"\s*:\s*"Disconnected"/);
 	});
 });
+
+describe("SettingsScreen keep-awake preference", () => {
+	// Catches: the toggle persists under a different key than the one the capture reads.
+	it("persists the same key holdScreenAwake reads", () => {
+		expect(source).toContain('import { KEEP_AWAKE_KEY } from "../../utils/screenWakeLock"');
+		expect(source).toMatch(/localStorage\.setItem\(KEEP_AWAKE_KEY,\s*String\(next\)\)/);
+	});
+});

@@ -37,10 +37,10 @@ export function useActiveTerminalSync(): void {
 				if (!repoPath) return;
 				const repo = repositoriesStore.state.repositories[repoPath];
 				if (!repo) return;
-				for (const [branchName, branch] of Object.entries(repo.branches)) {
+				for (const [branchName, branch] of Object.entries(repo.workspaces)) {
 					if (!branch.terminals.includes(id)) continue;
 					if (branch.lastActiveTerminal !== id) {
-						repositoriesStore.setBranch(repoPath, branchName, { lastActiveTerminal: id });
+						repositoriesStore.setWorkspace(repoPath, branchName, { lastActiveTerminal: id });
 					}
 					break;
 				}

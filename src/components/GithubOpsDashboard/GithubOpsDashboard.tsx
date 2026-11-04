@@ -6,6 +6,7 @@ import { repositoriesStore } from "../../stores/repositories";
 import { type ShellState, terminalsStore } from "../../stores/terminals";
 import type { BranchPrStatus, ImprovementFocus, ImprovementProposal } from "../../types";
 import { pathBasename } from "../../utils/pathUtils";
+import { PR_READINESS_LABELS, PR_READINESS_SEVERITY, prReadinessOf } from "../../utils/prReadiness";
 import s from "./GithubOpsDashboard.module.css";
 
 /** Live auto-fix session derived from the terminals store. */
@@ -37,24 +38,6 @@ function shellStateLabel(state: ShellState): string {
 	return t("github.ops.starting", "Starting");
 }
 
-/** Derive a CI/merge readiness verdict from a PR's checks + mergeable state. */
-function ciVerdict(pr: BranchPrStatus): Verdict {
-	if (pr.mergeable === "CONFLICTING") return "critical";
-	if (pr.checks.failed > 0) return "critical";
-	if (pr.checks.pending > 0) return "warn";
-	if (pr.is_draft) return "muted";
-	return "ok";
-}
-
-/** Short label for a CI/merge verdict. */
-function ciVerdictLabel(pr: BranchPrStatus): string {
-	if (pr.mergeable === "CONFLICTING") return t("github.ops.conflicts", "Conflicts");
-	if (pr.checks.failed > 0) return t("github.ops.ciFailing", "CI failing");
-	if (pr.checks.pending > 0) return t("github.ops.ciPending", "CI pending");
-	if (pr.is_draft) return t("github.ops.draft", "Draft");
-	return t("github.ops.ready", "Ready");
-}
-
 /** Pick the CSS badge class for a verdict. */
 function badgeClass(verdict: Verdict): string {
 	switch (verdict) {
@@ -69,11 +52,14 @@ function badgeClass(verdict: Verdict): string {
 	}
 }
 
+/** The card heading for a proposal: its own title, or the issue title it would file. */
 function proposalTitle(p: ImprovementProposal): string {
 	return p.title || p.issue_title;
 }
 
-/** GitHub Ops dashboard — five live columns for a single repo. */
+/** GitHub Ops dashboard — five live columns for a single repo. Review findings
+ * and Proposals run on FastAF's built-in AI engine; a failed review shows its
+ * error on the card instead of reading as still working. */
 export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 	const opsState = () => githubOpsStore.getState(props.repoPath);
 
@@ -83,27 +69,34 @@ export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 	const scanRunning = () => opsState().improvementScanRunning;
 	const scanError = () => opsState().improvementScanError;
 	const [creatingIssueFor, setCreatingIssueFor] = createSignal<number | null>(null);
+	const [issueError, setIssueError] = createSignal<string | null>(null);
 
+	// The store already records the scan error and the column renders it, so the
+	// rejection is swallowed here rather than left to become an unhandled one.
 	const runScan = (focus: ImprovementFocus) => {
-		void githubOpsStore.runImprovementScan(props.repoPath, focus);
+		void githubOpsStore.runImprovementScan(props.repoPath, focus).catch(() => {});
 	};
 
 	const createProposalIssue = async (proposal: ImprovementProposal, index: number) => {
 		setCreatingIssueFor(index);
+		setIssueError(null);
 		try {
 			await githubOpsStore.createIssueFromProposal(props.repoPath, proposal);
+		} catch (err) {
+			// gh's own sentence — "gh: Not Found" names the missing repo scope and a
+			// button that silently does nothing names nothing.
+			setIssueError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setCreatingIssueFor(null);
 		}
 	};
-
 	// Auto-fix sessions — LIVE from the terminals store, scoped to this repo via
 	// the branch → terminals mapping (branches named `autofix/issue-*`).
 	const autofixSessions = createMemo<AutofixSession[]>(() => {
 		const repo = repositoriesStore.get(props.repoPath);
 		if (!repo) return [];
 		const out: AutofixSession[] = [];
-		for (const [branchName, branch] of Object.entries(repo.branches)) {
+		for (const [branchName, branch] of Object.entries(repo.workspaces)) {
 			if (!AUTOFIX_BRANCH_RE.test(branchName)) continue;
 			for (const termId of branch.terminals) {
 				const term = terminalsStore.get(termId);
@@ -151,14 +144,20 @@ export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 									<div class={s.card}>
 										<div class={s.cardRow}>
 											<span class={s.cardLabel}>PR #{r.pr_number}</span>
-											<span class={badgeClass(r.done ? "ok" : "warn")}>
-												{r.done ? t("github.ops.done", "Done") : (r.phase ?? t("github.ops.working", "Working"))}
+											<span class={badgeClass(r.error ? "critical" : r.done ? "ok" : "warn")}>
+												{r.error
+													? t("github.ops.failed", "failed")
+													: r.done
+														? t("github.ops.done", "Done")
+														: t("github.ops.working", "Working")}
 											</span>
 										</div>
 										<span class={s.cardSub}>
 											{t("github.ops.findings", "Findings")}: {r.findingsCount}
-											<Show when={r.llm_model}> · {r.llm_model}</Show>
 										</span>
+										<Show when={r.error}>
+											<span class={s.errorText}>{r.error}</span>
+										</Show>
 									</div>
 								)}
 							</For>
@@ -239,7 +238,7 @@ export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 					<div class={s.scanButtons}>
 						<For each={IMPROVEMENT_FOCUSES}>
 							{(focus) => (
-								<button class={s.scanButton} disabled={scanRunning()} onClick={() => runScan(focus)}>
+								<button type="button" class={s.scanButton} disabled={scanRunning()} onClick={() => runScan(focus)}>
 									{focus}
 								</button>
 							)}
@@ -247,6 +246,9 @@ export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 					</div>
 					<Show when={scanError()}>
 						<div class={s.errorText}>{scanError()}</div>
+					</Show>
+					<Show when={issueError()}>
+						<div class={s.errorText}>{issueError()}</div>
 					</Show>
 					<Show
 						when={proposals().length > 0}
@@ -274,6 +276,7 @@ export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 											</Show>
 										</div>
 										<button
+											type="button"
 											class={s.issueButton}
 											disabled={creatingIssueFor() === i()}
 											onClick={() => void createProposalIssue(p, i())}
@@ -312,7 +315,9 @@ export const GithubOpsDashboard: Component<{ repoPath: string }> = (props) => {
 											<span class={s.cardLabel}>
 												PR #{pr.number} {pr.title}
 											</span>
-											<span class={badgeClass(ciVerdict(pr))}>{ciVerdictLabel(pr)}</span>
+											<span class={badgeClass(PR_READINESS_SEVERITY[prReadinessOf(pr)])}>
+												{PR_READINESS_LABELS[prReadinessOf(pr)]}
+											</span>
 										</div>
 										<span class={s.cardSub}>
 											{pr.checks.passed}/{pr.checks.total} {t("github.ops.checks", "checks")}

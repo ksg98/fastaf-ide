@@ -18,7 +18,7 @@
 import { type EditorState, type Extension, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
 import { formatRelativeTime } from "../../utils/time";
-import { type ChangeType, changesField, type GutterChange } from "./gitGutter";
+import { type ChangeType, changesField, type GutterChange, replacesWholeDoc } from "./gitGutter";
 
 /** Mirrors the Rust `BlameLine` struct (git.rs). */
 export interface BlameLine {
@@ -52,7 +52,8 @@ const blameField = StateField.define<BlameLine[]>({
 	create: () => [],
 	update(value, tr) {
 		for (const e of tr.effects) if (e.is(setBlame)) return e.value;
-		return value;
+		// Blame is line-indexed against the document it was fetched for.
+		return replacesWholeDoc(tr) ? [] : value;
 	},
 });
 

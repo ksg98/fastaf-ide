@@ -32,6 +32,24 @@ describe("CommandWidget", () => {
 		expect(texts).toContain("/help");
 	});
 
+	it("offers Codex's supported status command instead of unsupported help", () => {
+		const { container } = render(() => <CommandWidget sessionId="s1" agentType="codex" onDismiss={() => {}} />);
+		const labels = Array.from(container.querySelectorAll("button")).map((button) => button.textContent);
+		expect(labels).toContain("/status");
+		expect(labels).not.toContain("/help");
+	});
+
+	it("sends the supported Codex status command from the widget", async () => {
+		const { container } = render(() => <CommandWidget sessionId="s1" agentType="codex" onDismiss={() => {}} />);
+		fireEvent.click(
+			Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "/status")!,
+		);
+		await waitFor(() => expect(rpc).toHaveBeenCalledWith("write_pty", { sessionId: "s1", data: "\r" }));
+		expect(
+			vi.mocked(rpc).mock.calls.filter(([command, args]) => command === "write_pty" && args?.data === "/status"),
+		).toHaveLength(1);
+	});
+
 	it("renders model buttons for claude-code agent", () => {
 		const { container } = render(() => <CommandWidget sessionId="s1" agentType="claude" onDismiss={() => {}} />);
 		const buttons = container.querySelectorAll("button");
@@ -50,7 +68,11 @@ describe("CommandWidget", () => {
 		await waitFor(() => {
 			expect(rpc).toHaveBeenCalledWith("write_pty", {
 				sessionId: "s1",
-				data: "\x15/compact",
+				data: "\x15",
+			});
+			expect(rpc).toHaveBeenCalledWith("write_pty", {
+				sessionId: "s1",
+				data: "/compact",
 			});
 			expect(rpc).toHaveBeenCalledWith("write_pty", {
 				sessionId: "s1",
@@ -69,7 +91,11 @@ describe("CommandWidget", () => {
 		await waitFor(() => {
 			expect(rpc).toHaveBeenCalledWith("write_pty", {
 				sessionId: "s1",
-				data: "\x15/model opus",
+				data: "\x15",
+			});
+			expect(rpc).toHaveBeenCalledWith("write_pty", {
+				sessionId: "s1",
+				data: "/model opus",
 			});
 			expect(rpc).toHaveBeenCalledWith("write_pty", {
 				sessionId: "s1",
@@ -96,13 +122,14 @@ describe("CommandWidget", () => {
 		});
 	});
 
-	it("does not render model section for aider", () => {
+	// Catches: removed harness commands remaining available on mobile terminals.
+	it("does not render agent commands or models for a removed harness", () => {
 		const { container } = render(() => <CommandWidget sessionId="s1" agentType="aider" onDismiss={() => {}} />);
 		const buttons = container.querySelectorAll("button");
 		const texts = Array.from(buttons).map((b) => b.textContent);
-		expect(texts).toContain("/clear");
-		expect(texts).toContain("/help");
-		expect(texts).toContain("/tokens");
+		expect(texts).not.toContain("/clear");
+		expect(texts).not.toContain("/help");
+		expect(texts).not.toContain("/tokens");
 		expect(texts).not.toContain("opus");
 	});
 

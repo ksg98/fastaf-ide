@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { marked } from "marked";
+import { describe, expect, it, vi } from "vitest";
 import {
 	CONVENTION_HEADER,
 	ensureConventionHeader,
 	findSourceMatch,
+	findTweakCommentBlocks,
 	injectTweakSentinels,
+	insertTweakBlockComment,
 	insertTweakComment,
 	OverlappingCommentError,
 	parseTweakComments,
@@ -19,7 +22,231 @@ import {
 /** Spread a findSourceMatch result into String.slice(start, end) arguments. */
 const offsets = (m: { start: number; end: number }): [number, number] => [m.start, m.end];
 
+const legacyHeader =
+	"<!-- tweak-comments v1: inline review comments.\n" +
+	"     Format: [tweak:begin:ID]highlighted text[tweak:end:ID @ISO-TIMESTAMP\n" +
+	"     comment body (free text, may span multiple lines)\n" +
+	"     ] — where [ ] are the HTML comment delimiters <!-- -->.\n" +
+	"     The only escape is '-->' → '--&gt;' inside the comment body.\n" +
+	"     Read each comment, apply the feedback to the highlighted text,\n" +
+	"     then remove the tweak markers. -->\n\n";
+
+function renderedText(source: string): string {
+	const container = document.createElement("div");
+	container.innerHTML = marked.parse(source) as string;
+	return container.textContent?.replace(/\s+/g, " ").trim() ?? "";
+}
+
 describe("tweakComments parser/serializer", () => {
+	describe("block comments", () => {
+		it("maps rendered blocks to exact raw markdown ranges across formatting and links", () => {
+			const source = [
+				"# Product thesis",
+				"",
+				"A **formatted** paragraph with a [reference](SPEC.md).",
+				"",
+				"- first item",
+				"- second item",
+			].join("\n");
+
+			const blocks = findTweakCommentBlocks(source);
+
+			expect(blocks.map(({ start, end, tag }) => ({ source: source.slice(start, end), tag }))).toEqual([
+				{ source: "# Product thesis", tag: "H1" },
+				{ source: "A **formatted** paragraph with a [reference](SPEC.md).", tag: "P" },
+				{ source: "- first item\n- second item", tag: "UL" },
+				{ source: "- first item", tag: "LI" },
+				{ source: "- second item", tag: "LI" },
+			]);
+		});
+
+		it("stores a block comment before the exact block without wrapping or changing its markdown", () => {
+			const source = "# Heading\n\nParagraph with **formatting**.";
+			const block = findTweakCommentBlocks(source)[0];
+			const out = insertTweakBlockComment(
+				source,
+				{
+					id: "c_block",
+					highlighted: source.slice(block.start, block.end),
+					comment: "Clarify this section",
+					createdAt: "2026-09-22T12:00:00.000Z",
+				},
+				block,
+			);
+
+			expect(out).toContain("<!--tweak:block:c_block @2026-09-22T12:00:00.000Z\nClarify this section-->\n# Heading");
+			expect(injectTweakSentinels(out)).toContain("# Heading\n\nParagraph with **formatting**.");
+			expect(parseTweakComments(out)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ id: "c_block", anchor: "block", comment: "Clarify this section" }),
+				]),
+			);
+			expect(removeTweakComment(out, "c_block")).toBe(source);
+		});
+
+		// Catches: placing a marker between sibling bullets and splitting one list into two.
+		it("stores a task comment under its own bullet without splitting the list", () => {
+			const source = "- first\n- [ ] chosen\n- last\n";
+			const item = findTweakCommentBlocks(source).find(
+				(block) => source.slice(block.start, block.end) === "- [ ] chosen",
+			)!;
+			const out = insertTweakBlockComment(
+				source,
+				{
+					id: "c_task",
+					highlighted: "- [ ] chosen",
+					comment: "Do this first",
+					createdAt: "2026-09-27T12:00:00.000Z",
+				},
+				item,
+			);
+			expect(out).toContain(
+				"- [ ] chosen\n  <!--tweak:item:c_task @2026-09-27T12:00:00.000Z\n  Do this first-->\n- last",
+			);
+			const rendered = document.createElement("div");
+			rendered.innerHTML = marked.parse(out) as string;
+			expect(rendered.querySelectorAll("ul")).toHaveLength(1);
+			expect(Array.from(rendered.querySelectorAll("ul > li")).map((item) => item.textContent?.trim())).toEqual([
+				"first",
+				"chosen",
+				"last",
+			]);
+			expect(parseTweakComments(out)).toEqual([
+				expect.objectContaining({ id: "c_task", highlighted: "- [ ] chosen", anchor: "block" }),
+			]);
+			expect(removeTweakComment(out, "c_task")).toBe(source);
+		});
+
+		// Catches: attaching a child note to its parent or consuming nested source in the parent anchor.
+		it("anchors parent and nested comments separately, preserving their Markdown list", () => {
+			const source = "- parent\n  continuation\n  - child\n- sibling\n";
+			const parent = findTweakCommentBlocks(source).find(
+				(block) => source.slice(block.start, block.end) === "- parent\n  continuation",
+			)!;
+			let out = insertTweakBlockComment(
+				source,
+				{
+					id: "c_parent",
+					highlighted: "- parent\n  continuation",
+					comment: "Parent note",
+					createdAt: "2026-09-27T12:00:00.000Z",
+				},
+				parent,
+			);
+			const child = findTweakCommentBlocks(out).find((block) => out.slice(block.start, block.end) === "  - child")!;
+			out = insertTweakBlockComment(
+				out,
+				{ id: "c_child", highlighted: "  - child", comment: "Child note", createdAt: "2026-09-27T12:01:00.000Z" },
+				child,
+			);
+			expect(parseTweakComments(out).map((comment) => [comment.id, comment.highlighted])).toEqual([
+				["c_parent", "- parent\n  continuation"],
+				["c_child", "  - child"],
+			]);
+			expect(out).toContain("  continuation\n  <!--tweak:item:c_parent");
+			expect(out).toContain("  - child\n    <!--tweak:item:c_child");
+			expect(marked.parse(injectTweakSentinels(out))).toMatch(
+				/<ul>[\s\S]*<li>parent[\s\S]*<ul>[\s\S]*<li>child<\/li>[\s\S]*<\/ul>[\s\S]*<li>sibling<\/li>[\s\S]*<\/ul>/,
+			);
+		});
+
+		// Catches: a temporary marker changing a file that originally has no final newline.
+		it("removes an item comment without adding a final newline", () => {
+			const source = "- first\n- last";
+			const item = findTweakCommentBlocks(source).find((block) => source.slice(block.start, block.end) === "- last")!;
+			const out = insertTweakBlockComment(
+				source,
+				{ id: "c_eof", highlighted: "- last", comment: "Check ending", createdAt: "2026-09-27T12:00:00.000Z" },
+				item,
+			);
+			expect(removeTweakComment(out, "c_eof")).toBe(source);
+		});
+
+		// marked normalizes line endings before it lexes, so its token lengths are
+		// LF lengths. A CRLF file must still map to exact raw ranges, or the marker
+		// is written into the middle of a word on disk.
+		const crlfSource = "# Title\r\n\r\nFirst para\r\nline two\r\n\r\nSecond para\r\n";
+
+		it("maps blocks to exact raw ranges in a CRLF source", () => {
+			const blocks = findTweakCommentBlocks(crlfSource);
+			expect(blocks.map(({ start, end, tag }) => ({ source: crlfSource.slice(start, end), tag }))).toEqual([
+				{ source: "# Title", tag: "H1" },
+				{ source: "First para\r\nline two", tag: "P" },
+				{ source: "Second para", tag: "P" },
+			]);
+		});
+
+		it("maps blocks to exact raw ranges when lines end with a lone CR", () => {
+			const source = "# Title\r\rBody\r";
+			const blocks = findTweakCommentBlocks(source);
+			expect(blocks.map(({ start, end }) => source.slice(start, end))).toEqual(["# Title", "Body"]);
+		});
+
+		it("inserts, parses and removes a block comment in a CRLF source without breaking its line endings", () => {
+			const block = findTweakCommentBlocks(crlfSource)[2];
+			const out = insertTweakBlockComment(
+				crlfSource,
+				{
+					id: "c_crlf",
+					highlighted: crlfSource.slice(block.start, block.end),
+					comment: "Tighten this",
+					createdAt: "2026-09-23T08:00:00.000Z",
+				},
+				block,
+			);
+
+			expect(out).toContain(
+				"line two\r\n\r\n<!--tweak:block:c_crlf @2026-09-23T08:00:00.000Z\nTighten this-->\r\nSecond para\r\n",
+			);
+			expect(parseTweakComments(out)).toEqual([
+				expect.objectContaining({ id: "c_crlf", anchor: "block", highlighted: "Second para" }),
+			]);
+			expect(removeTweakComment(out, "c_crlf")).toBe(crlfSource);
+		});
+
+		it("refuses to insert when the block source changed since the comment was started", () => {
+			const source = "# Heading\n\nOriginal paragraph.";
+			const block = findTweakCommentBlocks(source)[1];
+			const snapshot = source.slice(block.start, block.end);
+			const changed = "# Heading\n\nX\n\nOriginal paragraph.";
+			expect(() =>
+				insertTweakBlockComment(
+					changed,
+					{ id: "c_stale", highlighted: snapshot, comment: "c", createdAt: "2026-09-23T08:00:00.000Z" },
+					block,
+				),
+			).toThrow(/no longer matches/);
+		});
+
+		// Streaming AI Chat re-parses the whole answer on every tick; a document
+		// without block markers must not pay for a full markdown lex.
+		it("does not lex the document when the source has no block marker", () => {
+			const lexer = vi.spyOn(marked, "lexer");
+			try {
+				parseTweakComments(
+					"# Title\n\nHello <!--tweak:begin:c_1-->world<!--tweak:end:c_1 @2026-09-23T08:00:00.000Z\nn-->",
+				);
+				expect(lexer).not.toHaveBeenCalled();
+			} finally {
+				lexer.mockRestore();
+			}
+		});
+
+		it("reuses precomputed blocks instead of lexing again", () => {
+			const source = "<!--tweak:block:c_b @2026-09-23T08:00:00.000Z\nnote-->\n# Heading";
+			const blocks = findTweakCommentBlocks(source);
+			const lexer = vi.spyOn(marked, "lexer");
+			try {
+				expect(parseTweakComments(source, blocks)).toEqual([
+					expect.objectContaining({ id: "c_b", highlighted: "# Heading" }),
+				]);
+				expect(lexer).not.toHaveBeenCalled();
+			} finally {
+				lexer.mockRestore();
+			}
+		});
+	});
+
 	describe("serializeTweakComment", () => {
 		it("wraps highlighted text with begin/end markers containing plain-text body", () => {
 			const out = serializeTweakComment({
@@ -134,6 +361,39 @@ describe("tweakComments parser/serializer", () => {
 			});
 			expect(out).toContain(CONVENTION_HEADER);
 			expect(out.indexOf(CONVENTION_HEADER)).toBe(0);
+		});
+
+		// Catches: the header closes early and exposes its instructions above an inline comment.
+		it("keeps the convention invisible in standard Markdown after an inline comment", () => {
+			const out = insertTweakComment("Hello world.", {
+				id: "c_1",
+				highlighted: "world",
+				comment: "Clarify this word",
+				createdAt: "2026-09-27T12:00:00.000Z",
+			});
+			expect(renderedText(out)).toBe("Hello world.");
+		});
+
+		// Catches: block insertion writes a header that leaks into a standard renderer.
+		it("keeps the convention invisible in standard Markdown after a block comment", () => {
+			const source = "# Heading\n\nBody.";
+			const out = insertTweakBlockComment(
+				source,
+				{ id: "c_1", highlighted: "# Heading", comment: "Clarify", createdAt: "2026-09-27T12:00:00.000Z" },
+				{ start: 0, end: 9 },
+			);
+			expect(renderedText(out)).toBe("Heading Body.");
+		});
+
+		// Catches: item insertion leaves convention text visible above the list.
+		it("keeps the convention invisible in standard Markdown after an item comment", () => {
+			const source = "- first\n- second";
+			const out = insertTweakBlockComment(
+				source,
+				{ id: "c_1", highlighted: "- first", comment: "Clarify", createdAt: "2026-09-27T12:00:00.000Z" },
+				{ start: 0, end: 7 },
+			);
+			expect(renderedText(out)).toBe("first second");
 		});
 
 		it("does not duplicate convention header on subsequent insertions", () => {
@@ -444,6 +704,12 @@ describe("tweakComments parser/serializer", () => {
 			expect(out).toContain("# Title");
 		});
 
+		// Catches: new-header support leaves the legacy header visible in the app renderer.
+		it("strips an existing legacy header from the app rendering path", () => {
+			const out = injectTweakSentinels(legacyHeader + "# Title\n\nBody text.");
+			expect(out).toBe("# Title\n\nBody text.");
+		});
+
 		it("is a no-op on plain markdown without markers", () => {
 			const src = "# Title\n\nSome **bold** text.";
 			expect(injectTweakSentinels(src)).toBe(src);
@@ -451,6 +717,29 @@ describe("tweakComments parser/serializer", () => {
 	});
 
 	describe("ensureConventionHeader", () => {
+		// Catches: an agent reading the file sees instructions for inline markers only.
+		it("describes inline, block, and item markers in raw Markdown", () => {
+			const source = ensureConventionHeader("body");
+			expect(source).toContain("tweak:begin:");
+			expect(source).toContain("tweak:end:");
+			expect(source).toContain("tweak:block:");
+			expect(source).toContain("tweak:item:");
+			expect(source).toContain("immediately before the selected block");
+			expect(source).toContain("after the selected list item");
+		});
+
+		// Catches: editing a legacy file prepends a second convention header.
+		it("does not add a second header to a file with the legacy convention", () => {
+			expect(ensureConventionHeader(legacyHeader + "body")).toBe(legacyHeader + "body");
+		});
+
+		// Catches: removing the final legacy marker leaves stale convention text in the file.
+		it("removes the legacy header when its last comment is deleted", () => {
+			const source =
+				legacyHeader + "Hello <!--tweak:begin:c_1-->world<!--tweak:end:c_1 @2026-09-27T12:00:00.000Z\nnote-->";
+			expect(removeTweakComment(source, "c_1")).toBe("Hello world");
+		});
+
 		it("adds header when missing", () => {
 			const out = ensureConventionHeader("body");
 			expect(out.startsWith(CONVENTION_HEADER)).toBe(true);

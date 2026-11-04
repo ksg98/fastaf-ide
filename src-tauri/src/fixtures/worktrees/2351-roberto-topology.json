@@ -1,0 +1,141 @@
+{
+  "source": "Roberto porcelain supplied 2026-10-26; absolute roots relocated under a disposable scratch root",
+  "old_branch": "POC-00001-slack-flap",
+  "old_head": "9f22c71fdcd9f17d5ab0d19260c17cc5828e57a5",
+  "switched_branch": "POC-00003/endpoint-capability-audit",
+  "entries": [
+    {
+      "path": "work/agent2",
+      "head": "4415863b5157dc5b2788aaed5373a4bcfa9ff6e2",
+      "branch": "main",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "private/tmp/agent2-reactive-backoff-20261022/old",
+      "head": "f82931087a15216a9e6b0f8033f640a48d638c86",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "private/tmp/agent2-reactive-io-native-work",
+      "head": "c71e3c532bfdf2361f43d90bba118a9c8f0384d7",
+      "branch": null,
+      "locked": null,
+      "prunable": true
+    },
+    {
+      "path": "private/tmp/agent2-scope-inbox-review-base",
+      "head": "a08604a1ce9371faa34567aa148437d0d95c5d2a",
+      "branch": null,
+      "locked": null,
+      "prunable": true
+    },
+    {
+      "path": "private/tmp/agent2-story210-review-old",
+      "head": "f1e16f66df0fd5741f8e5e923fcb9d615d1a0a28",
+      "branch": null,
+      "locked": null,
+      "prunable": true
+    },
+    {
+      "path": "private/tmp/agent2-story211-review-old",
+      "head": "f1e16f66df0fd5741f8e5e923fcb9d615d1a0a28",
+      "branch": null,
+      "locked": null,
+      "prunable": true
+    },
+    {
+      "path": "private/tmp/windows-location-qa-20261023/replay",
+      "head": "6ebe88a9371f0a378a56dd332065acbc9508c284",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/locator-predecessor-fixture-174",
+      "head": "0dbe2a8ce1a84e2039c382ae351f2b6d33930641",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-00001-intercept-apps",
+      "head": "a1c986edd9e3a44f1ac15f72ca86c8e6431b0cce",
+      "branch": "POC-00001-intercept-apps",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-00001-intercept-apps__wt/tmp-review236-r1",
+      "head": "f8ac40675f4170d95e8915ec91f19589f6eaf0aa",
+      "branch": "tmp/review236-r1",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-00001-mcp-optimize",
+      "head": "4621876e815d66b77c12d15b1e549af89d421209",
+      "branch": "POC-0001/reactive-resident-acquisition",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-00001-mcp-optimize-review",
+      "head": "7153eb15263db5c6c3281b7e5d8d63bb4f955dd4",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-00001-slack-flap",
+      "head": "07a1af8c8cdb9bdbc55766408045801f6af07c2b",
+      "branch": "POC-00003/endpoint-capability-audit",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-0001-endpoint-risk-recovery",
+      "head": "85a427535fac78367d116744024a49e77e4b4f18",
+      "branch": "POC-0001/endpoint-risk-recovery",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-0001-endpoint-risk-wip-20261019",
+      "head": "8c381107cff144cb8dbb1d6cfc525a3d92d65fae",
+      "branch": "POC-0001/endpoint-risk-wip-20261019",
+      "locked": "User requested endpoint-risk WIP preservation and later rework",
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/poc-0001-striker",
+      "head": "a264061ef3a93d518f1d16eaed153ad63872eb22",
+      "branch": "POC-00002/prompt-guard-mutants",
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/reactive-sql-baseline-8c104ea",
+      "head": "8c104ea918f4e4d011d7767586721d6f64ee7f91",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/reactive-tdd-clean-8c104ea",
+      "head": "8c104ea918f4e4d011d7767586721d6f64ee7f91",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    },
+    {
+      "path": "work/agent2__wt/review-story250-baseline-8c104ea",
+      "head": "8c104ea918f4e4d011d7767586721d6f64ee7f91",
+      "branch": null,
+      "locked": null,
+      "prunable": false
+    }
+  ]
+}

@@ -1,4 +1,17 @@
-import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { execFileSync } from "node:child_process";
+import {
+	type FSWatcher,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+	statSync,
+	watch,
+	writeFileSync,
+} from "node:fs";
+import { join, relative, sep } from "node:path";
+import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContentMatch, ContentSearchBatch, DirEntry } from "../../../types/fs";
@@ -40,6 +53,10 @@ const { FileBrowserPanel } = await import("../../../components/FileBrowserPanel/
 const { uiStore } = await import("../../../stores/ui");
 const { toastsStore } = await import("../../../stores/toasts");
 const { resetPlatformCache } = await import("../../../platform");
+const { mdTabsStore } = await import("../../../stores/mdTabs");
+const { editorTabsStore } = await import("../../../stores/editorTabs");
+const { repositoriesStore } = await import("../../../stores/repositories");
+const { appLogger } = await import("../../../stores/appLogger");
 
 const dir = (name: string, path = name): DirEntry => ({
 	name,
@@ -77,6 +94,7 @@ const batch = (matches: ContentMatch[], isFinal: boolean, searchId: string): Con
 	files_skipped: 0,
 	truncated: false,
 	repos_pending: 0,
+	repos_indexing: 0,
 	repos_searched: 0,
 });
 
@@ -108,6 +126,8 @@ const defaultInvoke = (cmd: string, args?: Record<string, unknown>) => {
 };
 
 mockInvoke.mockImplementation(defaultInvoke);
+// Match app startup: preference writes must have a loaded comparison base.
+await uiStore.hydrate();
 
 const setBrowserMode = (enabled: boolean) => {
 	const globals = globalThis as Record<string, unknown>;
@@ -127,6 +147,7 @@ beforeEach(() => {
 // The view-mode toggle persists prefs on a 500 ms debounce; let that timer fire
 // before teardown so it does not leak into the next test file.
 afterEach(async () => {
+	vi.unstubAllGlobals();
 	setBrowserMode(false);
 	uiStore.setFileBrowserViewMode("flat");
 	await new Promise((resolve) => setTimeout(resolve, 600));
@@ -152,7 +173,247 @@ const clickRow = (container: HTMLElement, name: string) => {
 	fireEvent.click(label.parentElement as HTMLElement);
 };
 
+describe("FileBrowserPanel external filesystem refresh", () => {
+	it.each([
+		"non-git root with nested git repo",
+		"git root",
+		"non-git root",
+		"collapsed parent",
+		"overlapping client loses its watcher when another tree collapses",
+	])("%s — catches unwatched expanded children and stale collapsed caches", async (scenario) => {
+		const scratch = join(process.cwd(), ".tmp", "file-tree-external");
+		mkdirSync(scratch, { recursive: true });
+		const root = mkdtempSync(join(scratch, "tree-"));
+		const nested = scenario === "non-git root with nested git repo";
+		const parent = nested ? "work/people/v2" : "people/v2";
+		mkdirSync(join(root, parent), { recursive: true });
+		if (nested || scenario === "git root") {
+			execFileSync("git", ["-c", "init.defaultBranch=main", "init", "-q", nested ? join(root, "work") : root]);
+		}
+		writeFileSync(join(root, parent, "existing.md"), "existing");
+		const watchers = new Map<string, { watcher: FSWatcher; subscribers: number }>();
+		const observed = new Set<string>();
+		const notifications = new Map<string, () => void>();
+		const mutateAndWaitForNotification = async (path: string, mutate: () => void) => {
+			// Native delivery is setup, not the cache-refresh assertion. In a loaded
+			// suite fs.watch may deliver after waitFor's UI deadline has expired.
+			// A rendered row does not prove its watch is installed yet. Arm before
+			// mutating so fast delivery cannot be missed. Ancestor events also reload
+			// this subtree; native filenames are optional and are not required here.
+			// The test harness still catches a missing native notification.
+			await waitFor(() => expect(watchers.has(path)).toBe(true));
+			const notified = new Promise<void>((resolve) => notifications.set(path, resolve));
+			mutate();
+			await notified;
+		};
+		// Real disk and native nonrecursive watches implement the transport boundary.
+		// No test-sent dir-changed event or repository revision can repair the tree.
+		mockInvoke.mockImplementation(async (cmd, args) => {
+			if (cmd === "start_dir_watcher") {
+				const path = String(args?.path);
+				const shared = watchers.get(path);
+				if (shared) shared.subscribers += 1;
+				else {
+					watchers.set(path, {
+						watcher: watch(path, { recursive: false }, () => {
+							observed.add(path);
+							emitEvent("dir-changed", { dir_path: path });
+							for (const [changedPath, notify] of notifications) {
+								if (changedPath === path || changedPath.startsWith(`${path}${sep}`)) {
+									notify();
+									notifications.delete(changedPath);
+								}
+							}
+						}),
+						subscribers: 1,
+					});
+				}
+				return Promise.resolve();
+			}
+			if (cmd === "stop_dir_watcher") {
+				const path = String(args?.path);
+				const shared = watchers.get(path);
+				if (shared && --shared.subscribers === 0) {
+					shared.watcher.close();
+					watchers.delete(path);
+				}
+				return Promise.resolve();
+			}
+			if (cmd === "list_directory") {
+				const subdir = String(args?.subdir);
+				const path = join(String(args?.repoPath), subdir);
+				return Promise.resolve(
+					readdirSync(path, { withFileTypes: true })
+						.filter((entry) => entry.name !== ".git")
+						.map((entry) => ({
+							name: entry.name,
+							path: relative(String(args?.repoPath), join(path, entry.name)).replaceAll("\\", "/"),
+							is_dir: entry.isDirectory(),
+							size: statSync(join(path, entry.name)).size,
+							modified_at: 0,
+							git_status: "",
+							is_ignored: false,
+						})),
+				);
+			}
+			return Promise.resolve();
+		});
+		const view = render(() => (
+			<FileBrowserPanel visible={true} repoPath={root} onClose={() => {}} onFileOpen={() => {}} />
+		));
+		let secondView: ReturnType<typeof render> | undefined;
+		// A queued native event can briefly rewatch a descendant after its rename.
+		// Capture only these expected ENOENT warnings and reject any other warning.
+		const warnings = vi.spyOn(appLogger, "warn").mockImplementation(() => {});
+		try {
+			clickTreeViewButton(view.container);
+			for (const name of parent.split("/")) {
+				await waitFor(() => expect(view.queryByText(name)).not.toBeNull());
+				clickRow(view.container, name);
+			}
+			await waitFor(() => expect(view.queryByText("existing.md")).not.toBeNull());
+			if (scenario.startsWith("overlapping client")) {
+				// Desktop tree and phone/browser listing share the Rust path-keyed map.
+				secondView = render(() => (
+					<FileBrowserPanel visible={true} repoPath={join(root, parent)} onClose={() => {}} onFileOpen={() => {}} />
+				));
+				await waitFor(() => expect(within(secondView!.container).queryByText("existing.md")).not.toBeNull());
+				clickRow(view.container, "v2");
+			}
+			if (scenario === "collapsed parent") clickRow(view.container, "v2");
+			const createRoles = () => {
+				mkdirSync(join(root, parent, "roles", "drafts"), { recursive: true });
+				writeFileSync(join(root, parent, "roles", "drafts", "architect.md"), "architect");
+			};
+			if (scenario === "collapsed parent") {
+				createRoles();
+				clickRow(view.container, "v2");
+			} else {
+				await mutateAndWaitForNotification(join(root, parent), createRoles);
+			}
+			const targetContainer = (secondView ?? view).container;
+			const target = within(targetContainer);
+			await waitFor(() => expect(target.queryByText("roles")).not.toBeNull(), { timeout: 3000 });
+			clickRow(targetContainer, "roles");
+			await waitFor(() => expect(target.queryByText("drafts")).not.toBeNull());
+			clickRow(targetContainer, "drafts");
+			await waitFor(() => expect(target.queryByText("architect.md")).not.toBeNull());
+			await mutateAndWaitForNotification(join(root, parent), () => {
+				renameSync(join(root, parent, "roles"), join(root, parent, "team"));
+			});
+			await waitFor(
+				() => {
+					expect(target.queryByText("team")).not.toBeNull();
+					expect(target.queryByText("roles")).toBeNull();
+				},
+				{ timeout: 3000 },
+			);
+			// Native backends may report the changed directory or its watched parent.
+			await waitFor(() => expect(observed.size).toBeGreaterThan(0));
+		} finally {
+			secondView?.unmount();
+			view.unmount();
+			const remainingWatches = watchers.size;
+			for (const shared of watchers.values()) shared.watcher.close();
+			rmSync(root, { recursive: true, force: true });
+			const capturedWarnings = [...warnings.mock.calls];
+			warnings.mockRestore();
+			for (const [source, message] of capturedWarnings) {
+				expect(source).toBe("app");
+				expect(message).toContain("Error: ENOENT:");
+				expect(
+					[join(root, parent, "roles"), join(root, parent, "roles", "drafts")].some((path) =>
+						message.startsWith(`Dir watcher failed for ${path}: `),
+					),
+				).toBe(true);
+			}
+			expect(remainingWatches).toBe(0);
+		}
+	});
+});
+
+describe("FileBrowserPanel external transfer refresh", () => {
+	it.each([
+		{ name: "external folder drop into an expanded tree folder", confirm: false, copy: false, remote: false },
+		{ name: "confirmed recursive drop", confirm: true, copy: false, remote: false },
+		{ name: "move source in another expanded folder of the same tree", confirm: false, copy: false, remote: false },
+		{ name: "copy leaves the source visible and reloads the destination", confirm: false, copy: true, remote: false },
+		{ name: "remote copy reloads the owning destination", confirm: true, copy: true, remote: true },
+	])("$name — catches stale transfer children", async ({ name, confirm, copy, remote }) => {
+		const { dispatchTauriDrop, confirmFolderDrop, setFolderDropConfirmHandler } = await import(
+			"../../../hooks/useFileDrop"
+		);
+		const { dragDropStore } = await import("../../../stores/dragDrop");
+		const owner = vi.spyOn(repositoriesStore, "getConnectionId").mockReturnValue(remote ? "mint" : undefined);
+		const { toastsStore } = await import("../../../stores/toasts");
+		const toast = vi.spyOn(toastsStore, "add").mockReturnValue(0);
+		const modifier = vi.spyOn(dragDropStore, "copyModifierHeld").mockReturnValue(copy);
+		listings.set("/repo|.", [dir("dest"), dir("source")]);
+		listings.set("/repo|dest", [file("existing.txt", "dest/existing.txt")]);
+		listings.set("/repo|source", [dir("incoming", "source/incoming")]);
+		const originalHitTest = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+		const pending = vi.fn();
+		setFolderDropConfirmHandler(pending);
+		mockInvoke.mockImplementation((cmd, args) => {
+			if (cmd === "fs_transfer_paths" || cmd === "fs_transfer_remote_paths") {
+				if (confirm && !args?.allowRecursive) {
+					return Promise.resolve({ moved: 0, skipped: 0, errors: [], needs_confirm: true });
+				}
+				listings.set("/repo|dest", [file("existing.txt", "dest/existing.txt"), dir("incoming", "dest/incoming")]);
+				if (!copy) listings.set("/repo|source", []);
+				return Promise.resolve({ moved: 1, skipped: 0, errors: [], needs_confirm: false });
+			}
+			return defaultInvoke(cmd, args);
+		});
+		try {
+			const { container } = render(() => (
+				<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+			));
+			clickTreeViewButton(container);
+			await waitFor(() => expect(container.textContent).toContain("dest"));
+			clickRow(container, "dest");
+			clickRow(container, "source");
+			await waitFor(() => expect(container.querySelector('[data-abs-path="/repo/source/incoming"]')).not.toBeNull());
+			await waitFor(() => expect(container.textContent).toContain("existing.txt"));
+			const dest = container.querySelector('[data-abs-path="/repo/dest"]');
+			Object.defineProperty(document, "elementFromPoint", { configurable: true, writable: true, value: () => dest });
+			await dispatchTauriDrop(["/repo/source/incoming"], 10, 10);
+			if (confirm) {
+				expect(pending).toHaveBeenCalledOnce();
+				expect(countListCalls("/repo", "dest")).toBe(1);
+				await confirmFolderDrop(pending.mock.calls[0][0]);
+			}
+			if (name.startsWith("move source")) {
+				await waitFor(() => expect(container.querySelector('[data-abs-path="/repo/source/incoming"]')).toBeNull());
+			}
+			await waitFor(() => expect(container.querySelector('[data-abs-path="/repo/dest/incoming"]')).not.toBeNull());
+			expect(container.querySelector('[data-abs-path="/repo/source/incoming"]') !== null).toBe(copy);
+		} finally {
+			if (originalHitTest) Object.defineProperty(document, "elementFromPoint", originalHitTest);
+			else Reflect.deleteProperty(document, "elementFromPoint");
+			toast.mockRestore();
+			owner.mockRestore();
+			modifier.mockRestore();
+			setFolderDropConfirmHandler(null);
+		}
+	});
+});
+
 describe("FileBrowserPanel tree cache", () => {
+	// Catches: remote folder descendants losing the panel's actual repository owner.
+	it("exposes the repository connection on the native file-drop surface", () => {
+		const owner = vi.spyOn(repositoriesStore, "getConnectionId").mockReturnValue("mint");
+		try {
+			const { container } = render(() => (
+				<FileBrowserPanel visible={true} repoPath="/remote/repo" onClose={() => {}} onFileOpen={() => {}} />
+			));
+			expect(container.querySelector("#file-browser-panel")?.getAttribute("data-drop-connection-id")).toBe("mint");
+			expect(owner).toHaveBeenCalledWith("/remote/repo");
+		} finally {
+			owner.mockRestore();
+		}
+	});
+
 	it("clears cached children and expanded dirs when the repo changes", async () => {
 		listings.set("/repoA|.", [dir("src")]);
 		listings.set("/repoA|src", [file("from-repo-a.ts", "src/from-repo-a.ts")]);
@@ -257,6 +518,7 @@ describe("FileBrowserPanel streamed content search", () => {
 					files_skipped: 0,
 					truncated: false,
 					repos_pending: 0,
+					repos_indexing: 0,
 					repos_searched: 0,
 				});
 			}
@@ -361,6 +623,121 @@ describe("FileBrowserPanel streamed content search", () => {
 	});
 });
 
+describe("FileBrowserPanel active-file highlight", () => {
+	afterEach(() => {
+		mdTabsStore.clearAll();
+		editorTabsStore.clearAll();
+	});
+
+	/** The row classes of the entry whose name label is `name`. */
+	const rowClasses = (container: HTMLElement, name: string) => {
+		const label = Array.from(container.querySelectorAll(".entryName")).find((el) => el.textContent === name);
+		if (!label) throw new Error(`row not found: ${name}`);
+		return (label.parentElement as HTMLElement).className;
+	};
+
+	it("highlights the file behind an HTML preview tab", async () => {
+		listings.set("/repo|.", [file("page.html"), file("other.html")]);
+		mdTabsStore.addHtmlPreview("/repo", "page.html");
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("page.html")).not.toBeNull());
+
+		await waitFor(() => expect(rowClasses(container, "page.html")).toContain("entryActive"));
+		expect(rowClasses(container, "other.html")).not.toContain("entryActive");
+	});
+
+	it("highlights the file behind a markdown tab", async () => {
+		listings.set("/repo|.", [file("README.md"), file("CHANGELOG.md")]);
+		mdTabsStore.add("/repo", "README.md");
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("README.md")).not.toBeNull());
+
+		await waitFor(() => expect(rowClasses(container, "README.md")).toContain("entryActive"));
+		expect(rowClasses(container, "CHANGELOG.md")).not.toContain("entryActive");
+	});
+
+	it("highlights nothing for a markdown tab with no file behind it", async () => {
+		listings.set("/repo|.", [file("README.md")]);
+		mdTabsStore.addVirtual("Plan", "plan:file?path=/plan.md", "/repo");
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("README.md")).not.toBeNull());
+
+		expect(container.querySelector(".entryActive")).toBeNull();
+	});
+
+	it("prefers the editor tab over the markdown panel", async () => {
+		listings.set("/repo|.", [file("main.ts"), file("page.html")]);
+		mdTabsStore.addHtmlPreview("/repo", "page.html");
+		editorTabsStore.add("/repo", "main.ts");
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("main.ts")).not.toBeNull());
+
+		await waitFor(() => expect(rowClasses(container, "main.ts")).toContain("entryActive"));
+		expect(rowClasses(container, "page.html")).not.toContain("entryActive");
+	});
+
+	it("highlights nothing when the preview belongs to another root", async () => {
+		listings.set("/repo|.", [file("page.html")]);
+		mdTabsStore.addHtmlPreview("/other-repo", "page.html");
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("page.html")).not.toBeNull());
+
+		expect(container.querySelector(".entryActive")).toBeNull();
+	});
+});
+
+describe("FileBrowserPanel delete errors", () => {
+	it("shows the backend error after confirmed Delete — catches log-only deletion failures", async () => {
+		const { ToastContainer } = await import("../../../components/ToastContainer/ToastContainer");
+		const { toastsStore } = await import("../../../stores/toasts");
+		const { activityStore } = await import("../../../stores/activityStore");
+		await activityStore.hydrate();
+		const { appLogger } = await import("../../../stores/appLogger");
+		const logged = vi.spyOn(appLogger, "error").mockImplementation(() => {});
+		listings.set("/repo|.", [file("locked.txt")]);
+		// FastAF deletes through one batch call (delete_paths) and words the toast
+		// "Couldn't delete"; upstream's version of this test drove delete_path.
+		mockInvoke.mockImplementation((cmd, args) =>
+			cmd === "delete_paths" ? Promise.reject("Permission denied: locked.txt") : defaultInvoke(cmd, args),
+		);
+		const { container, queryByText } = render(() => (
+			<>
+				<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+				<ToastContainer />
+			</>
+		));
+		const textOnPage = (text: string) =>
+			Array.from(document.querySelectorAll("*")).find(
+				(el) => el.children.length === 0 && el.textContent?.trim() === text,
+			);
+		try {
+			await waitFor(() => expect(queryByText("locked.txt")).not.toBeNull());
+			fireEvent.contextMenu(container.querySelector(".entryName")!.parentElement!);
+			fireEvent.click(textOnPage("Delete")!);
+			const confirm = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Delete");
+			fireEvent.click(confirm!);
+			await waitFor(() => expect(textOnPage("Permission denied: locked.txt")).toBeDefined());
+			expect(textOnPage("Couldn't delete")).toBeDefined();
+			expect(queryByText("locked.txt")).not.toBeNull();
+			expect(mockInvoke).toHaveBeenCalledWith("delete_paths", { repoPath: "/repo", paths: ["locked.txt"] });
+			expect(logged).toHaveBeenCalledWith("app", "Failed to delete", "Permission denied: locked.txt");
+		} finally {
+			for (const toast of toastsStore.toasts) toastsStore.remove(toast.id);
+			logged.mockRestore();
+		}
+	});
+});
+
 describe("FileBrowserPanel create file", () => {
 	/** Right-click a row and pick a context-menu item by label. */
 	const openContextMenuOn = (container: HTMLElement, name: string) => {
@@ -402,6 +779,54 @@ describe("FileBrowserPanel create file", () => {
 		// And the new row must actually appear — creating it invisibly is the bug.
 		listings.set("/repo|src", [file("main.ts", "src/main.ts"), file(".env", "src/.env")]);
 		await waitFor(() => expect(queryByText(".env")).not.toBeNull(), { timeout: 2000 });
+	});
+
+	// FastAF creates inline (an input row committed with Enter) and labels the
+	// menu items in sentence case; upstream's versions of these two tests drove a
+	// New Folder/New File dialog.
+	it("opens the root menu on the empty area below the tree entries and creates at the root", async () => {
+		listings.set("/repo|.", [dir("src"), file("README.md")]);
+		listings.set("/repo|src", [file("main.ts", "src/main.ts")]);
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		clickTreeViewButton(container);
+		await waitFor(() => expect(queryByText("src")).not.toBeNull());
+		clickRow(container, "src");
+		await waitFor(() => expect(queryByText("main.ts")).not.toBeNull());
+
+		const empty = container.querySelector(".content") as HTMLElement;
+		const notPrevented = fireEvent.contextMenu(empty);
+		expect(notPrevented).toBe(false);
+		clickMenuItem("New folder…");
+		const input = document.querySelector("input[aria-label='New Folder']") as HTMLInputElement;
+		fireEvent.input(input, { target: { value: "docs" } });
+		fireEvent.keyDown(input, { key: "Enter" });
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("create_directory", { repoPath: "/repo", dir: "docs" }),
+		);
+	});
+
+	it("empty-area menu in flat view inside a subdirectory creates in that listed directory", async () => {
+		listings.set("/repo|.", [dir("src"), file("README.md")]);
+		listings.set("/repo|src", [file("main.ts", "src/main.ts")]);
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("src")).not.toBeNull());
+		clickRow(container, "src");
+		await waitFor(() => expect(queryByText("main.ts")).not.toBeNull());
+
+		fireEvent.contextMenu(container.querySelector(".content") as HTMLElement);
+		clickMenuItem("New file…");
+		const input = document.querySelector("input[aria-label='New File']") as HTMLInputElement;
+		fireEvent.input(input, { target: { value: "notes.txt" } });
+		fireEvent.keyDown(input, { key: "Enter" });
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("create_file", { repoPath: "/repo", file: "src/notes.txt" }),
+		);
 	});
 
 	it("creates a dotfile typed into the inline New File row", async () => {
@@ -761,5 +1186,167 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 
 		await waitFor(() => expect(toastsStore.toasts.map((t) => t.title)).toContain("Moved 1 of 2"));
 		expect(toastsStore.toasts.find((t) => t.title === "Moved 1 of 2")?.message).toContain("a.txt");
+	});
+});
+
+describe("FileBrowserPanel external root (#1207-efd4)", () => {
+	afterEach(() => uiStore.setFileBrowserExternalRoot(null));
+
+	it("returns to the active repository when the repository changes", async () => {
+		listings.set("/repoA|.", [file("a.txt")]);
+		listings.set("/outside|.", [file("outside.txt")]);
+		listings.set("/repoB|.", [file("b.txt")]);
+
+		const [repoPath, setRepoPath] = createSignal("/repoA");
+		const { queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath={repoPath()} onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+		uiStore.setFileBrowserExternalRoot("/outside");
+		await waitFor(() => expect(queryByText("outside.txt")).not.toBeNull());
+
+		setRepoPath("/repoB");
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+		expect(uiStore.state.fileBrowserExternalRoot).toBeNull();
+		expect(queryByText("outside.txt")).toBeNull();
+	});
+
+	it("returns to the active worktree when only the worktree changes", async () => {
+		listings.set("/repo/wt1|.", [file("one.txt")]);
+		listings.set("/outside|.", [file("outside.txt")]);
+		listings.set("/repo/wt2|.", [file("two.txt")]);
+
+		const [fsRoot, setFsRoot] = createSignal("/repo/wt1");
+		const { queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" fsRoot={fsRoot()} onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("one.txt")).not.toBeNull());
+		uiStore.setFileBrowserExternalRoot("/outside");
+		await waitFor(() => expect(queryByText("outside.txt")).not.toBeNull());
+
+		setFsRoot("/repo/wt2");
+		await waitFor(() => expect(queryByText("two.txt")).not.toBeNull());
+		expect(uiStore.state.fileBrowserExternalRoot).toBeNull();
+	});
+
+	it("shows the external path with a control that returns to the repository", async () => {
+		listings.set("/repo|.", [file("in-repo.txt")]);
+		listings.set("/outside|.", [file("outside.txt")]);
+		const { queryByText, getByTitle } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("in-repo.txt")).not.toBeNull());
+		expect(document.querySelector('[data-testid="external-root-banner"]')).toBeNull();
+
+		uiStore.setFileBrowserExternalRoot("/outside");
+		await waitFor(() => expect(queryByText("outside.txt")).not.toBeNull());
+		expect(document.querySelector('[data-testid="external-root-banner"]')?.textContent).toContain("/outside");
+
+		fireEvent.click(getByTitle("Back to the active repository"));
+		await waitFor(() => expect(queryByText("in-repo.txt")).not.toBeNull());
+		expect(uiStore.state.fileBrowserExternalRoot).toBeNull();
+	});
+
+	it("keeps the external folder while the repository stays the same", async () => {
+		listings.set("/repo|.", [file("in-repo.txt")]);
+		listings.set("/outside|.", [file("outside.txt")]);
+		const { queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("in-repo.txt")).not.toBeNull());
+		uiStore.setFileBrowserExternalRoot("/outside");
+		await waitFor(() => expect(queryByText("outside.txt")).not.toBeNull());
+		expect(uiStore.state.fileBrowserExternalRoot).toBe("/outside");
+	});
+});
+
+describe("FileBrowserPanel pointer drag (#1329-a31a)", () => {
+	const pointer = (type: string, pointerType: string, x: number, y: number) =>
+		new PointerEvent(type, {
+			bubbles: true,
+			cancelable: true,
+			button: 0,
+			pointerId: 1,
+			pointerType,
+			clientX: x,
+			clientY: y,
+		});
+
+	const renameCalls = () => mockInvoke.mock.calls.filter(([cmd]) => cmd === "rename_path");
+
+	/** Press on `file`, optionally hold, move past the drag threshold and release over the `dir` row. */
+	const dragFileOntoDir = async (pointerType: string, holdMs = 0) => {
+		listings.set("/repo|.", [dir("docs"), file("a.txt")]);
+		const { container, queryByText } = render(() => (
+			<FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={() => {}} />
+		));
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+		const rows = Array.from(container.querySelectorAll(".entry")) as HTMLElement[];
+		const fileRow = rows.find((r) => r.textContent?.includes("a.txt")) as HTMLElement;
+		const dirRow = rows.find((r) => r.dataset.dropTarget === "folder") as HTMLElement;
+		const original = document.elementFromPoint;
+		document.elementFromPoint = () => dirRow;
+		try {
+			fileRow.dispatchEvent(pointer("pointerdown", pointerType, 50, 50));
+			if (holdMs) await new Promise((resolve) => setTimeout(resolve, holdMs));
+			document.dispatchEvent(pointer("pointermove", pointerType, 50, 20));
+			document.dispatchEvent(pointer("pointerup", pointerType, 50, 10));
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} finally {
+			document.elementFromPoint = original;
+		}
+	};
+
+	// Catches: a swipe that outruns pointercancel dropping the file onto a folder
+	// (an irreversible move started by a scroll gesture).
+	it.each(["touch", "pen"])("never moves a file when a %s swipe ends over a folder", async (pointerType) => {
+		vi.stubGlobal("matchMedia", () => ({ matches: false }));
+		await dragFileOntoDir(pointerType);
+		expect(renameCalls()).toHaveLength(0);
+	});
+
+	// Catches: removing touch file move instead of arming it with a long press.
+	it("moves a file when a touch long press is dragged onto a folder", async () => {
+		await dragFileOntoDir("touch", 450);
+		expect(renameCalls()).toHaveLength(1);
+		expect(renameCalls()[0][1]).toMatchObject({ from: "a.txt", to: "docs/a.txt" });
+	});
+
+	// Guards the mouse path: drag and drop must keep moving files.
+	it("still moves a file when a mouse drag ends over a folder", async () => {
+		await dragFileOntoDir("mouse");
+		expect(renameCalls()).toHaveLength(1);
+		expect(renameCalls()[0][1]).toMatchObject({ from: "a.txt", to: "docs/a.txt" });
+	});
+});
+
+describe("FileBrowserPanel symlink labels", () => {
+	it.each(["flat", "tree"] as const)("%s: catches links shown as ordinary file bytes", async (mode) => {
+		uiStore.setFileBrowserViewMode(mode);
+		listings.set("/repo|.", [
+			{
+				...file("linked-dir"),
+				size: 50,
+				symlink_target: "/shared/documents",
+				symlink_target_kind: "directory",
+			},
+		]);
+		const open = vi.fn();
+		const view = render(() => <FileBrowserPanel visible repoPath="/repo" onClose={() => {}} onFileOpen={open} />);
+		await waitFor(() => expect(view.getByText("directory link → /shared/documents")).toBeTruthy());
+		expect(view.queryByText("50 B")).toBeNull();
+		expect(
+			view.getByTitle("linked-dir\ndirectory link → /shared/documents", { normalizer: (value) => value }),
+		).toBeTruthy();
+		fireEvent.click(
+			view.getByTitle("linked-dir\ndirectory link → /shared/documents", { normalizer: (value) => value }),
+		);
+		expect(open).toHaveBeenCalledWith("/repo", "linked-dir");
+		// Catches refresh dedup hiding a retargeted link with unchanged timestamp.
+		listings.set("/repo|.", [{ ...listings.get("/repo|.")![0], symlink_target: "/shared/updated" }]);
+		repositoriesStore.bumpRevision("/repo");
+		await waitFor(() => expect(view.getByText("directory link → /shared/updated")).toBeTruthy());
+		view.unmount();
 	});
 });

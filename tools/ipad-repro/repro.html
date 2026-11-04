@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+#hud{position:fixed;top:0;left:0;right:0;background:#ff0;z-index:9;padding:6px;font:26px sans-serif;color:#000}
+#list{position:fixed;top:60px;bottom:0;left:0;right:0;overflow-y:auto;color:#fff}
+.row{padding:24px;border-bottom:1px solid #666;font:26px sans-serif}
+</style></head>
+<body>
+<div id="hud"></div>
+<div id="list"></div>
+<script type="module">
+// Query: ?css=global|none  ?drag=0|1 (real initMouseDrag on each row's pointerdown)
+// ?touchaction=<value> overrides touch-action on every element after global.css loads.
+const q = new URLSearchParams(location.search);
+if (q.get("css") !== "none") await import("/src/global.css");
+if (q.get("touchaction")) {
+  const s = document.createElement("style");
+  s.textContent = `*{touch-action:${q.get("touchaction")} !important}`;
+  document.head.append(s);
+}
+const { initMouseDrag, isHoldPointer } = await import("/src/hooks/useMouseDrag.ts");
+const list = document.getElementById("list");
+for (let i = 0; i < 200; i++) {
+  const r = document.createElement("div");
+  r.className = "row";
+  r.textContent = "row " + i;
+  if (q.get("drag") === "1") {
+    r.addEventListener("pointerdown", (e) =>
+      initMouseDrag(e, r, { onMove() {}, onDrop() {}, onCancel() {} }));
+  }
+  list.append(r);
+}
+const c = {};
+const hud = document.getElementById("hud");
+const mode = location.search + " hover:none=" + matchMedia("(hover: none)").matches;
+const render = () => (hud.textContent = `st=${list.scrollTop} ${JSON.stringify(c)} ${mode}`);
+for (const t of ["pointerdown", "pointermove", "pointercancel", "pointerup"])
+  document.addEventListener(t, () => { c[t] = (c[t] || 0) + 1; render(); });
+list.addEventListener("scroll", render);
+render();
+</script></body></html>

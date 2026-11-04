@@ -49,6 +49,9 @@ pub fn restore_from_config(app: &tauri::AppHandle) {
 
 /// Register a global shortcut combo string (e.g. "CommandOrControl+Shift+T").
 pub fn register(app: &tauri::AppHandle, combo: &str) -> Result<()> {
+    if crate::agent_test::active() {
+        anyhow::bail!("Global shortcuts are disabled in agent-test");
+    }
     let shortcut = Shortcut::from_str(combo)?;
     app.global_shortcut().register(shortcut)?;
     Ok(())
@@ -96,6 +99,15 @@ pub async fn set_global_hotkey(
     combo: Option<String>,
 ) -> std::result::Result<(), String> {
     let state = app.state::<Arc<AppState>>();
+    if combo.is_some() {
+        #[cfg(feature = "dictation")]
+        app.state::<crate::dictation::DictationState>()
+            .ensure_owner()?;
+        #[cfg(not(feature = "dictation"))]
+        if !app.state::<crate::input_ownership::Ownership>().is_owner() {
+            return Err(crate::input_ownership::OWNED_ELSEWHERE.to_string());
+        }
+    }
 
     // Unregister current hotkey (if any)
     let current = state.config.read().global_hotkey.clone();

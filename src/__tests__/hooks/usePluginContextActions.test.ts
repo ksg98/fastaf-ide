@@ -1,39 +1,19 @@
 import { createRoot } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-	mockAiDispose,
-	mockAppLogger,
-	mockConversationStore,
-	mockPromptLibraryStore,
-	mockRegisterAiChatContextActions,
-	mockSettingsStore,
-	mockUiStore,
-} = vi.hoisted(() => ({
-	mockAiDispose: vi.fn(),
+const { mockAppLogger, mockPromptLibraryStore } = vi.hoisted(() => ({
 	mockAppLogger: { error: vi.fn() },
-	mockConversationStore: { initFromDisk: vi.fn().mockResolvedValue(undefined) },
 	mockPromptLibraryStore: { getSmartByPlacement: vi.fn() },
-	mockRegisterAiChatContextActions: vi.fn(),
-	mockSettingsStore: { enabled: false, isAiChatEnabled: vi.fn(() => false) },
-	mockUiStore: {
-		state: { aiChatPanelVisible: false },
-		setAiChatPanelVisible: vi.fn(),
-	},
 }));
 
-vi.mock("../../components/AIChatPanel/contextMenuActions", () => ({
-	registerAiChatContextActions: mockRegisterAiChatContextActions,
-}));
 vi.mock("../../stores/appLogger", () => ({ appLogger: mockAppLogger }));
-vi.mock("../../stores/conversationStore", () => ({ conversationStore: mockConversationStore }));
 vi.mock("../../stores/promptLibrary", () => ({ promptLibraryStore: mockPromptLibraryStore }));
-vi.mock("../../stores/settings", () => ({ settingsStore: mockSettingsStore }));
-vi.mock("../../stores/ui", () => ({ uiStore: mockUiStore }));
 
 import { usePluginContextActions } from "../../hooks/usePluginContextActions";
+import { activityStore } from "../../stores/activityStore";
 import { contextMenuActionsStore } from "../../stores/contextMenuActionsStore";
 import type { SavedPrompt } from "../../stores/promptLibrary";
+import { toastsStore } from "../../stores/toasts";
 
 const branchPrompt = {
 	id: "branch-prompt",
@@ -53,14 +33,7 @@ describe("usePluginContextActions", () => {
 		contextMenuActionsStore.clear();
 		executeSmartPrompt.mockClear();
 		canExecute.mockClear();
-		mockAiDispose.mockClear();
 		mockAppLogger.error.mockClear();
-		mockConversationStore.initFromDisk.mockClear();
-		mockRegisterAiChatContextActions.mockReset().mockReturnValue([{ dispose: mockAiDispose }]);
-		mockSettingsStore.enabled = false;
-		mockSettingsStore.isAiChatEnabled.mockImplementation(() => mockSettingsStore.enabled);
-		mockUiStore.state.aiChatPanelVisible = false;
-		mockUiStore.setAiChatPanelVisible.mockClear();
 		mockPromptLibraryStore.getSmartByPlacement.mockImplementation((placement: string) => {
 			if (placement === "git-branches") return [branchPrompt];
 			if (placement === "terminal-context") return [terminalPrompt];
@@ -72,6 +45,8 @@ describe("usePluginContextActions", () => {
 		dispose?.();
 		dispose = undefined;
 		contextMenuActionsStore.clear();
+		for (const toast of [...toastsStore.toasts]) toastsStore.remove(toast.id);
+		activityStore._testCancelPendingSave();
 	});
 
 	it("registers smart prompts with their target-specific behavior", async () => {
@@ -94,31 +69,30 @@ describe("usePluginContextActions", () => {
 		expect(canExecute).toHaveBeenCalledWith(terminalPrompt);
 	});
 
-	it("registers and disposes AI Chat actions while the feature is enabled", () => {
-		mockSettingsStore.enabled = true;
+	// Catches: a branch smart prompt that cannot run (no headless agent) doing nothing visible.
+	it("tells the user why a branch smart prompt did not run", async () => {
+		const add = vi.spyOn(toastsStore, "add");
+		const reason = "No headless agent configured — set one in Settings → Smart Prompts";
+		const refused = vi.fn().mockResolvedValue({ ok: false, reason });
+		createRoot((rootDispose) => {
+			dispose = rootDispose;
+			usePluginContextActions({ executeSmartPrompt: refused, canExecute });
+		});
+		contextMenuActionsStore.getContextActions("branch")[0].action({ target: "branch", branchName: "feature/test" });
+		await vi.waitFor(() => expect(add).toHaveBeenCalledWith("Review branch", reason, "warn"));
+		add.mockRestore();
+	});
+
+	it("disposes every registration when the owning root is disposed", () => {
 		createRoot((rootDispose) => {
 			dispose = rootDispose;
 			usePluginContextActions({ executeSmartPrompt, canExecute });
 		});
-
-		expect(mockRegisterAiChatContextActions).toHaveBeenCalledOnce();
-		expect(mockConversationStore.initFromDisk).toHaveBeenCalledOnce();
+		expect(contextMenuActionsStore.getContextActions("branch")).toHaveLength(1);
 
 		dispose?.();
 		dispose = undefined;
-		expect(mockAiDispose).toHaveBeenCalledOnce();
 		expect(contextMenuActionsStore.getContextActions("branch")).toEqual([]);
 		expect(contextMenuActionsStore.getContextActions("terminal")).toEqual([]);
-	});
-
-	it("closes a visible AI Chat panel while the feature is disabled", () => {
-		mockUiStore.state.aiChatPanelVisible = true;
-		createRoot((rootDispose) => {
-			dispose = rootDispose;
-			usePluginContextActions({ executeSmartPrompt, canExecute });
-		});
-
-		expect(mockRegisterAiChatContextActions).not.toHaveBeenCalled();
-		expect(mockUiStore.setAiChatPanelVisible).toHaveBeenCalledWith(false);
 	});
 });

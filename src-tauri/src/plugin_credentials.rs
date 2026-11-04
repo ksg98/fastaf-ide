@@ -67,10 +67,14 @@ fn plugin_read_credential_inner(service_name: &str) -> Result<Option<String>, St
     // Deny access to FastAF's OWN secrets vault. `credentials:read` is for
     // reading OTHER tools' credentials (e.g. aws-cli creds), never the host's
     // GitHub/LLM/MCP tokens. Reject the vault service and any legacy entry.
-    if service_name == crate::credentials::KEYRING_SERVICE
+    // `MCP_UPSTREAM_LEGACY_SERVICE` covers every unmigrated MCP-upstream entry
+    // regardless of which upstream: `security find-generic-password -s <service>`
+    // matches on service alone, so the account (upstream name) can't narrow it.
+    if crate::app_instance::is_owned_vault_service(service_name)
         || crate::credentials::LEGACY_ENTRIES
             .iter()
             .any(|&(service, _)| service == service_name)
+        || service_name == crate::credentials::MCP_UPSTREAM_LEGACY_SERVICE
     {
         return Err("access to FastAF's own credential vault is denied".into());
     }
@@ -209,6 +213,50 @@ mod tests {
             assert!(result.is_err(), "expected {service} to be denied");
             assert!(result.unwrap_err().contains("denied"));
         }
+
+        // A named application instance has its own vault service, which must
+        // remain private to the host just like the default vault.
+        let named_instance =
+            crate::app_instance::AppInstance::named("work-laptop").expect("valid named instance");
+        let result = plugin_read_credential_inner(named_instance.vault_service());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("denied"));
+    }
+
+    #[test]
+    fn legacy_mcp_upstream_service_is_denied() {
+        // "tuicommander-mcp" is not in LEGACY_ENTRIES (those are per-service, one
+        // literal each) and is not an owned vault service (app_instance.rs only
+        // knows "tuicommander" / "tuicommander-instance-*") — it is the shared
+        // legacy service every `Credential::McpUpstream` entry was written under
+        // (credentials.rs `legacy_entry()`) before per-upstream lazy migration
+        // runs. `security find-generic-password -s tuicommander-mcp -w` matches
+        // on service alone, with no account/user filter, so it would return the
+        // password of ANY unmigrated MCP-upstream entry. This must stay denied
+        // even though neither guard above names it.
+        let result = plugin_read_credential_inner(crate::credentials::MCP_UPSTREAM_LEGACY_SERVICE);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("denied"));
+
+        // The deny check must be reading the same constant `legacy_entry()`
+        // derives from, not a separately typed copy of the literal.
+        assert_eq!(
+            crate::credentials::MCP_UPSTREAM_LEGACY_SERVICE,
+            "tuicommander-mcp"
+        );
+    }
+
+    #[test]
+    fn plugin_owned_non_host_service_is_not_denied() {
+        // A plugin reading a credential for some OTHER tool (e.g. its own
+        // aws-cli entry) must still pass the guard — only the host's own vault
+        // services and legacy entries are blocked.
+        let result =
+            plugin_read_credential_inner("some-other-tool-credentials-741-0eae-not-a-host-service");
+        assert!(
+            result.is_ok(),
+            "expected a plugin-owned service name to be allowed through, got: {result:?}"
+        );
     }
 
     #[cfg(target_os = "macos")]

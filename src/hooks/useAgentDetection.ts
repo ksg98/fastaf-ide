@@ -2,7 +2,6 @@ import { createSignal } from "solid-js";
 import type { AgentType } from "../agents";
 import { invoke } from "../invoke";
 import { appLogger } from "../stores/appLogger";
-import { isTauri } from "../transport";
 
 /** Agent binary detection result */
 interface AgentDetection {
@@ -23,7 +22,6 @@ const AGENT_BINARIES: Record<AgentType, string> = {
 	claude: "claude",
 	gemini: "gemini",
 	opencode: "opencode",
-	aider: "aider",
 	codex: "codex",
 	amp: "amp",
 	cursor: "cursor-agent",
@@ -31,6 +29,7 @@ const AGENT_BINARIES: Record<AgentType, string> = {
 	grok: "grok",
 	droid: "droid",
 	pi: "pi",
+	ego: "ego",
 	git: "git",
 	api: "", // Not a binary — LLM API is always "available"
 };
@@ -42,10 +41,6 @@ export function useAgentDetection() {
 
 	/** Detect all agents in a single batch call (fast, no version detection) */
 	async function detectAll(): Promise<void> {
-		if (!isTauri()) {
-			appLogger.debug("app", "Agent binary detection skipped in browser mode");
-			return;
-		}
 		setLoading(true);
 
 		try {

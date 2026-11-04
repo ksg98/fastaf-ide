@@ -1,16 +1,22 @@
-import { type Component, createEffect, createMemo, For, type JSX, Show } from "solid-js";
+import { type Component, createEffect, createMemo, createResource, createSignal, For, type JSX, Show } from "solid-js";
 import { t } from "../../i18n";
+import { workItemProviderRegistry } from "../../plugins/workItemProviderRegistry";
+import { openTaskConversation } from "../../services/taskNavigation";
 import { appLogger } from "../../stores/appLogger";
 import { githubStore } from "../../stores/github";
-import { flattenReviewFindings, postableFindings, prReviewStore, type ReviewFinding } from "../../stores/prReview";
+import { flattenReviewFindings, postableFindings, prReviewStore } from "../../stores/prReview";
 import { repositoriesStore } from "../../stores/repositories";
+import { rpc } from "../../transport";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { getCiClass, getCiIcon } from "../../utils/ciDisplay";
 import { handleOpenUrl } from "../../utils/openUrl";
+import { PR_READINESS_LABELS, PR_READINESS_SEVERITY, prReadinessOf } from "../../utils/prReadiness";
+import { stripAnsi } from "../../utils/stripAnsi";
 import { relativeTime } from "../../utils/time";
 import { SeverityIcon } from "../shared/SeverityIcon";
 import { CiRing } from "../ui/CiRing";
+import { PrActionButtons } from "./PrActionButtons";
 import s from "./PrDetailPopover.module.css";
 
 /** Map backend merge state CSS class strings to module classes */
@@ -28,6 +34,14 @@ const REVIEW_STATE_CLASSES: Record<string, string> = {
 	"review-required": s.reviewRequired,
 };
 
+/** Readiness severity -> module class (the verdict itself comes from prReadiness) */
+const READINESS_CLASSES = {
+	ok: s.readinessOk,
+	warn: s.readinessWarn,
+	critical: s.readinessCritical,
+	muted: s.readinessMuted,
+};
+
 /** Map CI state strings to module classes */
 const CI_CLASSES: Record<string, string> = {
 	success: s.success,
@@ -37,7 +51,11 @@ const CI_CLASSES: Record<string, string> = {
 
 /** Inline toggle for CI auto-heal per branch */
 const CiAutoHealToggle: Component<{ repoPath: string; branch: string }> = (props) => {
-	const healState = () => repositoriesStore.state.repositories[props.repoPath]?.branches[props.branch]?.ciAutoHeal;
+	// The PR popover knows a branch; the auto-heal counters live on a workspace
+	// row, reached through the single branch->id seam (`useCiHeal` resolves the
+	// same way, so the toggle and the healer address the same record).
+	const workspaceId = () => repositoriesStore.workspaceIdOnBranch(props.repoPath, props.branch) ?? props.branch;
+	const healState = () => repositoriesStore.state.repositories[props.repoPath]?.workspaces[workspaceId()]?.ciAutoHeal;
 	const enabled = () => healState()?.enabled ?? false;
 	const healing = () => healState()?.healing ?? false;
 	const attempts = () => healState()?.attempts ?? 0;
@@ -45,7 +63,7 @@ const CiAutoHealToggle: Component<{ repoPath: string; branch: string }> = (props
 	const toggle = () => {
 		const turningOn = !enabled();
 		const current = healState();
-		repositoriesStore.setCiAutoHeal(props.repoPath, props.branch, {
+		repositoriesStore.setCiAutoHeal(props.repoPath, workspaceId(), {
 			enabled: turningOn,
 			attempts: turningOn ? (current?.attempts ?? 0) : 0,
 		});
@@ -95,6 +113,7 @@ export interface PrDetailContentProps {
 	/** Push the (rebased/resolved) conflict worktree branch to origin. Shown when a
 	 *  local worktree exists for this branch. Gated behind a confirm() by the caller. */
 	onPushBranch?: (worktreePath: string) => void;
+	onConversationOpen?: () => void;
 	/** Extra content rendered after CI checks (e.g. action buttons) */
 	children?: JSX.Element;
 }
@@ -102,9 +121,43 @@ export interface PrDetailContentProps {
 /** Shared PR detail body: status pills, labels, merge direction, timestamps, meta, CI, checks, and Open on GitHub link.
  *  Used by both PrDetailPopover (floating) and the remote-only PR accordion (inline). */
 export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
+	const openConversation = () => {
+		const url = prData()?.url;
+		if (!url) return;
+		void openTaskConversation(url);
+		props.onConversationOpen?.();
+	};
 	const prData = () => githubStore.getBranchPrData(props.repoPath, props.branch);
 	const checkSummary = () => githubStore.getCheckSummary(props.repoPath, props.branch);
 	const checkDetails = () => githubStore.getCheckDetails(props.repoPath, props.branch);
+	const [expandedCircleCiLog, setExpandedCircleCiLog] = createSignal<string | null>(null);
+	const [circleCiLogs, setCircleCiLogs] = createSignal<
+		Record<string, { text?: string; error?: string; loading?: boolean }>
+	>({});
+	// DEFERRED (2026-09-25) — check details expose a URL but no CI provider. This predicate only
+	// controls whether to show the Log button; the backend verifies the selected
+	// check URL against the PR's head before fetching logs. Use a provider field
+	// here when the check-details protocol supplies one.
+	const isCircleCiFailure = (check: { state: string; html_url: string }) =>
+		getCiClass(check.state) === "failure" && /(^|\/\/)(app\.)?circleci\.com\//.test(check.html_url);
+	const toggleCircleCiLog = async (url: string) => {
+		if (expandedCircleCiLog() === url) return setExpandedCircleCiLog(null);
+		setExpandedCircleCiLog(url);
+		if (circleCiLogs()[url]?.text || circleCiLogs()[url]?.loading) return;
+		setCircleCiLogs((logs) => ({ ...logs, [url]: { loading: true } }));
+		try {
+			const text = await rpc<string>("fetch_ci_failure_logs", {
+				repoPath: props.repoPath,
+				branch: props.branch,
+				checkUrl: url,
+				headSha: prData()?.head_ref_oid,
+			});
+			setCircleCiLogs((logs) => ({ ...logs, [url]: { text } }));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			setCircleCiLogs((logs) => ({ ...logs, [url]: { error: message } }));
+		}
+	};
 
 	// AI-review state lives in prReviewStore keyed by repo+PR, not in local
 	// signals — so an in-flight review survives the popover being closed and
@@ -119,7 +172,7 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 	const reviewError = () => reviewEntry()?.error ?? null;
 	const selectedFindingIds = () => reviewEntry()?.selectedIds ?? [];
 
-	const reviewFindings = createMemo<ReviewFinding[]>(() => flattenReviewFindings(review()?.files ?? []));
+	const reviewFindings = createMemo(() => flattenReviewFindings(review()?.files ?? []));
 
 	const selectedFindings = createMemo(() => postableFindings(reviewFindings(), new Set(selectedFindingIds())));
 
@@ -173,6 +226,16 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 		if (isTerminalState()) return null;
 		const label = prData()?.merge_state_label;
 		if (!label) return null;
+		// GitHub's CLEAN knows nothing of unresolved threads or running checks: while the shared
+		// verdict names a blocker, "Ready to merge" would contradict the chip beside it.
+		const kind = readiness();
+		if (
+			label.css_class === "clean" &&
+			kind &&
+			PR_READINESS_SEVERITY[kind] !== "ok" &&
+			PR_READINESS_SEVERITY[kind] !== "muted"
+		)
+			return null;
 		return { label: label.label, cssClass: label.css_class };
 	};
 
@@ -183,12 +246,37 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 		return { label: label.label, cssClass: label.css_class };
 	};
 
-	const isConflicting = () => mergeState()?.cssClass === "conflicting";
+	const readiness = () => {
+		const pr = prData();
+		return pr ? prReadinessOf(pr) : null;
+	};
+
+	// The bot/human split costs one GraphQL query per PR, so it is fetched only
+	// while the panel is open on a PR that has unresolved threads.
+	const [threadSplit] = createResource(
+		() => {
+			const pr = prData();
+			return pr && (pr.unresolved_threads > 0 || pr.unresolved_threads_truncated) && !isTerminalState()
+				? { path: props.repoPath, prNumber: pr.number, unresolved: pr.unresolved_threads }
+				: null;
+		},
+		({ path, prNumber }) =>
+			rpc<{ bot: number; human: number; ego?: number }>("get_pr_review_threads", { path, prNumber }).catch((e) => {
+				appLogger.warn("github", "Failed to load review threads", { error: String(e) });
+				return null;
+			}),
+	);
+
+	// Keyed on the conflict state, not the readiness verdict: the verdict ranks "draft" above
+	// "conflict", but a conflicting draft PR still needs Resolve conflicts / Push.
+	const isConflicting = () => prData()?.conflict_state === "conflicting";
 
 	/** Local worktree path for this PR's head branch, if one exists (e.g. after
 	 *  conflict-assist created it). Drives the Push button's visibility. */
 	const conflictWorktreePath = () =>
-		repositoriesStore.state.repositories[props.repoPath]?.branches[props.branch]?.worktreePath ?? null;
+		repositoriesStore.state.repositories[props.repoPath]?.workspaces[
+			repositoriesStore.workspaceIdOnBranch(props.repoPath, props.branch) ?? props.branch
+		]?.worktreePath ?? null;
 
 	function handlePush() {
 		const wt = conflictWorktreePath();
@@ -209,14 +297,56 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 			{(pr) => (
 				<>
 					{/* Merge + review status pills */}
-					<Show when={mergeState() || reviewState()}>
+					{/* Terminal PRs show no pill, so the row would be empty */}
+					<Show when={!isTerminalState() && readiness()}>
 						<div class={s.statusRow}>
+							<Show when={readiness()}>
+								{(kind) => (
+									<span
+										class={cx(s.readinessBadge, READINESS_CLASSES[PR_READINESS_SEVERITY[kind()]])}
+										data-readiness={kind()}
+									>
+										{PR_READINESS_LABELS[kind()]}
+									</span>
+								)}
+							</Show>
 							<Show when={mergeState()}>
 								{(ms) => <span class={cx(s.mergeStateBadge, MERGE_STATE_CLASSES[ms().cssClass])}>{ms().label}</span>}
 							</Show>
 							<Show when={reviewState()}>
 								{(rs) => <span class={cx(s.reviewStateBadge, REVIEW_STATE_CLASSES[rs().cssClass])}>{rs().label}</span>}
 							</Show>
+						</div>
+					</Show>
+
+					<Show when={!isTerminalState() && (pr().unresolved_threads > 0 || pr().unresolved_threads_truncated)}>
+						<div class={s.statusRow} data-testid="unresolved-threads">
+							<button
+								type="button"
+								class={s.viewDiffBtn}
+								disabled={!pr().url}
+								onClick={openConversation}
+								title="Open comments and review threads"
+							>
+								{/* FastAF names no reviewing agent: threads the backend attributes to an
+								    agent reviewer count with the bots. */}
+								{threadSplit()
+									? t("prDetail.unresolvedSplit", "{human} human, {bot} bot unresolved threads", {
+											human: String(threadSplit()?.human),
+											bot: String((threadSplit()?.bot ?? 0) + (threadSplit()?.ego ?? 0)),
+										})
+									: t("prDetail.unresolved", "{count} unresolved threads", {
+											count: `${pr().unresolved_threads}${pr().unresolved_threads_truncated ? "+" : ""}`,
+										})}
+							</button>
+						</div>
+					</Show>
+
+					<Show when={pr().url}>
+						<div class={s.actions}>
+							<button type="button" class={s.viewDiffBtn} onClick={openConversation}>
+								{workItemProviderRegistry.list("github").length ? "Comments and review threads" : "Comments on GitHub"}
+							</button>
 						</div>
 					</Show>
 
@@ -336,6 +466,8 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 						</div>
 					</Show>
 
+					<PrActionButtons repoPath={props.repoPath} pr={pr()} checks={checkDetails()} />
+
 					{/* Check list */}
 					<Show when={checkDetails().length > 0}>
 						<div class={s.checks}>
@@ -356,6 +488,35 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 											<span class={cx(s.checkIcon, CI_CLASSES[getCiClass(check.state)])}>{getCiIcon(check.state)}</span>
 											<span class={s.checkName}>{check.context}</span>
 											<span class={cx(s.checkStatus, CI_CLASSES[getCiClass(check.state)])}>{check.state}</span>
+											<Show when={isCircleCiFailure(check)}>
+												<button
+													type="button"
+													class={s.checkLogBtn}
+													aria-expanded={expandedCircleCiLog() === check.html_url}
+													onKeyDown={(event) => event.stopPropagation()}
+													onClick={(event) => {
+														event.stopPropagation();
+														void toggleCircleCiLog(check.html_url);
+													}}
+												>
+													{t("prDetail.circleCiLog", "Log")}
+												</button>
+											</Show>
+											<Show when={expandedCircleCiLog() === check.html_url}>
+												<Show when={circleCiLogs()[check.html_url]?.loading}>
+													<span class={s.checkLogNote}>{t("prDetail.loading", "Loading…")}</span>
+												</Show>
+												<Show when={circleCiLogs()[check.html_url]?.error}>
+													<span class={cx(s.checkLogNote, s.checkLogError)}>
+														{circleCiLogs()[check.html_url]?.error}
+													</span>
+												</Show>
+												<Show when={circleCiLogs()[check.html_url]?.text}>
+													<pre class={s.checkLog} onClick={(event) => event.stopPropagation()}>
+														{stripAnsi(circleCiLogs()[check.html_url]?.text ?? "")}
+													</pre>
+												</Show>
+											</Show>
 										</div>
 									);
 								}}
@@ -381,8 +542,6 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 										{r().files.length === 1
 											? t("prDetail.reviewedOneFile", "1 file reviewed")
 											: `${r().files.length} ${t("prDetail.reviewedFiles", "files reviewed")}`}
-										{" · "}
-										{r().llm_model ?? t("prDetail.heuristicsOnly", "heuristics only")}
 									</div>
 								</div>
 							)}

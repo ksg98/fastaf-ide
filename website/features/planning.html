@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>Plan the work — FastAF</title>
+  <meta name="description" content="Capture ideas, turn them into native plans and stories with acceptance criteria, draw workflows as graphs and run agents on a schedule." />
+  <meta property="og:title" content="Plan the work — FastAF" />
+  <meta property="og:description" content="Ideas, native plans and stories, a Kanban board, workflows and automations." />
+  <meta property="og:url" content="https://tuicommander.com/features/planning.html" />
+  <meta name="twitter:title" content="Plan the work — FastAF" />
+  <meta name="twitter:description" content="Ideas, native plans and stories, a Kanban board, workflows and automations." />
+  <link rel="canonical" href="https://tuicommander.com/features/planning.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Plan the work</p>
+      <h1>From a thought to <em>running work</em>.</h1>
+      <p>Agents work best on clear, small stories. FastAF keeps the ideas, the plans, the stories and the schedules next to the agents that run them.</p>
+    </div>
+  </header>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Ideas, <em>caught</em> on the way.</h2>
+        <p>The Ideas panel (<code>Cmd+Alt+N</code>) keeps quick notes per project or globally, with images. Agents can add and read ideas too, through the <code>fastaf story</code> CLI and MCP, so a plan can start from what you wrote down in passing.</p>
+        <a class="more" href="/docs/user-guide/keyboard-shortcuts.html">Read the Keyboard Shortcuts guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/p-ideas.webp" alt="Ideas panel beside the terminal" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Ideas become <em>stories</em>.</h2>
+        <p><strong>Plans and Stories</strong> manages native plans and stories inside FastAF. A plan names a project and its Markdown document; its stories carry acceptance criteria, priority, type, dependencies and a revision history.</p>
+        <ul class="points">
+          <li><strong>List or Kanban</strong>, filtered by status and story type, with one column per status.</li>
+          <li><strong>Start work, check criteria, submit for review</strong>, then approve or request changes, by hand or from an agent.</li>
+          <li>The same actions through MCP, HTTP and the <code>fastaf story</code> CLI. Detach the dialog into its own window.</li>
+        </ul>
+        <a class="more" href="https://github.com/ksg98/fastaf-ide/blob/main/docs/user-guide/native-stories.md" rel="noopener noreferrer">Read the Plans and Stories guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/p-kanban.webp" alt="Plans and Stories with the Kanban board and a story's transition history" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Your pipeline, as a <em>graph</em>.</h2>
+        <p>The Workflow designer draws a story's pipeline as nodes: agent steps, judges, loops, pauses, notifications and joins. Each agent step uses a run profile you saved. Failed steps pause the run, and Run history shows the cause and offers Resume. The designer is new in 2.0, and some node types are still drafts.</p>
+        <a class="more" href="https://github.com/ksg98/fastaf-ide/blob/main/docs/user-guide/native-stories.md#workflow-graph-rollout" rel="noopener noreferrer">Read about workflows &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/p-designer.webp" alt="Workflow designer with a graph of steps" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Agents on a <em>schedule</em>.</h2>
+        <p>Automations start a saved agent profile with a literal prompt, once or on a cron schedule, in an existing checkout or a new worktree per run. Built-in templates cover a weekday repository audit, release readiness, a daily change review and an hourly maintenance review.</p>
+        <ul class="points">
+          <li><strong>Run now</strong> for any definition, and an overlap policy that skips an occurrence while the previous run is still open.</li>
+          <li><strong>Run history</strong> keeps each run's status and saved output.</li>
+          <li>Notices when a run needs you or fails.</li>
+        </ul>
+        <a class="more" href="/docs/user-guide/automations.html">Read the Automations guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/p-automations.webp" alt="Automations dialog with run history" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

@@ -1,58 +1,129 @@
-import { type Component, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { type Component, createEffect, createSignal, onCleanup, onMount, Show, untrack } from "solid-js";
 import { lastMenuActionTime } from "../../menuDedup";
 import { isMacOS, isWindows } from "../../platform";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import { appLogger } from "../../stores/appLogger";
+import { designModeBrowsers } from "../../stores/designMode";
 import { settingsStore } from "../../stores/settings";
 import { reclaimParkedTerminal } from "../../stores/terminalOwnership";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
+import { isTauri } from "../../transport";
+import { getSessionConnection } from "../../transportRuntime";
 import { filterMatchesToBlock } from "../../utils/blockSearchFilter";
 import { writeClipboard } from "../../utils/clipboard";
 import { formatRelativeTime } from "../../utils/formatRelativeTime";
 import { ensureKeyboardViewportTracking, keyboardOcclusion } from "../../utils/keyboardViewport";
 import { handleOpenUrl } from "../../utils/openUrl";
+import { isImagePaste } from "../../utils/pastedImage";
 import { isPerfDebug } from "../../utils/perfDebug";
 import { markPerf, noteFrameRequest } from "../../utils/perfTrace";
+import { stripAnswerMarkers } from "../../utils/stripAnswerMarkers";
 import { applyPinchFontDelta } from "../../utils/terminalZoom";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
+import { AnswersPanel } from "./AnswersPanel";
+import { type AnswersTurn, newTurnCache, readAnswersHistory, readTurnRows, sameAnswersHistory } from "./answersTurn";
 import { createCanvasTerminalBindings } from "./canvasTerminalBindings";
-import { createCanvasLinkController } from "./canvasTerminalLinks";
-import { createCanvasScrollController, ROW_CACHE_CHUNK } from "./canvasTerminalScroll";
+import { canvasToGrid as canvasToViewport, sgrMouseSequence } from "./canvasTerminalInputGeometry";
 import {
+	createCanvasLinkController,
+	createLinkPressTracker,
+	isOverSpan,
+	linkClaimsPress,
+	linkCovers,
+	spanAt,
+} from "./canvasTerminalLinks";
+import {
+	cachedMarkerSnapshot,
+	createCanvasMarkerPlanner,
+	MARKER_LOOKBACK_ROWS,
+	MARKER_PREFIX_BUDGET,
+	type MarkerPlan,
+	markerPromptStart,
+	type PromptBoundary,
+	readMarkerPromptBoundary,
+} from "./canvasTerminalMarkers";
+import { paintCursor, paintSearchHighlights, paintSelection, syncImePosition, thumbFor } from "./canvasTerminalPaint";
+import { createCanvasScrollController, gestureAccelFactor, ROW_CACHE_CHUNK } from "./canvasTerminalScroll";
+import {
+	commitSelectionCopy,
 	createCanvasSearchController,
 	createCanvasSelectionController,
 	EDGE_SCROLL_TICK_MS,
 	edgeScrollDistance,
 	edgeScrollLines,
 	edgeSelectionPoint,
+	selectionRowToGridRow,
+	selectionRowToViewport,
+	shouldValidateSelectionSnapshot,
+	viewportRowToSelectionRow,
 } from "./canvasTerminalSelection";
+import {
+	getLocalSelectionText,
+	type HoveredLink,
+	hoverSignature,
+	logicalCellToStringOffset,
+	logicalRows,
+	logicalStringSpanToCells,
+	readProjectedSelectionText,
+	rowStringSpanToCells,
+	underlinedText,
+	underlinedTextAt,
+} from "./canvasTerminalText";
 import { installTouchHandlers } from "./canvasTerminalTouch";
 import { createTransport, type TerminalTransport, toBinaryPayload } from "./canvasTerminalTransport";
 import {
 	type CellMetrics,
 	type CursorShape,
-	computeCursorRect,
+	cellText,
 	createHiddenAckThrottle,
 	createLeadingThrottle,
 	type DecodedFrame,
 	type DecodedRow,
 	decideFrameGrid,
+	decideSizeReclaim,
 	decodeBinaryFrame,
 	decodeStyledRange,
 	GUTTER_PX,
 	gridDimsForBox,
+	HIDDEN_ACK_INTERVAL_MS,
+	installFrameRows,
 	reconcileDelay,
 	rowText,
+	type StyledRange,
 	shouldFireReconcile,
 	snapLineHeight,
+	textSpanToCellRanges,
+	utf16SpanToCellRange,
 } from "./canvasTerminalUtils";
+import {
+	createWheelNotchState,
+	quantizeWheelNotches,
+	resetWheelNotch,
+	WHEEL_GESTURE_END_MS,
+	wheelDeltaToPixels,
+} from "./canvasTerminalWheel";
 import { installFrameTimingDebugHook, isFrameTimingEnabled, recordFrameTiming, resetFrameTiming } from "./frameTiming";
+import {
+	dumpFrameWorkload,
+	isFrameWorkloadEnabled,
+	recordWorkloadArrival,
+	recordWorkloadPaint,
+	recordWorkloadVisibility,
+} from "./frameWorkload";
 import { acquireCache, getSharedMetrics, invalidateGlyphCache, releaseCache } from "./glyphCache";
 import { createGridRenderer, type GridRenderer } from "./gridRenderer";
 import { kittySequenceForKey } from "./kittyKeyboard";
 import { fileUrlRegex, matchFilePaths, matchWebUrls } from "./linkProvider";
 import { createClickDragArbiter } from "./mouseGesture";
-import { INTENT_HIGHLIGHT_RE, planSuggestOverlay, SUGGEST_ANCHOR_RE } from "./suggestOverlay";
+import { buildScrollbarMarksHtml } from "./scrollbarMarks";
+import {
+	ANSWER_MARKER_RE,
+	answerOverlayKey,
+	INTENT_HIGHLIGHT_RE,
+	paintOverlayBlocks,
+	SUGGEST_ANCHOR_RE,
+} from "./suggestOverlay";
 import {
 	altSequenceFromCode,
 	cmdSequenceForKey,
@@ -62,6 +133,10 @@ import {
 	keyToSequence,
 	shouldReportMouseUp,
 } from "./terminalInput";
+import { cssColorToRgb, publishTerminalPalette } from "./terminalPalette";
+import { openTerminalPathLink } from "./terminalPathLink";
+import { ViewportProjection } from "./viewportProjection";
+import { latestIntersectionVisibility, retryUntilMeasured, SIZE_RETRY_MAX_FRAMES } from "./visibilityLifecycle";
 
 // Re-export for external consumers
 export type { CellMetrics, CursorShape, DecodedFrame };
@@ -80,6 +155,8 @@ export interface CanvasTerminalRef {
 	searchClear: () => void;
 	/** Paste text with correct bracketed paste wrapping based on current terminal state */
 	paste: (text: string) => void;
+	/** Run a wheel event that landed outside the canvas (the CLI | Chat switch) through the canvas's own wheel path. */
+	wheel: (e: WheelEvent) => void;
 }
 
 export interface CanvasTerminalProps {
@@ -107,7 +184,6 @@ const SEARCH_REFRESH_THROTTLE_MS = 150;
 const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	let canvasRef!: HTMLCanvasElement;
 	let overlayCanvasRef!: HTMLCanvasElement;
-	let touchTextareaRef!: HTMLTextAreaElement;
 	let keyInputRef!: HTMLInputElement;
 	let scrollbarRef!: HTMLDivElement;
 	let scrollThumbRef!: HTMLDivElement;
@@ -136,6 +212,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	const scroll = createCanvasScrollController();
 	const rowCache = scroll.rowCache;
 	const requestedChunks = scroll.requestedChunks;
+	// Per-gesture pixel accumulator for the app-forwarded wheel path (handleWheel below).
+	// Lives for the pane's lifetime; reset on gesture-end, direction reversal, blur, and
+	// primary/alternate screen swap — see the reset points next to its usages.
+	const wheelNotch = createWheelNotchState();
 	// Base-grid renderer (the canvas2d paint implementation). Created in onMount
 	// once ctx exists.
 	let gridRenderer!: GridRenderer;
@@ -189,6 +269,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// pending request). Gated by isFrameTimingEnabled().
 	let mainDirtySince = 0;
 	let resizeDebounce: ReturnType<typeof setTimeout> | undefined;
+	// Disposer for the frame loop waiting on an unsized pane (see remeasure).
+	let cancelSizeRetry: (() => void) | undefined;
 	let dprMediaQuery: MediaQueryList | undefined;
 	let dprChangeHandler: (() => void) | undefined;
 	let cleanupTouch: (() => void) | undefined;
@@ -197,8 +279,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	const ipcErr = (cmd: string) => (e: unknown) =>
 		appLogger.debug("terminal", `${cmd} failed`, { sessionId: props.sessionId, error: e });
 
-	// Selection state — row coordinates are absolute (viewportTop + viewportRow)
-	// so the highlight stays anchored to the original content when scrolling.
+	// Selection rows use eviction-stable indices (historyBase + grid-relative row)
+	// so output cannot alias a selected line onto its replacement at the scrollback cap.
 	const selection = createCanvasSelectionController();
 	let selectionScrollTimer: ReturnType<typeof setInterval> | null = null;
 	let selectionScrollDelta = 0;
@@ -212,36 +294,24 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// Link detection
 	const linkController = createCanvasLinkController();
 	const linkCache = linkController.rowCache;
-	let hoveredLink: {
-		row: number;
-		colStart: number;
-		colEnd: number;
-		path: string;
-		line?: number;
-		col?: number;
-		spans?: { row: number; colStart: number; colEnd: number }[];
-	} | null = null;
+	const STALE = Symbol("stale link lookup");
+	let hoveredLink: HoveredLink | null = null;
+	/** What the hovered link underlined when the probe resolved it; see pressSpanAt. */
+	let hoveredSignature = "";
 	const detectedLinks = linkController.detectedSpans;
 	/** Set by a Cmd/Ctrl+press the canvas kept for a link, so the matching release
 	 *  stays quiet and the click opens the link under the pointer. */
-	let linkPress = false;
+	let modifierLinkPress = false;
 	/** Cmd on macOS, Ctrl elsewhere: the modifier that opens a link on click. */
 	const isLinkModifier = (e: MouseEvent) => (isMacOS() ? e.metaKey : e.ctrlKey);
-	/** Whether a cell sits on a link already found: an underlined span, or the hovered link. */
-	const isOnKnownLink = (pos: { row: number; col: number }) => {
-		const inSpan = (sp: { colStart: number; colEnd: number }) => pos.col >= sp.colStart && pos.col < sp.colEnd;
-		if (detectedLinks.get(pos.row)?.some(inSpan)) return true;
-		if (!hoveredLink) return false;
-		return (hoveredLink.spans ?? [hoveredLink]).some((sp) => sp.row === pos.row && inSpan(sp));
-	};
-	// Spans of links that span soft-wrapped rows (web + file://), keyed by row.
-	// scanRowForLinks() merges these each time it rebuilds a row's dashed-underline
-	// spans, so multi-row underlines survive the per-frame rebuild at line ~1367.
-	// Recomputed by verifyVisibleFileLinks(); cleared with detectedLinks so it
-	// can't paint stale rows after a scroll/resize.
+	// Keep verified link identities across unrelated damage, not just their pixels.
+	// Each accepted frame projects them onto its current logical rows before painting.
 	const wrappedLinkSpans = linkController.wrappedSpans;
+	type WrappedLinkSource = { startRow: number; index: number; text: string; before: string; after: string };
+	let wrappedLinkSources: WrappedLinkSource[] = [];
 	function clearDetectedLinks() {
 		linkController.clearDetected();
+		wrappedLinkSources = [];
 	}
 
 	// Link context menu: right-clicking a detected link offers Open / Copy link.
@@ -257,10 +327,41 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			handleOpenUrl(link.path);
 		} else {
 			const path = link.path.startsWith("file://") ? link.path.slice(7) : link.path;
-			props.onOpenFilePath?.(path, link.line, link.col);
+			if (!invokeRef) return;
+			const termId = terminalsStore.getTerminalForSession(props.sessionId);
+			const cwd = (termId ? terminalsStore.get(termId)?.cwd : undefined) || "";
+			void openTerminalPathLink(path, cwd, invokeRef, props.onOpenFilePath, link.line, link.col);
 		}
 	};
 
+	// The press claimed a span; what it opens is resolved now, at the pointer, by its
+	// own lookup — neither `hoveredLink` nor the hover probe's staleness check.
+	const linkPress = createLinkPressTracker();
+	async function openLinkAt(row: number, col: number) {
+		const link = await resolveLinkAt(row, col, () => !alive);
+		if (link === STALE) {
+			appLogger.debug("terminal", "link click: lookup went stale", { row, col });
+		} else if (!link) {
+			appLogger.debug("terminal", "link click: nothing resolved under the pointer", { row, col });
+		} else if (!linkCovers(link, row, col)) {
+			appLogger.debug("terminal", "link click: resolved link does not cover the pointer", { row, col, link });
+		} else {
+			appLogger.debug("terminal", "link click: opening", { row, col, path: link.path });
+			openLink(link);
+		}
+	}
+	/**
+	 * The span a press at the cell belongs to: the dashed underline, or the link the hover
+	 * probe resolved under the pointer (OSC 8 text, a path wrapped over rows) that the
+	 * dashed underline does not cover. The hover is what showed the pointer cursor.
+	 */
+	function pressSpanAt(row: number, col: number): { colStart: number; colEnd: number } | undefined {
+		const underlined = spanAt(detectedLinks.get(row), col);
+		if (underlined || !hoveredLink || !linkCovers(hoveredLink, row, col)) return underlined;
+		// An in-place redraw leaves the hover standing; it only counts while it underlines what it did.
+		if (hoverSignature(rowMap, hoveredLink) !== hoveredSignature) return undefined;
+		return (hoveredLink.spans ?? [hoveredLink]).find((sp) => sp.row === row && col >= sp.colStart && col < sp.colEnd);
+	}
 	const copyLink = (link: LinkTarget) => {
 		const text = link.path.startsWith("file://") ? link.path.slice(7) : link.path;
 		writeClipboard(text).catch(() => {});
@@ -274,15 +375,18 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// tokens are resolved to rgb triples / hex strings here and reused via
 	// `chromeTint()` when an alpha wash is needed.
 	let cachedBgDefault = "#1e1e1e";
+	let cachedNeutralSurface = cachedBgDefault;
 	let cachedFgDefault = "#d4d4d4";
-	let cachedAccentRgb = "76, 157, 243";
-	let cachedWarningRgb = "245, 166, 35";
-	let cachedErrorRgb = "255, 85, 85";
-	let cachedSuccessRgb = "61, 214, 140";
-	let cachedFgMutedRgb = "140, 140, 140";
-	let cachedWarning = "#f5a623";
-	let cachedError = "#ff5555";
-	let cachedSuccess = "#3dd68c";
+	// Fallbacks are the fixed colours the overlay used before it followed the theme;
+	// they only show where a token is missing (a theme without it, or tests).
+	let cachedAccentRgb = "58, 130, 220";
+	let cachedWarningRgb = "255, 180, 50";
+	let cachedErrorRgb = "248, 81, 73";
+	let cachedSuccessRgb = "63, 185, 80";
+	let cachedFgMutedRgb = "150, 150, 150";
+	let cachedWarning = "#e8984c";
+	let cachedError = "#f85149";
+	let cachedSuccess = "#3fb950";
 
 	function chromeTint(rgbTriple: string, alpha: number): string {
 		return `rgba(${rgbTriple}, ${alpha})`;
@@ -291,12 +395,22 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// Tracks cumulative gesture distance (px) to ramp the scroll acceleration factor.
 	// Row index → row data lookup (persistent, updated incrementally)
 	const rowMap = new Map<number, DecodedFrame["rows"][0]>();
+	let viewportProjection = new ViewportProjection(rowMap);
+	let projectedDisplayOffset = 0;
+	function canvasToGrid(...args: Parameters<typeof canvasToViewport>) {
+		const point = canvasToViewport(...args);
+		let row = Math.min(viewportProjection.backendRow(point.row), Math.max(0, lastResizeRows - 1));
+		while (row > 0 && viewportProjection.hidden.has(row)) row--;
+		return { row, col: Math.min(viewportProjection.backendCol(row, point.col), Math.max(0, lastResizeCols - 1)) };
+	}
 	// Rows that arrived in the latest onFrame batch (drives incremental repaint)
 	const pendingDirtyRows = new Set<number>();
 	// When true, next paint must redraw everything (scroll, resize, clear)
 	let fullRepaintNeeded = true;
-	let hidden = false;
+	let hidden = true;
 	let lastHistorySize = -1;
+	let lastHistoryBase = -1;
+	let awaitingFullFrame = false;
 	// How many grid frames this transport has delivered. The ack echoes it so Rust
 	// can tell "the frontend caught up" from "a late ack for a frame the ticker
 	// already gave up on" — without an id, the second one reopened the gate and
@@ -308,9 +422,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		transport?.ackFrame(framesReceived);
 	}
 
-	// Below the backend's MAX_IN_FLIGHT_MS (500 ms): the gate must reopen on this
-	// ack, not on the ticker deciding the frontend is stuck.
-	const hiddenAck = createHiddenAckThrottle(ackFrame, 400);
+	// The gate must reopen on this ack, not on the ticker deciding the frontend is
+	// stuck. The margin that buys is in HIDDEN_ACK_INTERVAL_MS — do not inline it.
+	const hiddenAck = createHiddenAckThrottle(ackFrame, HIDDEN_ACK_INTERVAL_MS);
 
 	function writePtyNoScroll(data: string) {
 		invokeRef?.("write_pty", { sessionId: props.sessionId, data }).catch((e) => {
@@ -318,7 +432,29 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		});
 	}
 
+	// The backend frame carries the size the child sees; when another viewer took
+	// it, this viewer (the one in use) asks for its own back (story 2131-aa75).
+	let reclaimAskedFor = "";
+	function reclaimSize() {
+		if (!currentFrame || !invokeRef) return;
+		const mine = { rows: lastResizeRows, cols: lastResizeCols };
+		const d = decideSizeReclaim(currentFrame, mine, reclaimAskedFor);
+		reclaimAskedFor = d.askedFor;
+		if (!d.send) return;
+		if (isPerfDebug())
+			appLogger.diag.info("terminal", `resize_pty reclaim canvas ${mine.rows}x${mine.cols}`, {
+				sessionId: props.sessionId,
+				caller: "canvas-reclaim",
+				viewer: isTauri() ? "desktop" : "browser",
+				...mine,
+				childRows: currentFrame.screenRows,
+				childCols: currentFrame.screenCols,
+			});
+		invokeRef("resize_pty", { sessionId: props.sessionId, ...mine }).catch(ipcErr("resize_pty"));
+	}
+
 	function writePty(data: string) {
+		reclaimSize();
 		// Typing jumps to the bottom — abandon any in-flight smooth scroll gesture so
 		// its transient transform/cache render doesn't fight the programmatic jump.
 		resetSmoothScroll();
@@ -390,15 +526,17 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	}
 
 	/** While auto-scrolling, the selection ends at the visible edge it scrolls
-	 *  toward. Re-pinned on every frame, so it follows the rows as they arrive. */
+	 *  toward. Re-pinned on every frame, so it follows the rows as they arrive.
+	 *  The edge row goes through the marker projection (hidden suggest/intent rows)
+	 *  and lands in the eviction-stable selection space, like every other point. */
 	function pinSelectionToScrollEdge(): boolean {
 		if (selectionScrollTimer === null || !currentFrame || !selection.start) return false;
-		selection.end = edgeSelectionPoint(
-			selectionScrollDelta,
-			currentFrame.historySize - currentFrame.displayOffset,
-			currentFrame.screenRows || lastResizeRows,
-			lastResizeCols - 1,
-		);
+		const screenRows = currentFrame.screenRows || lastResizeRows;
+		const edgeRow = selectionScrollDelta > 0 ? 0 : screenRows - 1;
+		const absRow = viewportRowToAbs(Math.min(viewportProjection.backendRow(edgeRow), screenRows - 1));
+		if (absRow === null) return false;
+		// One-row window: the top edge yields column 0, the bottom edge the last column.
+		selection.end = edgeSelectionPoint(selectionScrollDelta, absRow, 1, lastResizeCols - 1);
 		return true;
 	}
 
@@ -410,38 +548,24 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 	}
 
-	function canvasToGrid(e: MouseEvent, cachedRect?: DOMRect): { col: number; row: number } {
-		const m = metrics();
-		if (!m) return { col: 0, row: 0 };
-		const rect = cachedRect ?? canvasRef.getBoundingClientRect();
-		const x = e.clientX - rect.left - GUTTER_PX;
-		const y = e.clientY - rect.top;
-		const maxCol = Math.max(0, Math.floor((rect.width - GUTTER_PX) / m.cellWidth) - 1);
-		const maxRow = Math.max(0, Math.floor(rect.height / m.cellHeight) - 1);
-		return {
-			col: Math.max(0, Math.min(Math.floor(x / m.cellWidth), maxCol)),
-			row: Math.max(0, Math.min(Math.floor(y / m.cellHeight), maxRow)),
-		};
-	}
-
-	function mouseModifiers(e: MouseEvent): number {
-		return (e.shiftKey ? 4 : 0) | (e.altKey ? 8 : 0) | (e.ctrlKey ? 16 : 0);
-	}
-
-	function sgrMouseSequence(button: number, col: number, row: number, press: boolean, e?: MouseEvent): string {
-		const cb = button + (e ? mouseModifiers(e) : 0);
-		return `\x1b[<${cb};${col + 1};${row + 1}${press ? "M" : "m"}`;
-	}
-
 	function viewportRowToAbs(viewportRow: number): number | null {
 		if (!currentFrame) return null;
-		return currentFrame.historySize - currentFrame.displayOffset + viewportRow;
+		return viewportRowToSelectionRow(
+			{ ...currentFrame, displayOffset: projectedDisplayOffset, screenRows: currentFrame.screenRows || lastResizeRows },
+			viewportRow,
+		);
 	}
 
-	function remeasure() {
-		if (!ctx) return;
+	/**
+	 * Measure the pane and apply its geometry to the metrics, both canvases and
+	 * the PTY. Returns false when there was no usable box to measure — the pane
+	 * has not been laid out yet, or is still too small to hold one cell — in
+	 * which case nothing here has run and the measurement is still owed.
+	 */
+	function measureNow(): boolean {
+		if (!ctx) return false;
 		const rect = containerRef.getBoundingClientRect();
-		if (rect.width <= 0 || rect.height <= 0) return;
+		if (rect.width <= 0 || rect.height <= 0) return false;
 
 		const dpr = window.devicePixelRatio || 1;
 		const perTerminalSize = terminalsStore.state.terminals[props.terminalId]?.fontSize;
@@ -456,20 +580,36 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// (the frame around it is --bg-secondary).
 		cachedBgDefault = cs.getPropertyValue("--bg-primary").trim() || "#050505";
 		cachedFgDefault = cs.getPropertyValue("--fg-primary").trim() || "#d4d4d4";
+		cachedNeutralSurface = cs.getPropertyValue("--bg-tertiary").trim() || cachedBgDefault;
 		// Overlay chrome tokens — kept in sync with the app theme so search/fold/
 		// exit/selection marks recolor when the user swaps themes at runtime.
-		cachedAccentRgb = cs.getPropertyValue("--accent-rgb").trim() || cachedAccentRgb;
-		cachedWarningRgb = cs.getPropertyValue("--warning-rgb").trim() || cachedWarningRgb;
-		cachedErrorRgb = cs.getPropertyValue("--error-rgb").trim() || cachedErrorRgb;
-		cachedSuccessRgb = cs.getPropertyValue("--success-rgb").trim() || cachedSuccessRgb;
-		cachedFgMutedRgb = cs.getPropertyValue("--fg-muted-rgb").trim() || cachedFgMutedRgb;
+		// Themes publish --accent-rgb only, so the other triples come from the colour token.
+		const rgbOf = (name: string, fallback: string) => {
+			const triple = cs.getPropertyValue(`${name}-rgb`).trim();
+			if (triple) return triple;
+			const rgb = cssColorToRgb(cs.getPropertyValue(name));
+			return rgb ? rgb.join(", ") : fallback;
+		};
+		cachedAccentRgb = rgbOf("--accent", cachedAccentRgb);
+		cachedWarningRgb = rgbOf("--warning", cachedWarningRgb);
+		cachedErrorRgb = rgbOf("--error", cachedErrorRgb);
+		cachedSuccessRgb = rgbOf("--success", cachedSuccessRgb);
+		cachedFgMutedRgb = rgbOf("--fg-muted", cachedFgMutedRgb);
 		cachedWarning = cs.getPropertyValue("--warning").trim() || cachedWarning;
 		cachedError = cs.getPropertyValue("--error").trim() || cachedError;
 		cachedSuccess = cs.getPropertyValue("--success").trim() || cachedSuccess;
-		gridRenderer.setTheme(cachedBgDefault, cachedFgDefault);
+		gridRenderer.setTheme(cachedBgDefault, cachedFgDefault, cachedNeutralSurface);
+
+		// The emulator answers OSC 10/11/12 from these. It has no other way to
+		// know the theme, and staying silent makes a probing agent retry forever
+		// (see terminalPalette.ts). Cursor reuses the foreground: that is what the
+		// overlay actually paints it with (octx.strokeStyle = cachedFgDefault).
+		const bgRgb = cssColorToRgb(cachedBgDefault);
+		const fgRgb = cssColorToRgb(cachedFgDefault);
+		if (bgRgb && fgRgb) publishTerminalPalette(fgRgb, bgRgb, fgRgb);
 
 		const { rows, cols } = gridDimsForBox(rect.width, rect.height, m.cellWidth, m.cellHeight);
-		if (cols <= 0 || rows <= 0) return;
+		if (cols <= 0 || rows <= 0) return false;
 		// A resize invalidates the smooth-scroll geometry (cell metrics, overscan,
 		// row cache). Cancel any in-flight gesture so the new geometry takes over
 		// cleanly. Cheap no-op when no gesture is active (scrollPosF already null).
@@ -515,7 +655,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				octxOverscan.setTransform(1, 0, 0, 1, 0, 0);
 				octxOverscan.scale(dpr, dpr);
 				octxOverscan.translate(GUTTER_PX, 0);
-				overscanRenderer.setTheme(cachedBgDefault, cachedFgDefault);
+				overscanRenderer.setTheme(cachedBgDefault, cachedFgDefault, cachedNeutralSurface);
 			}
 			scroll.clearCache();
 		}
@@ -530,10 +670,30 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			lastResizeCols = cols;
 			lastResizeRows = rows;
 
-			rowMap.clear();
-			clearDetectedLinks();
+			// Do NOT clear rowMap/detectedLinks here. resize_pty is async — the new
+			// geometry's frame is still in flight — and painting from an emptied
+			// rowMap below flashes a blank grid for one frame. The canvas bitmap was
+			// already reset above, so leaving rowMap alone repaints the STALE old
+			// content into the new size instead, which is what actually stays on
+			// screen until the new frame's geomChanged handling clears and
+			// repopulates rowMap for real (see the decideFrameGrid handling below).
 			fullRepaintNeeded = true;
 			lastDisplayOffset = -1;
+			// Several viewers share one PTY and the last resize wins: this line records
+			// which viewer asked for which grid from which box (story 2128-153a). The
+			// backend logs every applied size and its origin without this gate.
+			if (isPerfDebug())
+				appLogger.diag.info("terminal", `resize_pty request canvas ${rows}x${cols}`, {
+					sessionId: props.sessionId,
+					caller: "canvas",
+					viewer: isTauri() ? "desktop" : "browser",
+					rows,
+					cols,
+					boxWidth: rect.width,
+					boxHeight: rect.height,
+					cellWidth: m.cellWidth,
+					cellHeight: m.cellHeight,
+				});
 			invokeRef("resize_pty", { sessionId: props.sessionId, rows, cols }).catch(ipcErr("resize_pty"));
 		}
 
@@ -541,32 +701,147 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			fullRepaintNeeded = true;
 			paintFrame(currentFrame, m);
 		}
+		return true;
+	}
+
+	/**
+	 * Measure the pane now, or as soon as it has a box to measure.
+	 *
+	 * A full page reload mounts every terminal before layout runs, so the first
+	 * measurement of a mount routinely lands on a 0x0 pane. Dropping it left the
+	 * canvas at its mount-time geometry — a small box in the corner of the pane,
+	 * the rest black — until a window resize ran the measurement again (#716-031e).
+	 */
+	function remeasure() {
+		cancelSizeRetry?.();
+		cancelSizeRetry = undefined;
+		// A hidden pane has no layout box by design. The visibility observer
+		// remeasures on show, so only visible panes need the bounded retry.
+		if (measureNow() || hidden || !containerRef.isConnected) return;
+		cancelSizeRetry = retryUntilMeasured(measureNow, () => {
+			if (hidden || !containerRef.isConnected) return;
+			appLogger.warn(
+				"terminal",
+				`Pane stayed unsized for ${SIZE_RETRY_MAX_FRAMES} frames — canvas geometry not applied for ${props.terminalId}`,
+			);
+		});
 	}
 
 	function paintFrame(frame: DecodedFrame, m: CellMetrics, dirtyIndices?: Set<number>) {
-		gridRenderer.paintGrid(rowMap, m, { fullRepaint: fullRepaintNeeded, dirtyIndices });
+		// A wrapped suggest may start above the first frame a client received.
+		// Fetch its bounded lookback rather than leaving an orphaned tail visible.
+		const top = frame.historyBase + frame.historySize - frame.displayOffset;
+		for (
+			let chunk = Math.floor(Math.max(frame.historyBase, top - MARKER_LOOKBACK_ROWS) / ROW_CACHE_CHUNK);
+			chunk < Math.ceil(top / ROW_CACHE_CHUNK);
+			chunk++
+		) {
+			if (requestedChunks.has(chunk)) continue;
+			requestedChunks.add(chunk);
+			void fetchChunk(chunk);
+		}
+		const markers = planViewportMarkers(frame, dirtyIndices);
+		projectedDisplayOffset = frame.displayOffset;
+		const projection = new ViewportProjection(rowMap, markers.hidden, markers.answerMarkers);
+		const projectionChanged = projection.key !== viewportProjection.key;
+		viewportProjection = projection;
+		const workloadStart = isFrameWorkloadEnabled() ? performance.now() : 0;
+		const paintOptions = {
+			fullRepaint: fullRepaintNeeded,
+			viewportTop: frame.historyBase + frame.historySize - frame.displayOffset,
+			projection: viewportProjection,
+			dirtyIndices:
+				dirtyIndices &&
+				withToggledRows(
+					withToggledRows(dirtyIndices, paintedHiddenRows, markers.hidden),
+					paintedAnswerMarkers,
+					markers.answerMarkers,
+				),
+			hiddenRows: markers.hidden,
+			hiddenAnswerMarkers: markers.answerMarkers,
+		};
+		if (isFrameWorkloadEnabled())
+			recordWorkloadPaint(props.sessionId, rowMap, {
+				metrics: { ...m },
+				fontFamily: settingsStore.getFontFamily(),
+				fontWeight: settingsStore.state.fontWeight,
+				width: canvasRef.width,
+				height: canvasRef.height,
+				background: cachedBgDefault,
+				foreground: cachedFgDefault,
+				neutral: cachedNeutralSurface,
+				hidden,
+				fullRepaint: paintOptions.fullRepaint,
+				viewportTop: paintOptions.viewportTop,
+				projectionChanged,
+				dirtyIndices: paintOptions.dirtyIndices ? [...paintOptions.dirtyIndices] : undefined,
+				hiddenRows: [...markers.hidden],
+				answerMarkers: [...markers.answerMarkers],
+			});
+		gridRenderer.paintGrid(rowMap, m, paintOptions);
+		if (workloadStart && performance.now() - workloadStart > 200) {
+			void dumpFrameWorkload("long-grid-paint", true).catch(ipcErr("save_frame_workload"));
+		}
+		paintedHiddenRows = markers.hidden;
+		paintedAnswerMarkers = markers.answerMarkers;
 		fullRepaintNeeded = false;
 
 		// Overlay (cursor/selection/search/links/scrollbar/suggest) always stays on main.
 		repaintOverlay(frame, m);
 
 		updateScrollbar(frame);
-		updateSuggestOverlay(frame, m, dirtyIndices);
+		updateSuggestOverlay(m, markers);
+		if (answersView() !== null) scheduleAnswersRefresh();
 	}
 
 	function repaintOverlay(frame: DecodedFrame, m: CellMetrics) {
 		octx.clearRect(-GUTTER_PX, 0, overlayCanvasRef.width / m.dpr, overlayCanvasRef.height / m.dpr);
-		paintSelection(m);
-		paintSearchHighlights(m);
+		// The selection is clamped to the visible window: select-all spans the whole
+		// scrollback, and walking every history row per repaint costs more than the paint.
+		const selectionTop = frame.historyBase + frame.historySize - (overlayScrollOffset ?? projectedDisplayOffset);
+		paintSelection(
+			selection,
+			selectionAbsRowToViewport,
+			overlayScrollOffset,
+			rowCache,
+			rowMap,
+			octx,
+			m,
+			viewportProjection,
+			{
+				fill: chromeTint(cachedAccentRgb, 0.35),
+				firstRow: selectionTop,
+				lastRow: selectionTop + (frame.screenRows || lastResizeRows || 24) - 1,
+			},
+		);
+		paintSearchHighlights(search, absRowToViewport, octx, m, viewportProjection, {
+			fill: chromeTint(cachedWarningRgb, 0.2),
+			active: cachedWarning,
+		});
 		paintLinkUnderline(frame, m);
 		paintGutterMarkers(m);
 		paintBlockTimestamps(m);
 		paintFoldedBlocks(m);
-		paintCursor(frame, m);
+		paintCursor(
+			focused,
+			cursorBlinkOn,
+			octx,
+			cachedFgDefault,
+			rowMap,
+			gridRenderer,
+			cachedBgDefault,
+			keyInputRef,
+			{ ...frame, displayOffset: overlayScrollOffset ?? frame.displayOffset },
+			m,
+			viewportProjection,
+		);
 	}
 
-	function paintLinkUnderline(_frame: DecodedFrame, m: CellMetrics) {
-		const maxRow = currentFrame?.screenRows || lastResizeRows;
+	function paintLinkUnderline(frame: DecodedFrame, m: CellMetrics) {
+		// Link spans belong to rowMap's backend viewport, while smooth scrolling
+		// paints cached text at a newer offset. Use the same row projection as search
+		// before applying marker layout, including each row of a wrapped hover.
+		const linkRowToViewport = (row: number) => absRowToViewport(frame.historySize - frame.displayOffset + row);
 		octx.strokeStyle = cachedFgDefault;
 		octx.lineWidth = 1;
 
@@ -575,12 +850,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			octx.globalAlpha = 0.4;
 			octx.setLineDash([2, 3]);
 			octx.beginPath();
-			for (const [row, spans] of detectedLinks) {
-				if (row < 0 || row >= maxRow) continue;
-				const y = row * m.cellHeight + m.cellHeight - 1 + 0.5;
+			for (const [sourceRow, spans] of detectedLinks) {
+				const row = linkRowToViewport(sourceRow);
+				if (row === null) continue;
+				const displayRow = viewportProjection.displayRow(row);
+				if (displayRow === null) continue;
+				const y = displayRow * m.cellHeight + m.cellHeight - 1 + 0.5;
 				for (const span of spans) {
-					octx.moveTo(span.colStart * m.cellWidth, y);
-					octx.lineTo(span.colEnd * m.cellWidth, y);
+					octx.moveTo(viewportProjection.displayCol(row, span.colStart) * m.cellWidth, y);
+					octx.lineTo(viewportProjection.displayCol(row, span.colEnd) * m.cellWidth, y);
 				}
 			}
 			octx.stroke();
@@ -594,10 +872,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				{ row: hoveredLink.row, colStart: hoveredLink.colStart, colEnd: hoveredLink.colEnd },
 			];
 			for (const span of rowSpans) {
-				if (span.row >= 0 && span.row < maxRow) {
-					const x = span.colStart * m.cellWidth;
-					const w = (span.colEnd - span.colStart) * m.cellWidth;
-					const y = span.row * m.cellHeight + m.cellHeight - 1 + 0.5;
+				const viewportRow = linkRowToViewport(span.row);
+				if (viewportRow !== null) {
+					const row = viewportProjection.displayRow(viewportRow);
+					if (row === null) continue;
+					const start = viewportProjection.displayCol(viewportRow, span.colStart);
+					const end = viewportProjection.displayCol(viewportRow, span.colEnd);
+					const x = start * m.cellWidth;
+					const w = (end - start) * m.cellWidth;
+					const y = row * m.cellHeight + m.cellHeight - 1 + 0.5;
 					octx.beginPath();
 					octx.moveTo(x, y);
 					octx.lineTo(x + w, y);
@@ -649,7 +932,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const allBlocks = term.activeBlock ? [...term.commandBlocks, term.activeBlock] : term.commandBlocks;
 				const viewTop = currentFrame.historySize - currentFrame.displayOffset;
 				const viewCenter = viewTop + Math.floor(currentFrame.screenRows / 2);
-				matches = filterMatchesToBlock(matches, allBlocks, viewCenter);
+				matches = filterMatchesToBlock(matches, allBlocks, viewCenter, currentFrame.historyBase);
 			}
 		}
 		const activeMatch = search.replace(
@@ -687,30 +970,35 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (!currentFrame) return null;
 		// During a smooth-scroll gesture the base is cache-rendered at overlayScrollOffset
 		// (the backend frame lags), so map overlay rows against that same offset.
-		const offset = overlayScrollOffset ?? currentFrame.displayOffset;
+		const offset = overlayScrollOffset ?? projectedDisplayOffset;
 		const viewportTop = currentFrame.historySize - offset;
 		const viewportRow = absRow - viewportTop;
 		if (viewportRow < 0 || viewportRow >= (currentFrame.screenRows || lastResizeRows)) return null;
 		return viewportRow;
 	}
 
-	function paintSearchHighlights(m: CellMetrics) {
-		if (search.matches.length === 0) return;
-		for (let i = 0; i < search.matches.length; i++) {
-			const match = search.matches[i];
-			const vpRow = absRowToViewport(match.row);
-			if (vpRow === null) continue;
-			const isActive = i === search.activeIndex;
-			const x = match.col_start * m.cellWidth;
-			const y = vpRow * m.cellHeight;
-			const w = (match.col_end - match.col_start) * m.cellWidth;
-			octx.fillStyle = chromeTint(cachedWarningRgb, 0.2);
-			octx.fillRect(x, y, w, m.cellHeight);
-			if (isActive) {
-				octx.fillStyle = cachedWarning;
-				octx.fillRect(x, y + m.cellHeight - 2, w, 2);
-			}
+	function selectionAbsRowToViewport(absRow: number): number | null {
+		if (!currentFrame) return null;
+		const offset = overlayScrollOffset ?? projectedDisplayOffset;
+		return selectionRowToViewport(
+			{ ...currentFrame, displayOffset: offset, screenRows: currentFrame.screenRows || lastResizeRows },
+			absRow,
+		);
+	}
+
+	function clearSelectionIfEvicted(frame: DecodedFrame): void {
+		if (
+			(selection.start && selectionRowToGridRow(frame, selection.start.row) === null) ||
+			(selection.end && selectionRowToGridRow(frame, selection.end.row) === null)
+		) {
+			selection.clear();
+			stopSelectionScroll();
 		}
+	}
+
+	function paintAbsRowToViewport(absRow: number): number | null {
+		const row = absRowToViewport(absRow);
+		return row === null ? null : viewportProjection.displayRow(row);
 	}
 
 	function paintGutterMarkers(m: CellMetrics) {
@@ -720,7 +1008,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (blocks.length === 0) return;
 		for (const block of blocks) {
 			if (block.exitCode === null || block.exitCode === 0) continue;
-			const vpRow = absRowToViewport(block.promptLine);
+			const vpRow = paintAbsRowToViewport(block.promptLine - (currentFrame?.historyBase ?? 0));
 			if (vpRow === null) continue;
 			octx.fillStyle = cachedError;
 			octx.fillRect(-GUTTER_PX, vpRow * m.cellHeight, 3, m.cellHeight);
@@ -741,9 +1029,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			const foldEnd = block.endLine;
 			const foldedCount = foldEnd - foldStart;
 			if (foldedCount <= 0) continue;
-			const startVp = absRowToViewport(foldStart);
+			const startVp = paintAbsRowToViewport(foldStart - (currentFrame?.historyBase ?? 0));
 			if (startVp === null) continue;
-			const endVp = absRowToViewport(foldEnd - 1);
+			const endVp = paintAbsRowToViewport(foldEnd - 1 - (currentFrame?.historyBase ?? 0));
 			const lastVp = endVp ?? lastResizeRows - 1;
 			const y = startVp * m.cellHeight;
 			const h = (lastVp - startVp + 1) * m.cellHeight;
@@ -757,7 +1045,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			octx.fillText(label, 4, y + m.cellHeight * 0.75);
 			// Fold gutter indicator
 			octx.fillStyle = chromeTint(cachedAccentRgb, 0.5);
-			const gutterVp = absRowToViewport(block.promptLine);
+			const gutterVp = paintAbsRowToViewport(block.promptLine - (currentFrame?.historyBase ?? 0));
 			if (gutterVp !== null) {
 				octx.fillRect(-GUTTER_PX, gutterVp * m.cellHeight, 3, m.cellHeight);
 			}
@@ -779,7 +1067,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const canvasW = overlayCanvasRef.width / m.dpr;
 		let lastLabelBottom = -Infinity;
 		for (const block of all) {
-			const vpRow = absRowToViewport(block.promptLine);
+			const vpRow = paintAbsRowToViewport(block.promptLine - (currentFrame?.historyBase ?? 0));
 			if (vpRow === null) continue;
 			const y = vpRow * m.cellHeight;
 			if (y < lastLabelBottom) continue;
@@ -790,115 +1078,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 	}
 
-	function paintSelection(m: CellMetrics) {
-		if (!selection.start || !selection.end) return;
-		const absStartRow = Math.min(selection.start.row, selection.end.row);
-		const absEndRow = Math.max(selection.start.row, selection.end.row);
-
-		octx.fillStyle = chromeTint(cachedAccentRgb, 0.35);
-
-		// Clamp to the visible window before iterating. A drag-selection is bounded by
-		// the viewport, but select-all spans the entire scrollback — walking every
-		// history row on each repaint (only to have absRowToViewport reject it) would
-		// cost far more than the paint itself on a long buffer.
-		const offset = overlayScrollOffset ?? currentFrame?.displayOffset ?? 0;
-		const viewportTop = (currentFrame?.historySize ?? 0) - offset;
-		const screenRows = currentFrame?.screenRows || lastResizeRows || 24;
-		const firstVisible = Math.max(absStartRow, viewportTop);
-		const lastVisible = Math.min(absEndRow, viewportTop + screenRows - 1);
-
-		for (let absRi = firstVisible; absRi <= lastVisible; absRi++) {
-			const vpRow = absRowToViewport(absRi);
-			if (vpRow === null) continue;
-			// During a gesture rows come from the cache (keyed by the eviction-stable
-			// all-time index = historyBase + grid-relative abs); at rest from the live
-			// rowMap (keyed by viewport row). `absRi` is the grid-relative selection
-			// coordinate, so bridge it into the cache's space with historyBase.
-			const row =
-				overlayScrollOffset != null ? rowCache.get((currentFrame?.historyBase ?? 0) + absRi) : rowMap.get(vpRow);
-			if (!row) continue;
-			const y = vpRow * m.cellHeight;
-
-			if (absStartRow === absEndRow) {
-				const c0 = Math.min(selection.start.col, selection.end.col);
-				const c1 = Math.max(selection.start.col, selection.end.col);
-				octx.fillRect(c0 * m.cellWidth, y, (c1 - c0 + 1) * m.cellWidth, m.cellHeight);
-			} else if (absRi === absStartRow) {
-				const isStartFirst = selection.start.row <= selection.end.row;
-				const startCol = isStartFirst ? selection.start.col : selection.end.col;
-				octx.fillRect(startCol * m.cellWidth, y, (row.count - startCol) * m.cellWidth, m.cellHeight);
-			} else if (absRi === absEndRow) {
-				const isStartFirst = selection.start.row <= selection.end.row;
-				const endCol = isStartFirst ? selection.end.col : selection.start.col;
-				octx.fillRect(0, y, (endCol + 1) * m.cellWidth, m.cellHeight);
-			} else {
-				octx.fillRect(0, y, row.count * m.cellWidth, m.cellHeight);
-			}
-		}
-	}
-
-	/** The live row at an absolute index, or null when it is off-screen. */
-	function onscreenRow(absRi: number): DecodedRow | null {
-		const vpRow = absRowToViewport(absRi);
-		return vpRow !== null ? (rowMap.get(vpRow) ?? null) : null;
-	}
-
-	function getLocalSelectionText(): string {
-		return selection.getLocalText(onscreenRow);
-	}
-
-	function paintCursor(frame: DecodedFrame, m: CellMetrics) {
-		if (frame.displayOffset > 0) return;
-		if (!frame.cursorVisible) return;
-		if (!focused()) return;
-		if (!cursorBlinkOn) return;
-
-		const settingShape: CursorShape =
-			settingsStore.state.cursorStyle === "block"
-				? "block"
-				: settingsStore.state.cursorStyle === "underline"
-					? "underline"
-					: "beam";
-		const shape: CursorShape = frame.cursorShape !== "block" ? frame.cursorShape : settingShape;
-		const rect = computeCursorRect(shape, frame.cursorRow, frame.cursorCol, m);
-
-		octx.fillStyle = cachedFgDefault;
-		octx.fillRect(rect.x, rect.y, rect.w, rect.h);
-
-		if (shape === "block") {
-			const row = rowMap.get(frame.cursorRow);
-			const col = frame.cursorCol;
-			if (row && col < row.count) {
-				const cp = row.codepoints[col];
-				if (cp !== 0 && cp !== 0x20) {
-					const fontFamily = settingsStore.getFontFamily();
-					octx.font = gridRenderer.buildFontStyle(row.attrs[col], m.fontSize, fontFamily);
-					octx.fillStyle = cachedBgDefault;
-					octx.fillText(String.fromCodePoint(cp), rect.x, frame.cursorRow * m.cellHeight + m.baseline);
-				}
-			}
-		}
-
-		syncImePosition(frame.cursorRow, frame.cursorCol, m);
-	}
-
-	function syncImePosition(row: number, col: number, m: CellMetrics) {
-		const x = GUTTER_PX + col * m.cellWidth;
-		const y = row * m.cellHeight;
-		keyInputRef.style.left = `${x}px`;
-		keyInputRef.style.top = `${y}px`;
-		keyInputRef.style.height = `${m.cellHeight}px`;
-		keyInputRef.style.fontSize = `${m.fontSize}px`;
-	}
-
 	// --- Scrollbar ---
 
 	function updateScrollbar(frame: DecodedFrame) {
 		if (!scrollbarRef || !scrollThumbRef) return;
 		const total = frame.historySize + (frame.screenRows || lastResizeRows || 24);
-		// visible rows = the authoritative resize row count — no per-frame
-		// canvasRef.clientHeight read (layout-forcing).
-		const visible = lastResizeRows || 24;
 
 		if (frame.historySize === 0) {
 			scrollbarRef.style.display = "none";
@@ -906,15 +1090,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 		scrollbarRef.style.display = "block";
 
-		// Track height comes from the resize-time cache, not scrollbarRef.clientHeight.
-		const trackH = scrollbarTrackHeight;
-		const thumbRatio = Math.min(1, visible / total);
-		const thumbHeight = Math.max(20, trackH * thumbRatio);
-		const scrollRange = trackH - thumbHeight;
-		const scrollPos = frame.historySize > 0 ? (1 - frame.displayOffset / frame.historySize) * scrollRange : scrollRange;
-
-		scrollThumbRef.style.height = `${thumbHeight}px`;
-		scrollThumbRef.style.transform = `translateY(${scrollPos}px)`;
+		const thumb = thumbFor(scrollbarTrackHeight, lastResizeRows, frame);
+		scrollThumbRef.style.height = `${thumb.height}px`;
+		scrollThumbRef.style.transform = `translateY(${thumb.top}px)`;
 
 		paintScrollbarMarks(total);
 	}
@@ -922,8 +1100,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	let scrollbarMarksContainer: HTMLDivElement | null = null;
 	let lastScrollbarMarksKey = "";
 
+	createEffect(() => {
+		settingsStore.state.showScrollbarMarks;
+		untrack(() => {
+			if (currentFrame) updateScrollbar(currentFrame);
+		});
+	});
+
 	function paintScrollbarMarks(totalRows: number) {
-		if (!scrollbarRef || !settingsStore.state.showScrollbarMarks) return;
+		if (!scrollbarRef) return;
 		if (!scrollbarMarksContainer) {
 			scrollbarMarksContainer = document.createElement("div");
 			scrollbarMarksContainer.style.cssText =
@@ -934,103 +1119,177 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (!term) return;
 		const blocks = term.commandBlocks;
 		const promptLines = term.userPromptLines;
+		const historyBase = currentFrame?.historyBase ?? 0;
 		const searchCount = search.matches.length;
-		const showBlocks = blockTimestampsVisible;
-		const key = `${showBlocks ? blocks.length : 0}:${showBlocks ? promptLines.length : 0}:${totalRows}:${showBlocks ? (blocks[blocks.length - 1]?.exitCode ?? "") : ""}:s${searchCount}:${searchCount > 0 ? search.matches[0].row : ""}`;
+		// `showScrollbarMarks` gates the HISTORY markers only — block boundaries and
+		// user-prompt ticks — not the search hits below. Command history is a display
+		// preference; a search hit is the live result of something the user just did,
+		// and a Cmd+F that silently draws nothing because of a terminal display
+		// setting is not a preference being honoured, it is a broken search.
+		//
+		// It is folded into `showBlocks` rather than returned on early, which also
+		// fixes turning the setting OFF: an early return above the key computation
+		// left the last-painted marks on screen forever, because the repaint that
+		// would clear them never ran.
+		const showBlocks = blockTimestampsVisible && settingsStore.state.showScrollbarMarks;
+		const key = `${showBlocks ? blocks.length : 0}:${showBlocks ? promptLines.length : 0}:${totalRows}:${historyBase}:${showBlocks ? (blocks.at(-1)?.exitCode ?? "") : ""}:s${searchCount}:${searchCount > 0 ? search.matches[0].row : ""}:${cachedAccentRgb}${cachedError}${cachedSuccess}${cachedWarning}`;
 		if (key === lastScrollbarMarksKey) return;
 		lastScrollbarMarksKey = key;
 
-		const trackH = scrollbarTrackHeight;
-		let html = "";
-		if (showBlocks) {
-			for (const block of blocks) {
-				const ratio = block.promptLine / totalRows;
-				const color = block.exitCode !== null && block.exitCode !== 0 ? cachedError : chromeTint(cachedAccentRgb, 0.5);
-				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${ratio * trackH}px;background:${color}"></div>`;
-			}
-			// Dedicated GREEN tick at each line where the USER submitted a prompt
-			// (distinct from the blue/red agent tool-call block ticks above): few,
-			// one per turn. Drawn after the block ticks so it sits on top.
-			for (const line of promptLines) {
-				const ratio = line / totalRows;
-				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${ratio * trackH}px;background:${cachedSuccess}"></div>`;
-			}
-		}
-		if (searchCount > 0) {
-			const seen = new Set<number>();
-			for (const match of search.matches) {
-				const rounded = Math.round((match.row / totalRows) * trackH);
-				if (seen.has(rounded)) continue;
-				seen.add(rounded);
-				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${rounded}px;background:${cachedWarning}"></div>`;
-			}
-		}
-		scrollbarMarksContainer.innerHTML = html;
+		scrollbarMarksContainer.innerHTML = buildScrollbarMarksHtml({
+			blocks,
+			promptLines,
+			historyBase,
+			matchRows: search.matches.map((m) => m.row),
+			totalRows,
+			trackH: scrollbarTrackHeight,
+			showBlocks,
+			// Theme tokens, not upstream's fixed hexes: the ticks follow the app theme.
+			colors: {
+				failedBlock: cachedError,
+				okBlock: chromeTint(cachedAccentRgb, 0.5),
+				userPrompt: cachedSuccess,
+				searchMatch: cachedWarning,
+			},
+		});
 	}
 
 	// --- Suggest / Intent overlay ---
 
-	const rowToText = rowText;
-
-	function makeOverlayDiv(top: number, height: number, background: string): HTMLDivElement {
-		const div = document.createElement("div");
-		div.style.cssText = `position:absolute;left:0;right:0;top:${top}px;height:${height}px;background:${background}`;
-		return div;
-	}
-
-	// Cached suggest/intent overlay state to avoid full DOM rebuild
+	// Cached answer overlay state to avoid full DOM rebuild
 	let lastSuggestOverlayKey = "";
 
-	function updateSuggestOverlay(
-		_frame: DecodedFrame,
-		m: CellMetrics,
-		dirtyIndices?: Set<number>,
-		snapshotOverride?: (i: number) => { text: string; isWrapped: boolean } | null,
-	) {
-		if (!overlayRef) return;
+	// Prompt ends use all-time rows, not viewport coordinates. Cache them independently
+	// of scroll rows so a long prompt does not need to stay in the 6000-row paint cache.
+	const markerPromptEnds = new Map<number, PromptBoundary>();
+	const markerPromptReads = new Set<number>();
+	let markerPromptGeneration = -1;
+	const cachedPlanCanvasMarkers = createCanvasMarkerPlanner();
+	const markerSnapshot = cachedMarkerSnapshot(rowText, (row, end) => utf16SpanToCellRange(row, 0, end)[1]);
+	const NO_MARKERS: MarkerPlan = { hidden: new Set(), answerMarkers: new Set(), key: "", blocks: [] };
+	let lastMarkerPlan: MarkerPlan = NO_MARKERS;
+	/** The hidden set the main canvas was last painted with. */
+	let paintedHiddenRows: ReadonlySet<number> = NO_MARKERS.hidden;
+	let paintedAnswerMarkers: ReadonlySet<number> = NO_MARKERS.answerMarkers;
 
-		// Skip full rescan if no dirty rows touch suggest/intent patterns
-		// (skipped entirely when rendering from the cache during a scroll gesture).
-		if (!snapshotOverride && dirtyIndices && !fullRepaintNeeded) {
-			let hasSuggestContent = false;
+	/** `dirty` plus every viewport row whose hidden state differs between `before` and `after`. */
+	function withToggledRows(dirty: Set<number>, before: ReadonlySet<number>, after: ReadonlySet<number>): Set<number> {
+		if (before === after) return dirty;
+		const out = new Set(dirty);
+		for (const idx of before) if (idx >= 0 && !after.has(idx)) out.add(idx);
+		for (const idx of after) if (idx >= 0 && !before.has(idx)) out.add(idx);
+		return out;
+	}
+
+	/**
+	 * Classify the screen rows (plus one overscan row below, and a lookback above
+	 * the viewport) by `getRow`. The plan covers `rows + 1` so the overscan row
+	 * below the viewport is classified too.
+	 */
+	function planMarkers(
+		rows: number,
+		base: number,
+		getRow: (i: number) => { text: string; isWrapped: boolean } | null,
+	): MarkerPlan {
+		const generation = scroll.cacheGeneration;
+		if (markerPromptGeneration !== generation) {
+			markerPromptGeneration = generation;
+			markerPromptEnds.clear();
+			markerPromptReads.clear();
+		}
+		const historyBase = currentFrame?.historyBase ?? 0;
+		const prompts = (terminalsStore.get(props.terminalId)?.userPromptLines ?? []).filter((row) => row >= historyBase);
+		for (const start of markerPromptEnds.keys()) if (!prompts.includes(start)) markerPromptEnds.delete(start);
+		const prior = markerPromptStart(prompts, base);
+		const known = prior === undefined ? undefined : markerPromptEnds.get(prior);
+		const boundary =
+			known && (known.resolved || known.end >= base + rows + 1) ? { ...known, end: known.end - base } : undefined;
+		const plan = cachedPlanCanvasMarkers(
+			rows,
+			getRow,
+			prompts.map((row) => row - base),
+			boundary,
+		);
+		if (prior !== undefined && plan.promptBoundary)
+			markerPromptEnds.set(prior, { ...plan.promptBoundary, end: plan.promptBoundary.end + base });
+		if (plan.pendingPrompt !== undefined) {
+			const start = base + plan.pendingPrompt;
+			if (!markerPromptReads.has(start)) {
+				markerPromptReads.add(start);
+				const liveEpoch = scroll.liveEpoch;
+				void readMarkerPromptBoundary(
+					known && !known.resolved ? Math.max(start, known.end - 1) : start,
+					base + rows + 1,
+					(from, to) => readTurnRows(fetchStyledRange, from, to),
+					MARKER_PREFIX_BUDGET,
+				).then((result) => {
+					if (!alive || !scroll.isCacheGenerationCurrent(generation)) return;
+					markerPromptReads.delete(start);
+					if (!result) return;
+					// As with scroll-row fetches, a read that raced a history commit is stale.
+					if (scroll.liveEpoch === liveEpoch) {
+						markerPromptEnds.set(start, result);
+						if (!result.resolved && result.end < base + rows + 1) {
+							// Continue in bounded IPC tasks, not one full canvas repaint per prefix chunk.
+							planMarkers(rows, base, getRow);
+							return;
+						}
+					}
+					fullRepaintNeeded = true;
+					if (scroll.position !== null) scheduleSmoothRender();
+					else scheduleRepaint();
+				});
+			}
+		}
+		return plan;
+	}
+
+	/** Marker plan of the live frame; a dirty-row prefilter skips the scan on screens that never had a marker. */
+	function planViewportMarkers(frame: DecodedFrame, dirtyIndices?: Set<number>): MarkerPlan {
+		if (dirtyIndices && !fullRepaintNeeded && lastMarkerPlan.key === "") {
+			let touchesMarker = false;
 			for (const idx of dirtyIndices) {
 				const row = rowMap.get(idx);
 				if (!row) continue;
 				const text = rowToText(row);
-				if (SUGGEST_ANCHOR_RE.test(text) || INTENT_HIGHLIGHT_RE.test(text)) {
-					hasSuggestContent = true;
+				// A wrapped row can complete a marker whose anchor row did not change.
+				if (
+					rowMap.get(idx - 1)?.wrapped ||
+					SUGGEST_ANCHOR_RE.test(text) ||
+					INTENT_HIGHLIGHT_RE.test(text) ||
+					ANSWER_MARKER_RE.test(text)
+				) {
+					touchesMarker = true;
 					break;
 				}
 			}
-			if (!hasSuggestContent) {
-				if (lastSuggestOverlayKey === "") return;
-				// Stale overlay — fall through to rebuild/clear it
-			}
+			if (!touchesMarker) return lastMarkerPlan;
 		}
+		const base = frame.historyBase + frame.historySize - frame.displayOffset;
+		const wrappedAbove = (i: number) => (i > 0 ? rowMap.get(i - 1) : rowCache.get(base + i - 1))?.wrapped ?? false;
+		lastMarkerPlan = planMarkers(frame.screenRows || lastResizeRows || 24, base, (i) => {
+			const row = i >= 0 ? rowMap.get(i) : rowCache.get(base + i);
+			return row ? markerSnapshot(row, wrappedAbove(i)) : null;
+		});
+		return lastMarkerPlan;
+	}
 
-		const bg = cachedBgDefault;
-		const numRows = lastResizeRows || 24;
+	const rowToText = rowText;
 
-		const getRowSnapshot =
-			snapshotOverride ??
-			((i: number) => {
-				const row = rowMap.get(i);
-				if (!row) return null;
-				return { text: rowToText(row), isWrapped: row.wrapped };
-			});
-
-		// Decide what to mask before building anything: most repaints leave the
-		// plan untouched, and the elements were being created and dropped just to
-		// discover that.
-		const { key, blocks } = planSuggestOverlay(numRows, getRowSnapshot);
+	function updateSuggestOverlay(m: CellMetrics, plan: MarkerPlan) {
+		if (!overlayRef) return;
+		const blocks = plan.blocks.flatMap((block) => {
+			const row = viewportProjection.displayRow(block.row);
+			return row === null ? [] : [{ ...block, row }];
+		});
+		const key = answerOverlayKey(
+			`${plan.key}:${m.cellWidth}`,
+			m.cellHeight,
+			blocks.map((block) => block.row),
+		);
 		if (key === lastSuggestOverlayKey) return;
 		lastSuggestOverlayKey = key;
-
-		overlayRef.textContent = "";
-		for (const block of blocks) {
-			const background = block.kind === "intent" ? chromeTint(cachedWarningRgb, 0.12) : bg;
-			overlayRef.appendChild(makeOverlayDiv(block.row * m.cellHeight, m.cellHeight, background));
-		}
+		paintOverlayBlocks(overlayRef, blocks, m.cellHeight, m.cellWidth);
 	}
 
 	function startBlink() {
@@ -1094,8 +1353,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const target = scroll.pendingOffset;
 		scroll.pendingOffset = null;
 		scroll.inFlight = true;
-		invokeRef?.("terminal_scroll_to_offset", { sessionId: props.sessionId, offset: target })
-			.catch(ipcErr("terminal_scroll_to_offset"))
+		const frame = currentFrame;
+		if (!frame) {
+			scroll.inFlight = false;
+			return;
+		}
+		const anchor = target === 0 ? null : frame.historyBase + frame.historySize - target;
+		invokeRef?.("terminal_scroll_to_anchor", { sessionId: props.sessionId, anchor })
+			.catch(ipcErr("terminal_scroll_to_anchor"))
 			.finally(() => {
 				scroll.inFlight = false;
 			});
@@ -1117,7 +1382,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// a fractional rest where scrollPosF stays non-integer — we never snap to a line).
 	// We only ever hand off to normal rendering at the bottom (offset 0). Until the
 	// backend frame reaches `settlePending` we keep cache-rendering it (no jump).
-	let settleTimer = 0;
 
 	// Full-frame reconciliation: partial frames (only the rows alacritty marked
 	// dirty) merge into rowMap by index, so if the grid shifts content the canvas
@@ -1163,20 +1427,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		);
 	}
 
-	function finishSettle() {
-		settleTimer = 0;
-		// A settle timer can fire after unmount; the row cache is released by then,
-		// so endSmoothScroll must not run.
-		if (!alive || scroll.settleTarget == null) return;
-		scroll.settleTarget = null;
-		scroll.position = null;
-		endSmoothScroll();
-	}
 	function clearSettlePending() {
-		if (settleTimer) {
-			clearTimeout(settleTimer);
-			settleTimer = 0;
-		}
 		scroll.settleTarget = null;
 	}
 
@@ -1193,12 +1444,34 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// keeps up at 60fps regardless of scroll speed.
 	function renderCachedBase(intOffset: number, m: CellMetrics, rows: number, hist: number) {
 		const cacheRow = (abs: number): DecodedRow | null => rowCache.get(abs) ?? null;
+		projectedDisplayOffset = intOffset;
 		const tempMap = new Map<number, DecodedRow>();
 		for (let r = 0; r < rows; r++) {
 			const cached = cacheRow(hist - intOffset + r);
 			if (cached) tempMap.set(r, cached.index === r ? cached : { ...cached, index: r });
 		}
-		gridRenderer.paintGrid(tempMap, m, { fullRepaint: true });
+		// Classify from the cache at this offset so the marker rows track the scrolling
+		// content instead of the lagging backend frame (no flicker, no raw marker).
+		const markers = planMarkers(rows, hist - intOffset, (i) => {
+			const cached = cacheRow(hist - intOffset + i);
+			if (!cached) return null;
+			return markerSnapshot(cached, cacheRow(hist - intOffset + i - 1)?.wrapped ?? false);
+		});
+		const projectionRows = new Map(tempMap);
+		for (const index of [-1, rows]) {
+			const cached = cacheRow(hist - intOffset + index);
+			if (cached) projectionRows.set(index, { ...cached, index });
+		}
+		viewportProjection = new ViewportProjection(projectionRows, markers.hidden, markers.answerMarkers);
+		gridRenderer.paintGrid(tempMap, m, {
+			fullRepaint: true,
+			projection: viewportProjection,
+			hiddenRows: markers.hidden,
+			hiddenAnswerMarkers: markers.answerMarkers,
+		});
+		paintedHiddenRows = markers.hidden;
+		paintedAnswerMarkers = markers.answerMarkers;
+		lastMarkerPlan = markers;
 		if (octxOverscan && overscanRenderer) {
 			const ch = m.cellHeight;
 			const w = overscanCanvasRef.width / m.dpr;
@@ -1208,26 +1481,19 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (above) {
 				octxOverscan.fillStyle = cachedBgDefault;
 				octxOverscan.fillRect(-GUTTER_PX, 0, w, ch);
-				overscanRenderer.paintRow(above, 0, m);
+				const display = viewportProjection.projectRow({ ...above, index: -1 });
+				if (display) overscanRenderer.paintRow(display, (display.index + 1) * ch, m);
 			}
 			if (below) {
 				const y = (rows + 1) * ch;
 				octxOverscan.fillStyle = cachedBgDefault;
 				octxOverscan.fillRect(-GUTTER_PX, y, w, ch);
-				overscanRenderer.paintRow(below, y, m);
+				const display = viewportProjection.projectRow({ ...below, index: rows });
+				if (display && display.index === rows) overscanRenderer.paintRow(display, y, m);
 			}
 		}
 		ensureCacheBand(intOffset, rows, hist);
-		// Rebuild suggest/intent masks from the cache at this offset so they track the
-		// scrolling content instead of the lagging backend frame (no flicker, and the
-		// raw suggest line stays masked).
-		if (currentFrame) {
-			updateSuggestOverlay(currentFrame, m, undefined, (i) => {
-				const cached = cacheRow(hist - intOffset + i);
-				if (!cached) return null;
-				return { text: rowToText(cached), isWrapped: cached.wrapped };
-			});
-		}
+		if (currentFrame) updateSuggestOverlay(m, markers);
 	}
 
 	function renderSmooth() {
@@ -1241,8 +1507,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// All-time top-of-history index: cache keys live in this eviction-stable space.
 		const hist = currentFrame.historyBase + currentFrame.historySize;
 		const intOffset = Math.floor(scroll.position);
-		const frac = (scroll.position - intOffset) * ch; // [0, ch): how far past the line
 		renderCachedBase(intOffset, m, rows, hist);
+		// Advancing across an omitted row moves no visible content.
+		const frac = viewportProjection.hidden.has(-1) ? 0 : (scroll.position - intOffset) * ch;
 		// Repaint the selection/cursor/search overlay aligned to the cached offset so the
 		// highlight tracks the content while scrolling (the overlay canvas is inside the
 		// stage, so the fractional translate below keeps it pixel-aligned with the base).
@@ -1274,6 +1541,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (!invokeRef) return;
 		const start = chunk * ROW_CACHE_CHUNK;
 		const cacheGeneration = scroll.cacheGeneration;
+		const liveEpoch = scroll.liveEpoch;
+		// First all-time row that was still a live screen row when the fetch began.
+		const liveFromAbs = currentFrame ? currentFrame.historyBase + currentFrame.historySize : 0;
 		try {
 			const res = await invokeRef("terminal_styled_rows", {
 				sessionId: props.sessionId,
@@ -1288,15 +1558,89 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			const buffer = toBinaryPayload(res);
 			if (!buffer) return;
 			const decoded = decodeStyledRange(buffer);
-			if (!decoded) return;
-			scroll.cacheRows(decoded.rows);
+			if (!decoded) {
+				// Leave the range uninstalled and release its request key so the next
+				// cache-band pass can fetch it again. A live full frame is the normal
+				// synchronization barrier and also guarantees another render pass.
+				requestedChunks.delete(chunk);
+				invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
+				return;
+			}
+			if (!scroll.cacheFetchedRows(decoded.rows, liveEpoch, liveFromAbs)) requestedChunks.delete(chunk);
 			if (scroll.position != null) scheduleSmoothRender();
+			else {
+				fullRepaintNeeded = true;
+				scheduleRepaint();
+			}
 		} catch (e) {
 			if (!scroll.isCacheGenerationCurrent(cacheGeneration)) return;
 			requestedChunks.delete(chunk);
 			ipcErr("terminal_styled_rows")(e);
 		}
 	}
+
+	// --- Answers-only view ---
+	// A panel above the canvas listing every user prompt of the session, each with the
+	// 💬 answers of its turn, read from the backend grid (scrollback included) through the same
+	// `terminal_styled_rows` reader as the scroll row cache. The PTY and the grid
+	// are untouched; closing the panel returns to the live terminal as it was.
+	const [answersView, setAnswersView] = createSignal<AnswersTurn[] | null>(null, {
+		equals: sameAnswersHistory,
+	});
+	const answersCache = newTurnCache();
+	let answersGeneration = 0;
+	let answersTimer: ReturnType<typeof setTimeout> | undefined;
+	const answersOnly = () => terminalsStore.get(props.terminalId)?.answersOnly === true;
+
+	async function fetchStyledRange(start: number, count: number): Promise<StyledRange | null> {
+		if (!invokeRef) return null;
+		try {
+			const buffer = toBinaryPayload(
+				await invokeRef("terminal_styled_rows", { sessionId: props.sessionId, start, count }),
+			);
+			return buffer ? decodeStyledRange(buffer) : null;
+		} catch (e) {
+			ipcErr("terminal_styled_rows")(e);
+			return null;
+		}
+	}
+
+	// DEFERRED (2026-10-17) — Answers-only refresh still classifies the running turn in full.
+	// Bounding it needs a lazy history/copy contract; canvas viewport planning does not change that contract.
+	async function refreshAnswers() {
+		const frame = currentFrame;
+		if (!alive || !frame) return;
+		const generation = ++answersGeneration;
+		const endAbs = frame.historyBase + frame.historySize + frame.screenRows;
+		const turns = await readAnswersHistory(
+			fetchStyledRange,
+			terminalsStore.get(props.terminalId)?.userPromptLines ?? [],
+			frame.historyBase,
+			endAbs,
+			answersCache,
+		);
+		// A newer refresh, the toggle going off, or unmount during the await wins.
+		if (!turns || generation !== answersGeneration || !alive || !answersOnly()) return;
+		setAnswersView(turns);
+	}
+
+	/** New output while the panel is open: re-read the turn, at most every 400 ms. */
+	function scheduleAnswersRefresh() {
+		if (answersTimer) return;
+		answersTimer = setTimeout(() => {
+			answersTimer = undefined;
+			void refreshAnswers();
+		}, 400);
+	}
+
+	createEffect(() => {
+		if (answersOnly()) {
+			untrack(() => void refreshAnswers());
+		} else {
+			answersGeneration++;
+			setAnswersView(null);
+		}
+	});
 
 	// During a gesture the cursor/selection canvas is hidden (those are anchored to
 	// the backend frame and we're not selecting while scrolling). The suggest/intent
@@ -1337,6 +1681,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// after we've handed control to another scroll path (scrollbar, programmatic jump).
 	function resetSmoothScroll(repaint = true) {
 		clearTimeout(scrollGestureEndTimer);
+		// That timer is what clears the forwarded wheel's sub-notch residual
+		// (onWheelGestureEnd), so cancelling it must clear the residual too: typing,
+		// a resize or a scrollbar drag would otherwise leave it to the next gesture.
+		resetWheelNotch(wheelNotch);
 		if (scrollRafId) {
 			cancelAnimationFrame(scrollRafId);
 			scrollRafId = 0;
@@ -1382,8 +1730,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// once the backend frame arrives at offset 0. No motion: 0 has no fractional part.
 		if (position === 0) {
 			scroll.settleTarget = 0;
-			if (settleTimer) clearTimeout(settleTimer);
-			settleTimer = window.setTimeout(finishSettle, 400);
 		}
 		scheduleSmoothRender();
 	}
@@ -1408,23 +1754,31 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			return;
 		}
 		// Otherwise keep cache-rendering the snapped line until the backend frame
-		// reaches `target` (onFrame settle handler), with a timer as the safety net.
+		// reaches `target` (onFrame settle handler).
 		scroll.settleTarget = target;
-		if (settleTimer) clearTimeout(settleTimer);
-		settleTimer = window.setTimeout(finishSettle, 400);
 		scheduleSmoothRender();
 	}
 
+	// Forwarded-wheel gesture went idle: drop the pixel accumulator (a trailing
+	// sub-notch residual must not leak into the next, unrelated gesture) and let any
+	// in-flight scrollback gesture settle the normal way. resetScrollGesture is a
+	// no-op when there is no smooth-scroll position, so this is safe to call even when
+	// the wheel was being forwarded to the app the whole time.
+	function onWheelGestureEnd() {
+		resetWheelNotch(wheelNotch);
+		resetScrollGesture();
+	}
+
 	// Apply one wheel/touch delta (raw pixels) with gesture acceleration → smooth
-	// sub-line scroll.
+	// sub-line scroll. The acceleration ramp is capped (gestureAccelFactor) and resets
+	// on direction reversal (accumulateGesture) so a long momentum fling can't ramp
+	// past a 2x ceiling or keep accelerating a scroll-back after the gesture reverses.
 	function handleScrollDelta(dy: number) {
 		const m = metrics();
 		const ch = m?.cellHeight ?? 20;
 		const screenPx = ch * (lastResizeRows || 24);
-		scroll.gestureDistancePx += Math.abs(dy);
-		const excess = Math.max(0, scroll.gestureDistancePx - screenPx);
-		const factor = 0.5 + 0.5 * (excess / screenPx);
-		applySmoothScroll((dy * factor) / ch);
+		const distance = scroll.accumulateGesture(dy);
+		applySmoothScroll((dy * gestureAccelFactor(distance, screenPx)) / ch);
 	}
 
 	// The transport normalizes every payload shape (see toBinaryPayload) and drops
@@ -1438,27 +1792,28 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// on decode/paint), then decode (cheap) which keeps rowMap + currentFrame alive
 		// for the overlay (cursor/selection/links/search/scrollbar) and input semantics.
 		//
-		// A hidden terminal acks late instead of per frame. That is the whole of the
-		// flow control this observer promises: a background tab is display:none and
-		// never unmounted, so Rust keeps a producer running for it, and acking at
-		// once reopens the gate at full rate for a frame nobody can see. The trailing
-		// ack drops it to ~2 frames/s while still clearing the gate itself — staying
-		// silent would leave that to the ticker's stuck-frontend path, which is a
-		// warning per output burst for a tab that is merely in the background.
+		// Desktop visibility admission stops grid delivery while hidden. A frame
+		// already queued before hide can still arrive; acknowledge it on the
+		// trailing timer. Browser sockets keep their independent frame stream.
 		framesReceived++;
 		if (hidden) hiddenAck.schedule();
 		else ackFrame();
+		recordWorkloadArrival(props.sessionId, buffer, hidden);
 		const timing = isFrameTimingEnabled();
 		const decodeT0 = timing ? performance.now() : 0;
 		// rowMap is the merge base for partial rows (see ROW_PARTIAL_FLAG): they
 		// carry only their damaged columns and take the rest of the line from what
 		// is already on screen.
 		const frame = decodeBinaryFrame(buffer, rowMap);
+		if (frame && terminalsStore.get(props.terminalId)?.historyBase !== frame.historyBase) {
+			terminalsStore.update(props.terminalId, { historyBase: frame.historyBase });
+		}
 		if (timing) recordFrameTiming(props.sessionId, "decode", performance.now() - decodeT0);
 		if (!frame) {
 			// The only way to land here is a buffer shorter than the 26-byte header:
-			// truncated row data decodes into the rows that did survive. The backend
-			// never sends one, so this is a wire-format bug and must not be silent.
+			// declared row/trailer truncation returns an empty frame with
+			// needsFullFrame instead. The backend never sends an undersized header, so
+			// this is a wire-format bug and must not be silent.
 			// DEFERRED (2026-08-18) — no resync request on this path. The rows of a
 			// dropped frame are gone (damage was consumed backend-side), but asking
 			// for a full frame on a stream that is producing malformed buffers turns
@@ -1471,28 +1826,35 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			return;
 		}
 
-		// Decoded even while hidden: the bell rides in the frame header and a
-		// background tab is exactly where it needs to reach the user.
-		if (frame.bell) props.onBell?.();
+		// Bells are delivered by the backend session event, independently of frames.
 		// Everything below paints, scans links or fills the scroll cache for a
 		// viewport that is not on screen.
 		if (hidden) return;
 
 		// Grid decision: geom/scroll/full-replace/scroll-wait for the rowMap.
 		const decision = decideFrameGrid(
-			{ lastScreenRows, lastScreenCols, lastDisplayOffset, lastHistorySize, lastAltScreen },
+			{
+				lastScreenRows,
+				lastScreenCols,
+				lastDisplayOffset,
+				lastHistorySize,
+				lastHistoryBase,
+				lastAltScreen,
+				awaitingFullFrame,
+			},
 			frame,
 			lastResizeRows,
 		);
 		const { geomChanged, scrollChanged, screenChanged } = decision;
 
 		// A primary/alternate swap replaces the entire absolute-row universe. Reset
-		// every stateful consumer as one transaction, and never repaint the old smooth
-		// frame while adopting the new one.
+		// every stateful consumer as one transaction. A partial first frame cannot
+		// inherit either rows or interaction state from the previous screen era.
 		if (screenChanged) {
 			screenGeneration++;
 			resetSmoothScroll(false);
 			scroll.clearCache();
+			resetWheelNotch(wheelNotch);
 			selection.clear();
 			stopSelectionScroll();
 			clearSearchState();
@@ -1511,23 +1873,76 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 		// When geometry changes, viewport is entirely different — must clear and repaint
 		if (geomChanged) {
+			// Interim old-frame paints can refill ownership after the resize request.
+			// Accepting reflow must invalidate those boundaries and in-flight reads too.
+			scroll.clearCache();
 			selection.clear();
+			stopSelectionScroll();
 			rowMap.clear();
 			clearDetectedLinks();
 			fullRepaintNeeded = true;
 		}
 
+		if (decision.holdPreviousFrame) {
+			// Same-generation viewport shifts retain the last coherent frame until its
+			// replacement arrives. Screen-era and geometry changes are hard boundaries:
+			// keep currentFrame null so pointer/copy paths cannot act on stale coordinates.
+			if (screenChanged || geomChanged) {
+				currentFrame = null;
+				if (screenChanged) lastAltScreen = frame.altScreen;
+				if (geomChanged) {
+					lastScreenRows = frame.screenRows;
+					lastScreenCols = frame.screenCols;
+				}
+			}
+			awaitingFullFrame = true;
+			if (decision.requestFullFrame) {
+				const request = invokeRef?.("terminal_request_frame", { sessionId: props.sessionId });
+				if (!request) {
+					awaitingFullFrame = false;
+				} else {
+					request.catch((error) => {
+						// Keep the coherent frame, but let the next delta retry the pull.
+						awaitingFullFrame = false;
+						ipcErr("terminal_request_frame")(error);
+					});
+				}
+			}
+			return;
+		}
+		awaitingFullFrame = false;
+		// Purged history cannot acknowledge a gesture that still targets a removed row.
+		if (scroll.position != null && scroll.position > frame.historySize) resetSmoothScroll(false);
+
 		if (scrollChanged || geomChanged || screenChanged) {
-			lastDisplayOffset = frame.displayOffset;
-			lastHistorySize = frame.historySize;
-			lastScreenRows = frame.screenRows;
-			lastScreenCols = frame.screenCols;
-			lastAltScreen = frame.altScreen;
 			if (hoveredLink) {
 				hoveredLink = null;
 				canvasRef.style.cursor = "text";
 			}
 		}
+		// Lines that scrolled into history since the last accepted frame, in the
+		// eviction-stable all-time space. Geometry and screen changes start a new era.
+		const historyGrowth =
+			screenChanged || geomChanged ? 0 : frame.historyBase + frame.historySize - (lastHistoryBase + lastHistorySize);
+		// The rows that just left the live screen carry their final content only now.
+		if (historyGrowth > 0) {
+			const liveTop = lastHistoryBase + lastHistorySize;
+			scroll.commitLiveRows(liveTop, liveTop + historyGrowth);
+		} else if (historyGrowth < 0) {
+			// History rewound: the resize-repaint dedupe removed rows (or the scrollback
+			// was erased). Every row newer than the removed ones now has a lower all-time
+			// index, and the frame does not say where they were, so no cached row or
+			// chunk in flight can be trusted (#1264-89c8). This frame reseeds the viewport.
+			scroll.clearCache();
+		}
+		// These describe the merge origin for the next frame even when history and
+		// display offset advanced together and left the visible all-time top stable.
+		lastDisplayOffset = frame.displayOffset;
+		lastHistorySize = frame.historySize;
+		lastHistoryBase = frame.historyBase;
+		lastScreenRows = frame.screenRows;
+		lastScreenCols = frame.screenCols;
+		lastAltScreen = frame.altScreen;
 
 		// [dup] desync detector (perfDebug): if this full frame is the one pulled by a
 		// reconcile at rest (no scroll/geom change), snapshot the partial-accumulated
@@ -1543,26 +1958,34 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// When backend sends all screen rows, replace rowMap to discard stale entries
 		if (decision.fullReplace) {
 			reconcileHealPending = false;
-			rowMap.clear();
-			clearDetectedLinks();
-
-			fullRepaintNeeded = true;
-		} else if (decision.scrollWait) {
-			// Scroll changed but only partial rows arrived. Old rowMap entries are keyed
-			// to the previous viewportTop — rendering them with the new displayOffset maps
-			// them to wrong screen positions, producing ghost content.
-			// Clear immediately (brief blank < ~5ms) and request a full frame.
-			rowMap.clear();
-			clearDetectedLinks();
-			fullRepaintNeeded = true;
-			invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
-			currentFrame = frame;
-			return;
+			if (scrollChanged) clearDetectedLinks();
+			// A full wire replacement is not a canvas invalidation. The renderer
+			// can retain matching pixels; geometry/screen/theme changes invalidate separately.
 		}
-		for (const row of frame.rows) {
-			rowMap.set(row.index, row);
-			pendingDirtyRows.add(row.index);
-			scanRowForLinks(row.index);
+		// Damage can include unchanged text (cursor, colours, or a full redraw).
+		// Compare before installing the new rows: clearing those matches while the
+		// asynchronous search refresh is pending makes every highlight blink.
+		const rewrittenSearchRows = new Set<number>();
+		if (searchQuery) {
+			const viewportTop = frame.historySize - frame.displayOffset;
+			for (const row of frame.rows) {
+				const previous = rowMap.get(row.index);
+				if (scrollChanged || !previous || rowToText(previous) !== rowToText(row)) {
+					rewrittenSearchRows.add(viewportTop + row.index);
+				}
+			}
+		}
+		const linkRows = new Set([...wrappedLinkSpans.keys(), ...frame.rows.map((row) => row.index)]);
+		installFrameRows(rowMap, frame, decision);
+		refreshWrappedLinkSpans();
+		if (hoveredLink && hoverSignature(rowMap, hoveredLink) !== hoveredSignature) {
+			hoveredLink = null;
+			canvasRef.style.cursor = "text";
+		}
+		for (const row of frame.rows) pendingDirtyRows.add(row.index);
+		for (const row of linkRows) scanRowForLinks(row);
+		for (const row of detectedLinks.keys()) {
+			if (!rowMap.has(row)) detectedLinks.delete(row);
 		}
 
 		// A partial row arrived for a line we do not hold — it was dropped rather
@@ -1574,18 +1997,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
 		}
 
-		// Every row in this frame just had its text replaced. A search match anchored
-		// to one of those absolute rows describes text that no longer exists, so drop
-		// it now rather than painting a highlight over whatever the TUI wrote there
-		// (ink agents repaint their bottom rows continuously). The debounced re-search
-		// then re-establishes the matches that still hit.
+		// Invalidate only changed text; unchanged rows keep their decorations until
+		// the backend refresh adopts the next result. Changed rows still clear now
+		// so a highlight cannot linger over text that no longer matches.
 		if (searchQuery && frame.rows.length > 0) {
-			const viewportTop = frame.historySize - frame.displayOffset;
-			const rewritten = new Set<number>();
-			for (const row of frame.rows) rewritten.add(viewportTop + row.index);
-			// No repaint flag needed: repaintOverlay() clears and redraws the overlay
-			// canvas (where highlights live) on every frame.
-			search.dropRows(rewritten);
+			search.dropRows(rewrittenSearchRows);
 			scheduleSearchRefresh();
 		}
 
@@ -1612,6 +2028,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 
 		currentFrame = frame;
+		// A frame at our own size confirms the reclaim: release the once-per-foreign-size latch.
+		if (frame.screenRows === lastResizeRows && frame.screenCols === lastResizeCols) reclaimAskedFor = "";
+		clearSelectionIfEvicted(frame);
 		pinSelectionToScrollEdge();
 
 		// Re-anchor the soft-keyboard lift to the new cursor row (touch + keyboard
@@ -1631,15 +2050,16 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// physical line keeps its key for life — no stale row aliases onto a new one
 		// after the scrollback cap rotates. Also pump a live render if a gesture is active.
 		//
-		// During a fast gesture the backend frame trails the live scroll position by
-		// several lines, so its rows are keyed to a lagging displayOffset. Seeding them
-		// then would overwrite cache entries the smooth renderer is currently painting
-		// (brief flicker / wrong overscan). Only seed when at rest or when the backend
-		// has caught up to our integer offset.
-		if (scroll.position == null || frame.displayOffset === Math.floor(scroll.position)) {
-			const base = frame.historyBase + frame.historySize - frame.displayOffset;
-			scroll.cacheRows(frame.rows.map((row) => ({ abs: base + row.index, row })));
-		}
+		// Seed on every frame, also while the backend trails the gesture: a row is keyed
+		// by its eviction-stable absolute index, so a lagging frame still says what
+		// each of its rows holds NOW. Skipping it left the rows an agent rewrites in
+		// place (spinner, status, live region) painting their old text for as long
+		// as the gesture ran (#1264-89c8).
+		// The gesture offset is relative to the history bottom: move it with the
+		// output first, so the cache render and the seed below stay on the same lines.
+		if (scroll.followHistory(historyGrowth, frame.historySize, frame.displayOffset)) scheduleScrollFlush();
+		const base = frame.historyBase + frame.historySize - frame.displayOffset;
+		scroll.cacheRows(frame.rows.map((row) => ({ abs: base + row.index, row })));
 		if (scroll.acceptSettledFrame(frame.displayOffset)) {
 			// Backend reached the snapped line — hand off to normal rendering
 			// seamlessly (the cache render already shows this exact frame).
@@ -1656,9 +2076,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			clearOverscan();
 		}
 
-		// Drop a copied selection once the app redraws the text under it (not mid-drag,
-		// and not while it reaches off-screen — see isStale).
-		if (decision.fullReplace && selection.isStale(absRowToViewport, onscreenRow)) selection.clear();
+		// Only compare content when the selection is fully on-screen — off-screen rows return empty
+		// strings from getLocalSelectionText() causing spurious mismatches that clear the selection.
+		if (shouldValidateSelectionSnapshot(selection, decision.fullReplace, selectionAbsRowToViewport)) {
+			const nowText = getLocalSelectionText(selection, selectionAbsRowToViewport, rowMap);
+			if (nowText !== selection.localSnapshot) selection.clear();
+		}
 
 		scheduleRepaint();
 		scheduleFileLinkVerification();
@@ -1668,10 +2091,65 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 	const FILE_URL_RE = fileUrlRegex();
 
-	// Per-session cache: row text → verified file link spans (null = checked, none exist)
+	// Per-session cache: cwd + candidate identities → verified spans (null = checked, none exist)
 	const fileLinkCache = linkController.fileCache;
 	const FILE_LINK_RECHECK_MS = 3_000;
 	const FILE_LINK_CACHE_MAX = 500;
+
+	function refreshWrappedLinkSpans() {
+		wrappedLinkSpans.clear();
+		wrappedLinkSources = wrappedLinkSources.filter((source) => {
+			const rows = logicalRows(rowMap, source.startRow);
+			const text = rows
+				.map(({ row }) => {
+					let text = "";
+					for (let col = 0; col < row.count; col++) {
+						if (row.codepoints[col] !== 0) text += cellText(row, col);
+					}
+					return text;
+				})
+				.join("")
+				.trimEnd();
+			const end = source.index + source.text.length;
+			if (
+				text.slice(source.index, end) !== source.text ||
+				text.slice(Math.max(0, source.index - 1), source.index) !== source.before ||
+				text.slice(end, end + 1) !== source.after
+			)
+				return false;
+			const spans = logicalStringSpanToCells(rowMap, source.startRow, text, source.index, end);
+			if (spans.length < 2) return false;
+			for (const span of spans) {
+				const existing = wrappedLinkSpans.get(span.row) ?? [];
+				existing.push({ colStart: span.colStart, colEnd: span.colEnd });
+				wrappedLinkSpans.set(span.row, existing);
+			}
+			return true;
+		});
+	}
+
+	function fileCandidates(rowIndex: number, text: string) {
+		const candidates: { colStart: number; colEnd: number; raw: string }[] = [];
+		// matchFilePaths also offers paths holding spaces (macOS screenshot names) and
+		// backslash-escaped forms; `candidate` is the unescaped string to resolve.
+		for (const fp of matchFilePaths(text)) {
+			const cells = rowStringSpanToCells(rowMap, rowIndex, fp.index, fp.index + fp.text.length);
+			if (cells) candidates.push({ colStart: cells[0], colEnd: cells[1], raw: fp.candidate });
+		}
+		FILE_URL_RE.lastIndex = 0;
+		let match: RegExpExecArray | null;
+		while ((match = FILE_URL_RE.exec(text)) !== null) {
+			const cells = rowStringSpanToCells(rowMap, rowIndex, match.index, match.index + match[0].length);
+			if (cells) candidates.push({ colStart: cells[0], colEnd: cells[1], raw: match[1] });
+		}
+		return candidates;
+	}
+
+	// Decorations depend on candidate text and cell positions, not a spinner elsewhere
+	// on the same row. Include cwd because the same relative path can resolve differently.
+	function fileCacheKey(candidates: ReturnType<typeof fileCandidates>) {
+		return JSON.stringify([terminalsStore.get(props.terminalId)?.cwd ?? "", candidates]);
+	}
 
 	function scanRowForLinks(rowIndex: number) {
 		const row = rowMap.get(rowIndex);
@@ -1683,11 +2161,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const spans: { colStart: number; colEnd: number }[] = [];
 
 		for (const url of matchWebUrls(text)) {
-			spans.push({ colStart: url.index, colEnd: url.index + url.text.length });
+			const cells = rowStringSpanToCells(rowMap, rowIndex, url.index, url.index + url.text.length);
+			if (cells) spans.push({ colStart: cells[0], colEnd: cells[1] });
 		}
 
 		// File paths: only underline if previously verified to exist
-		const cached = fileLinkCache.get(text);
+		const cached = fileLinkCache.get(fileCacheKey(fileCandidates(rowIndex, text)));
 		if (cached?.spans) {
 			spans.push(...cached.spans);
 		}
@@ -1711,31 +2190,23 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (!ref || !alive) return;
 		const generation = screenGeneration;
 		const maxRow = currentFrame?.screenRows || lastResizeRows;
-		const cols = lastScreenCols > 0 ? lastScreenCols : currentFrame?.screenCols || 80;
 		const now = Date.now();
-		const toCheck: { text: string; candidates: { colStart: number; colEnd: number; raw: string }[] }[] = [];
+		const toCheck: { key: string; candidates: { colStart: number; colEnd: number; raw: string }[] }[] = [];
 
 		for (let i = 0; i < maxRow; i++) {
 			const row = rowMap.get(i);
 			if (!row) continue;
 			const text = rowToText(row);
 
-			const cached = fileLinkCache.get(text);
+			const candidates = fileCandidates(i, text);
+			const key = fileCacheKey(candidates);
+			const cached = fileLinkCache.get(key);
 			if (cached) {
 				if (cached.spans !== null) continue;
 				if (now - cached.ts < FILE_LINK_RECHECK_MS) continue;
 			}
 
-			const candidates: { colStart: number; colEnd: number; raw: string }[] = [];
-			for (const fp of matchFilePaths(text)) {
-				candidates.push({ colStart: fp.index, colEnd: fp.index + fp.text.length, raw: fp.candidate });
-			}
-			let m: RegExpExecArray | null;
-			FILE_URL_RE.lastIndex = 0;
-			while ((m = FILE_URL_RE.exec(text)) !== null) {
-				candidates.push({ colStart: m.index, colEnd: m.index + m[0].length, raw: m[1] });
-			}
-			if (candidates.length > 0) toCheck.push({ text, candidates });
+			if (candidates.length > 0) toCheck.push({ key, candidates });
 		}
 
 		const termId = terminalsStore.getTerminalForSession(props.sessionId);
@@ -1771,7 +2242,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					const oldest = fileLinkCache.keys().next().value;
 					if (oldest !== undefined) fileLinkCache.delete(oldest);
 				}
-				fileLinkCache.set(item.text, { spans: verified.length > 0 ? verified : null, ts: Date.now() });
+				fileLinkCache.set(item.key, { spans: verified.length > 0 ? verified : null, ts: Date.now() });
 				if (verified.length > 0) anyFound = true;
 			}
 		}
@@ -1781,48 +2252,72 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// logical line is scanned and any match that crosses a row boundary has
 		// its per-row spans recorded in wrappedLinkSpans (merged by scanRowForLinks
 		// so they survive the per-frame rebuild). Rebuilt fresh each pass.
-		wrappedLinkSpans.clear();
-		// Record a match's per-row spans into wrappedLinkSpans.
-		const recordWrappedSpans = (startRow: number, matchIndex: number, matchEnd: number) => {
-			for (let offset = matchIndex; offset < matchEnd; ) {
-				const spanRow = startRow + Math.floor(offset / cols);
-				const spanColStart = offset % cols;
-				const remaining = matchEnd - offset;
-				const spanColEnd = Math.min(spanColStart + remaining, cols);
-				const existing = wrappedLinkSpans.get(spanRow) || [];
-				existing.push({ colStart: spanColStart, colEnd: spanColEnd });
-				wrappedLinkSpans.set(spanRow, existing);
-				offset += spanColEnd - spanColStart;
-			}
+		const nextWrappedSources: WrappedLinkSource[] = [];
+		// Publish the next verification atomically; never expose an empty map while IPC awaits.
+		const recordWrappedSpans = (startRow: number, text: string, matchIndex: number, matchEnd: number) => {
+			nextWrappedSources.push({
+				startRow,
+				index: matchIndex,
+				text: text.slice(matchIndex, matchEnd),
+				before: text.slice(Math.max(0, matchIndex - 1), matchIndex),
+				after: text.slice(matchEnd, matchEnd + 1),
+			});
 		};
-		const spansMultipleRows = (matchIndex: number, matchEnd: number) =>
-			Math.floor(matchIndex / cols) !== Math.floor((matchEnd - 1) / cols);
-		const checkedLogicalStarts = new Set<number>();
+		const spansMultipleRows = (startRow: number, text: string, matchIndex: number, matchEnd: number) =>
+			logicalStringSpanToCells(rowMap, startRow, text, matchIndex, matchEnd).length > 1;
+
+		// Candidate rows: full-width rows that might be part of a soft-wrapped
+		// web/file:// URL. Collected up front (no IPC) so every logical-line
+		// lookup below can fire concurrently instead of one row at a time.
+		const wrapCandidateRows: number[] = [];
 		for (let i = 0; i < maxRow; i++) {
-			if (!alive) return;
 			const row = rowMap.get(i);
 			if (!row) continue;
 			const text = rowToText(row);
-			if (text.length < cols) continue; // not full-width, not wrapped
-			const hasFile = text.includes("file://");
-			const hasWeb = /https?:\/\//.test(text);
-			if (!hasFile && !hasWeb) continue;
-			if (checkedLogicalStarts.has(i)) continue;
-			try {
-				const [startRow, logicalText] = (await ref("terminal_get_logical_line", {
-					sessionId: props.sessionId,
-					row: i,
-				})) as [number, string];
-				if (!alive || generation !== screenGeneration) return;
-				if (startRow === i && logicalText === text) continue; // single row
+			if (!row.wrapped) continue;
+			if (!text.includes("file://") && !/https?:\/\//.test(text)) continue;
+			wrapCandidateRows.push(i);
+		}
+
+		if (wrapCandidateRows.length > 0) {
+			// One terminal_get_logical_line per candidate row, all in flight at once —
+			// this used to await them one row at a time, so a screen with N wrap
+			// candidates cost N serial round trips before any of it resolved.
+			const logicalLines = await Promise.all(
+				wrapCandidateRows.map(async (i) => {
+					try {
+						const [startRow, logicalText] = (await ref("terminal_get_logical_line", {
+							sessionId: props.sessionId,
+							row: i,
+						})) as [number, string];
+						return { i, startRow, logicalText };
+					} catch {
+						return null; // terminal_get_logical_line not available on this backend
+					}
+				}),
+			);
+			if (!alive || generation !== screenGeneration) return;
+
+			const checkedLogicalStarts = new Set<number>();
+			// file:// candidates across every logical line, resolved in ONE call —
+			// the same batching the single-row pass above already does.
+			const fileCandidates: { startRow: number; logicalText: string; index: number; matchEnd: number; raw: string }[] =
+				[];
+
+			for (const result of logicalLines) {
+				if (!result) continue;
+				const { i, startRow, logicalText } = result;
+				const row = rowMap.get(i);
+				if (!row) continue;
+				if (startRow === i && logicalText === rowToText(row)) continue; // single row
 				if (checkedLogicalStarts.has(startRow)) continue;
 				checkedLogicalStarts.add(startRow);
 
 				// Web URLs — no path resolution needed.
 				for (const url of matchWebUrls(logicalText)) {
 					const matchEnd = url.index + url.text.length;
-					if (!spansMultipleRows(url.index, matchEnd)) continue;
-					recordWrappedSpans(startRow, url.index, matchEnd);
+					if (!spansMultipleRows(startRow, logicalText, url.index, matchEnd)) continue;
+					recordWrappedSpans(startRow, logicalText, url.index, matchEnd);
 					anyFound = true;
 				}
 
@@ -1831,28 +2326,40 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				let m: RegExpExecArray | null;
 				while ((m = FILE_URL_RE.exec(logicalText)) !== null) {
 					const matchEnd = m.index + m[0].length;
-					if (!spansMultipleRows(m.index, matchEnd)) continue;
-					try {
-						const r = (await ref("resolve_terminal_path", { cwd, candidate: m[1] })) as {
-							absolute_path: string;
-							is_directory: boolean;
-						} | null;
-						if (!alive || generation !== screenGeneration) return;
-						if (!r) continue;
-						recordWrappedSpans(startRow, m.index, matchEnd);
-						anyFound = true;
-					} catch {
-						/* resolve failed */
-					}
+					if (!spansMultipleRows(startRow, logicalText, m.index, matchEnd)) continue;
+					fileCandidates.push({ startRow, logicalText, index: m.index, matchEnd, raw: m[1] });
 				}
-			} catch {
-				/* terminal_get_logical_line not available */
-				break;
+			}
+
+			if (fileCandidates.length > 0) {
+				let resolved: (unknown | null)[];
+				try {
+					resolved = (await ref("resolve_terminal_paths", {
+						cwd,
+						candidates: fileCandidates.map((c) => c.raw),
+					})) as (unknown | null)[];
+				} catch (e) {
+					appLogger.debug("terminal", "resolve_terminal_paths failed", {
+						count: fileCandidates.length,
+						error: e,
+					});
+					resolved = [];
+				}
+				if (!alive || generation !== screenGeneration) return;
+				fileCandidates.forEach((c, idx) => {
+					if (resolved[idx]) {
+						recordWrappedSpans(c.startRow, c.logicalText, c.index, c.matchEnd);
+						anyFound = true;
+					}
+				});
 			}
 		}
 
-		if (anyFound) {
-			if (generation !== screenGeneration) return;
+		if (generation !== screenGeneration) return;
+		const hadWrapped = wrappedLinkSources.length > 0;
+		wrappedLinkSources = nextWrappedSources;
+		refreshWrappedLinkSpans();
+		if (anyFound || hadWrapped) {
 			for (let i = 0; i < maxRow; i++) scanRowForLinks(i);
 			scheduleRepaint();
 		}
@@ -1860,10 +2367,29 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 	let linkThrottle: ReturnType<typeof setTimeout> | undefined;
 
+	/** Hover probe: the link under the cell becomes `hoveredLink`; a newer probe supersedes this one. */
 	async function checkLinksAtRow(row: number, col: number) {
-		const ref = invokeRef;
-		if (!ref || !alive) return;
+		if (!invokeRef || !alive) return;
 		const gen = linkController.beginCheck();
+		const found = await resolveLinkAt(row, col, () => !linkController.isCurrent(gen));
+		if (found === STALE) return;
+		hoveredLink = found;
+		hoveredSignature = found ? hoverSignature(rowMap, found) : "";
+		canvasRef.style.cursor = hoveredLink ? "pointer" : "text";
+		if (currentFrame) {
+			const m = metrics();
+			if (m) repaintOverlay(currentFrame, m);
+		}
+	}
+
+	/** The link under the cell, or `STALE` when `isStale` turned true while resolving. Touches no hover state. */
+	async function resolveLinkAt(
+		row: number,
+		col: number,
+		isStale: () => boolean,
+	): Promise<HoveredLink | null | typeof STALE> {
+		const ref = invokeRef;
+		if (!ref || !alive) return STALE;
 
 		// OSC 8 hyperlinks take priority — the program explicitly tagged this cell
 		try {
@@ -1890,19 +2416,13 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 						/* resolve failed — use raw URI */
 					}
 				}
-				if (!alive || !linkController.isCurrent(gen)) return;
-				hoveredLink = { row, colStart, colEnd, path: resolvedPath };
-				canvasRef.style.cursor = "pointer";
-				if (currentFrame) {
-					const m = metrics();
-					if (m) repaintOverlay(currentFrame, m);
-				}
-				return;
+				if (!alive || isStale()) return STALE;
+				return { row, colStart, colEnd, path: resolvedPath };
 			}
 		} catch {
 			/* ignore — command may not exist on older backend */
 		}
-		if (!alive || !linkController.isCurrent(gen)) return;
+		if (!alive || isStale()) return STALE;
 
 		let rowText: string;
 		try {
@@ -1911,9 +2431,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				row,
 			})) as string;
 		} catch {
-			return;
+			return STALE;
 		}
-		if (!alive || !linkController.isCurrent(gen)) return;
+		if (!alive || isStale()) return STALE;
 
 		const cacheKey = `${row}:${rowText}`;
 		let links = linkCache.get(cacheKey);
@@ -1986,21 +2506,37 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				}[];
 				const allLinks = [...validFiles, ...urlMatches];
 				links = allLinks.length > 0 ? allLinks : null;
-				if (linkCache.size > 200) {
-					const oldest = linkCache.keys().next().value;
-					if (oldest !== undefined) linkCache.delete(oldest);
+				// A file that did not resolve may be written a moment later (the tool
+				// call line prints before the file exists). Caching that miss would keep
+				// the name dead on click after the 3 s re-verification underlines it.
+				if (validFiles.length === fileMatches.length) {
+					if (linkCache.size > 200) {
+						const oldest = linkCache.keys().next().value;
+						if (oldest !== undefined) linkCache.delete(oldest);
+					}
+					linkCache.set(cacheKey, links);
 				}
-				linkCache.set(cacheKey, links);
 			}
 		}
 
-		hoveredLink = null;
+		let found: HoveredLink | null = null;
+		const decodedRow = rowMap.get(row);
 		if (links) {
 			for (const link of links) {
 				const start = link.index ?? 0;
 				const end = start + link.text.length;
-				if (col >= start && col < end) {
-					hoveredLink = { row, colStart: start, colEnd: end, path: link.path, line: link.line, col: link.col };
+				const cells = decodedRow
+					? textSpanToCellRanges([{ index: row, row: decodedRow }], rowText, start, end)?.[0]
+					: null;
+				if (cells && col >= cells.colStart && col < cells.colEnd) {
+					found = {
+						row,
+						colStart: cells.colStart,
+						colEnd: cells.colEnd,
+						path: link.path,
+						line: link.line,
+						col: link.col,
+					};
 					break;
 				}
 			}
@@ -2012,17 +2548,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const rowHasEdgeUrl = matchWebUrls(rowText).some((url) => url.index + url.text.length >= rowText.length);
 
 		// If no single-row link found, try logical line (joins soft-wrapped rows)
-		if (!hoveredLink && ref) {
+		if (!found && ref) {
 			try {
 				const [startRow, logicalText] = (await ref("terminal_get_logical_line", {
 					sessionId: props.sessionId,
 					row,
 				})) as [number, string];
-				if (!alive || !linkController.isCurrent(gen)) return;
+				if (!alive || isStale()) return STALE;
 				if (startRow !== row || logicalText !== rowText || rowHasEdgeUrl) {
-					const cols = lastScreenCols > 0 ? lastScreenCols : currentFrame?.screenCols || 80;
-					const colOffset = (row - startRow) * cols;
-					const logicalCol = colOffset + col;
+					const logicalOffset = logicalCellToStringOffset(rowMap, startRow, logicalText, row, col);
 					const fuRe = FILE_URL_RE;
 					const logicalMatches: { text: string; candidate: string; index: number; isUrl: boolean }[] = [];
 
@@ -2040,7 +2574,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 					for (const lm of logicalMatches) {
 						const matchEnd = lm.index + lm.text.length;
-						if (logicalCol >= lm.index && logicalCol < matchEnd) {
+						if (logicalOffset !== null && logicalOffset >= lm.index && logicalOffset < matchEnd) {
 							let resolvedPath = lm.candidate;
 							if (!lm.isUrl) {
 								const termId = terminalsStore.getTerminalForSession(props.sessionId);
@@ -2050,22 +2584,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 									absolute_path: string;
 									is_directory: boolean;
 								} | null;
-								if (!alive || !linkController.isCurrent(gen)) return;
+								if (!alive || isStale()) return STALE;
 								if (!r) break;
 								resolvedPath = r.absolute_path;
 							}
-							// Build multi-row spans
-							const spans: { row: number; colStart: number; colEnd: number }[] = [];
-							for (let offset = lm.index; offset < matchEnd; ) {
-								const spanRow = startRow + Math.floor(offset / cols);
-								const spanColStart = offset % cols;
-								const remaining = matchEnd - offset;
-								const spanColEnd = Math.min(spanColStart + remaining, cols);
-								spans.push({ row: spanRow, colStart: spanColStart, colEnd: spanColEnd });
-								offset += spanColEnd - spanColStart;
-							}
+							const spans = logicalStringSpanToCells(rowMap, startRow, logicalText, lm.index, matchEnd);
+							if (spans.length === 0) break;
 							const firstSpan = spans[0];
-							hoveredLink = {
+							found = {
 								row: firstSpan.row,
 								colStart: firstSpan.colStart,
 								colEnd: firstSpan.colEnd,
@@ -2081,14 +2607,38 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			}
 		}
 
-		canvasRef.style.cursor = hoveredLink ? "pointer" : "text";
-		if (currentFrame) {
-			const m = metrics();
-			if (m) repaintOverlay(currentFrame, m);
-		}
+		return found;
 	}
 
 	let scrollGestureEndTimer: ReturnType<typeof setTimeout> | undefined;
+
+	let streamToastId: number | undefined;
+
+	function clearStreamNotice(): void {
+		if (streamToastId !== undefined) toastsStore.remove(streamToastId);
+		streamToastId = undefined;
+	}
+
+	function showStreamNotice(title: string, message: string, level: "warn" | "error"): void {
+		if (!alive) return;
+		clearStreamNotice();
+		const name = terminalsStore.get(props.terminalId)?.name;
+		streamToastId = toastsStore.add(
+			name ? `${title} — ${name}` : title,
+			message,
+			level,
+			false,
+			undefined,
+			0,
+			undefined,
+			props.sessionId,
+			false,
+		);
+	}
+
+	function showStreamError(error: unknown): void {
+		showStreamNotice("Terminal stream failed", error instanceof Error ? error.message : String(error), "error");
+	}
 
 	onMount(async () => {
 		const overlayCtx = overlayCanvasRef.getContext("2d");
@@ -2117,7 +2667,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// shell prints its first prompt as soon as the PTY spawns, while
 		// `document.fonts.load` may still have a cold-cache round trip to make.
 		// The grid subscription stays below: frames replay on subscribe.
-		transport = createTransport(props.sessionId);
+		// A session on a remote machine streams from that machine's WebSocket, not
+		// from this origin — so the owner is resolved here rather than assumed local.
+		transport = createTransport(props.sessionId, getSessionConnection(props.sessionId));
 		invokeRef = (cmd, args) => transport!.invoke(cmd, args);
 		// Teardown covering what exists right now: unmounting during the font load
 		// below must not leave these listeners attached. Widened to the DOM
@@ -2126,6 +2678,21 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		try {
 			// One shape on both transports: the Tauri event and the WS frame both
 			// carry `{ cwd }`, so there is nothing to normalise here.
+			transport.onStreamError?.((error) => {
+				showStreamNotice(
+					"Terminal stream reconnecting",
+					error instanceof Error ? error.message : String(error),
+					"warn",
+				);
+			});
+			transport.onStreamReconnecting?.((attempt, maxAttempts) => {
+				showStreamNotice("Terminal stream reconnecting", `Reconnecting ${attempt}/${maxAttempts}`, "warn");
+			});
+			transport.onStreamRecovered?.(clearStreamNotice);
+			transport.onStreamExhausted?.((maxAttempts) => {
+				showStreamError(new Error(`Reconnect failed after ${maxAttempts} attempts`));
+			});
+			await transport.onEvent("bell", () => props.onBell?.());
 			await transport.onEvent("cwd", (payload) => {
 				const { cwd } = payload as { cwd: string };
 				terminalsStore.update(props.terminalId, { cwd });
@@ -2185,9 +2752,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// Flow control: ack on a trailing timer when hidden, request full frame on show
 		visibilityObserver = new IntersectionObserver(
 			(entries) => {
-				const isVisible = entries[0]?.isIntersecting ?? false;
+				const isVisible = latestIntersectionVisibility(entries);
 				if (isVisible && hidden) {
 					hidden = false;
+					recordWorkloadVisibility(props.sessionId, false);
+					transport?.setVisible?.(true);
+					awaitingFullFrame = false;
 					// Back to full rate: clear the gate now instead of waiting out the
 					// hidden interval, so the frame requested below is not queued behind it.
 					hiddenAck.cancel();
@@ -2204,25 +2774,32 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					// naturally discarded without a blank flash.
 					remeasure();
 					if (focused()) startBlink();
-					// If remeasure saw 0x0 (layout not yet computed after
-					// display:none → display:block), retry after a frame.
-					const rect = containerRef.getBoundingClientRect();
-					if (rect.width <= 0 || rect.height <= 0) {
-						requestAnimationFrame(() => {
-							remeasure();
-							noteFrameRequest();
-							invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(
-								ipcErr("terminal_request_frame"),
-							);
-						});
-					} else {
+					// Tauri publishes visibility before requesting its authoritative frame.
+					// WS has no visibility publication, so this component owns its request.
+					const requestShowFrame = () => {
+						if (transport?.setVisible) return;
 						noteFrameRequest();
 						invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(
 							ipcErr("terminal_request_frame"),
 						);
+					};
+					// Retry layout after display:none → display:block even when the
+					// transport owns the frame request.
+					const rect = containerRef.getBoundingClientRect();
+					if (rect.width <= 0 || rect.height <= 0) {
+						requestAnimationFrame(() => {
+							remeasure();
+							requestShowFrame();
+						});
+					} else {
+						requestShowFrame();
 					}
 				} else if (!isVisible && !hidden) {
 					hidden = true;
+					cancelSizeRetry?.();
+					cancelSizeRetry = undefined;
+					recordWorkloadVisibility(props.sessionId, true);
+					transport?.setVisible?.(false);
 					stopBlink();
 					// Shrink to free the backing store while hidden. All THREE canvases:
 					// the overscan one is the tallest (logicalH + 2 cell rows) and was
@@ -2289,6 +2866,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			setFocused(true);
 			startBlink();
 			props.onFocus?.();
+			reclaimSize();
 			resetInputBuffer();
 			if (currentFrame?.focusReporting) writePtyNoScroll("\x1b[I");
 		});
@@ -2298,6 +2876,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			repaintCursorIfNeeded();
 			gestureArbiter.reset();
 			if (currentFrame?.focusReporting) writePtyNoScroll("\x1b[O");
+			// A wheel gesture that was mid-flight when focus left this pane must not
+			// resume it on refocus.
+			resetWheelNotch(wheelNotch);
 		});
 
 		// Text from input methods that don't emit usable keydown events — iOS/
@@ -2338,7 +2919,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const composition = createCompositionState();
 		bindings.listen(keyInputRef, "compositionstart", () => {
 			const m = metrics();
-			if (currentFrame && m) syncImePosition(currentFrame.cursorRow, currentFrame.cursorCol, m);
+			if (currentFrame && m) {
+				const point = viewportProjection.toDisplay(currentFrame.cursorRow, currentFrame.cursorCol);
+				if (point) syncImePosition(keyInputRef, point.row, point.col, m);
+			}
 		});
 		bindings.listen(keyInputRef, "compositionend", (e) => {
 			const data = composition.onCompositionEnd(e.data);
@@ -2394,9 +2978,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				if (term) {
 					const blocks = term.commandBlocks;
 					const active = term.activeBlock;
-					const allPromptLines = blocks.map((b) => b.promptLine).concat(active ? [active.promptLine] : []);
+					const allPromptLines = blocks
+						.map((b) => b.promptLine)
+						.concat(active ? [active.promptLine] : [])
+						.filter((line) => line >= (currentFrame?.historyBase ?? 0));
 					if (allPromptLines.length > 0 && currentFrame) {
-						const currentViewLine = currentFrame.historySize - currentFrame.displayOffset;
+						const currentViewLine = currentFrame.historyBase + currentFrame.historySize - currentFrame.displayOffset;
 						let targetLine: number | undefined;
 						if (e.key === "ArrowUp") {
 							for (let i = allPromptLines.length - 1; i >= 0; i--) {
@@ -2414,9 +3001,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 							}
 						}
 						if (targetLine !== undefined) {
-							invokeRef?.("terminal_scroll_to", { sessionId: props.sessionId, line: targetLine }).catch(
-								ipcErr("terminal_scroll_to"),
-							);
+							invokeRef?.("terminal_scroll_to", {
+								sessionId: props.sessionId,
+								line: targetLine - currentFrame.historyBase,
+							}).catch(ipcErr("terminal_scroll_to"));
 						}
 						e.preventDefault();
 						return;
@@ -2434,7 +3022,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			) {
 				const term = terminalsStore.get(props.terminalId);
 				if (term && currentFrame) {
-					const viewTop = currentFrame.historySize - currentFrame.displayOffset;
+					const viewTop = currentFrame.historyBase + currentFrame.historySize - currentFrame.displayOffset;
 					const blocks = [...term.commandBlocks, term.activeBlock].filter(
 						Boolean,
 					) as import("../../stores/terminals").CommandBlock[];
@@ -2459,6 +3047,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				clearDetectedLinks();
 				fullRepaintNeeded = true;
 				currentFrame = null;
+				awaitingFullFrame = false;
 				lastDisplayOffset = -1;
 				remeasure();
 				invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
@@ -2601,9 +3190,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				}
 			}
 
-			// Kitty keyboard protocol: encode special keys when flag 1 (disambiguate) is active
+			// Kitty keyboard protocol: encode special keys when flag 1 (disambiguate) is active.
 			const kbFlags = currentFrame?.keyboardFlags ?? 0;
-			if (kbFlags & 1) {
+			// DEFERRED (2026-10-31) — ego accepts BusySteer but does not negotiate Kitty yet.
+			// Keep only its Ctrl+Enter exception until ego enables the Reedline protocol guard.
+			const egoCtrlEnter = e.key === "Enter" && e.ctrlKey && terminalsStore.get(props.terminalId)?.agentType === "ego";
+			if (kbFlags & 1 || egoCtrlEnter) {
 				const seq = kittySequenceForKey(e.key, e.shiftKey, e.altKey, e.ctrlKey, e.metaKey);
 				if (seq !== null) {
 					e.preventDefault();
@@ -2657,15 +3249,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		});
 
 		bindings.listen(keyInputRef, "paste", (e: ClipboardEvent) => {
-			if (e.clipboardData) {
-				const items = e.clipboardData.items;
-				for (let i = 0; i < items.length; i++) {
-					if (items[i].type.startsWith("image/")) {
-						e.preventDefault();
-						writePty("\x16");
-						return;
-					}
-				}
+			if (isImagePaste(e)) {
+				e.preventDefault();
+				writePty("\x16");
+				return;
 			}
 			const text = e.clipboardData?.getData("text");
 			if (text) {
@@ -2695,15 +3282,16 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// the plain-selection path and the drag-select path under mouse reporting.
 		const applyMultiClickSelect = (pos: { col: number; row: number }, absRow: number) => {
 			const absPos = { col: pos.col, row: absRow };
+			// A new gesture must not be validated against the previous copy's snapshot.
+			selection.invalidateSnapshot();
 			if (clickCount === 2) {
-				const vpRow = absRowToViewport(absRow);
+				const vpRow = selectionAbsRowToViewport(absRow);
 				const row = vpRow !== null ? rowMap.get(vpRow) : null;
 				if (row) {
 					const isWordChar = (col: number) => {
 						if (col < 0 || col >= row.count) return false;
-						const cp = row.codepoints[col];
-						if (cp === 0 || cp === 32) return false;
-						const ch = String.fromCodePoint(cp);
+						const ch = cellText(row, col);
+						if (ch === "" || /^\s+$/.test(ch)) return false;
 						return !/[\s\t\x00-\x1f\x7f "'`(){}[\]<>|;:,.!?@#$%^&*~=+/\\]/.test(ch);
 					};
 					let left = pos.col;
@@ -2735,8 +3323,19 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		/** Buttons this canvas reported down, so their release is owed to the app. */
 		const reportedDown = new Set<number>();
 
+		/** Bumped by every press and every context menu request; a menu lookup older than the counter is stale. */
+		let pressSeq = 0;
+
 		bindings.listen(canvasRef, "mousedown", (e: MouseEvent) => {
+			// Keep the shared input focused: the default canvas focus runs AFTER this
+			// handler and briefly blurs it, which can dismiss the soft keyboard. Cancel before
+			// any grid/link early return, while preserving native context-menu presses.
+			if (e.button === 0 && !(isMacOS() && e.ctrlKey)) e.preventDefault();
+			pressSeq++;
 			keyInputRef.focus({ preventScroll: true });
+			const pressAt = canvasToGrid(metrics, canvasRef, e);
+			const pressSpan = pressSpanAt(pressAt.row, pressAt.col);
+			linkPress.begin(e.button, pressAt.row, pressSpan, underlinedText(rowMap, pressAt.row, pressSpan));
 
 			// Multi-click counter — shared by the forwarding (drag-select) and
 			// plain-selection paths below.
@@ -2755,24 +3354,32 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// SGR has no bit for Cmd, so the app would read it as a plain click. Without
 			// reporting it is kept from starting a selection only over a known link,
 			// so Cmd+drag elsewhere still selects.
-			linkPress = false;
+			modifierLinkPress = false;
 			if (e.button === 0 && isLinkModifier(e)) {
 				const reporting = !!currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey;
-				if (reporting || isOnKnownLink(canvasToGrid(e))) {
-					linkPress = true;
+				if (reporting || pressSpan !== undefined) {
+					modifierLinkPress = true;
 					e.preventDefault();
 					return;
 				}
 			}
-
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
-				const pos = canvasToGrid(e);
-				// Right-click on a detected link → let the contextmenu handler fire (Open /
-				// Copy link), even while an app has mouse reporting on. In WKWebView,
-				// preventDefault on a right-button mousedown suppresses the contextmenu event,
-				// so over a link we neither forward nor preventDefault: the app loses this one
-				// right-click, but the link menu works — UI-first (see #57).
-				if (e.button === 2 && detectedLinks.get(pos.row)?.some((sp) => pos.col >= sp.colStart && pos.col < sp.colEnd)) {
+				const pos = canvasToGrid(metrics, canvasRef, e);
+				// A press on a detected link → let the link handlers fire (click opens,
+				// contextmenu shows Open / Copy link), even while an app has mouse
+				// reporting on. The underline promises the click opens, and Claude
+				// Code's fullscreen mode reports the mouse, so forwarding the press left
+				// every underlined path dead. In WKWebView, preventDefault on a
+				// right-button mousedown suppresses the contextmenu event, so over a link
+				// we neither forward nor preventDefault: the app loses this one press,
+				// but the link works — UI-first (see #57). Shift bypasses reporting.
+				if (linkClaimsPress(e.button, pressSpanAt(pos.row, pos.col) !== undefined)) {
+					// A leftover Shift-drag selection would make the click bail as a drag.
+					if (linkPress.isClaimed() && selection.hasRange()) {
+						selection.clear();
+						fullRepaintNeeded = true;
+						scheduleRepaint();
+					}
 					return;
 				}
 				// Drag-select under mouse reporting: defer the press to the arbiter —
@@ -2798,9 +3405,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				return;
 			}
 			if (e.button !== 0) return;
-			const pos = canvasToGrid(e);
+			const pos = canvasToGrid(metrics, canvasRef, e);
 			const absRow = viewportRowToAbs(pos.row);
 			if (absRow === null) return;
+			// cachedText belongs to the last completed/copied range. A new gesture
+			// must not compare its evolving range against that previous snapshot.
+			selection.invalidateSnapshot();
 
 			// Gutter click: select entire block output
 			{
@@ -2808,13 +3418,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const rawX = e.clientX - rect.left;
 				if (rawX < GUTTER_PX) {
 					const term = terminalsStore.get(props.terminalId);
-					if (term) {
+					const historyBase = currentFrame?.historyBase;
+					const gridRow = currentFrame ? selectionRowToGridRow(currentFrame, absRow) : null;
+					if (term && historyBase !== undefined && gridRow !== null) {
 						const allBlocks = [...term.commandBlocks, term.activeBlock].filter(
 							Boolean,
 						) as import("../../stores/terminals").CommandBlock[];
 						const block = allBlocks.find((b) => b.promptLine <= absRow && (b.endLine ?? Infinity) >= absRow);
 						if (block) {
-							const startRow = (block.executionLine ?? block.promptLine) + 1;
+							const startRow = Math.max(historyBase, (block.executionLine ?? block.promptLine) + 1);
 							const endRow = (block.endLine ?? absRow) - 1;
 							if (endRow >= startRow) {
 								selection.start = { row: startRow, col: 0 };
@@ -2872,12 +3484,20 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				return;
 			}
 			stopSelectionScroll();
-			const pos = canvasToGrid(e, rect);
+			const pos = canvasToGrid(metrics, canvasRef, e, rect);
 			const absRow = viewportRowToAbs(pos.row);
 			if (absRow === null) return;
 			selection.end = { col: pos.col, row: absRow };
 			const mRepaint = metrics();
 			if (currentFrame && mRepaint) paintFrame(currentFrame, mRepaint);
+		};
+
+		const scheduleLinkProbe = (e: MouseEvent) => {
+			clearTimeout(linkThrottle);
+			linkThrottle = setTimeout(() => {
+				const pos = canvasToGrid(metrics, canvasRef, e);
+				checkLinksAtRow(pos.row, pos.col);
+			}, 100);
 		};
 
 		const onMouseMove = (e: MouseEvent) => {
@@ -2894,6 +3514,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 						gestureArbiter.reset();
 						return;
 					}
+					selection.invalidateSnapshot();
 					selection.start = { col: st.down.col, row: st.down.absRow };
 					selection.end = null;
 					selection.selecting = true;
@@ -2905,11 +3526,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					// nothing) must not report a clamped cell into this PTY.
 					const rect = canvasRef.getBoundingClientRect();
 					if (!isPointerInsideRect(e, rect)) return;
+					// Keep probing links: the press over one is claimed from the app
+					// (mousedown), and the click only opens what this probe found.
+					if (!selection.selecting) scheduleLinkProbe(e);
 					if (currentFrame.mouseMode >= 3) {
-						const pos = canvasToGrid(e, rect);
+						const pos = canvasToGrid(metrics, canvasRef, e, rect);
 						writePtyNoScroll(sgrMouseSequence(35, pos.col, pos.row, true, e));
-					} else if (currentFrame.mouseMode >= 2 && e.buttons > 0) {
-						const pos = canvasToGrid(e, rect);
+					} else if (currentFrame.mouseMode >= 2 && e.buttons > 0 && !linkPress.isClaimed()) {
+						const pos = canvasToGrid(metrics, canvasRef, e, rect);
 						const btn = e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : 2;
 						writePtyNoScroll(sgrMouseSequence(32 + btn, pos.col, pos.row, true, e));
 					}
@@ -2926,13 +3550,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				}
 			}
 
-			// Link detection (throttled)
-			if (!selection.selecting) {
-				clearTimeout(linkThrottle);
-				linkThrottle = setTimeout(() => {
-					const pos = canvasToGrid(e);
-					checkLinksAtRow(pos.row, pos.col);
-				}, 100);
+			// Link detection (throttled). The listener is on document (see comment
+			// above), so without a rect test every visible pane runs checkLinksAtRow
+			// on every move — up to 3 IPC round trips each — for panes the pointer
+			// never touched.
+			if (!selection.selecting && isPointerInsideRect(e, canvasRef.getBoundingClientRect())) {
+				scheduleLinkProbe(e);
 			}
 		};
 
@@ -2941,12 +3564,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// hiding the terminal or dragging off it mid-gesture would otherwise
 			// leave the button logically held with nothing left to retract it.
 			const rect = canvasRef.getBoundingClientRect();
-			const reportUp = shouldReportMouseUp(reportedDown, e.button, isPointerInsideRect(e, rect));
+			// A claimed link press was never reported down, so its release is not owed either.
+			const reportUp =
+				!linkPress.isClaimed() && shouldReportMouseUp(reportedDown, e.button, isPointerInsideRect(e, rect));
 			const owed = reportedDown.delete(e.button);
 			if (hidden && !owed) return;
-			// The release of a link press: the app never saw the press, and no
+			// The release of a Cmd/Ctrl link press: the app never saw the press, and no
 			// selection was started.
-			if (linkPress && e.button === 0) return;
+			if (modifierLinkPress && e.button === 0) return;
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
 				const up = gestureArbiter.onUp();
 				if (up.kind === "click") {
@@ -2964,7 +3589,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					if (!reportUp) return;
 					// canvasToGrid clamps to the grid, so a release outside the canvas
 					// reports the edge cell — what a terminal does for a drag-out.
-					const pos = canvasToGrid(e, rect);
+					const pos = canvasToGrid(metrics, canvasRef, e, rect);
 					if (currentFrame.sgrMouse) {
 						writePtyNoScroll(sgrMouseSequence(e.button, pos.col, pos.row, false, e));
 					}
@@ -2996,42 +3621,59 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		bindings.listen(document, "mousemove", onMouseMove);
 		bindings.listen(document, "mouseup", onMouseUp);
 
-		// Link click. A plain click opens the hovered link unless the user was
-		// selecting text; under mouse reporting the app owns plain clicks, and a
-		// link left hovered by the right-click menu must not open on one.
+		// Link click. A plain click opens a link only for the press that claimed it
+		// (mousedown), so a link left hovered by the right-click menu never opens
+		// on one, and under mouse reporting every other plain click is the app's.
 		// Cmd/Ctrl+click resolves the link under the pointer now, as the right-click
 		// menu does: the hover result can be gone (a scrolling frame clears it) or
 		// never made (hover detection is off under mouse reporting).
-		bindings.listen(canvasRef, "click", async (e: MouseEvent) => {
-			const pressed = linkPress;
-			linkPress = false;
-			if (!pressed) {
-				if (selection.hasRange()) return;
-				if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) return;
-			}
-			if (pressed || isLinkModifier(e)) {
+		bindings.listen(canvasRef, "click", (e: MouseEvent) => {
+			const at = canvasToGrid(metrics, canvasRef, e);
+			const claimed = linkPress.release(at.row, at.col, underlinedTextAt(rowMap, pressSpanAt, at.row, at.col));
+			const modifierPressed = modifierLinkPress;
+			modifierLinkPress = false;
+			if (modifierPressed || (isLinkModifier(e) && !selection.hasRange())) {
+				if (e.detail > 1) return;
 				// A hover check still pending from the last move would supersede this
 				// one mid-await and leave the click with nothing to open.
 				clearTimeout(linkThrottle);
-				const pos = canvasToGrid(e);
-				await checkLinksAtRow(pos.row, pos.col);
+				void openLinkAt(at.row, at.col);
+				return;
 			}
-			if (hoveredLink) openLink(hoveredLink);
+			// The first click of a double-click already opened it.
+			if (!claimed || e.detail > 1 || selection.hasRange()) {
+				// Only a click on something the user sees as a link is worth a line.
+				if (claimed || isOverSpan(detectedLinks.get(at.row), at.col)) {
+					appLogger.debug("terminal", "link click: not opened", {
+						row: at.row,
+						col: at.col,
+						claimed: claimed !== null,
+						detail: e.detail,
+						hasRange: selection.hasRange(),
+					});
+				}
+				return;
+			}
+			void openLinkAt(at.row, at.col);
 		});
 
 		// Right-click on a detected link → context menu (Open / Copy link).
 		// Only when the click lands on a link span; elsewhere the default is left alone.
 		bindings.listen(canvasRef, "contextmenu", async (e: MouseEvent) => {
-			const pos = canvasToGrid(e);
-			const onLink = detectedLinks.get(pos.row)?.some((sp) => pos.col >= sp.colStart && pos.col < sp.colEnd);
-			if (!onLink) return;
+			// Any menu request retires a pending lookup, also one off every link (Menu key, Shift+F10).
+			const seq = ++pressSeq;
+			const pos = canvasToGrid(metrics, canvasRef, e);
+			if (!pressSpanAt(pos.row, pos.col)) return;
 			e.preventDefault();
 			// Stop the App-level terminal context menu (#terminal-panes onContextMenu)
 			// from also opening and covering our Open/Copy-link menu.
 			e.stopPropagation();
-			await checkLinksAtRow(pos.row, pos.col);
-			if (!hoveredLink) return;
-			setLinkMenuTarget({ path: hoveredLink.path, line: hoveredLink.line, col: hoveredLink.col });
+			// Suppression is synchronous; the target is resolved again here, so a link whose
+			// hyperlink changed or vanished under the same text opens what is there now, or no menu.
+			// The lookup's own answer, never the shared hover: a newer probe for another cell owns that.
+			const link = await resolveLinkAt(pos.row, pos.col, () => !alive || pressSeq !== seq);
+			if (!link || link === STALE || !linkCovers(link, pos.row, pos.col)) return;
+			setLinkMenuTarget({ path: link.path, line: link.line, col: link.col });
 			linkMenu.openAt(e.clientX, e.clientY);
 		});
 
@@ -3053,16 +3695,36 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// (TUIC scrolled its own history instead of forwarding to grok).
 			// Shift+wheel always scrolls the TUIC scrollback, never the app — the
 			// escape hatch matching the click/motion handlers' `!e.shiftKey` bypass.
+			// (wheelScrollDelta inside quantizeWheelNotches/wheelDeltaToPixels also
+			// corrects for macOS/WebKit reporting Shift+wheel on deltaX instead of
+			// deltaY — without that, this escape hatch does nothing until Shift is
+			// released and the momentum tail lands back on deltaY.)
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
-				const pos = canvasToGrid(e as unknown as MouseEvent);
-				const btn = e.deltaY < 0 ? 64 : 65;
-				writePtyNoScroll(sgrMouseSequence(btn, pos.col, pos.row, true, e as unknown as MouseEvent));
+				const ch = metrics()?.cellHeight ?? 20;
+				const rows = lastResizeRows || 24;
+				// Quantize to whole notches the way a native terminal does: macOS
+				// delivers a wheel event for the entire momentum tail after a flick
+				// (60-120 events/s of decaying deltas), and forwarding one SGR notch
+				// per event — as this used to — turns one flick into dozens of
+				// notches sent to the app.
+				const notches = quantizeWheelNotches(wheelNotch, e, ch, rows);
+				clearTimeout(scrollGestureEndTimer);
+				scrollGestureEndTimer = setTimeout(onWheelGestureEnd, WHEEL_GESTURE_END_MS);
+				if (notches === 0) return;
+				const pos = canvasToGrid(metrics, canvasRef, e as unknown as MouseEvent);
+				const btn = notches < 0 ? 64 : 65;
+				const seq = sgrMouseSequence(btn, pos.col, pos.row, true, e as unknown as MouseEvent);
+				// One write_pty per DOM event instead of one per notch — the sequence
+				// is stateless, so repeating it is byte-identical to N separate writes.
+				writePtyNoScroll(seq.repeat(Math.abs(notches)));
 				return;
 			}
 			// Scale wheel input by the user's scroll sensitivity (percent, 20–200).
 			// Touch scrolling (direct manipulation) and SGR wheel forwarding above
 			// (discrete per-tick events) are deliberately left unscaled.
-			const dy = e.deltaY * (settingsStore.state.terminalScrollSensitivity / 100);
+			const dy =
+				wheelDeltaToPixels(e, metrics()?.cellHeight ?? 20, lastResizeRows || 24) *
+				(settingsStore.state.terminalScrollSensitivity / 100);
 			const atBottom =
 				currentFrame && currentFrame.displayOffset === 0 && (scroll.position == null || scroll.position <= 0);
 			const atTop =
@@ -3074,7 +3736,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			handleScrollDelta(dy);
 
 			clearTimeout(scrollGestureEndTimer);
-			scrollGestureEndTimer = setTimeout(resetScrollGesture, 200);
+			// Same handler as the forwarded branch: this timer replaced that one, so it must
+			// also drop any forwarded sub-notch residual or it leaks into the next gesture.
+			scrollGestureEndTimer = setTimeout(onWheelGestureEnd, WHEEL_GESTURE_END_MS);
 		}
 		bindings.listen(canvasRef, "wheel", handleWheel, { passive: false });
 		bindings.listen(scrollbarRef, "wheel", handleWheel, { passive: false });
@@ -3082,7 +3746,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// Scrollbar drag
 		let scrollDragging = false;
 		let scrollDragStartY = 0;
-		let scrollDragStartOffset = 0;
+		// Thumb travel already applied to the gesture, in lines. The drag feeds the
+		// smooth-scroll gesture only the change since the last move, so output landing
+		// mid-drag moves the gesture through followHistory instead of being dropped by
+		// an offset anchored to the frame the drag started on (#1265-8b16).
+		let scrollDragAppliedDelta = 0;
 
 		// Scrollbar track click: jump to position
 		bindings.listen(scrollbarRef, "mousedown", (e: MouseEvent) => {
@@ -3111,31 +3779,28 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			resetSmoothScroll();
 			scrollDragging = true;
 			scrollDragStartY = e.clientY;
-			scrollDragStartOffset = currentFrame?.displayOffset ?? 0;
+			scrollDragAppliedDelta = 0;
 		});
 
 		const onScrollDragMove = (e: MouseEvent) => {
 			if (!scrollDragging || !currentFrame) return;
 			const historySize = currentFrame.historySize;
 			if (historySize === 0) return;
-			// Use the cached track height (set in remeasure) instead of reading
-			// scrollbarRef.clientHeight — a layout-forcing read on every mousemove.
-			const trackHeight = scrollbarTrackHeight;
-			const thumbHeight = parseFloat(scrollThumbRef.style.height) || 20;
-			const scrollRange = trackHeight - thumbHeight;
+			const scrollRange = thumbFor(scrollbarTrackHeight, lastResizeRows, currentFrame).range;
 			if (scrollRange <= 0) return;
 
 			const dy = e.clientY - scrollDragStartY;
 			const offsetDelta = Math.round((dy / scrollRange) * historySize);
-			// Absolute target anchored to the drag start — NOT a delta vs the (async, often
-			// stale) currentFrame.displayOffset, which would overshoot on fast drags. Routed
-			// through the coalesced latest-wins flush so rapid mousemoves collapse to one IPC.
-			scroll.pendingOffset = Math.max(0, Math.min(historySize, scrollDragStartOffset - offsetDelta));
-			scheduleScrollFlush();
+			// Same gesture path as the wheel: position is distance from the history
+			// bottom, rebased by followHistory when output lands, and clamped there.
+			applySmoothScroll(offsetDelta - scrollDragAppliedDelta);
+			scrollDragAppliedDelta = offsetDelta;
 		};
 
 		const onScrollDragUp = () => {
+			if (!scrollDragging) return;
 			scrollDragging = false;
+			resetScrollGesture();
 		};
 
 		bindings.listen(document, "mousemove", onScrollDragMove);
@@ -3158,7 +3823,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		};
 
 		// Touch input (mobile/tablet)
-		cleanupTouch = installTouchHandlers(canvasRef, touchTextareaRef, {
+		cleanupTouch = installTouchHandlers(canvasRef, keyInputRef, {
 			onScrollPixels: (dy) => {
 				// Touch is direct manipulation: the content must follow the finger,
 				// the OPPOSITE of the wheel convention handleScrollDelta expects
@@ -3168,12 +3833,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				handleScrollDelta(-dy);
 			},
 			onScrollEnd: resetScrollGesture,
-			onInput: (data) => writePty(data),
-			onFocus: () => {
-				setFocused(true);
-				startBlink();
-				props.onFocus?.();
-			},
 			onFontSizeChange: (delta) => {
 				// Per-terminal, like every keyboard/menu/palette zoom: the global
 				// default is persisted config, and the renderer reads the terminal's
@@ -3193,6 +3852,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// count has to start from zero with it.
 			hiddenAck.cancel();
 			framesReceived = 0;
+			awaitingFullFrame = false;
 			await transport.subscribe((data) => onFrame(data));
 			if (!alive) {
 				// Unmounted while subscribe() was in flight. onCleanup already ran and
@@ -3201,18 +3861,18 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				transport.unsubscribe();
 				return;
 			}
-			// Paint the current grid now. The browser-mode WS subscribe (unlike the
-			// Tauri event channel) does not replay the current frame, so an idle
-			// session with no pending output would render nothing and leave the
-			// canvas black until the first interaction. Forcing a full frame here is
-			// idempotent on desktop and fixes the black-on-load in browser mode.
-			noteFrameRequest();
-			invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
+			// WS needs an initial frame even for an idle session. Desktop visibility
+			// publication already owns its authoritative frame request.
+			if (!transport.setVisible) {
+				noteFrameRequest();
+				invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
+			}
 		} catch (e) {
 			appLogger.error("terminal", "Failed to subscribe to terminal grid channel", {
 				sessionId: props.sessionId,
 				error: e,
 			});
+			showStreamError(e);
 			// `unsubscribe` already covers this on unmount; drop the session-event
 			// listeners now rather than keeping them alive on a terminal that will
 			// never paint.
@@ -3220,14 +3880,16 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 
 		props.onRef?.({
+			wheel: handleWheel,
 			focus: () => keyInputRef.focus({ preventScroll: true }),
-			getSelectionText: () => selection.cachedText,
+			getSelectionText: () => stripAnswerMarkers(selection.cachedText),
 			selectAll: () => selectAllBuffer(),
 			refresh: () => {
 				rowMap.clear();
 				clearDetectedLinks();
 				fullRepaintNeeded = true;
 				currentFrame = null;
+				awaitingFullFrame = false;
 				lastDisplayOffset = -1;
 				lastResizeCols = 0;
 				lastResizeRows = 0;
@@ -3239,6 +3901,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				// against the fresh gate Rust installs on resubscribe.
 				hiddenAck.cancel();
 				framesReceived = 0;
+				awaitingFullFrame = false;
 				await transport?.resubscribe();
 			},
 			searchFind: async (query: string, blockScope?: boolean) => {
@@ -3309,7 +3972,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// gets pushed up. Anchoring to the cursor bottom self-clamps: the cursor can't
 		// overshoot above containerRef.top.
 		const keyboardTop = window.innerHeight - occ;
-		const cursorBottomY = containerRef.getBoundingClientRect().top + (frame.cursorRow + 1) * m.cellHeight;
+		const cursorBottomY =
+			containerRef.getBoundingClientRect().top +
+			((viewportProjection.displayRow(frame.cursorRow) ?? frame.cursorRow) + 1) * m.cellHeight;
 		const lift = Math.max(0, Math.round(cursorBottomY - keyboardTop));
 		kbLiftRef.style.transform = lift > 0 ? `translateY(${-lift}px)` : "";
 	}
@@ -3336,40 +4001,75 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		remeasure();
 	});
 
-	/** Text under the current selection coordinates.
+	/** Text under the current selection coordinates — the copy gesture and select-all
+	 *  both read through here.
 	 *
 	 *  Always prefers the Rust path: it unwraps soft-wrapped logical lines via the
-	 *  WRAPLINE flag (grid_get_selection_text), so copying a line the terminal merely
-	 *  wrapped for width doesn't insert a spurious newline. The JS fallback has no
-	 *  wrap info (see getLocalSelectionText DEFERRED) and only runs when invoke or the
-	 *  selection coords are unavailable — and it can only see rows still in `rowMap`,
-	 *  i.e. the viewport. Errors propagate; callers decide what a failed read means. */
+	 *  WRAPLINE flag. The snapshot base lets Rust rebase the grid-relative rows under
+	 *  the same lock that reads them, so eviction cannot alias replacements. Rows the
+	 *  marker projection hides (suggest/intent) are left out, so the text is what the
+	 *  viewport paints. Throws "selection rows are no longer retained" when the range
+	 *  has left the scrollback; callers decide what a failed read means. */
 	async function readSelectionText(): Promise<string> {
-		if (invokeRef && selection.start && selection.end) {
-			const text = (await invokeRef("terminal_get_selection_text", {
-				sessionId: props.sessionId,
-				startRow: selection.start.row,
-				startCol: selection.start.col,
-				endRow: selection.end.row,
-				endCol: selection.end.col,
-			})) as string;
-			// Fall back to the local read if the IPC path yields nothing (transient error,
-			// grid not ready). Loses wrap-unwrapping, but a wrapped copy beats a silent
-			// no-op — the onscreen path could always satisfy a copy before this routing.
-			if (text) return text;
+		const startRow = currentFrame && selection.start ? selectionRowToGridRow(currentFrame, selection.start.row) : null;
+		const endRow = currentFrame && selection.end ? selectionRowToGridRow(currentFrame, selection.end.row) : null;
+		const historyBase = currentFrame?.historyBase;
+		if (
+			invokeRef &&
+			selection.start &&
+			selection.end &&
+			startRow !== null &&
+			endRow !== null &&
+			historyBase !== undefined
+		) {
+			// Read recorded cell rows rather than filtering copied prose: only
+			// the marker projection knows which physical rows are omitted.
+			const start = { ...selection.start };
+			const end = { ...selection.end };
+			const first = Math.min(start.row, end.row);
+			const last = Math.max(start.row, end.row);
+			const viewportTop = historyBase + currentFrame!.historySize - (overlayScrollOffset ?? projectedDisplayOffset);
+			let copyRows = new Map<number, DecodedRow>();
+			for (let index = viewportTop - MARKER_LOOKBACK_ROWS; index < viewportTop; index++) {
+				const row = rowCache.get(index);
+				if (row) copyRows.set(index, row);
+			}
+			for (const [index, row] of rowMap) copyRows.set(viewportTop + index, row);
+			if (first < viewportTop || last >= viewportTop + currentFrame!.screenRows) {
+				const from = Math.max(historyBase, first - MARKER_LOOKBACK_ROWS);
+				const range = await fetchStyledRange(from, last - from + 1 + MARKER_LOOKBACK_ROWS);
+				if (!range?.rows.some(({ abs }) => abs === first) || !range.rows.some(({ abs }) => abs === last)) {
+					throw new Error("selection rows are no longer retained");
+				}
+				copyRows = new Map(range.rows.map(({ abs, row }) => [abs, row]));
+			}
+			const text = await readProjectedSelectionText(
+				start,
+				end,
+				copyRows,
+				async (start, end) =>
+					(await invokeRef!("terminal_get_selection_text", {
+						sessionId: props.sessionId,
+						startRow: start.row - historyBase,
+						startCol: start.col,
+						endRow: end.row - historyBase,
+						endCol: end.col,
+						historyBase,
+					})) as string,
+			);
+			// An all-hidden range is intentionally empty; never restore raw rows.
+			return text;
 		}
-		return getLocalSelectionText();
+		return selection.cachedText || getLocalSelectionText(selection, selectionAbsRowToViewport, rowMap);
 	}
 
 	/**
 	 * Select the whole buffer — scrollback and screen.
 	 *
-	 * Grid-relative absolute row 0 is the top of history: `viewportRowToAbs` reads
-	 * `historySize - displayOffset + viewportRow`, so the full buffer is
-	 * `[0, historySize + screenRows)`. That is the same coordinate space
-	 * `terminal_get_selection_text` takes, so the text read below covers rows that
-	 * were never rendered — which is the entire point, since the canvas only ever
-	 * holds a viewport's worth of DOM-invisible pixels.
+	 * Selection rows are eviction-stable (`historyBase + grid-relative`), so the full
+	 * buffer is `[historyBase, historyBase + historySize + screenRows)`. The text read
+	 * below covers rows that were never rendered — which is the entire point, since
+	 * the canvas only ever holds a viewport's worth of DOM-invisible pixels.
 	 *
 	 * `cachedText` is filled here rather than at copy time because ⌘C reads
 	 * `getSelectionText()` (the cache) and nothing else populates it outside an
@@ -3379,12 +4079,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (!currentFrame) return false;
 		const m = metrics();
 		const screenRows = currentFrame.screenRows || lastResizeRows || 24;
-		const lastRow = currentFrame.historySize + screenRows - 1;
-		if (lastRow < 0) return false;
+		const firstRow = currentFrame.historyBase;
+		const lastRow = firstRow + currentFrame.historySize + screenRows - 1;
+		if (lastRow < firstRow) return false;
 		const maxCol = m ? Math.max(0, Math.floor(canvasRef.getBoundingClientRect().width / m.cellWidth) - 1) : 79;
 
+		selection.invalidateSnapshot();
 		selection.selecting = false;
-		selection.start = { col: 0, row: 0 };
+		selection.start = { col: 0, row: firstRow };
 		selection.end = { col: maxCol, row: lastRow };
 		fullRepaintNeeded = true;
 		scheduleRepaint();
@@ -3393,8 +4095,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			selection.cachedText = await readSelectionText();
 		} catch (e) {
 			appLogger.warn("terminal", "Select-all text read failed", { error: e });
-			selection.cachedText = getLocalSelectionText();
+			selection.cachedText = getLocalSelectionText(selection, selectionAbsRowToViewport, rowMap);
 		}
+		selection.localSnapshot = getLocalSelectionText(selection, selectionAbsRowToViewport, rowMap);
 		return true;
 	}
 
@@ -3403,11 +4106,19 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			| ((msg: string) => void)
 			| undefined;
 		try {
-			const text = await readSelectionText();
-			if (text) {
+			const result = await commitSelectionCopy(readSelectionText, async (text) => {
 				selection.cachedText = text;
-				await writeClipboard(text);
+				selection.localSnapshot = getLocalSelectionText(selection, selectionAbsRowToViewport, rowMap);
+				await writeClipboard(stripAnswerMarkers(text));
+			});
+			if (result.kind === "copied") {
 				setStatus?.("Copied to clipboard");
+			} else if (result.kind === "expired") {
+				selection.clear();
+				stopSelectionScroll();
+				const m = metrics();
+				if (currentFrame && m) repaintOverlay(currentFrame, m);
+				setStatus?.("Selection expired — text left scrollback");
 			}
 		} catch (e) {
 			appLogger.warn("terminal", "Clipboard write failed", { error: e });
@@ -3417,13 +4128,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 	onCleanup(() => {
 		alive = false;
+		clearStreamNotice();
+		clearTimeout(answersTimer);
 		stopBlink();
 		if (rafId !== undefined) {
 			cancelAnimationFrame(rafId);
 			rafId = undefined;
 		}
-		// Smooth-scroll RAF + settle timer also outlive unmount and run against the
-		// released row cache — cancel both.
+		// The smooth-scroll RAF can outlive unmount and use the released row cache.
 		if (smoothRafId) {
 			cancelAnimationFrame(smoothRafId);
 			smoothRafId = 0;
@@ -3432,6 +4144,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		hiddenAck.cancel();
 		if (reconcileTimer) clearTimeout(reconcileTimer);
 		clearTimeout(resizeDebounce);
+		cancelSizeRetry?.();
+		cancelSizeRetry = undefined;
 		resizeObserver?.disconnect();
 		visibilityObserver?.disconnect();
 		if (dprChangeHandler) dprMediaQuery?.removeEventListener("change", dprChangeHandler);
@@ -3467,29 +4181,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const path = e.dataTransfer?.getData("application/x-tuic-path");
 				if (!path) return;
 				e.preventDefault();
-				const quoted = `'${path.replace(/'/g, "'\\''")}' `;
+				const quoted = `'${path.replaceAll("'", "'\\''")}' `;
 				writePty(quoted);
 				keyInputRef.focus({ preventScroll: true });
 			}}
 		>
-			{/* Offscreen textarea for mobile virtual keyboard input */}
-			<textarea
-				ref={touchTextareaRef!}
-				style={{
-					position: "fixed",
-					top: "-9999px",
-					left: "-9999px",
-					width: "1px",
-					height: "1px",
-					opacity: "0",
-					"pointer-events": "none",
-				}}
-				autocomplete="off"
-				autocorrect="off"
-				autocapitalize="off"
-				spellcheck={false}
-				tabIndex={-1}
-			/>
 			{/* Hidden input that receives all keyboard events including dead-key composition.
 			    Canvas elements in WKWebView don't participate in the macOS text input system,
 			    so dead keys (quotes, accents, etc.) are lost when listeners live on the canvas.
@@ -3589,6 +4285,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					/>
 				</div>
 			</div>
+			<Show when={answersView()}>
+				{(view) => (
+					<AnswersPanel
+						view={view()}
+						fontFamily={settingsStore.getFontFamily()}
+						fontSize={terminalsStore.get(props.terminalId)?.fontSize ?? settingsStore.state.defaultFontSize}
+					/>
+				)}
+			</Show>
 			{/* Scrollbar */}
 			<div
 				ref={scrollbarRef!}
@@ -3611,7 +4316,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 						width: "10px",
 						"margin-left": "2px",
 						"border-radius": "5px",
-						"min-height": "20px",
 						position: "absolute",
 						top: "0",
 						cursor: "pointer",
@@ -3634,6 +4338,33 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 							if (t) copyLink(t);
 						},
 					},
+					...(/^https?:\/\//i.test(linkMenuTarget()?.path ?? "") && terminalsStore.get(props.terminalId)?.agentType
+						? [
+								{
+									label: "Start in Design Mode",
+									action: () => {},
+									children: designModeBrowsers.map((browser) => ({
+										label: browser.label,
+										action: () => {
+											const target = linkMenuTarget();
+											if (!target || !invokeRef) return;
+											void invokeRef("start_design_mode", {
+												sessionId: props.sessionId,
+												browser: browser.id,
+												url: target.path,
+											}).catch((error) => {
+												appLogger.error("terminal", "Failed to start Design Mode", error);
+												toastsStore.add(
+													"Design Mode failed",
+													error instanceof Error ? error.message : String(error),
+													"error",
+												);
+											});
+										},
+									})),
+								},
+							]
+						: []),
 				]}
 				x={linkMenu.position().x}
 				y={linkMenu.position().y}

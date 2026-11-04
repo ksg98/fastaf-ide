@@ -1,0 +1,55 @@
+{
+  "protocolVersion": 1,
+  "agentCapabilities": {
+    "loadSession": true,
+    "promptCapabilities": {
+      "image": true,
+      "audio": false,
+      "embeddedContext": false
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": false,
+      "acp": true
+    },
+    "sessionCapabilities": {
+      "list": {},
+      "delete": {},
+      "fork": {
+        "_meta": {
+          "ego": {
+            "atMessage": true
+          }
+        }
+      },
+      "resume": {},
+      "close": {}
+    },
+    "auth": {},
+    "_meta": {
+      "ego": {
+        "steer": {
+          "version": 1,
+          "method": "_ego/steer",
+          "contentTypes": [
+            "text"
+          ]
+        },
+        "compact": {
+          "version": 1,
+          "method": "_ego/compact"
+        },
+        "hold": {
+          "version": 1,
+          "pause": "_ego/pause",
+          "resume": "_ego/resume"
+        }
+      }
+    }
+  },
+  "authMethods": [],
+  "agentInfo": {
+    "name": "ego",
+    "version": "0.1.0"
+  }
+}

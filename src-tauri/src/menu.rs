@@ -106,17 +106,17 @@ pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
         .separator()
         .item(&item!(
             "zoom-in-all",
-            "Zoom In All Terminals",
+            "Zoom In All Tabs",
             "CmdOrCtrl+Shift+="
         ))
         .item(&item!(
             "zoom-out-all",
-            "Zoom Out All Terminals",
+            "Zoom Out All Tabs",
             "CmdOrCtrl+Shift+-"
         ))
         .item(&item!(
             "zoom-reset-all",
-            "Reset Zoom All Terminals",
+            "Reset Zoom All Tabs",
             "CmdOrCtrl+Shift+0"
         ))
         .separator()
@@ -184,12 +184,8 @@ pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
             "Prompt Library",
             "CmdOrCtrl+Shift+K"
         ))
-        .item(&item!("run-command", "Run Command", "CmdOrCtrl+R"))
-        .item(&item!(
-            "edit-run-command",
-            "Edit && Run Command",
-            "CmdOrCtrl+Shift+R"
-        ))
+        .item(&item!("run-command", "Run Command", "CmdOrCtrl+Shift+R"))
+        .item(&item!("edit-run-command", "Edit && Run Command"))
         .item(&item!(
             "content-search",
             "Search File Contents",

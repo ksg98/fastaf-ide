@@ -47,8 +47,8 @@ describe("OutputView screen-row reconciliation", () => {
 	});
 
 	/** Render the view and wait for its async mount to install the subscription. */
-	async function mountView() {
-		const result = render(() => <OutputView sessionId="sess-1" />);
+	async function mountView(searchQuery?: string) {
+		const result = render(() => <OutputView sessionId="sess-1" searchQuery={searchQuery} />);
 		// onMount awaits the initial HTTP fetch before subscribing.
 		await vi.waitFor(() => expect(captured).toBeDefined());
 		return result;
@@ -123,6 +123,41 @@ describe("OutputView screen-row reconciliation", () => {
 
 		captured?.onScreenRows?.(["alpha", "beta"]);
 		expectSameNodes(rowNodes(container), before);
+		unmount();
+	});
+
+	it("renders source-width prose as one mobile-wrappable paragraph", async () => {
+		const { container, unmount } = await mountView();
+		captured?.onScreenRows?.([
+			{ spans: [{ text: "  Il mio giudizio ragionato richiede ancora una misura prima di" }], cols: 80 },
+			{ spans: [{ text: "  trasformarlo in un dato." }], cols: 80 },
+		]);
+		const before = rowNodes(container);
+		expect(before).toHaveLength(1);
+		expect(before[0].textContent).toBe(
+			"  Il mio giudizio ragionato richiede ancora una misura prima di trasformarlo in un dato.",
+		);
+		captured?.onScreenRows?.([
+			{ spans: [{ text: "  Il mio giudizio ragionato richiede ancora una misura prima di" }], cols: 80 },
+			{ spans: [{ text: "  trasformarlo in un dato." }], cols: 80 },
+		]);
+		expectSameNodes(rowNodes(container), before);
+		unmount();
+	});
+
+	it("does not join two search matches that were not adjacent rows", async () => {
+		// A blank row separates the paragraphs. The filter drops it, so a reflow
+		// that runs after the filter sees a full-width row followed by a
+		// continuation and fabricates one sentence from two paragraphs.
+		const { container, unmount } = await mountView("alpha");
+		const first = "  alpha one two three four five six seven eight nine ten eleven twelve thirteen";
+		const second = "  alpha starts the next paragraph.";
+		captured?.onScreenRows?.([
+			{ spans: [{ text: first }], cols: 80 },
+			{ spans: [{ text: "" }], cols: 80 },
+			{ spans: [{ text: second }], cols: 80 },
+		]);
+		expect(rowNodes(container).map((node) => node.textContent)).toEqual([first, second]);
 		unmount();
 	});
 });

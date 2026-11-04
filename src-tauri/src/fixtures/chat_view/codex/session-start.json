@@ -1,0 +1,9 @@
+{
+  "session_id": "01a13487-f2a9-7480-90b8-d21e87833dc2",
+  "transcript_path": "/recorded/rollout.jsonl",
+  "cwd": "/recorded/workspace",
+  "hook_event_name": "SessionStart",
+  "model": "probe",
+  "permission_mode": "bypassPermissions",
+  "source": "startup"
+}

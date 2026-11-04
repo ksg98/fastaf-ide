@@ -1,0 +1,22 @@
+.create { display: flex; flex-direction: column; min-width: 0; max-width: 720px; padding: 16px; box-sizing: border-box; background: var(--bg-primary); color: var(--fg-primary); font-family: var(--font-ui); font-size: var(--font-md, 13px); --fg-muted: var(--fg-secondary); /* the shared settings hint reads --fg-muted, which is 3.5:1 on the form background */ }
+.create h2 { margin: 0 0 16px; font-size: var(--font-lg); font-weight: 600; overflow-wrap: anywhere; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); column-gap: 12px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.actions .muted { margin-right: auto; }
+.create :focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25); }
+.muted { color: var(--fg-secondary); font-size: var(--font-sm, 12px); margin: 0; }
+.error { color: var(--error); margin: 8px 0 0; font-size: var(--font-sm); overflow-wrap: anywhere; }
+.error button { margin-left: 8px; }
+@container (max-width: 600px) {
+	.create { padding: 12px; }
+}
+
+.create :is(input, select, textarea)[data-form-control] { width: 100%; }
+
+.optional { margin-top: 8px; }
+/* A disclosure heading with a drawn chevron, not the native triangle. */
+.optional > summary { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--fg-secondary); font-size: var(--font-sm); font-weight: 600; list-style: none; cursor: pointer; }
+.optional > summary::-webkit-details-marker { display: none; }
+.optional > summary::before { content: ""; width: 5px; height: 5px; margin: 0 2px 2px 1px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform var(--duration-fast) var(--ease-out); }
+.optional[open] > summary::before { transform: rotate(45deg); margin-bottom: 4px; }
+.optional > .fields { margin-top: 8px; }

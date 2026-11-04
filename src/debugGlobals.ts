@@ -1,3 +1,4 @@
+import { dumpFrameWorkload, frameWorkloadStatus, setFrameWorkloadEnabled } from "./components/Terminal/frameWorkload";
 /**
  * Debug globals for MCP eval_js introspection.
  *
@@ -22,6 +23,19 @@ import { isPerfDebug, setPerfDebug } from "./utils/perfDebug";
 
 export function initDebugGlobals(): void {
 	(window as unknown as Record<string, unknown>).__TUIC__ = {
+		frameWorkload: {
+			enable: setFrameWorkloadEnabled,
+			status: frameWorkloadStatus,
+			dump: dumpFrameWorkload,
+			async replay(
+				recording: import("./components/Terminal/frameWorkload").WorkloadRecording,
+				canvasFor: (session: string) => HTMLCanvasElement,
+				pace = false,
+			) {
+				const { replayFrameWorkload } = await import("./components/Terminal/frameWorkloadReplay");
+				return replayFrameWorkload(recording, canvasFor, pace);
+			},
+		},
 		// ---- Dynamic registry ----
 
 		/** List all registered store snapshot names */

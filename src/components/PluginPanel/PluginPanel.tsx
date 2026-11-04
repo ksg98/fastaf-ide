@@ -13,6 +13,7 @@ import { themeGeneration } from "../../themes";
 import { writeClipboard } from "../../utils/clipboard";
 import { attachIframeKeyForwarder } from "../../utils/iframeKeyForwarder";
 import { IFRAME_SEARCH_SCRIPT } from "../../utils/iframeSearch";
+import { handleOpenUrl } from "../../utils/openUrl";
 import { assignTabToActiveGroup } from "../../utils/paneTabAssign";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
 import { PLUGIN_BASE_CSS } from "./pluginBaseStyles";
@@ -23,11 +24,9 @@ export interface PluginPanelProps {
 	tab: PluginPanelTab;
 	onClose?: () => void;
 	/**
-	 * Whether this panel is the one on screen. Every plugin panel ever opened
-	 * stays mounted behind `display:none` — unmounting would throw away the
-	 * iframe's scroll, focus and JS state, which is the whole reason a panel is
-	 * worth keeping — so the host gates what it pushes at the hidden ones
-	 * instead. Absent (detached windows, previews) means always visible.
+	 * Whether this panel is on screen. Hidden panels unload their iframes so
+	 * their page scripts cannot block the terminal's shared WebContent thread.
+	 * Absent (detached windows, previews) means always visible.
 	 */
 	visible?: () => boolean;
 }
@@ -292,6 +291,12 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
 				if (data.pinned) mdTabsStore.setPinned(tabId, true);
 				return;
 			}
+			case "tuic:open-url": {
+				// URL-mode pages can post arbitrary messages without a user click.
+				if (props.tab.url && !props.tab.url.startsWith("file://")) return;
+				if (typeof data.url === "string") handleOpenUrl(data.url);
+				return;
+			}
 			case "tuic:edit": {
 				const path = typeof data.path === "string" ? data.path : "";
 				if (!path) {
@@ -420,12 +425,12 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
 		});
 
 		const tabId = props.tab.id;
-		pluginRegistry.registerPanelSendChannel(tabId, (data: unknown) => {
+		pluginRegistry.registerPanelSendChannel(tabId, (data: unknown, transfer?: Transferable[]) => {
 			if (iframeRef?.contentWindow) {
 				// srcdoc iframes have an opaque ("null") origin — use "*" but rely on
 				// event.source === iframeRef.contentWindow check in handleMessage above
 				// to ensure only our iframe receives the message.
-				iframeRef.contentWindow.postMessage(data, "*");
+				iframeRef.contentWindow.postMessage({ type: "tuic:host-message", payload: data }, "*", transfer ?? []);
 			}
 		});
 		onCleanup(() => pluginRegistry.unregisterPanelSendChannel(tabId));
@@ -530,19 +535,20 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
 				openReloadMenu(e.clientX, e.clientY);
 			}}
 		>
-			{props.tab.url && !props.tab.url.startsWith("file://") ? (
-				<iframe
-					ref={iframeRef}
-					src={props.tab.url}
-					sandbox="allow-scripts allow-same-origin"
-					onLoad={() => {
-						guardSameOriginNav();
-						sendSdkInit();
-					}}
-					style={iframeStyle}
-				/>
-			) : (
-				/* DO NOT remove allow-same-origin — WKWebView inherits the parent
+			<Show when={props.visible?.() ?? true}>
+				{props.tab.url && !props.tab.url.startsWith("file://") ? (
+					<iframe
+						ref={iframeRef}
+						src={props.tab.url}
+						sandbox="allow-scripts allow-same-origin"
+						onLoad={() => {
+							guardSameOriginNav();
+							sendSdkInit();
+						}}
+						style={iframeStyle}
+					/>
+				) : (
+					/* DO NOT remove allow-same-origin — WKWebView inherits the parent
            CSP into srcdoc iframes and CSP3 silently blocks ALL inline scripts
            when source-list entries coexist with 'unsafe-inline'. Without
            allow-same-origin every plugin's JS is dead (no D&D, no filters,
@@ -551,16 +557,17 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
            Keyed <Show> on reloadKey() forces Solid to unmount/remount the
            iframe element on reload — avoids the srcdoc write races that
            can leave it blank. */
-				<Show when={reloadKey()} keyed>
-					<iframe
-						ref={iframeRef}
-						sandbox="allow-scripts allow-same-origin"
-						srcdoc={srcdoc()}
-						style={iframeStyle}
-						onLoad={installKeyForwarder}
-					/>
-				</Show>
-			)}
+					<Show when={reloadKey()} keyed>
+						<iframe
+							ref={iframeRef}
+							sandbox="allow-scripts allow-same-origin"
+							srcdoc={srcdoc()}
+							style={iframeStyle}
+							onLoad={installKeyForwarder}
+						/>
+					</Show>
+				)}
+			</Show>
 			<ContextMenu
 				visible={menu.visible()}
 				x={menu.position().x}

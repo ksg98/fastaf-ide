@@ -1,5 +1,6 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { ActionEntry } from "../../actions/actionRegistry";
+import { appLogger } from "../../stores/appLogger";
 import { commandPaletteStore } from "../../stores/commandPalette";
 import { registerModal } from "../../stores/modalStack";
 import { paneLayoutStore } from "../../stores/paneLayout";
@@ -8,16 +9,20 @@ import { terminalsStore } from "../../stores/terminals";
 import type { TerminalMatch } from "../../types";
 import type { ContentMatch, DirEntry } from "../../types/fs";
 import { buildIndex } from "../../utils/bm25";
+import { contentSearchEmptyMessage } from "../../utils/contentSearch";
 import { openFileAction } from "../../utils/filePreview";
 import { pathBasename } from "../../utils/pathUtils";
 import { FileIcon } from "../FileBrowserPanel/FileIcon";
 import shared from "../shared/dialog.module.css";
+import { Input } from "../ui/Input";
 import s from "./CommandPalette.module.css";
 
 export interface CommandPaletteProps {
 	actions: ActionEntry[];
 	/** Browser clients expose only actions whose implementation is available over HTTP or in the web UI. */
 	browserMode?: boolean;
+	/** Entries for a pasted work-item URL (see `urlPaste.ts`), listed above the commands. */
+	urlActions?: (text: string, signal: AbortSignal) => Promise<ActionEntry[]>;
 }
 
 /**
@@ -25,6 +30,9 @@ export interface CommandPaletteProps {
  * until their HTTP or browser implementation has been verified explicitly.
  */
 const BROWSER_ACTION_IDS = new Set([
+	"start-design-mode-edge",
+	"start-design-mode-chrome",
+	"stop-design-mode",
 	"new-terminal",
 	"close-terminal",
 	"reopen-closed-tab",
@@ -36,6 +44,8 @@ const BROWSER_ACTION_IDS = new Set([
 	"prev-tab",
 	"next-tab",
 	"focus-last-terminal",
+	"history-back",
+	"history-forward",
 	"jump-waiting-terminal",
 	"zoom-in",
 	"zoom-out",
@@ -73,7 +83,6 @@ const BROWSER_ACTION_IDS = new Set([
 	"prompt-library",
 	"open-path",
 	"command-overview",
-	"ai-triage",
 	"toggle-tunnels",
 	"process-manager",
 	"open-generators",
@@ -81,7 +90,12 @@ const BROWSER_ACTION_IDS = new Set([
 	"block-next",
 	"block-fold-toggle",
 	"block-search-toggle",
+	"answers-only",
 	"toggle-compose-panel",
+	"toggle-hands-free",
+	"progress",
+	"automations",
+	"plans-stories",
 	"reset-panel-sizes",
 	"search-terminals",
 	"search-files",
@@ -102,6 +116,30 @@ export function isBrowserCommandPaletteAction(action: ActionEntry): boolean {
 	return BROWSER_ACTION_IDS.has(action.id) || BROWSER_ACTION_PREFIXES.some((prefix) => action.id.startsWith(prefix));
 }
 
+/**
+ * `ActionEntry.label` is typed `string`, but the list is assembled from data this
+ * process does not fully control — a repo record read from disk, or a plugin
+ * action registered across the iframe/postMessage boundary — so a corrupt or
+ * missing label can still reach here as `undefined`. `baseSort` below calls
+ * `.localeCompare` on every label unconditionally; an invalid one used to crash
+ * the whole palette (and, via the ErrorBoundary, the app) instead of just that
+ * one row (#763-d219). Logged once per offending id so a corrupt source is
+ * visible without spamming on every keystroke's re-sort.
+ */
+const loggedInvalidLabelActionIds = new Set<string>();
+
+function sanitizedActionLabel(action: ActionEntry): string {
+	if (typeof action.label === "string" && action.label.length > 0) return action.label;
+	if (!loggedInvalidLabelActionIds.has(action.id)) {
+		loggedInvalidLabelActionIds.add(action.id);
+		appLogger.error("app", "Command palette action has an invalid label; falling back to its id", {
+			id: action.id,
+			label: action.label,
+		});
+	}
+	return action.id || "(unnamed action)";
+}
+
 export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	const [selectedIndex, setSelectedIndex] = createSignal(0);
 	let inputRef: HTMLInputElement | undefined;
@@ -110,9 +148,13 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	const isOpen = () => commandPaletteStore.state.isOpen;
 	const mode = () => commandPaletteStore.mode();
 	const searchQuery = () => commandPaletteStore.searchQuery();
-	const availableActions = createMemo(() =>
-		props.browserMode ? props.actions.filter(isBrowserCommandPaletteAction) : props.actions,
-	);
+	const availableActions = createMemo(() => {
+		const base = props.browserMode ? props.actions.filter(isBrowserCommandPaletteAction) : props.actions;
+		return base.map((action) => {
+			const label = sanitizedActionLabel(action);
+			return label === action.label ? action : { ...action, label };
+		});
+	});
 
 	/**
 	 * Rebuild the BM25 index whenever the action list changes. The corpus is
@@ -120,15 +162,31 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	 * allocation-free per keystroke.
 	 */
 	const bm25Index = createMemo(() =>
-		buildIndex(availableActions().map((a) => ({ item: a, text: `${a.label} ${a.category}` }))),
+		buildIndex(availableActions().map((a) => ({ item: a, text: `${a.label} ${a.category} ${a.keywords ?? ""}` }))),
 	);
+
+	// A pasted URL is offered to plugin resolvers; their entries lead the list.
+	const [urlEntries, setUrlEntries] = createSignal<ActionEntry[]>([]);
+	createEffect(() => {
+		const query = commandPaletteStore.state.query;
+		setUrlEntries([]);
+		if (!props.urlActions || mode() !== "command" || !/^\s*https?:\/\//i.test(query)) return;
+		const controller = new AbortController();
+		onCleanup(() => controller.abort());
+		props
+			.urlActions(query, controller.signal)
+			.then((entries) => {
+				if (!controller.signal.aborted) setUrlEntries(entries);
+			})
+			.catch((err) => appLogger.warn("app", "Pasted URL could not be resolved", err));
+	});
 
 	/**
 	 * Empty query → recent actions first, then alphabetical.
 	 * Non-empty query → BM25 ranked; ties and non-matches fall back to the
 	 * recency/alphabetical order so frequently used commands stay reachable.
 	 */
-	const filteredActions = createMemo(() => {
+	const rankedActions = createMemo(() => {
 		if (mode() !== "command") return [];
 		const query = commandPaletteStore.state.query;
 		const recent = commandPaletteStore.state.recentActions;
@@ -143,7 +201,7 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 		};
 
 		if (!query.trim()) {
-			return [...availableActions()].sort(baseSort);
+			return availableActions().toSorted(baseSort);
 		}
 
 		const ranked = bm25Index().score(query);
@@ -155,6 +213,8 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 			})
 			.map((r) => r.item);
 	});
+
+	const filteredActions = createMemo(() => [...urlEntries(), ...rankedActions()]);
 
 	/** Item count for the current mode */
 	const itemCount = () => {
@@ -335,7 +395,7 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 					onClick={(e) => e.stopPropagation()}
 				>
 					<div class={s.search}>
-						<input
+						<Input
 							ref={inputRef}
 							type="text"
 							aria-label="Command palette search"
@@ -425,14 +485,16 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 								}
 							>
 								{/* A cross-repo search can only cover repos whose index is built.
-								    Saying "No results" while N repos are still indexing is a lie —
-								    report the coverage instead. */}
+								    Saying "No results" while N repos went unsearched is a lie, and so
+								    was the old "still indexing, retry shortly" — most pending repos are
+								    queued for nothing. The backend reports which ones are actually
+								    building; `contentSearchEmptyMessage` spends that count. */}
 								<div class={s.empty}>
-									{commandPaletteStore.state.contentReposPending > 0
-										? `No results in ${commandPaletteStore.state.contentReposSearched} repo${
-												commandPaletteStore.state.contentReposSearched === 1 ? "" : "s"
-											} — ${commandPaletteStore.state.contentReposPending} still indexing, retry shortly`
-										: "No results"}
+									{contentSearchEmptyMessage({
+										reposSearched: commandPaletteStore.state.contentReposSearched,
+										reposPending: commandPaletteStore.state.contentReposPending,
+										reposIndexing: commandPaletteStore.state.contentReposIndexing,
+									})}
 								</div>
 							</Show>
 							<Show when={commandPaletteStore.state.contentError}>

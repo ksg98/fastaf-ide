@@ -1,0 +1,8 @@
+{"step":"send 0","delivered":false,"path":"inbox_only","wake":"WakeSubmitted","attempts":1}
+{"step":"send 1","delivered":false,"path":"inbox_only","wake":"WakeCoalesced","attempts":1}
+{"step":"send 2","delivered":false,"path":"inbox_only","wake":"WakeCoalesced","attempts":1}
+{"step":"inbox 0","messages":[{"from":"550e8400-e29b-41d4-a716-446655440a01","content":"recorded mail 0"}],"has_more":true,"count":1,"cursor_message":0,"wake_needed":true}
+{"step":"inbox 1","messages":[{"from":"550e8400-e29b-41d4-a716-446655440a01","content":"recorded mail 1"}],"has_more":true,"count":1,"cursor_message":1,"wake_needed":true}
+{"step":"inbox 2","messages":[{"from":"550e8400-e29b-41d4-a716-446655440a01","content":"recorded mail 2"}],"has_more":false,"count":1,"cursor_message":2,"wake_needed":false}
+{"step":"empty inbox","count":0,"has_more":false}
+{"step":"send after read","path":"inbox_only","wake":"WakeSubmitted","attempts":2}

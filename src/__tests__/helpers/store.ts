@@ -12,6 +12,8 @@ export function makeTerminal(
 		awaitingInput: "question" | "error" | null;
 		agentType: AgentType | null;
 		agentSessionId: string | null;
+		tuicSession: string | null;
+		parentSession: string | null;
 	}> = {},
 ) {
 	return {

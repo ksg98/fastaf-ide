@@ -1,4 +1,5 @@
 import { type Component, createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
 import { executeCleanup } from "../../hooks/usePostMergeCleanup";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
@@ -20,6 +21,7 @@ import {
 	type StepStatus,
 } from "../PostMergeCleanupDialog/PostMergeCleanupDialog";
 import { PrDetailContent } from "../PrDetailPopover/PrDetailContent";
+import { Button } from "../ui/Button";
 import { PrStateBadge } from "./PrStateBadge";
 import { canMergePr } from "./prMergeEligibility";
 import s from "./Sidebar.module.css";
@@ -64,12 +66,13 @@ export const RemoteOnlyPrPopover: Component<{
 		const ctx = cleanupCtx();
 		if (!ctx) return true; // remote-only: user is not on merged branch
 		const repo = repositoriesStore.get(props.repoPath);
-		return repo?.activeBranch === ctx.baseBranch;
+		return repo?.activeWorkspaceId === ctx.baseBranch;
 	};
 
-	const closeTerminalsForBranch = async (repoPath: string, branchName: string) => {
+	/** Called by `executeCleanup`, which passes the workspace id it was given. */
+	const closeTerminalsForBranch = async (repoPath: string, workspaceId: string) => {
 		const repo = repositoriesStore.get(repoPath);
-		const branch = repo?.branches[branchName];
+		const branch = repo?.workspaces[workspaceId];
 		if (branch) {
 			for (const termId of branch.terminals) {
 				try {
@@ -91,6 +94,10 @@ export const RemoteOnlyPrPopover: Component<{
 
 		await executeCleanup({
 			repoPath: props.repoPath,
+			// A PR names its head branch, so the workspace is resolved through the
+			// single documented branch->id seam; the id addresses the row and the
+			// checkout, the branch stays the ref to delete.
+			workspaceId: repositoriesStore.workspaceIdOnBranch(props.repoPath, ctx.branchName) ?? ctx.branchName,
 			branchName: ctx.branchName,
 			baseBranch: ctx.baseBranch,
 			steps: steps.map((st) => ({ id: st.id, checked: st.checked })),
@@ -116,6 +123,9 @@ export const RemoteOnlyPrPopover: Component<{
 	const handleCleanupSkip = () => {
 		setCleanupCtx(null);
 	};
+
+	let popoverRef: HTMLDivElement | undefined;
+	useOutsideDismiss({ inside: () => [popoverRef], onClose: props.onClose, enabled: () => !cleanupCtx() });
 
 	const visiblePrs = createMemo(() => props.prs.filter((pr) => !dismissedPrs().has(pr.number)));
 
@@ -154,7 +164,7 @@ export const RemoteOnlyPrPopover: Component<{
 			const preferred =
 				repoSettingsStore.getEffective(props.repoPath)?.prMergeStrategy ?? repoDefaultsStore.state.prMergeStrategy;
 			const startMethod = effectiveMergeMethod(pr, preferred);
-			const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod);
+			const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod, pr.head_ref_oid);
 			// Persist the working method so future merges use it directly
 			if (usedMethod !== preferred) {
 				const repo = repositoriesStore.get(props.repoPath);
@@ -217,11 +227,11 @@ export const RemoteOnlyPrPopover: Component<{
 	const handleViewDiff = async (pr: BranchPrStatus) => {
 		setDiffLoadingPr(pr.number);
 		try {
-			const diff = await invoke<string>("get_pr_diff", {
+			const { diff, headSha } = await invoke<{ diff: string; headSha: string }>("get_pr_diff", {
 				repoPath: props.repoPath,
 				prNumber: pr.number,
 			});
-			mdTabsStore.addPrDiff(props.repoPath, pr.number, pr.title, diff);
+			mdTabsStore.addPrDiff(props.repoPath, pr.number, pr.title, diff, headSha);
 		} catch (e) {
 			const msg = String(e);
 			appLogger.error("github", `Failed to load PR #${pr.number} diff`, { error: msg });
@@ -257,18 +267,17 @@ export const RemoteOnlyPrPopover: Component<{
 				)}
 			</Show>
 			<Show when={!cleanupCtx()}>
-				<div class={s.remoteOnlyOverlay} onClick={props.onClose} onKeyDown={handleKeyDown} tabIndex={-1} />
-				<div class={s.remoteOnlyPopover} onKeyDown={handleKeyDown} tabIndex={-1}>
+				<div ref={popoverRef} class={s.remoteOnlyPopover} onKeyDown={handleKeyDown} tabIndex={-1}>
 					<div class={s.remoteOnlyHeader}>
 						<span>{t("sidebar.remoteOnlyPrs", "Remote-only PRs")}</span>
 						<Show when={dismissedCount() > 0}>
-							<button class={s.remoteOnlyShowDismissed} onClick={handleShowDismissed}>
+							<Button size="compact" variant="ghost" class={s.remoteOnlyShowDismissed} onClick={handleShowDismissed}>
 								{t("sidebar.showDismissed", "Show")} {dismissedCount()} {t("sidebar.dismissed", "dismissed")}
-							</button>
+							</Button>
 						</Show>
-						<button class={s.remoteOnlyClose} onClick={props.onClose}>
+						<Button size="compact" variant="ghost" class={s.remoteOnlyClose} onClick={props.onClose}>
 							&times;
-						</button>
+						</Button>
 					</div>
 					<div class={s.remoteOnlyList}>
 						<For each={visiblePrs()}>
@@ -292,67 +301,94 @@ export const RemoteOnlyPrPopover: Component<{
 											reviewDecision={pr.review_decision}
 											ciFailed={pr.checks?.failed}
 											ciPending={pr.checks?.pending}
+											unresolvedThreads={pr.unresolved_threads}
+											unresolvedThreadsTruncated={pr.unresolved_threads_truncated}
 										/>
 									</div>
 									<Show when={expandedBranch() === pr.branch}>
 										<div class={s.remoteOnlyDetail}>
-											<button
+											<Button
+												size="compact"
+												variant="ghost"
 												class={s.remoteOnlyDetailDismiss}
 												onClick={() => handleDismiss(pr.number)}
-												title={t("sidebar.dismissPr", "Hide this PR from view")}
+												aria-label={t("sidebar.dismissPr", "Hide this PR from view")}
+												data-tooltip={t("sidebar.dismissPr", "Hide this PR from view")}
+												data-tooltip-pos="bottom"
+												data-tooltip-align="right"
 											>
 												&times;
-											</button>
+											</Button>
 											<PrDetailContent repoPath={props.repoPath} branch={pr.branch}>
 												<div class={s.remoteOnlyDetailActions}>
-													<button
+													<Button
+														size="compact"
+														variant="ghost"
 														class={s.remoteOnlyCheckout}
 														onClick={() => props.onCheckout(pr.branch)}
-														title={t("sidebar.checkoutBranch", "Check out this branch locally")}
+														data-tooltip={t("sidebar.checkoutBranch", "Check out this branch locally")}
+														data-tooltip-pos="bottom"
+														data-tooltip-align="right"
 													>
 														{t("sidebar.checkout", "Checkout")}
-													</button>
+													</Button>
 													<Show when={props.onCreateWorktree}>
-														<button
+														<Button
+															size="compact"
+															variant="ghost"
 															class={s.remoteOnlyWorktree}
 															onClick={() => props.onCreateWorktree?.(pr.branch)}
-															title={t("sidebar.createWorktreeFromBranch", "Create worktree from this branch")}
+															data-tooltip={t("sidebar.createWorktreeFromBranch", "Create worktree from this branch")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
 															{t("sidebar.worktree", "Worktree")}
-														</button>
+														</Button>
 													</Show>
 													<Show when={canApprovePr(pr, githubStore.state.viewerLogin)}>
-														<button
+														<Button
+															size="compact"
+															variant="primary"
 															class={s.remoteOnlyApprove}
 															onClick={() => handleApprove(pr)}
 															disabled={approvingPr() === pr.number}
-															title={t("sidebar.approvePr", "Approve this pull request")}
+															data-tooltip={t("sidebar.approvePr", "Approve this pull request")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
 															{approvingPr() === pr.number
 																? t("sidebar.approving", "Approving...")
 																: t("sidebar.approve", "Approve")}
-														</button>
+														</Button>
 													</Show>
 													<Show when={canMergePr(pr)}>
-														<button
+														<Button
+															size="compact"
+															variant="ghost"
 															class={s.remoteOnlyMerge}
 															onClick={() => handleMerge(pr)}
 															disabled={mergingPr() === pr.number}
-															title={t("sidebar.mergePr", "Merge this pull request")}
+															data-tooltip={t("sidebar.mergePr", "Merge this pull request")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
 															{mergingPr() === pr.number ? t("sidebar.merging", "Merging...") : mergeLabel(pr)}
-														</button>
+														</Button>
 													</Show>
-													<button
+													<Button
+														size="compact"
+														variant="ghost"
 														class={s.remoteOnlyViewDiff}
 														onClick={() => handleViewDiff(pr)}
 														disabled={diffLoadingPr() === pr.number}
-														title={t("sidebar.viewDiff", "View PR diff")}
+														data-tooltip={t("sidebar.viewDiff", "View PR diff")}
+														data-tooltip-pos="bottom"
+														data-tooltip-align="right"
 													>
 														{diffLoadingPr() === pr.number
 															? t("sidebar.loadingDiff", "Loading...")
 															: t("sidebar.diff", "Diff")}
-													</button>
+													</Button>
 												</div>
 												<Show when={approveError()}>
 													<div class={s.remoteOnlyMergeError}>{approveError()}</div>

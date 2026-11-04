@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { execSync } from "node:child_process";
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
@@ -6,15 +7,32 @@ import checker from "vite-plugin-checker";
 import { visualizer } from "rollup-plugin-visualizer";
 import purgecss from "vite-plugin-purgecss";
 import { Features } from "lightningcss";
+import { backendBuildIdentity } from "./scripts/backend-build-identity.mjs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 // @ts-expect-error process is a nodejs global
 const devBackend = process.env.TUIC_DEV_BACKEND;
-const typescriptWatchApi = import.meta.resolve("@typescript/typescript6");
+
+// Only frontend inputs can affect Vite's output. A repository-local tooling
+// checkout may contain any filename, including index.html. Ignore `.tmp/` at
+// every depth so tooling output cannot reload the live WebView.
+const ignoreNonFrontendFile = (path: string): boolean => {
+  const file = relative(import.meta.dirname, path).split(sep).join("/");
+  if (file === "") return false; // Keep the root itself watchable.
+  if (file === ".." || file.startsWith("../") || isAbsolute(file)) return true;
+  if (file.split("/").includes(".tmp")) return true;
+  // Rust owns this grammar, but frontend imports must invalidate on edits too.
+  const intentGrammar = "src-tauri/crates/tuic-terminal/src/intent_marker.json";
+  if (file === intentGrammar || intentGrammar.startsWith(`${file}/`)) return false;
+  if (file === "src" || file.startsWith("src/")) return false;
+  if (file === "public" || file.startsWith("public/")) return false;
+  if (!file.includes("/") && file.endsWith(".html")) return false;
+  return !["vite.config.ts", "tsconfig.json", "package.json", "pnpm-lock.yaml"].includes(file);
+};
 
 // Read app version from tauri.conf.json
-const tauriConf = JSON.parse(readFileSync("./src-tauri/tauri.conf.json", "utf-8"));
+const tauriConf = JSON.parse(readFileSync(join(import.meta.dirname, "src-tauri/tauri.conf.json"), "utf-8"));
 
 // Git hash for PWA version checks
 const gitHash = (() => {
@@ -30,9 +48,43 @@ const devServerIdentity = (): Plugin => ({
   name: "tuic-dev-identity",
   apply: "serve",
   configureServer(server: ViteDevServer) {
+    server.middlewares.use("/__tuic_backend_identity", (req, res) => {
+      try {
+        const query = new URL(req.url ?? "/", "http://localhost").searchParams.get("backend");
+        const identity = backendBuildIdentity(server.config.root, query ? JSON.parse(query) : undefined);
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+        res.end(JSON.stringify(identity));
+      } catch (error) {
+        server.config.logger.error(`Backend identity failed: ${error}`);
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "unavailable", key: "unavailable" }));
+      }
+    });
     server.middlewares.use("/__tuic_dev_root", (_req, res) => {
       res.setHeader("content-type", "text/plain");
       res.end(server.config.root);
+    });
+  },
+});
+
+// Theme gallery (`theme-gallery.html`): the bundled theme JSONs, read fresh on
+// every request. An `import.meta.glob` would be cached by the module graph and
+// never invalidated, because `server.watch.ignored` excludes `src-tauri`; a
+// theme edit would then stay invisible until a dev-server restart.
+const themeSources = (): Plugin => ({
+  name: "tuic-theme-sources",
+  apply: "serve",
+  configureServer(server: ViteDevServer) {
+    server.middlewares.use("/__tuic_themes", (_req, res) => {
+      const dir = join(server.config.root, "src-tauri/src/themes");
+      const themes = readdirSync(dir)
+        .filter((f) => f.endsWith(".json"))
+        .sort()
+        .map((f) => ({ key: f.slice(0, -".json".length), ...JSON.parse(readFileSync(join(dir, f), "utf-8")) }));
+      res.setHeader("content-type", "application/json");
+      res.setHeader("cache-control", "no-store");
+      res.end(JSON.stringify(themes));
     });
   },
 });
@@ -52,6 +104,7 @@ export default defineConfig(async ({ command }) => ({
     ...(command === "serve"
       ? [
           devServerIdentity(),
+          themeSources(),
           checker({
             // vite-plugin-checker 0.14.5+ detects TypeScript 7 and runs its
             // native CLI because TS7 no longer exposes the JavaScript compiler API.
@@ -114,6 +167,10 @@ export default defineConfig(async ({ command }) => ({
         main: "index.html",
         mobile: "mobile.html",
       },
+      // Keep `/*! … */` and `@license` comments when minifying. Vite drops legal
+      // comments by default, which strips the notices that MIT/ISC code such as
+      // the Lucide-derived icons (src/components/icons) must ship with.
+      output: { comments: { legal: true } },
     },
   },
 
@@ -151,14 +208,10 @@ export default defineConfig(async ({ command }) => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`, `.claude`, and `.mdkb`.
-      //    Vite already ignores `.git`/`node_modules` by default; these are the
-      //    agent/tooling dirs it would otherwise watch. Worktrees under
-      //    `.claude/worktrees/` are full checkouts incl. `src/` (double-watch +
-      //    spurious reload on create/remove), and `.mdkb/` is written constantly
-      //    by mdkb (memory writes, code index) — both would churn the dev server
-      //    or trigger spurious full reloads mid-session.
-      ignored: ["**/src-tauri/**", "**/.claude/**", "**/.mdkb/**"],
+      // 3. watch only frontend inputs. Mutation tooling clones a full checkout
+      //    into `.tmp/`; its index.html files caused live WebView reloads.
+      //    This also excludes other tooling, docs, builds and worktree trees.
+      ignored: ignoreNonFrontendFile,
     },
   },
 }));

@@ -1,0 +1,40 @@
+{
+  "id": "tasks-provider-project-id",
+  "name": "Tasks provider with a project id",
+  "version": "0.1.0",
+  "minAppVersion": "0.0.0",
+  "main": "main.js",
+  "description": "FastAF test fixture: a work-item provider whose default project is a numeric id setting.",
+  "capabilities": ["net:http"],
+  "allowedUrls": ["https://tracker-a.example.invalid/*"],
+  "providers": [
+    {
+      "id": "fixture-tracker-a",
+      "label": "Fixture tracker A",
+      "kinds": ["basic", "bearer"],
+      "verify": { "path": "/api/me", "loginPointer": "/name" }
+    }
+  ],
+  "settings": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "title": "Project id",
+          "description": "Project used when a Tasks account names none.",
+          "maxLength": 64,
+          "x-setting": {
+            "sensitivity": "public",
+            "apply": "service_restart",
+            "effect": "Reloads the provider with the new project.",
+            "operations": ["get", "set", "reset"],
+            "confirmationClass": "ordinary"
+          }
+        }
+      }
+    },
+    "defaults": { "projectId": "" }
+  }
+}

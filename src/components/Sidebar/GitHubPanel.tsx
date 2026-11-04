@@ -1,5 +1,6 @@
 import { type Component, createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
 import { executeCleanup } from "../../hooks/usePostMergeCleanup";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
@@ -26,6 +27,9 @@ import {
 	type StepStatus,
 } from "../PostMergeCleanupDialog/PostMergeCleanupDialog";
 import { SmartButtonStrip } from "../SmartButtonStrip/SmartButtonStrip";
+import { Button } from "../ui/Button";
+import { ChevronIcon } from "../ui/ChevronIcon";
+import { Select } from "../ui/Select";
 import { PrSection } from "./PrSection";
 import s from "./Sidebar.module.css";
 
@@ -61,8 +65,6 @@ export const GitHubPanel: Component<{
 	onAutofix?: (issueNumber: number, prompt: string) => void;
 	onCleanupActive?: (active: boolean) => void;
 }> = (props) => {
-	const [showChangelog, setShowChangelog] = createSignal(false);
-
 	// Issue accordion state
 	const [expandedIssue, setExpandedIssue] = createSignal<number | null>(null);
 	// PR accordion state, lifted out of PrSection: Enter on a keyboard-navigated
@@ -73,6 +75,8 @@ export const GitHubPanel: Component<{
 	const [dismissedPrs, setDismissedPrs] = createSignal<Record<string, number[]>>({});
 	const [closingIssue, setClosingIssue] = createSignal<number | null>(null);
 	const [issueActionError, setIssueActionError] = createSignal<{ num: number; msg: string } | null>(null);
+	// Changelog modal visibility. The modal runs the generation itself on mount.
+	const [showChangelog, setShowChangelog] = createSignal(false);
 	// Auto-fix prompt dialog target (issue number), and in-flight PR create.
 	const [autofixIssue, setAutofixIssue] = createSignal<number | null>(null);
 	const [creatingPr, setCreatingPr] = createSignal<number | null>(null);
@@ -96,12 +100,13 @@ export const GitHubPanel: Component<{
 		const ctx = cleanupCtx();
 		if (!ctx) return true;
 		const repo = repositoriesStore.get(props.repoPath);
-		return repo?.activeBranch === ctx.baseBranch;
+		return repo?.activeWorkspaceId === ctx.baseBranch;
 	};
 
-	const closeTerminalsForBranch = async (repoPath: string, branchName: string) => {
+	/** Called by `executeCleanup`, which passes the workspace id it was given. */
+	const closeTerminalsForBranch = async (repoPath: string, workspaceId: string) => {
 		const repo = repositoriesStore.get(repoPath);
-		const branch = repo?.branches[branchName];
+		const branch = repo?.workspaces[workspaceId];
 		if (branch) {
 			for (const termId of branch.terminals) {
 				try {
@@ -123,6 +128,10 @@ export const GitHubPanel: Component<{
 
 		await executeCleanup({
 			repoPath: props.repoPath,
+			// A PR names its head branch, so the workspace is resolved through the
+			// single documented branch->id seam; the id addresses the row and the
+			// checkout, the branch stays the ref to delete.
+			workspaceId: repositoriesStore.workspaceIdOnBranch(props.repoPath, ctx.branchName) ?? ctx.branchName,
 			branchName: ctx.branchName,
 			baseBranch: ctx.baseBranch,
 			steps: steps.map((st) => ({ id: st.id, checked: st.checked })),
@@ -257,6 +266,14 @@ export const GitHubPanel: Component<{
 
 	let panelRef: HTMLDivElement | undefined;
 
+	// The sidebar badge toggles the panel; its press must reach the toggle instead of closing first.
+	useOutsideDismiss({
+		inside: () => [panelRef],
+		onClose: props.onClose,
+		enabled: () => !cleanupCtx(),
+		ignoreSelector: "[data-gh-panel-trigger]",
+	});
+
 	// Keep the keyboard row in view without moving DOM focus.
 	createEffect(() => {
 		if (!activeRow()) return;
@@ -368,7 +385,6 @@ export const GitHubPanel: Component<{
 				)}
 			</Show>
 			<Show when={!cleanupCtx()}>
-				<div class={s.ghPanelOverlay} onClick={props.onClose} onKeyDown={handleKeyDown} tabIndex={-1} />
 				<div
 					class={s.ghPanel}
 					onKeyDown={handleKeyDown}
@@ -382,14 +398,16 @@ export const GitHubPanel: Component<{
 					<Show when={circuitOpen()}>
 						<div class={s.ghRateLimitBanner}>
 							<span>{t("github.rateLimited", "GitHub API unavailable")}</span>
-							<button
+							<Button
+								size="compact"
+								variant="danger"
 								class={s.ghRetryBtn}
 								onClick={() => {
 									githubStore.pollIssues();
 								}}
 							>
 								{t("github.retry", "Retry")}
-							</button>
+							</Button>
 						</div>
 					</Show>
 					{/* Panel header */}
@@ -401,27 +419,35 @@ export const GitHubPanel: Component<{
 							/>
 						</svg>
 						<span>GitHub</span>
-						<button
+						<Button
+							size="compact"
+							variant="ghost"
 							class={s.ghChangelogBtn}
 							onClick={() => mdTabsStore.addGithubOps(props.repoPath)}
-							title={t("github.opsDashboard", "Ops Dashboard")}
+							aria-label={t("github.opsDashboard", "Ops Dashboard")}
+							data-tooltip={t("github.opsDashboard", "Ops Dashboard")}
+							data-tooltip-pos="bottom"
 						>
 							<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 								<path d="M1.5 1a.5.5 0 0 0-.5.5v13a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5v-13a.5.5 0 0 0-.5-.5h-13ZM2 14V2h12v12H2Zm2.5-3a.5.5 0 0 1 .5.5v.5a.5.5 0 0 1-1 0v-.5a.5.5 0 0 1 .5-.5Zm2.5-3a.5.5 0 0 1 .5.5V12a.5.5 0 0 1-1 0V8.5a.5.5 0 0 1 .5-.5Zm3-3a.5.5 0 0 1 .5.5V12a.5.5 0 0 1-1 0V5.5a.5.5 0 0 1 .5-.5Z" />
 							</svg>
-						</button>
-						<button
+						</Button>
+						<Button
+							size="compact"
+							variant="ghost"
 							class={s.ghChangelogBtn}
 							onClick={() => setShowChangelog(true)}
-							title={t("github.changelog", "Changelog")}
+							aria-label={t("github.changelog", "Changelog")}
+							data-tooltip={t("github.changelog", "Changelog")}
+							data-tooltip-pos="bottom"
 						>
 							<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 								<path d="M4 1.5A1.5 1.5 0 0 0 2.5 3v10A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5V5.5L9.5 1.5H4Zm5 1.06L12.44 6H9.5a.5.5 0 0 1-.5-.5V2.56ZM5 8h6v1H5V8Zm0 2.5h6v1H5v-1ZM5 5.5h2v1H5v-1Z" />
 							</svg>
-						</button>
-						<button class={s.ghPanelClose} onClick={props.onClose}>
+						</Button>
+						<Button size="compact" variant="ghost" class={s.ghPanelClose} onClick={props.onClose}>
 							&times;
-						</button>
+						</Button>
 					</div>
 
 					<Show when={showChangelog()}>
@@ -495,7 +521,7 @@ export const GitHubPanel: Component<{
 									onKeyDown={onClickKeyDown(() => toggleSection("issues", false))}
 								>
 									<span class={cx(s.ghSectionChevron, !sectionCollapsed("issues", false) && s.ghSectionChevronOpen)}>
-										{"›"}
+										<ChevronIcon />
 									</span>
 									<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 										<path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" />
@@ -556,57 +582,80 @@ export const GitHubPanel: Component<{
 																<div class={s.ghItemDetail} data-compact>
 																	<IssueDetailContent issue={issue} repoPath={props.repoPath}>
 																		<div class={s.ghItemActions}>
-																			<button
+																			<Button
+																				size="compact"
+																				variant="ghost"
 																				class={cx(
 																					s.ghActionBtn,
 																					issue.state?.toUpperCase() === "OPEN" ? s.ghCloseBtn : s.ghReopenBtn,
 																				)}
 																				onClick={() => handleCloseReopenIssue(issue)}
 																				disabled={closingIssue() === issue.number}
-																				title={
+																				data-tooltip={
 																					issue.state?.toUpperCase() === "OPEN"
 																						? t("github.closeIssue", "Close issue")
 																						: t("github.reopenIssue", "Reopen issue")
 																				}
+																				data-tooltip-pos="bottom"
+																				data-tooltip-align="right"
 																			>
 																				{closingIssue() === issue.number
 																					? "..."
 																					: issue.state?.toUpperCase() === "OPEN"
 																						? t("github.close", "Close")
 																						: t("github.reopen", "Reopen")}
-																			</button>
-																			<button
+																			</Button>
+																			<Button
+																				size="compact"
+																				variant="ghost"
 																				class={s.ghActionBtn}
 																				onClick={() => handleCopyIssueNumber(issue)}
-																				title={t("github.copyNumber", "Copy issue number")}
+																				data-tooltip={t("github.copyNumber", "Copy issue number")}
+																				data-tooltip-pos="bottom"
+																				data-tooltip-align="right"
 																			>
 																				#{issue.number}
-																			</button>
+																			</Button>
 																			<Show when={issue.url}>
-																				<button
+																				<Button
+																					size="compact"
+																					variant="ghost"
 																					class={cx(s.ghActionBtn, s.ghLinkBtn)}
 																					onClick={() => handleOpenUrl(issue.url)}
-																					title={t("prDetail.openOnGithub", "Open on GitHub")}
+																					data-tooltip={t("prDetail.openOnGithub", "Open on GitHub")}
+																					data-tooltip-pos="bottom"
+																					data-tooltip-align="right"
 																				>
 																					GitHub {"↗"}
-																				</button>
+																				</Button>
 																			</Show>
 																			<Show when={issue.state?.toUpperCase() === "OPEN"}>
-																				<button
+																				<Button
+																					size="compact"
+																					variant="ghost"
 																					class={s.ghActionBtn}
 																					onClick={() => setAutofixIssue(issue.number)}
-																					title={t("github.autofix", "Auto-fix in a worktree agent")}
+																					data-tooltip={t("github.autofixTooltip", "Auto-fix in a worktree agent")}
+																					data-tooltip-pos="bottom"
+																					data-tooltip-align="right"
 																				>
 																					{t("github.autofix", "Auto-fix")}
-																				</button>
-																				<button
+																				</Button>
+																				<Button
+																					size="compact"
+																					variant="ghost"
 																					class={s.ghActionBtn}
 																					onClick={() => handleCreatePr(issue)}
 																					disabled={creatingPr() === issue.number}
-																					title={t("github.createPr", "Create draft PR from auto-fix branch")}
+																					data-tooltip={t(
+																						"github.createPrTooltip",
+																						"Create draft PR from auto-fix branch",
+																					)}
+																					data-tooltip-pos="bottom"
+																					data-tooltip-align="right"
 																				>
 																					{creatingPr() === issue.number ? "..." : t("github.createPr", "Create PR")}
-																				</button>
+																				</Button>
 																			</Show>
 																			<SmartButtonStrip
 																				placement="issue-popover"
@@ -642,13 +691,13 @@ export const GitHubPanel: Component<{
 
 							{/* Filter bar — always visible so user can re-enable issues */}
 							<div class={s.ghFilterBar}>
-								<select
+								<Select
 									class={s.ghFilterSelect}
 									value={settingsStore.state.issueFilter}
 									onChange={(e) => githubStore.setIssueFilter(e.currentTarget.value as IssueFilterMode)}
 								>
 									<For each={FILTER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
-								</select>
+								</Select>
 							</div>
 						</div>
 					</div>

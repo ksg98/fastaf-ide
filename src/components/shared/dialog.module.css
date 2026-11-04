@@ -42,6 +42,7 @@
 }
 
 .popover {
+  composes: form from "../ui/FormControls.module.css";
   /* The clamp only bites on a phone, which these dialogs now reach:
      McpConfirmHost renders one in the mobile shell. */
   width: min(360px, calc(100vw - 32px));
@@ -63,6 +64,7 @@
 }
 
 .header {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   gap: 10px;
@@ -166,4 +168,62 @@
 
 .primaryBtn {
   composes: btnPrimary from "./controls.module.css";
+}
+
+/* A destructive third action (Delete next to Archive). */
+.dangerBtn {
+  composes: btnDanger from "./controls.module.css";
+}
+
+/* Archive-safety checklist (worktree removal, ConfirmDialog). */
+.checklistPopover {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.workspaceName {
+  margin: 0 0 14px;
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  overflow-wrap: anywhere;
+}
+
+.checklist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+}
+
+.checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.checklist svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  color: var(--success);
+}
+
+.checklist li[data-passed="false"] svg {
+  color: var(--error);
+}
+
+.checklistExplanation {
+  margin-top: 14px;
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+  line-height: 1.55;
+}
+
+.checklistFailure {
+  color: var(--error);
 }

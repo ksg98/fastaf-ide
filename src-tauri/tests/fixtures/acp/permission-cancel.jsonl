@@ -1,0 +1,15 @@
+// A turn is cancelled while two questions are open. Both are answered with the
+// outcome that grants nothing, in the order they were asked, and only then is
+// the agent told to stop.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"request","id":7,"method":"session/request_permission","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","toolCall":{"toolCallId":"call-1","title":"Write a file"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}
+{"step":"request","id":8,"method":"elicitation/create","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","mode":"form","message":"Which branch?","requestedSchema":{"type":"object","properties":{"branch":{"type":"string","title":"Branch"}},"required":["branch"]}}}
+{"step":"expect_response","id":7,"result":{"outcome":{"outcome":"cancelled"}}}
+{"step":"expect_response","id":8,"result":{"action":"cancel"}}
+{"step":"expect","method":"session/cancel","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"}}
+{"step":"respond","to":"prompt","result":{"stopReason":"cancelled"}}
+{"step":"await_stdin_eof"}

@@ -1,0 +1,30 @@
+[package]
+description = "Host a HTTP and HTTPS server on the same port with `axum-server`"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+name = "axum-server-dual-protocol"
+repository = "https://github.com/daxpedda/axum-server-dual-protocol"
+rust-version = "1.66"
+# Must keep satisfying the `axum-server-dual-protocol = "0.7"` requirement in
+# src-tauri/Cargo.toml: `[patch.crates-io]` replaces the source of a version, it
+# does not relax the request.
+version = "0.7.0"
+
+[features]
+default = ["rustls/aws-lc-rs"]
+
+[dependencies]
+# The whole reason this crate is vendored: upstream caps this at `^0.7.1`, and
+# axum-server 0.7 is the only thing still pulling unmaintained rustls-pemfile
+# (RUSTSEC-2025-0134). 0.8 swapped it for rustls-pki-types.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+bytes = { version = "1", default-features = false }
+http = "1"
+http-body-util = "0.1"
+pin-project = "1"
+rustls = { version = "0.23", default-features = false }
+tokio = "1"
+tokio-rustls = { version = "0.26", default-features = false }
+tokio-util = "0.7.1"
+tower-layer = "0.3"
+tower-service = "0.3"

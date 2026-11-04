@@ -1,0 +1,24 @@
+{
+  "perArtifactWarnBytes": 5368709120,
+  "totalWarnBytes": 53687091200,
+  "totalCriticalBytes": 161061273600,
+  "hotWindowSecs": 86400,
+  "pollIntervalMs": 3600000,
+  "enabledKinds": [
+    "rust",
+    "maven",
+    "node",
+    "jscache",
+    "python",
+    "dotnet",
+    "gradle",
+    "cmake",
+    "swift",
+    "flutter",
+    "terraform",
+    "elixir",
+    "zig",
+    "haskell",
+    "php"
+  ]
+}

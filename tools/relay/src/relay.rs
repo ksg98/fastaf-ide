@@ -25,14 +25,39 @@ pub struct SessionSlot {
 }
 
 impl SessionSlot {
+    fn contains_peer(&self, peer_id: u64, peer: &mpsc::WeakSender<Message>) -> bool {
+        peer.upgrade().is_some_and(|sender| {
+            self.peers
+                .iter()
+                .any(|(id, tx)| *id == peer_id && tx.same_channel(&sender))
+        })
+    }
+
     fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    /// Publish the admission transition while the room is still locked, before
+    /// stats writes can yield or either peer can forward its first record.
+    fn announce_presence(&self) {
+        let peer = if self.peer_count() == 2 {
+            PeerStatus::Connected
+        } else {
+            PeerStatus::Waiting
+        };
+        let msg = serde_json::to_string(&RelayMessage::Status { peer })
+            .expect("status serialization is infallible");
+        for (_, tx) in &self.peers {
+            let _ = tx.try_send(Message::Text(msg.clone().into()));
+        }
     }
 }
 
 /// Application state shared across all handlers.
 pub struct AppState {
     pub sessions: DashMap<String, SessionSlot>,
+    /// Serializes room admission and removal so cross-room token limits are atomic.
+    pub admission: std::sync::Mutex<()>,
     /// SQLite connection for stats. None in test mode.
     pub db: Option<Connection>,
     /// Registered token hashes (in-memory cache for fast WS auth verification).
@@ -48,6 +73,30 @@ pub struct AppState {
     pub rate_limit_per_hour: u32,
     /// Max concurrent sessions per token. 0 = no limit.
     pub max_sessions_per_token: u32,
+    pub timing: RelayTiming,
+}
+
+/// Waits the relay applies to slow or silent peers. Fields are public so a
+/// test can shrink them; production uses the defaults.
+#[derive(Clone, Copy, Debug)]
+pub struct RelayTiming {
+    /// How long a forward waits for room in a full peer queue before the room
+    /// is closed. A terminal burst is absorbed; a stuck peer is not.
+    pub peer_send_timeout: Duration,
+    /// Interval between WebSocket pings to each peer.
+    pub ping_interval: Duration,
+    /// A peer that sent no frame (pong included) this long is dropped.
+    pub dead_after: Duration,
+}
+
+impl Default for RelayTiming {
+    fn default() -> Self {
+        Self {
+            peer_send_timeout: Duration::from_secs(5),
+            ping_interval: Duration::from_secs(20),
+            dead_after: Duration::from_secs(60),
+        }
+    }
 }
 
 impl AppState {
@@ -55,6 +104,7 @@ impl AppState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             sessions: DashMap::new(),
+            admission: std::sync::Mutex::new(()),
             db: None,
             token_cache: DashMap::new(),
             vapid: None,
@@ -62,6 +112,7 @@ impl AppState {
             rate_limits: DashMap::new(),
             rate_limit_per_hour: 0,
             max_sessions_per_token: 0,
+            timing: RelayTiming::default(),
         })
     }
 
@@ -69,6 +120,7 @@ impl AppState {
     pub fn with_db(db: Connection) -> Arc<Self> {
         Arc::new(Self {
             sessions: DashMap::new(),
+            admission: std::sync::Mutex::new(()),
             db: Some(db),
             token_cache: DashMap::new(),
             vapid: None,
@@ -76,6 +128,7 @@ impl AppState {
             rate_limits: DashMap::new(),
             rate_limit_per_hour: 0,
             max_sessions_per_token: 0,
+            timing: RelayTiming::default(),
         })
     }
 
@@ -89,7 +142,7 @@ impl AppState {
         let now = Instant::now();
         let window = std::time::Duration::from_secs(3600);
 
-        let mut entry = self.rate_limits.entry(ip).or_insert_with(Vec::new);
+        let mut entry = self.rate_limits.entry(ip).or_default();
         let timestamps = entry.value_mut();
 
         // Remove expired entries
@@ -112,6 +165,9 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<String> {
         return Some(hash);
     }
 
+    // DEFERRED (2026-10-16) — public-service exhaustion controls (pre-auth WS
+    // quotas and bounded/off-thread Argon2 cache misses) are outside this
+    // trusted-relay admission fix; do not expose the prototype publicly.
     // Slow path: iterate DB hashes and verify with argon2
     let conn = state.db.as_ref()?;
     let all_hashes = match crate::db::list_token_hashes(conn).await {
@@ -136,6 +192,10 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<String> {
 /// Maximum peers allowed per session (desktop + mobile).
 const MAX_PEERS_PER_SESSION: usize = 2;
 
+/// Largest WebSocket message the relay accepts. A tunnel record is 16 KiB plus
+/// framing and tag; existing mobile event envelopes fit well under this.
+pub const MAX_WS_MESSAGE_BYTES: usize = 1024 * 1024;
+
 /// Bounded channel capacity per peer — backpressure on slow clients.
 const PEER_CHANNEL_CAPACITY: usize = 32;
 
@@ -144,201 +204,167 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Handle a new WebSocket connection for the given session.
 pub async fn handle_ws(state: Arc<AppState>, session_id: String, mut socket: WebSocket) {
-    // Check capacity before splitting — allows sending close frame on rejection
-    {
-        let session_full = state
-            .sessions
-            .get(&session_id)
-            .map(|s| s.peer_count() >= MAX_PEERS_PER_SESSION)
-            .unwrap_or(false);
+    // Authentication is mandatory, including when no database is configured.
+    let token = match tokio::time::timeout(AUTH_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(Message::Text(text)))) => text
+            .strip_prefix("Bearer ")
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned),
+        _ => None,
+    };
+    let token_hash = match token {
+        Some(token) => resolve_token(&state, &token).await,
+        None => None,
+    };
+    let Some(token_hash) = token_hash else {
+        reject(&mut socket, 4003, "authentication required").await;
+        return;
+    };
 
-        if session_full {
-            warn!(session_id, "session full, rejecting peer");
-            let _ = socket
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 4001,
-                    reason: "session full".into(),
-                })))
-                .await;
-            return;
-        }
-    }
-
-    // Try to authenticate: read first message, check if it's a Bearer token
-    let mut token_hash: Option<String> = None;
-    let mut first_msg_to_replay: Option<Message> = None;
-
-    // Wait for first message with timeout — peers that skip auth just get no token_hash
-    let first_msg = tokio::time::timeout(AUTH_TIMEOUT, socket.recv()).await;
-    if let Ok(Some(Ok(msg))) = first_msg {
-        if let Message::Text(ref text) = msg {
-            if let Some(token) = text.strip_prefix("Bearer ") {
-                // Verify token against cache
-                // Check cache first, fall back to DB argon2 verification on miss
-                if let Some(hash) = resolve_token(&state, token).await {
-                    // Check max concurrent sessions per token
-                    if state.max_sessions_per_token > 0 {
-                        let session_count: usize = state
-                            .sessions
-                            .iter()
-                            .filter(|e| e.value().token_hash.as_deref() == Some(hash.as_str()))
-                            .count();
-
-                        if session_count >= state.max_sessions_per_token as usize {
-                            warn!(session_id, "max sessions per token exceeded, rejecting");
-                            let _ = socket
-                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                    code: 4002,
-                                    reason: "max sessions per token exceeded".into(),
-                                })))
-                                .await;
-                            return;
-                        }
-                    }
-                    token_hash = Some(hash);
-                } else {
-                    warn!(session_id, "invalid bearer token, rejecting");
-                    let _ = socket
-                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                            code: 4003,
-                            reason: "invalid token".into(),
-                        })))
-                        .await;
-                    return;
-                }
+    let (tx, rx) = mpsc::channel::<Message>(PEER_CHANNEL_CAPACITY);
+    // No await under this lock. Ownership, capacity, token room count and
+    // insertion are one transaction; a second peer does not create a room.
+    let admission = {
+        let _guard = state.admission.lock().expect("admission lock poisoned");
+        if let Some(mut slot) = state.sessions.get_mut(&session_id) {
+            if slot.token_hash.as_deref() != Some(token_hash.as_str()) {
+                Err((4003, "room belongs to another token"))
+            } else if slot.peer_count() >= MAX_PEERS_PER_SESSION {
+                Err((4001, "session full"))
             } else {
-                // Not a bearer token — treat as regular message
-                first_msg_to_replay = Some(msg);
+                let id = slot.next_peer_id;
+                slot.next_peer_id += 1;
+                slot.peers.push((id, tx.clone()));
+                slot.announce_presence();
+                Ok(id)
             }
         } else {
-            // Not a text message — treat as regular message
-            first_msg_to_replay = Some(msg);
+            let room_count = state
+                .sessions
+                .iter()
+                .filter(|entry| entry.token_hash.as_deref() == Some(token_hash.as_str()))
+                .count();
+            if state.max_sessions_per_token > 0
+                && room_count >= state.max_sessions_per_token as usize
+            {
+                Err((4002, "max sessions per token exceeded"))
+            } else {
+                let slot = SessionSlot {
+                    peers: vec![(0, tx.clone())],
+                    next_peer_id: 1,
+                    token_hash: Some(token_hash.clone()),
+                    last_activity: Instant::now(),
+                };
+                slot.announce_presence();
+                state.sessions.insert(session_id.clone(), slot);
+                Ok(0)
+            }
         }
-    } else if first_msg.is_err() {
-        // Auth timeout — proceed without auth (unauthenticated peer)
-        info!(session_id, "auth timeout, proceeding without authentication");
-    } else {
-        // Connection closed or error before any message
-        return;
-    }
-
-    let (ws_sender, mut ws_receiver) = socket.split();
-
-    // Create bounded channel for this peer
-    let (tx, rx) = mpsc::channel::<Message>(PEER_CHANNEL_CAPACITY);
-
-    // Join the session
-    let peer_id = {
-        let mut entry = state
-            .sessions
-            .entry(session_id.clone())
-            .or_insert_with(|| SessionSlot { peers: Vec::new(), next_peer_id: 0, token_hash: None, last_activity: Instant::now() });
-        // Set token_hash if authenticated
-        if token_hash.is_some() {
-            entry.value_mut().token_hash = token_hash;
-        }
-        let slot = entry.value_mut();
-        let id = slot.next_peer_id;
-        slot.next_peer_id += 1;
-        slot.peers.push((id, tx.clone()));
-        id
     };
+    let peer = tx.downgrade();
+    let peer_id = match admission {
+        Ok(id) => id,
+        Err((code, reason)) => {
+            reject(&mut socket, code, reason).await;
+            return;
+        }
+    };
+    let (ws_sender, mut ws_receiver) = socket.split();
 
     info!(session_id, peer_id, "peer joined");
 
     // Record session start in DB for stats tracking
     if let Some(conn) = &state.db {
-        let token_hash_for_db = state
-            .sessions
-            .get(&session_id)
-            .and_then(|s| s.token_hash.clone());
-        if let Some(hash) = token_hash_for_db {
-            if let Err(e) = crate::db::start_session(conn, &session_id, &hash).await {
-                warn!(error = %e, "failed to record session start");
-            }
+        if let Err(e) = crate::db::start_session(conn, &session_id, &token_hash).await {
+            warn!(error = %e, "failed to record session start");
         }
-    }
-
-    // Notify this peer of current state
-    let peer_count = state
-        .sessions
-        .get(&session_id)
-        .map(|s| s.peer_count())
-        .unwrap_or(0);
-
-    let status = if peer_count == 2 {
-        PeerStatus::Connected
-    } else {
-        PeerStatus::Waiting
-    };
-
-    let status_msg = serde_json::to_string(&RelayMessage::Status {
-        peer: status.clone(),
-    })
-    .expect("status serialization is infallible");
-    let _ = tx.send(Message::Text(status_msg.into())).await;
-
-    // If we're the second peer, notify the first peer too
-    if peer_count == 2 {
-        notify_other_peers(&state, &session_id, peer_id, PeerStatus::Connected).await;
     }
 
     // Spawn writer task: reads from channel, writes to WebSocket
-    let writer_handle = tokio::spawn(write_loop(ws_sender, rx));
+    // Only the room owns strong senders after setup. Eviction closes the writer
+    // channel, and writer completion cancels the reader even on a silent socket.
+    drop(tx);
+    let mut writer_handle = tokio::spawn(write_loop(ws_sender, rx));
 
-    // If the first message wasn't a bearer token, process it now
-    if let Some(msg) = first_msg_to_replay {
-        process_message(&state, &session_id, peer_id, msg).await;
-    }
-
-    // Reader loop: reads from WebSocket, forwards to other peer(s)
-    while let Some(Ok(msg)) = ws_receiver.next().await {
-        if matches!(&msg, Message::Close(_)) {
-            break;
+    // Reader loop: reads from WebSocket, forwards to other peer(s). A silent
+    // TCP peer would otherwise pin its room until the idle reaper runs.
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + state.timing.ping_interval,
+        state.timing.ping_interval,
+    );
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_seen = Instant::now();
+    loop {
+        tokio::select! {
+            _ = &mut writer_handle => break,
+            _ = ping.tick() => {
+                if last_seen.elapsed() > state.timing.dead_after {
+                    warn!(session_id, peer_id, "peer silent, dropping");
+                    break;
+                }
+                if let Some(tx) = peer.upgrade() {
+                    let _ = tx.try_send(Message::Ping(Vec::new().into()));
+                }
+            }
+            incoming = ws_receiver.next() => {
+                let Some(Ok(msg)) = incoming else { break };
+                last_seen = Instant::now();
+                if matches!(&msg, Message::Close(_)) {
+                    break;
+                }
+                process_message(&state, &session_id, peer_id, &peer, msg).await;
+            }
         }
-        process_message(&state, &session_id, peer_id, msg).await;
     }
 
     // Peer disconnected — clean up
     writer_handle.abort();
 
-    // Record session end in DB
-    if let Some(conn) = &state.db {
+    // A stale handler cannot remove or account for a replacement room.
+    let removed = remove_peer(&state, &session_id, peer_id, &peer).await;
+    if let Some(conn) = state.db.as_ref().filter(|_| removed) {
         if let Err(e) = crate::db::end_session(conn, &session_id, 0).await {
             warn!(error = %e, "failed to record session end");
         }
     }
 
-    remove_peer(&state, &session_id, peer_id).await;
     info!(session_id, peer_id, "peer left");
 }
 
+async fn reject(socket: &mut WebSocket, code: u16, reason: &'static str) {
+    let _ = socket
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
+}
+
 /// If the other peer is offline, send Web Push to all subscriptions for this session's token.
-async fn maybe_send_push(state: &Arc<AppState>, session_id: &str, reason: &str, session_name: &str) {
-    // Check if the other peer is connected (session has 2 peers = both online)
-    let peer_count = state
-        .sessions
-        .get(session_id)
-        .map(|s| s.peer_count())
-        .unwrap_or(0);
-
-    if peer_count >= 2 {
-        // Other peer is connected, no push needed
-        return;
-    }
-
-    let (Some(vapid), Some(conn)) = (state.vapid.clone(), state.db.clone()) else {
-        // Push not configured or no DB
-        return;
-    };
-
-    // Find the token_hash for this session
-    let token_hash = match state.sessions.get(session_id).and_then(|s| s.token_hash.clone()) {
-        Some(h) => h,
-        None => {
-            warn!(session_id, "no token_hash for session, cannot send push");
+async fn maybe_send_push(
+    state: &Arc<AppState>,
+    session_id: &str,
+    peer_id: u64,
+    peer: &mpsc::WeakSender<Message>,
+    reason: &str,
+    session_name: &str,
+) {
+    // Resolve ownership and presence together, before any await. A stale handler
+    // must never use a recreated room's token for push delivery.
+    let token_hash = {
+        let Some(slot) = state.sessions.get(session_id) else {
+            return;
+        };
+        if !slot.contains_peer(peer_id, peer) || slot.peer_count() >= 2 {
             return;
         }
+        let Some(hash) = slot.token_hash.clone() else {
+            return;
+        };
+        hash
+    };
+    let (Some(vapid), Some(conn)) = (state.vapid.clone(), state.db.clone()) else {
+        return;
     };
 
     // Get all push subscriptions for this token
@@ -390,110 +416,152 @@ async fn process_message(
     state: &Arc<AppState>,
     session_id: &str,
     peer_id: u64,
+    peer: &mpsc::WeakSender<Message>,
     msg: Message,
 ) {
     // Update activity timestamp
     if let Some(mut slot) = state.sessions.get_mut(session_id) {
+        if !slot.contains_peer(peer_id, peer) {
+            return;
+        }
         slot.last_activity = Instant::now();
+    } else {
+        return;
     }
 
     match &msg {
         Message::Binary(_) => {
             // Opaque E2E data — forward to other peers
-            forward_to_others(state, session_id, peer_id, msg).await;
+            forward_to_others(state, session_id, peer_id, peer, msg).await;
         }
         Message::Text(text) => {
             // Check if this is a relay:push hint
-            if let Ok(RelayMessage::Push { reason, session_name }) =
-                serde_json::from_str::<RelayMessage>(text)
+            if let Ok(RelayMessage::Push {
+                reason,
+                session_name,
+            }) = serde_json::from_str::<RelayMessage>(text)
             {
-                maybe_send_push(state, session_id, &reason, &session_name).await;
+                maybe_send_push(state, session_id, peer_id, peer, &reason, &session_name).await;
             }
             // Always forward text to other peers
-            forward_to_others(state, session_id, peer_id, Message::Text(text.clone())).await;
+            forward_to_others(
+                state,
+                session_id,
+                peer_id,
+                peer,
+                Message::Text(text.clone()),
+            )
+            .await;
         }
         Message::Close(_) | Message::Ping(_) | Message::Pong(_) => {}
     }
 }
 
 /// Forward a message to all peers in the session except the sender.
+///
+/// A full peer queue ends the whole room. The frames carry an ordered encrypted
+/// stream, so dropping one would corrupt it while both sides still looked
+/// connected; closing both ends is the only outcome the endpoints can detect.
 async fn forward_to_others(
     state: &AppState,
     session_id: &str,
     sender_id: u64,
+    peer: &mpsc::WeakSender<Message>,
     msg: Message,
 ) {
-    if let Some(slot) = state.sessions.get(session_id) {
-        for (id, peer_tx) in slot.peers.iter() {
-            if *id != sender_id {
-                // Drop message if peer is slow (bounded channel)
-                let _ = peer_tx.try_send(msg.clone());
-            }
+    // Clone the senders so no map guard is held across the awaits below.
+    let targets: Vec<mpsc::Sender<Message>> = {
+        let Some(slot) = state.sessions.get(session_id) else {
+            return;
+        };
+        if !slot.contains_peer(sender_id, peer) {
+            return;
         }
+        slot.peers
+            .iter()
+            .filter(|(id, _)| *id != sender_id)
+            .map(|(_, tx)| tx.clone())
+            .collect()
+    };
+    let mut overflowed = false;
+    for tx in targets {
+        if let Err(mpsc::error::SendTimeoutError::Timeout(_)) = tx
+            .send_timeout(msg.clone(), state.timing.peer_send_timeout)
+            .await
+        {
+            overflowed = true;
+        }
+    }
+    if overflowed {
+        evict_room(state, session_id, sender_id, peer);
     }
 }
 
-/// Notify all peers except the given one of a status change.
-async fn notify_other_peers(
+/// Drop the room's senders so each writer drains its queue, sends a close
+/// frame and ends its handler. Only the room that overflowed is touched.
+fn evict_room(
     state: &AppState,
     session_id: &str,
-    except_id: u64,
-    status: PeerStatus,
+    sender_id: u64,
+    peer: &mpsc::WeakSender<Message>,
 ) {
-    let msg = serde_json::to_string(&RelayMessage::Status { peer: status })
-        .expect("status serialization is infallible");
-
-    if let Some(slot) = state.sessions.get(session_id) {
-        for (id, peer_tx) in slot.peers.iter() {
-            if *id != except_id {
-                let _ = peer_tx.try_send(Message::Text(msg.clone().into()));
-            }
-        }
+    let _guard = state.admission.lock().expect("admission lock poisoned");
+    let still_ours = state
+        .sessions
+        .get(session_id)
+        .is_some_and(|slot| slot.contains_peer(sender_id, peer));
+    if still_ours {
+        warn!(session_id, "peer queue full, closing room");
+        state.sessions.remove(session_id);
     }
 }
 
-/// Remove a peer from the session and notify remaining peers.
-async fn remove_peer(state: &AppState, session_id: &str, peer_id: u64) {
-    let remaining = {
-        let mut entry = match state.sessions.get_mut(session_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let slot = entry.value_mut();
-        slot.peers.retain(|(id, _)| *id != peer_id);
-        slot.peers.len()
+/// Remove only the admitted channel, never a reused numeric ID in another room.
+async fn remove_peer(
+    state: &AppState,
+    session_id: &str,
+    peer_id: u64,
+    peer: &mpsc::WeakSender<Message>,
+) -> bool {
+    let _guard = state.admission.lock().expect("admission lock poisoned");
+    let Some(mut entry) = state.sessions.get_mut(session_id) else {
+        return false;
     };
-
+    let slot = entry.value_mut();
+    if !slot.contains_peer(peer_id, peer) {
+        return false;
+    }
+    slot.peers.retain(|(id, _)| *id != peer_id);
+    let remaining = slot.peer_count();
+    let msg = serde_json::to_string(&RelayMessage::Status {
+        peer: PeerStatus::Disconnected,
+    })
+    .expect("status serialization is infallible");
+    for (_, tx) in &slot.peers {
+        let _ = tx.try_send(Message::Text(msg.clone().into()));
+    }
+    drop(entry);
     if remaining == 0 {
         state.sessions.remove(session_id);
-    } else {
-        // Notify remaining peers
-        notify_all_peers(state, session_id, PeerStatus::Disconnected).await;
     }
-}
-
-/// Notify all peers in a session of a status change.
-async fn notify_all_peers(state: &AppState, session_id: &str, status: PeerStatus) {
-    let msg = serde_json::to_string(&RelayMessage::Status { peer: status })
-        .expect("status serialization is infallible");
-
-    if let Some(slot) = state.sessions.get(session_id) {
-        for (_id, peer_tx) in slot.peers.iter() {
-            let _ = peer_tx.try_send(Message::Text(msg.clone().into()));
-        }
-    }
+    true
 }
 
 /// Writer loop: drains the channel and writes to the WebSocket sink.
-async fn write_loop(
-    mut sender: SplitSink<WebSocket, Message>,
-    mut rx: mpsc::Receiver<Message>,
-) {
+async fn write_loop(mut sender: SplitSink<WebSocket, Message>, mut rx: mpsc::Receiver<Message>) {
     while let Some(msg) = rx.recv().await {
         if sender.send(msg).await.is_err() {
-            break;
+            return;
         }
     }
+    // The room dropped this peer's channel (overflow or idle reap): say so
+    // explicitly rather than leaving the socket to look like a network fault.
+    let _ = sender
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: 4004,
+            reason: "room closed".into(),
+        })))
+        .await;
 }
 
 /// Spawn a background task that reaps idle sessions.
@@ -509,23 +577,179 @@ pub fn spawn_session_reaper(
         loop {
             tokio::time::sleep(check_interval).await;
 
-            let mut to_remove = Vec::new();
-            for entry in state.sessions.iter() {
-                if entry.value().last_activity.elapsed() > timeout {
-                    to_remove.push(entry.key().clone());
+            // Check activity and evict under the same locks as admission. No
+            // stale candidate list can remove a refreshed or recreated room.
+            let _guard = state.admission.lock().expect("admission lock poisoned");
+            state.sessions.retain(|session_id, slot| {
+                if slot.last_activity.elapsed() <= timeout {
+                    return true;
                 }
-            }
-
-            for session_id in to_remove {
                 info!(session_id, "reaping idle session");
-
-                // Send timeout status to all connected peers before dropping
-                notify_all_peers(&state, &session_id, PeerStatus::Timeout).await;
-
-                // Remove the session — dropping senders closes the channels,
-                // which terminates the writer tasks and disconnects the peers.
-                state.sessions.remove(&session_id);
-            }
+                let msg = serde_json::to_string(&RelayMessage::Status {
+                    peer: PeerStatus::Timeout,
+                })
+                .expect("status serialization is infallible");
+                for (_, tx) in &slot.peers {
+                    let _ = tx.try_send(Message::Text(msg.clone().into()));
+                }
+                // Dropping the room's senders drains and closes each writer;
+                // handle_ws then cancels its reader and checks channel identity.
+                false
+            });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches delayed stats writes making both admissions publish Connected twice,
+    // which restarts the daemon's handshake after its first record was consumed.
+    #[tokio::test]
+    async fn concurrent_admission_orders_presence_before_records_despite_pending_stats() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        let db = crate::db::init(":memory:").await.unwrap();
+        let state = AppState::with_db(db.clone());
+        state
+            .token_cache
+            .insert("owner".into(), "owner-hash".into());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = crate::routes::build_router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        // Hold the real SQLite worker, not the relay: both authenticated peers
+        // can be admitted while their start_session calls remain pending.
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let blocked_db = tokio::spawn(async move {
+            db.call(move |_| -> tokio_rusqlite::rusqlite::Result<()> {
+                let _ = entered.send(());
+                let _ = release_rx.recv();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let url = format!("ws://{addr}/ws/concurrent-admission");
+        let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        first
+            .send(ClientMessage::Text("Bearer owner".into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !state.sessions.contains_key("concurrent-admission") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first peer admitted while stats are blocked");
+        let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        second
+            .send(ClientMessage::Text("Bearer owner".into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !state
+                .sessions
+                .get("concurrent-admission")
+                .is_some_and(|slot| slot.peer_count() == 2)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both peers admitted while stats are blocked");
+        drop(release);
+        blocked_db.await.unwrap();
+
+        let exchange = async {
+            let waiting = ClientMessage::Text(r#"{"type":"relay:status","peer":"waiting"}"#.into());
+            let connected =
+                ClientMessage::Text(r#"{"type":"relay:status","peer":"connected"}"#.into());
+            assert_eq!(first.next().await.unwrap().unwrap(), waiting);
+            assert_eq!(first.next().await.unwrap().unwrap(), connected);
+            assert_eq!(second.next().await.unwrap().unwrap(), connected);
+            first
+                .send(ClientMessage::Binary(vec![1, 2, 3].into()))
+                .await
+                .unwrap();
+            second
+                .send(ClientMessage::Binary(vec![4, 5, 6].into()))
+                .await
+                .unwrap();
+            // Exact next frames: skipping status frames would hide duplicates.
+            assert_eq!(
+                second.next().await.unwrap().unwrap(),
+                ClientMessage::Binary(vec![1, 2, 3].into())
+            );
+            assert_eq!(
+                first.next().await.unwrap().unwrap(),
+                ClientMessage::Binary(vec![4, 5, 6].into())
+            );
+            first.close(None).await.unwrap();
+            second.close(None).await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(60), exchange)
+            .await
+            .expect("presence and records delivered");
+        server.abort();
+    }
+
+    // Catches a stale handler acting on reused peer ID 0 while its old channel
+    // is still alive during setup or an in-flight operation.
+    #[tokio::test]
+    async fn stale_channel_cannot_refresh_forward_or_remove_replacement_peer() {
+        let state = AppState::new();
+        let (old_tx, _old_rx) = mpsc::channel(2);
+        let old_peer = old_tx.downgrade();
+        let (new_tx, mut new_rx) = mpsc::channel(2);
+        let previous_activity = Instant::now() - Duration::from_secs(1);
+        state.sessions.insert(
+            "reused".into(),
+            SessionSlot {
+                peers: vec![(0, new_tx)],
+                next_peer_id: 1,
+                token_hash: Some("replacement-owner".into()),
+                last_activity: previous_activity,
+            },
+        );
+        process_message(
+            &state,
+            "reused",
+            0,
+            &old_peer,
+            Message::Binary(vec![1].into()),
+        )
+        .await;
+        // Forwarding also revalidates after an await, independently of the
+        // initial activity check (text push processing can yield in between).
+        forward_to_others(
+            &state,
+            "reused",
+            1,
+            &old_peer,
+            Message::Binary(vec![2].into()),
+        )
+        .await;
+        assert!(!remove_peer(&state, "reused", 0, &old_peer).await);
+        let slot = state.sessions.get("reused").unwrap();
+        assert_eq!(slot.last_activity, previous_activity);
+        assert_eq!(slot.peer_count(), 1);
+        assert_eq!(slot.token_hash.as_deref(), Some("replacement-owner"));
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
 }

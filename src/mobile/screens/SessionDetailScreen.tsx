@@ -1,41 +1,194 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { AGENT_DISPLAY, type AgentType } from "../../agents";
+import { Button, Input } from "../../components/ui";
+import { AgentIcon } from "../../components/ui/AgentIcon";
+import { appLogger } from "../../stores/appLogger";
+import type { ChatViewWake } from "../../stores/chatView";
+import { toastsStore } from "../../stores/toasts";
+import { rpc } from "../../transport";
+import { writeClipboard } from "../../utils/clipboard";
 import { CommandInput } from "../components/CommandInput";
 import { CommandWidget } from "../components/CommandWidget";
 import { IdeasOverlay } from "../components/IdeasOverlay";
+import { MobileJumpBottom } from "../components/MobileJumpBottom";
+import { createOpenMarkdownTabs, OpenMarkdownMenu } from "../components/OpenMarkdownMenu";
 import { OutputView } from "../components/OutputView";
-import { StatusBadge } from "../components/StatusBadge";
+import { QueuedPrompts } from "../components/QueuedPrompts";
+import { SessionHeaderOverlay, type SessionHeaderPanel } from "../components/SessionHeaderOverlay";
+import { SessionUsageBlock } from "../components/SessionUsageBlock";
 import { SuggestChips } from "../components/SuggestChips";
+import type { ComposerInputKey } from "../components/syncGuards";
 import { TerminalKeybar } from "../components/TerminalKeybar";
+import { useSessionChatView } from "../components/useSessionChatView";
 
-import type { SessionInfo } from "../useSessions";
+import { getAgentCommands } from "../config/agentCommands";
+import { useMobileVoice } from "../useMobileVoice";
+import type { SessionInfo, SessionState } from "../useSessions";
 import { formatRetryCountdown } from "../utils/formatRetryCountdown";
+import { isKnownAgentType } from "../utils/sessionKind";
 import { useDebouncedStatus } from "../utils/useDebouncedStatus";
 import styles from "./SessionDetailScreen.module.css";
 
 interface SessionDetailScreenProps {
+	onConnectionError?: (error: string | null) => void;
+	onRegisterRetry?: (retry: (() => void) | undefined) => void;
 	session: SessionInfo;
+	subscribeChatWake: ChatViewWake;
 	sessionExists: boolean;
 	onBack: () => void;
+	onOpenFiles: () => void;
+	onOpenFileLink?: (candidate: string, line?: number, root?: string, openerTuicSession?: string) => void;
 }
 
 function projectName(cwd: string | null): string {
 	if (!cwd) return "unknown";
-	const parts = cwd.split("/");
-	return parts[parts.length - 1] || "unknown";
+	const parts = cwd.replaceAll("\\", "/").split("/");
+	return parts.at(-1)! || "unknown";
+}
+
+function elapsedTime(ms: number): string {
+	const minutes = Math.max(0, Math.floor((Date.now() - ms) / 60_000));
+	if (minutes < 1) return "now";
+	if (minutes < 60) return `${minutes}m`;
+	if (minutes < 1_440) return `${Math.floor(minutes / 60)}h`;
+	return `${Math.floor(minutes / 1_440)}d`;
+}
+
+/** Both responsive call actions use the same handset, not the dictation mic. */
+function VoiceCallIcon() {
+	return (
+		<svg
+			width="20"
+			height="20"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			aria-hidden="true"
+		>
+			<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.79a2 2 0 0 1-.45 2.11L8.09 9.89a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.89.33 1.83.56 2.79.69A2 2 0 0 1 22 16.92z" />
+		</svg>
+	);
 }
 
 export function SessionDetailScreen(props: SessionDetailScreenProps) {
-	// Merge polled state with real-time WebSocket state pushes.
-	// WS state arrives instantly; poll state arrives every 3s as fallback.
-	const [wsState, setWsState] = createSignal<Record<string, unknown> | null>(null);
-	const sessionState = () => {
-		const ws = wsState();
-		const poll = props.session.state;
-		if (!ws) return poll;
-		// WS state is authoritative when present; poll state fills gaps on reconnect.
-		return { ...poll, ...ws } as typeof poll;
-	};
+	// Both transports send complete snapshots, with cleared optional fields omitted.
+	// Replace rather than merge, and let a fresh poll recover a paused/stale socket.
+	const [sessionState, setSessionState] = createSignal(props.session.state);
+	createEffect(() => {
+		const snapshot = props.session.state;
+		setSessionState((current) => {
+			if (snapshot && current && snapshot.last_activity_ms < current.last_activity_ms) return current;
+			return snapshot;
+		});
+	});
 	const status = useDebouncedStatus(() => ({ ...props.session, state: sessionState() }));
+	// Native dialogs own their keys; otherwise report suggestions replace generic confirmations.
+	const showSuggestions = () => !sessionState()?.choice_prompt && !!sessionState()?.suggested_actions?.length;
+	const [moreOpen, setMoreOpen] = createSignal(false);
+	const [wideMarkdown, setWideMarkdown] = createSignal(window.innerWidth >= 768);
+	const [markdownOpen, setMarkdownOpen] = createSignal(false);
+	const markdownTabs = createOpenMarkdownTabs(() => props.session.worktree_path || props.session.cwd);
+	const resizeMarkdown = () => {
+		const wide = window.innerWidth >= 768;
+		if (wide === wideMarkdown()) return;
+		setWideMarkdown(wide);
+		setMarkdownOpen(false);
+		setMoreOpen(false);
+	};
+	window.addEventListener("resize", resizeMarkdown);
+	onCleanup(() => window.removeEventListener("resize", resizeMarkdown));
+	const openMarkdown: Parameters<typeof OpenMarkdownMenu>[0]["onOpen"] = (tab) => {
+		setMarkdownOpen(false);
+		setMoreOpen(false);
+		props.onOpenFileLink?.(tab.absolute_path, undefined, tab.fs_root, tab.opener_tuic_session);
+	};
+
+	const [headerPanel, setHeaderPanel] = createSignal<SessionHeaderPanel | null>(null);
+	const agentType = () => sessionState()?.agent_type;
+	const chat = useSessionChatView({
+		sessionId: () => props.session.session_id,
+		agentType,
+		sessionExists: () => props.sessionExists,
+		subscribeWake: props.subscribeChatWake,
+		busy: () => sessionState()?.shell_state === "busy",
+		awaitingInput: () => !!sessionState()?.awaiting_input || !!sessionState()?.last_error,
+		activityRevision: () => `${sessionState()?.shell_state}:${sessionState()?.last_activity_ms}`,
+	});
+	const [queueRevision, setQueueRevision] = createSignal(0);
+	const [cliAtBottom, setCliAtBottom] = createSignal(true);
+	let jumpCli: (() => void) | undefined;
+	const [browserDictating, setBrowserDictating] = createSignal(false);
+	const voice = useMobileVoice(
+		() => props.session.session_id,
+		() => !!agentType() && props.sessionExists && !browserDictating(),
+	);
+	const statusText = () =>
+		({
+			idle: "Idle",
+			busy: "Working",
+			"sub-tasks": "Sub-tasks",
+			question: "Input",
+			error: "Error",
+			"rate-limited": "Rate limited",
+			unseen: "Finished",
+		})[status()];
+	const hasCommands = () => {
+		const commands = getAgentCommands(agentType());
+		return commands.commands.length > 0 || !!commands.models?.length || !!commands.permissionToggleSeq;
+	};
+
+	async function copySessionId() {
+		setMoreOpen(false);
+		try {
+			await writeClipboard(props.session.session_id);
+			toastsStore.add(
+				"Session ID copied",
+				props.session.session_id,
+				"info",
+				false,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				false,
+			);
+		} catch (error) {
+			toastsStore.add(
+				"Could not copy session ID",
+				String(error),
+				"error",
+				false,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				false,
+			);
+		}
+	}
+
+	async function terminateSession() {
+		setMoreOpen(false);
+		if (!window.confirm("Kill this session?")) return;
+		try {
+			await rpc("close_pty", { sessionId: props.session.session_id });
+		} catch (error) {
+			appLogger.warn("network", `Failed to kill session: ${String(error)}`);
+			toastsStore.add(
+				"Could not terminate session",
+				String(error),
+				"error",
+				false,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				false,
+			);
+		}
+	}
 
 	// Search filter
 	const [searchOpen, setSearchOpen] = createSignal(false);
@@ -47,14 +200,75 @@ export function SessionDetailScreen(props: SessionDetailScreenProps) {
 	// Ideas overlay toggle
 	const [ideasOpen, setIdeasOpen] = createSignal(false);
 
+	const [openingQuestion, setOpeningQuestion] = createSignal(false);
+	const [codexQuestionOpen, setCodexQuestionOpen] = createSignal(false);
+	const [egoQuestionOpen, setEgoQuestionOpen] = createSignal(false);
+	let visibleEgoQuestion: string | undefined;
+	createEffect(() => {
+		const state = sessionState();
+		const prompt = state?.agent_type === "ego" && state.awaiting_input ? state.choice_prompt : undefined;
+		// Highlight changes and identical polling snapshots must not undo a manual
+		// close. A new native selector, including one already waiting on entry, opens.
+		const signature = prompt
+			? JSON.stringify([
+					props.session.session_id,
+					prompt.title,
+					prompt.options.map((option) => [option.key, option.label]),
+				])
+			: undefined;
+		if (signature && signature !== visibleEgoQuestion) setEgoQuestionOpen(true);
+		visibleEgoQuestion = signature;
+		if (!state?.awaiting_input) {
+			setCodexQuestionOpen(false);
+			setEgoQuestionOpen(false);
+		}
+	});
+	const egoQuestionWaiting = () =>
+		sessionState()?.agent_type === "ego" &&
+		sessionState()?.awaiting_input &&
+		(!!sessionState()?.choice_prompt || (!!sessionState()?.question_confident && !!sessionState()?.question_text)) &&
+		props.sessionExists;
+	const codexQuestionWaiting = () =>
+		sessionState()?.agent_type === "codex" &&
+		sessionState()?.awaiting_input &&
+		sessionState()?.question_confident &&
+		!sessionState()?.choice_prompt &&
+		props.sessionExists;
+
+	async function openCodexQuestion() {
+		if (openingQuestion()) return;
+		setOpeningQuestion(true);
+		try {
+			await rpc("write_pty", { sessionId: props.session.session_id, data: "\x1b[1;2D" });
+			setCodexQuestionOpen(true);
+		} catch (err) {
+			appLogger.warn("network", "Could not open Codex question", { error: err });
+			toastsStore.add("Question not opened", "Could not open the Codex question", "error", true);
+		} finally {
+			setOpeningQuestion(false);
+		}
+	}
+	function openQuestion() {
+		if (egoQuestionWaiting()) setEgoQuestionOpen((open) => !open);
+		else void openCodexQuestion();
+	}
+	function revealRequiredSelection(sessionId: string) {
+		// A refusal may arrive after navigation. Never open another session's card
+		// or replay the refused text into a native selector.
+		if (sessionId !== props.session.session_id || !props.sessionExists) return;
+		if (egoQuestionWaiting()) setEgoQuestionOpen(true);
+		else if (codexQuestionWaiting()) void openCodexQuestion();
+	}
+
 	// Prefill value for CommandInput (set by slash menu selection).
 	const [inputPrefill] = createSignal<{ text: string; seq: number }>({ text: "", seq: 0 });
 
 	// PTY input line synced from WebSocket (what's on the terminal prompt)
-	const [ptyInputLine, setPtyInputLine] = createSignal<string | null>(null);
+	const [ptyInputLine, setPtyInputLine] = createSignal<string | null>(null, { equals: false });
 
 	// Registered by CommandInput so TerminalKeybar can trigger slash mode
-	let slashTrigger: (() => void) | undefined;
+	let insertComposerText: ((text: string) => void) | undefined;
+	let requestComposerInputKey: ((key: ComposerInputKey) => void) | undefined;
 
 	// Live countdown for rate limit retry_after_ms
 	const [retryRemaining, setRetryRemaining] = createSignal(0);
@@ -82,54 +296,268 @@ export function SessionDetailScreen(props: SessionDetailScreenProps) {
 	return (
 		<div class={styles.screen}>
 			<header class={styles.header}>
-				<button class={styles.backBtn} onClick={props.onBack}>
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<Button
+					shape="icon"
+					variant="ghost"
+					class={styles.backBtn}
+					onClick={props.onBack}
+					aria-label="Back to sessions"
+				>
+					<svg
+						width="20"
+						height="20"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						aria-hidden="true"
+					>
 						<path d="M15 18l-6-6 6-6" />
 					</svg>
-				</button>
-				<div class={styles.headerInfo}>
-					<span class={styles.agentName}>{sessionState()?.agent_type ?? "Terminal"}</span>
-					<span class={styles.project}>{projectName(props.session.cwd)}</span>
-				</div>
-				<Show when={sessionState()?.usage_limit_pct != null}>
-					<span class={styles.usageLabel} classList={{ [styles.danger]: (sessionState()!.usage_limit_pct ?? 0) > 80 }}>
-						{sessionState()!.usage_limit_pct}%
-					</span>
-				</Show>
-				<button
-					class={styles.searchToggle}
-					classList={{ [styles.searchToggleActive]: ideasOpen() }}
-					onClick={() => setIdeasOpen((v) => !v)}
-				>
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M9 18h6" />
-						<path d="M10 22h4" />
-						<path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z" />
-					</svg>
-				</button>
-				<button
-					class={styles.searchToggle}
-					classList={{ [styles.searchToggleActive]: searchOpen() }}
-					onClick={() => {
-						if (searchOpen()) {
-							setSearchOpen(false);
-							setSearchQuery("");
-						} else {
-							setSearchOpen(true);
-						}
+				</Button>
+				<span
+					class={styles.logo}
+					role="img"
+					aria-label={`${agentType() ? agentType()![0].toUpperCase() + agentType()!.slice(1) : "Terminal"} logo`}
+					style={{
+						color: isKnownAgentType(agentType()) ? AGENT_DISPLAY[agentType() as AgentType].color : "var(--fg-muted)",
 					}}
 				>
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<circle cx="11" cy="11" r="8" />
-						<line x1="21" y1="21" x2="16.65" y2="16.65" />
-					</svg>
+					<Show when={isKnownAgentType(agentType())} fallback={<span aria-hidden="true">›_</span>}>
+						<AgentIcon agent={agentType() as AgentType} size={24} />
+					</Show>
+					<span class={styles.stateDot} data-state={status()} />
+				</span>
+				<button
+					data-control-layout="row"
+					type="button"
+					class={styles.headerInfo}
+					aria-label={props.session.display_name || agentType() || "Terminal"}
+					onClick={() => setHeaderPanel("details")}
+				>
+					<span class={styles.agentName}>{props.session.display_name || agentType() || "Terminal"}</span>
+					<span class={styles.project}>
+						{projectName(props.session.worktree_path ?? props.session.cwd)}
+						<Show when={props.session.worktree_branch}> · {props.session.worktree_branch}</Show> · {statusText()}{" "}
+						{sessionState()?.last_activity_ms ? elapsedTime(sessionState()!.last_activity_ms) : ""}
+						<Show when={voice.phase()}> · Voice {voice.phase()}</Show>
+					</span>
 				</button>
-				<StatusBadge status={status()} />
+				<Show when={wideMarkdown()}>
+					<div class={styles.markdownDropdown}>
+						<Button
+							variant="ghost"
+							type="button"
+							class={styles.markdownTrigger}
+							aria-expanded={markdownOpen()}
+							onClick={() => {
+								setMoreOpen(false);
+								setMarkdownOpen((open) => !open);
+							}}
+						>
+							Markdown
+							<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+								<path d="m2 4 4 4 4-4z" />
+							</svg>
+						</Button>
+						<Show when={markdownOpen()}>
+							<div class={`${styles.overflow} ${styles.markdownPopover}`}>
+								<OpenMarkdownMenu
+									cwd={props.session.worktree_path || props.session.cwd}
+									source={markdownTabs}
+									onOpen={openMarkdown}
+								/>
+							</div>
+						</Show>
+					</div>
+				</Show>
+				<chat.Toggle />
+				<Show when={voice.available()}>
+					<Button
+						shape="icon"
+						variant="ghost"
+						type="button"
+						class={`${styles.headerAction} ${styles.secondaryAction}`}
+						classList={{ [styles.voiceActive]: voice.armed() }}
+						aria-label={voice.armed() ? "Stop voice call" : "Start voice call"}
+						aria-pressed={voice.armed()}
+						disabled={browserDictating()}
+						onClick={() => void voice.toggle()}
+					>
+						<VoiceCallIcon />
+					</Button>
+				</Show>
+				<Button
+					shape="icon"
+					variant="ghost"
+					type="button"
+					class={`${styles.headerAction} ${styles.secondaryAction}`}
+					aria-label={`Session tasks, ${sessionState()?.active_sub_tasks ?? 0} active`}
+					onClick={() => setHeaderPanel("tasks")}
+				>
+					<svg
+						width="20"
+						height="20"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						aria-hidden="true"
+					>
+						<path d="M5 6h14M5 12h14M5 18h14" />
+					</svg>
+					<Show when={(sessionState()?.active_sub_tasks ?? 0) > 0}>
+						<span class={styles.taskCount}>{sessionState()!.active_sub_tasks}</span>
+					</Show>
+				</Button>
+				<Show when={codexQuestionWaiting() || egoQuestionWaiting()}>
+					<Button
+						shape="icon"
+						variant="ghost"
+						type="button"
+						class={styles.headerAction}
+						onClick={openQuestion}
+						disabled={openingQuestion()}
+						aria-label={egoQuestionWaiting() ? "Open ego question" : "Open Codex question"}
+						title={egoQuestionWaiting() ? "Open ego question" : "Open Codex question"}
+						aria-expanded={egoQuestionWaiting() ? egoQuestionOpen() : codexQuestionOpen()}
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							aria-hidden="true"
+						>
+							<circle cx="12" cy="12" r="9" />
+							<path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4" />
+							<circle cx="12" cy="17" r=".6" fill="currentColor" stroke="none" />
+						</svg>
+					</Button>
+				</Show>
+				<Button
+					shape="icon"
+					variant="ghost"
+					type="button"
+					class={styles.headerAction}
+					aria-label="More session actions"
+					aria-expanded={moreOpen()}
+					onClick={() => {
+						setMarkdownOpen(false);
+						setMoreOpen((open) => !open);
+					}}
+				>
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+						<circle cx="12" cy="5" r="1.8" />
+						<circle cx="12" cy="12" r="1.8" />
+						<circle cx="12" cy="19" r="1.8" />
+					</svg>
+				</Button>
 			</header>
+			<Show when={moreOpen()}>
+				<div class={`${styles.overflow} ${styles.sessionMenu}`} role="region" aria-label="Session actions">
+					<Show when={voice.available()}>
+						<Button
+							variant="ghost"
+							type="button"
+							class={styles.phoneAction}
+							aria-pressed={voice.armed()}
+							disabled={browserDictating()}
+							onClick={() => {
+								setMoreOpen(false);
+								void voice.toggle();
+							}}
+						>
+							<VoiceCallIcon />
+							{voice.armed() ? "Stop voice call" : "Start voice call"}
+						</Button>
+					</Show>
+					<Button
+						variant="ghost"
+						type="button"
+						class={styles.phoneAction}
+						aria-label={`Tasks, ${sessionState()?.active_sub_tasks ?? 0} active`}
+						onClick={() => {
+							setMoreOpen(false);
+							setHeaderPanel("tasks");
+						}}
+					>
+						Tasks <span>{sessionState()?.active_sub_tasks ?? 0}</span>
+					</Button>
+					<Button
+						variant="ghost"
+						type="button"
+						onClick={() => {
+							setMoreOpen(false);
+							setHeaderPanel("progress");
+						}}
+					>
+						Progress <span>{sessionState()?.progress == null ? "—" : `${sessionState()!.progress}%`}</span>
+					</Button>
+					<Button
+						variant="ghost"
+						type="button"
+						onClick={() => {
+							setMoreOpen(false);
+							props.onOpenFiles();
+						}}
+					>
+						Files
+					</Button>
+					<Button
+						variant="ghost"
+						type="button"
+						onClick={() => {
+							setMoreOpen(false);
+							setSearchOpen(true);
+						}}
+					>
+						Search output
+					</Button>
+					<Button
+						variant="ghost"
+						type="button"
+						onClick={() => {
+							setMoreOpen(false);
+							setIdeasOpen(true);
+						}}
+					>
+						Ideas
+					</Button>
+					<Show when={!wideMarkdown()}>
+						<OpenMarkdownMenu
+							cwd={props.session.worktree_path || props.session.cwd}
+							source={markdownTabs}
+							onOpen={openMarkdown}
+						/>
+					</Show>
+					<Show when={hasCommands()}>
+						<Button
+							variant="ghost"
+							type="button"
+							onClick={() => {
+								setMoreOpen(false);
+								setCommandWidgetOpen(true);
+							}}
+						>
+							Commands
+						</Button>
+					</Show>
+					<SessionUsageBlock sessionId={props.session.session_id} />
+					<Button variant="ghost" type="button" onClick={() => void copySessionId()}>
+						Copy session ID
+					</Button>
+					<Button variant="ghost" type="button" class={styles.dangerAction} onClick={() => void terminateSession()}>
+						Terminate session
+					</Button>
+				</div>
+			</Show>
 
 			<Show when={searchOpen()}>
 				<div class={styles.searchBar}>
-					<input
+					<Input
 						class={styles.searchInput}
 						type="text"
 						placeholder="Filter output..."
@@ -138,54 +566,19 @@ export function SessionDetailScreen(props: SessionDetailScreenProps) {
 						autofocus
 					/>
 					<Show when={searchQuery()}>
-						<button class={styles.searchClear} onClick={() => setSearchQuery("")}>
+						<Button
+							shape="icon"
+							aria-label="Clear output filter"
+							variant="ghost"
+							class={styles.searchClear}
+							onClick={() => setSearchQuery("")}
+						>
 							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 								<line x1="18" y1="6" x2="6" y2="18" />
 								<line x1="6" y1="6" x2="18" y2="18" />
 							</svg>
-						</button>
+						</Button>
 					</Show>
-				</div>
-			</Show>
-
-			<Show when={sessionState()?.agent_intent}>
-				<div class={styles.intentLine}>
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<circle cx="12" cy="12" r="10" />
-						<line x1="22" y1="12" x2="18" y2="12" />
-						<line x1="6" y1="12" x2="2" y2="12" />
-						<line x1="12" y1="6" x2="12" y2="2" />
-						<line x1="12" y1="22" x2="12" y2="18" />
-					</svg>
-					<span class={styles.subText}>{sessionState()!.agent_intent}</span>
-				</div>
-			</Show>
-
-			<Show when={sessionState()?.current_task}>
-				<div class={styles.taskLine}>
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<circle cx="12" cy="12" r="3" />
-						<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-					</svg>
-					<span class={styles.subText}>{sessionState()!.current_task}</span>
-				</div>
-			</Show>
-
-			<Show when={(sessionState()?.active_sub_tasks ?? 0) > 0}>
-				<div class={styles.taskLine}>
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-						<circle cx="9" cy="7" r="4" />
-						<path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-						<path d="M16 3.13a4 4 0 0 1 0 7.75" />
-					</svg>
-					<span class={styles.subText}>{sessionState()!.active_sub_tasks} sub-tasks running</span>
-				</div>
-			</Show>
-
-			<Show when={sessionState()?.progress != null}>
-				<div class={styles.headerProgressBar}>
-					<div class={styles.headerProgressFill} style={{ transform: `scaleX(${sessionState()!.progress! / 100})` }} />
 				</div>
 			</Show>
 
@@ -203,47 +596,91 @@ export function SessionDetailScreen(props: SessionDetailScreenProps) {
 			</Show>
 
 			<div class={styles.outputArea}>
+				<chat.View />
 				<OutputView
+					sessionExists={props.sessionExists}
+					onConnectionError={props.onConnectionError}
+					onRegisterRetry={props.onRegisterRetry}
+					visible={!chat.active()}
+					onAtBottomChange={setCliAtBottom}
+					onRegisterScrollToBottom={(fn) => {
+						jumpCli = fn;
+					}}
 					sessionId={props.session.session_id}
-					onStateChange={setWsState}
+					onOpenFileLink={props.onOpenFileLink}
+					onStateChange={(state) => setSessionState(state as unknown as SessionState)}
 					onInputLine={setPtyInputLine}
 					searchQuery={searchQuery()}
 				/>
 				<Show when={!props.sessionExists}>
 					<div class={styles.endedOverlay}>
 						<span class={styles.endedText}>Session ended</span>
-						<button class={styles.endedBackBtn} onClick={props.onBack}>
+						<Button class={styles.endedBackBtn} onClick={props.onBack}>
 							Back
-						</button>
+						</Button>
 					</div>
 				</Show>
+				<MobileJumpBottom
+					visible={chat.active() ? !chat.atBottom() : !cliAtBottom()}
+					onScrollToBottom={() => (chat.active() ? chat.scrollToBottom() : jumpCli?.())}
+				/>
 			</div>
-			<Show when={sessionState()?.suggested_actions?.length}>
+			<Show when={showSuggestions()}>
 				<SuggestChips
 					sessionId={props.session.session_id}
 					items={sessionState()!.suggested_actions!}
 					agentType={sessionState()?.agent_type as string | null | undefined}
 				/>
 			</Show>
-			<TerminalKeybar
-				sessionId={props.session.session_id}
-				agentType={sessionState()?.agent_type as string | null | undefined}
-				awaitingInput={sessionState()?.awaiting_input}
-				questionConfident={sessionState()?.question_confident}
-				onCommandWidgetOpen={() => setCommandWidgetOpen(true)}
-				onSlashRequest={() => slashTrigger?.()}
-			/>
-			<CommandInput
-				sessionId={props.session.session_id}
-				prefillValue={inputPrefill()}
-				ptyInputLine={ptyInputLine()}
-				agentType={sessionState()?.agent_type ?? null}
-				slashItems={sessionState()?.slash_menu_items}
-				choicePrompt={sessionState()?.choice_prompt}
-				onRegisterTrigger={(fn) => {
-					slashTrigger = fn;
-				}}
-			/>
+			<Show when={props.sessionExists && props.session.session_id} keyed>
+				{(sessionId) => (
+					<QueuedPrompts
+						sessionId={sessionId}
+						count={sessionState()?.queued_commands ?? 0}
+						revision={queueRevision()}
+					/>
+				)}
+			</Show>
+			<div class={styles.controls}>
+				<TerminalKeybar
+					sessionId={props.session.session_id}
+					agentType={sessionState()?.agent_type as string | null | undefined}
+					awaitingInput={sessionState()?.awaiting_input && !showSuggestions()}
+					choicePromptOpen={!!sessionState()?.choice_prompt}
+					questionConfident={sessionState()?.question_confident}
+					sessionExists={props.sessionExists}
+					onCommandWidgetOpen={() => setCommandWidgetOpen(true)}
+					onSlashRequest={() => insertComposerText?.("/")}
+					onInputKeyRequest={(key) => requestComposerInputKey?.(key)}
+				/>
+				<CommandInput
+					chatMode={chat.active()}
+					busy={sessionState()?.shell_state === "busy"}
+					onQueued={(sessionId) => {
+						if (sessionId === props.session.session_id) setQueueRevision((value) => value + 1);
+					}}
+					serverVoiceRecording={voice.recording()}
+					onBrowserDictating={setBrowserDictating}
+					sessionId={props.session.session_id}
+					managedSession={!!sessionState()?.agent_type}
+					awaitingInput={sessionState()?.awaiting_input}
+					sessionExists={props.sessionExists}
+					prefillValue={inputPrefill()}
+					ptyInputLine={ptyInputLine()}
+					agentType={sessionState()?.agent_type ?? null}
+					slashItems={sessionState()?.slash_menu_items}
+					choicePrompt={agentType() === "ego" && !egoQuestionOpen() ? undefined : sessionState()?.choice_prompt}
+					questionText={egoQuestionOpen() && !sessionState()?.choice_prompt ? sessionState()?.question_text : undefined}
+					codexQuestionOpen={codexQuestionOpen()}
+					onSelectionRequired={revealRequiredSelection}
+					onRegisterInsertText={(fn) => {
+						insertComposerText = fn;
+					}}
+					onRegisterInputKey={(fn) => {
+						requestComposerInputKey = fn;
+					}}
+				/>
+			</div>
 			<Show when={commandWidgetOpen()}>
 				<CommandWidget
 					sessionId={props.session.session_id}
@@ -255,8 +692,19 @@ export function SessionDetailScreen(props: SessionDetailScreenProps) {
 				<IdeasOverlay
 					sessionId={props.session.session_id}
 					repoPath={props.session.cwd}
+					microphoneBlocked={voice.recording() || browserDictating()}
 					onDismiss={() => setIdeasOpen(false)}
 				/>
+			</Show>
+			<Show when={headerPanel()}>
+				{(panel) => (
+					<SessionHeaderOverlay
+						mode={panel()}
+						session={props.session}
+						state={sessionState()}
+						onClose={() => setHeaderPanel(null)}
+					/>
+				)}
 			</Show>
 		</div>
 	);

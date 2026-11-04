@@ -54,6 +54,19 @@ the derived tokens (`--border-subtle`, `--surface-hover`, `--wash-*`, `--scrim`,
 scrollbar colours) with the right polarity for light themes. Always use
 variables, never hardcode core palette values.
 
+**Theme gallery (dev only).** With `make dev` running, open
+`http://127.0.0.1:1421/theme-gallery.html` (`src/dev/themeGallery.tsx`). It renders
+one row per bundled theme: the shipped theme on the left and, on the right, the edit
+proposed in `src/dev/themeProposals.ts` (a partial override merged over the JSON;
+empty when nothing is under review). Each card mounts the real `Toolbar`, `Sidebar`,
+`TabBar`, `StatusBar` and collapsed `ComposeToggle` components over stores seeded
+once in the page (a fake `__TAURI_INTERNALS__` in `theme-gallery.html` answers every
+`invoke`), so a component or stylesheet edit repaints every theme through HMR and a
+theme JSON edit shows up within a second. Never hand-copy component markup into the
+gallery; a copy drifts within a session (the page polls `/__tuic_themes`, a serve-only
+Vite middleware in `vite.config.ts`). Use it to check a palette change against every
+theme before touching the live app. It is not a build input and never ships.
+
 ### Surfaces
 
 | Variable | Default | Usage |
@@ -316,6 +329,31 @@ monochrome inline SVGs — the colour comes from the text colour around them,
 never from the icon. Do not hand-draw a new glyph inline; add it to
 `components/icons/index.tsx` on the same grid. Content glyphs (file-type icons,
 agent logos, the IDE app icon) are exempt.
+
+## Accessibility
+
+- Secondary and muted informational text must meet WCAG AA (4.5:1) on every
+  neutral chrome surface, including highlighted rows and pills. Built-in themes keep
+  primary > secondary > muted contrast. Do not lower informational contrast to make
+  something look quieter; remove it instead.
+- Desktop and mobile startup foregrounds come from `src/styles/foreground-tokens.css`.
+  `src/__tests__/themeContrast.test.ts` protects the contrast and the startup palette.
+- Status is told by **colour + shape + icon**, never colour alone.
+- Keyboard focus is always visible (`:focus-visible`). In forced-colour mode a
+  system-colour outline replaces a focus shadow.
+- `prefers-reduced-motion` disables animation; a pulsing or breathing indicator
+  becomes a static dot.
+
+## Mobile PWA stylesheet
+
+The mobile PWA has its own stylesheet, `src/mobile/mobile.css`, independent of
+`global.css`. Both entrypoints import `src/styles/foreground-tokens.css` (startup
+foregrounds) and `src/styles/chat-tokens.css` (Session Chat prompt/answer colours and
+the font-size scale). When a core palette colour changes in `global.css`, change it in
+`mobile.css` too: the `:root` blocks must stay in step. Mobile uses flex layout
+instead of the desktop layout variables, enables text selection, honours
+`env(safe-area-inset-*)`, keeps native inputs at 16px (below that iOS zooms) and keeps
+every touch target at least 44px.
 
 ## Anti-patterns (DO NOT)
 

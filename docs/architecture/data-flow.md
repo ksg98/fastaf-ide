@@ -58,7 +58,7 @@ UTF-8 String ──> EscapeAwareBuffer
     │             (prevents splitting ANSI escape sequences)
     ▼
 Safe String
-    ├──> Ring Buffer (64KB, for MCP access)
+    ├──> Ring Buffer (2 MB, for MCP access)
     ├──> WebSocket broadcast (for browser clients)
     ├──> Grid frame (alacritty_terminal) ──> Frontend: CanvasTerminal renders it
     ├──> OutputParser detects special events
@@ -104,7 +104,7 @@ dictationStore ──manages──> dictation state, model downloads
 notificationsStore ──plays──> sound alerts on terminal events
 errorHandlingStore ──retries──> failed operations with backoff
 statusBarTicker ──feeds──> StatusBar (rotating priority-based messages)
-notesStore ──provides──> NotesPanel (ideas/notes), StatusBar (badge count)
+ideasStore ──provides──> IdeasPanel (ideas), StatusBar (badge count)
 userActivityStore ──tracks──> StatusBar (merged PR grace period)
 ```
 
@@ -137,7 +137,7 @@ useAppInit.initApp()
     ├──> repoSettingsStore.hydrate()    → load_repo_settings
     ├──> repoDefaultsStore.hydrate()    → load_repo_defaults
     ├──> promptLibraryStore.hydrate()   → load_prompt_library
-    ├──> notesStore.hydrate()           → load_notes
+    ├──> ideasStore.hydrate()           → load_notes
     ├──> keybindingsStore.hydrate()     → load_keybindings
     ├──> agentConfigsStore.hydrate()    → load_agents_config
     └──> agentDetection.detectAll()     → detect installed AI agents
@@ -214,41 +214,47 @@ githubStore.getBranchPrData(repoPath, branch)
 
 On `repo-changed` events (git index/refs/HEAD changes), `githubStore.pollRepo(path)` triggers an immediate re-poll for that repo, debounced to 2 seconds to coalesce rapid git events.
 
-### Claude Usage Polling
+### Agent Usage Polling
 
-Claude Usage is a native feature (not a plugin) managed by `src/features/claudeUsage.ts`. It polls the Anthropic OAuth usage API and posts results to the status bar ticker.
+Claude and Codex usage share one native feature slot managed by
+`src/features/agentUsage.ts`. It follows the active terminal's detected agent,
+polls only that provider's usage API, and labels every ticker result with its
+provider so an asynchronous tab switch cannot render stale limits as the other
+provider's headroom.
 
 ```
-initClaudeUsage()  (called from plugins/index.ts if not disabled)
+initAgentUsage()  (called from plugins/index.ts if not disabled)
     │
-    every 5 min (API_POLL_MS)
-    │
-    ▼
-invoke("get_claude_usage_api")
+    active Claude/Codex tab change or every 5 min (API_POLL_MS)
     │
     ▼
-Rust: read ~/.claude/.credentials OAuth token
-    → HTTP GET to Anthropic usage endpoint
-    → parse UsageApiResponse (five_hour, seven_day, per-model buckets)
+invoke("get_claude_usage_api" | "get_codex_usage_api")
+    │
+    ▼
+Rust: read the matching local provider credentials
+    → HTTP GET to the provider usage endpoint
+    → parse Claude or Codex rate-limit windows
     │
     ▼
 statusBarTicker.addMessage({
     id: "claude-usage:rate",
     pluginId: "claude-usage",
-    text: "Claude: 5h: 42% · 7d: 18%",
+    label: "Claude" | "Codex",
+    text: "5h: 42% · 7d: 18%",
     priority: 10–90 (based on utilization),
     onClick: openDashboard
 })
     │
     ▼
 StatusBar renders ticker message
-    ├── Standalone ticker (when active agent is not claude)
-    └── Absorbed into agent badge (when active agent is claude)
+    ├── matching Claude/Codex label → absorbed into active agent badge
+    ├── stale provider label on an agent tab → hidden until the new poll wins
+    └── non-agent tab → standalone ticker
 ```
 
 ### Status Bar Ticker
 
-The `statusBarTicker` store provides a priority-based rotating message system used by the Claude Usage feature and available to plugins via the `ui:ticker` capability.
+The `statusBarTicker` store provides a priority-based rotating message system used by the shared Agent Usage feature and available to plugins via the `ui:ticker` capability.
 
 ```
 statusBarTicker
@@ -258,7 +264,7 @@ statusBarTicker
     ├── Expired messages scavenged every 1s (TTL-based)
     │
     └── StatusBar rendering:
-        ├── Agent badge absorbs claude-usage messages when active agent is claude
+        ├── Agent badge absorbs a provider-matching Claude/Codex usage message
         └── Standalone ticker for all other messages
 ```
 

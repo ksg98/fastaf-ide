@@ -16,7 +16,7 @@ describe("TerminalKeybar agent-aware confirm keys", () => {
 	});
 
 	it("getConfirmKeys returns y+Enter / n+Enter for text-based prompts", () => {
-		// Aider Y/N, generic shell prompts, non-confident detections
+		// Generic Y/N shell prompts, non-confident detections
 		expect(tsx).toContain('{ label: "Yes", seq: "y\\r", confirm: true }');
 		expect(tsx).toContain('{ label: "No", seq: "n\\r", confirm: true }');
 	});

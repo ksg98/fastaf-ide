@@ -3,8 +3,6 @@ export interface TouchHandlerOptions {
 	onScrollPixels: (dy: number) => void;
 	/** Called when momentum finishes or touch ends without movement. */
 	onScrollEnd: () => void;
-	onInput: (data: string) => void;
-	onFocus: () => void;
 	onFontSizeChange: (delta: number) => void;
 	onSelectionMode: () => void;
 }
@@ -25,7 +23,7 @@ function touchDist(a: Touch, b: Touch): number {
 
 export function installTouchHandlers(
 	canvas: HTMLCanvasElement,
-	textarea: HTMLTextAreaElement,
+	input: HTMLInputElement,
 	opts: TouchHandlerOptions,
 ): () => void {
 	let startY = 0;
@@ -130,8 +128,7 @@ export function installTouchHandlers(
 		if (e.changedTouches.length > 0 && !longPressFired && e.touches.length === 0) {
 			const moved = moveHistory.length > 0;
 			if (!moved) {
-				textarea.focus({ preventScroll: true });
-				opts.onFocus();
+				input.focus({ preventScroll: true });
 			} else {
 				const v = computeVelocity();
 				if (v.speed > 0.1) {
@@ -147,24 +144,14 @@ export function installTouchHandlers(
 		cancelLongPress();
 	}
 
-	function onInput() {
-		const value = textarea.value;
-		if (value) {
-			opts.onInput(value);
-			textarea.value = "";
-		}
-	}
-
 	canvas.addEventListener("touchstart", onTouchStart, { passive: true });
 	canvas.addEventListener("touchmove", onTouchMove, { passive: false });
 	canvas.addEventListener("touchend", onTouchEnd);
-	textarea.addEventListener("input", onInput);
 
 	return () => {
 		canvas.removeEventListener("touchstart", onTouchStart);
 		canvas.removeEventListener("touchmove", onTouchMove);
 		canvas.removeEventListener("touchend", onTouchEnd);
-		textarea.removeEventListener("input", onInput);
 		cancelLongPress();
 		stopMomentum();
 	};

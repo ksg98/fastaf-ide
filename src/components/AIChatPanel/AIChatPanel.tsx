@@ -17,6 +17,7 @@ import { type ConversationMeta, conversationStore, type ToolCallEntry } from "..
 import { dictationStore } from "../../stores/dictation";
 import { ENCODABLE_EFFORT_LEVELS } from "../../stores/providerRegistry";
 import { terminalsStore } from "../../stores/terminals";
+import { uiStore } from "../../stores/ui";
 import { voiceStore } from "../../stores/voice";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
@@ -39,8 +40,12 @@ import p from "../shared/panel.module.css";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
 import { VoiceOrb } from "../ui/VoiceOrb";
-import s from "./AIChatPanel.module.css";
+// FastAF's own panel stylesheet. AIChatPanel.module.css is upstream's, kept for
+// the Transcript/Composer components the terminal Chat view and mobile chat use;
+// sharing one module would make the two designs fight over the same class names.
+import s from "./FastAFChatPanel.module.css";
 import { SessionKnowledgeBar } from "./SessionKnowledgeBar";
+import { trackPanelWidth } from "./trackPanelWidth";
 
 const ContentRenderer = lazy(() =>
 	import("../ui/ContentRenderer").then((module) => ({ default: module.ContentRenderer })),
@@ -93,6 +98,12 @@ export interface AIChatPanelProps {
 	 * handed its binding instead, from the params it was opened with.
 	 */
 	terminal?: () => AIChatTerminalBinding;
+	/** Passed by the docked mount; FastAF's chat binds to the focused terminal instead. */
+	repoPath?: string | null;
+	/** Passed by the docked mount; unused — see `repoPath`. */
+	fsRoot?: string | null;
+	/** Passed by the docked mount; unused — see `repoPath`. */
+	onOpenSettings?: (tab: string, section?: string) => void;
 }
 
 /** Copy text to clipboard, return true on success */
@@ -291,6 +302,9 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	const [inputText, setInputText] = createSignal("");
 	let messageListRef: HTMLDivElement | undefined;
 	let textareaRef: HTMLTextAreaElement | undefined;
+	// Toasts keep clear of this panel's rendered width (see ToastContainer).
+	let panelEl!: HTMLDivElement;
+	onMount(() => onCleanup(trackPanelWidth(panelEl, (width) => uiStore.setAiChatPanelMeasuredWidth(width))));
 
 	const [autonomy, setAutonomy] = createSignal<"assisted" | "autonomous">("assisted");
 	const [maxSteps, setMaxSteps] = createSignal(20);
@@ -678,7 +692,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	const agentBusy = () => conversationStore.agentState() === "running" || conversationStore.agentState() === "paused";
 
 	return (
-		<div id="ai-chat-panel" class={cx(s.panel, !props.visible && s.hidden)}>
+		<div id="ai-chat-panel" ref={panelEl} class={cx(s.panel, !props.visible && s.hidden)}>
 			<PanelResizeHandle panelId="ai-chat-panel" minWidth={300} maxWidth={700} />
 
 			{/* ── Header — what this chat is attached to, and nothing else. Every

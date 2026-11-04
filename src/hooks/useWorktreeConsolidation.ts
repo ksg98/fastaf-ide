@@ -13,7 +13,7 @@ import { repositoriesStore } from "../stores/repositories";
 export function worktreeTerminalsOf(repoPath: string): string[] {
 	const repo = repositoriesStore.state.repositories[repoPath];
 	if (!repo) return [];
-	return Object.values(repo.branches)
+	return Object.values(repo.workspaces)
 		.filter((branch) => branch.worktreePath !== null)
 		.flatMap((branch) => branch.terminals);
 }

@@ -30,42 +30,39 @@ function touchEvent(type: string, touches: Touch[], changedTouches = touches): T
 
 describe("installTouchHandlers", () => {
 	let canvas: HTMLCanvasElement;
-	let textarea: HTMLTextAreaElement;
+	let input: HTMLInputElement;
 	let opts: { [K in keyof TouchHandlerOptions]: ReturnType<typeof vi.fn> };
 	let cleanup: () => void;
 
 	beforeEach(() => {
 		canvas = document.createElement("canvas");
-		textarea = document.createElement("textarea");
+		input = document.createElement("input");
 		document.body.appendChild(canvas);
-		document.body.appendChild(textarea);
+		document.body.appendChild(input);
 
 		opts = {
 			onScrollPixels: vi.fn(),
 			onScrollEnd: vi.fn(),
-			onInput: vi.fn(),
-			onFocus: vi.fn(),
 			onFontSizeChange: vi.fn(),
 			onSelectionMode: vi.fn(),
 		};
 
-		cleanup = installTouchHandlers(canvas, textarea, opts as unknown as TouchHandlerOptions);
+		cleanup = installTouchHandlers(canvas, input, opts as unknown as TouchHandlerOptions);
 	});
 
 	afterEach(() => {
 		cleanup();
 		canvas.remove();
-		textarea.remove();
+		input.remove();
 	});
 
 	describe("tap to focus", () => {
-		it("tap calls onFocus and focuses textarea", () => {
-			const focusSpy = vi.spyOn(textarea, "focus");
+		// Catches: a tap leaves keyboard focus on the canvas rather than the supplied input.
+		it("tap focuses input", () => {
 			const t = makeTouch(100, 100);
 			canvas.dispatchEvent(touchEvent("touchstart", [t]));
 			canvas.dispatchEvent(touchEvent("touchend", [], [t]));
-			expect(opts.onFocus).toHaveBeenCalledOnce();
-			expect(focusSpy).toHaveBeenCalled();
+			expect(document.activeElement).toBe(input);
 		});
 	});
 
@@ -152,31 +149,16 @@ describe("installTouchHandlers", () => {
 		});
 	});
 
-	describe("textarea input forwarding", () => {
-		it("input event on textarea calls onInput", () => {
-			textarea.value = "a";
-			textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
-			expect(opts.onInput).toHaveBeenCalledWith("a");
-		});
-
-		it("textarea is cleared after input", () => {
-			textarea.value = "hello";
-			textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
-			expect(textarea.value).toBe("");
-		});
-	});
-
 	describe("cleanup", () => {
 		it("cleanup removes all listeners", () => {
 			cleanup();
-			const focusSpy = vi.spyOn(textarea, "focus");
+			const focusSpy = vi.spyOn(input, "focus");
 			const t = makeTouch(100, 100);
 			canvas.dispatchEvent(touchEvent("touchstart", [t]));
 			canvas.dispatchEvent(touchEvent("touchend", [], [t]));
-			expect(opts.onFocus).not.toHaveBeenCalled();
 			expect(focusSpy).not.toHaveBeenCalled();
 			// re-install so afterEach cleanup() doesn't throw
-			cleanup = installTouchHandlers(canvas, textarea, opts as unknown as TouchHandlerOptions);
+			cleanup = installTouchHandlers(canvas, input, opts as unknown as TouchHandlerOptions);
 		});
 	});
 });

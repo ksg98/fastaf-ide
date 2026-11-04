@@ -9,6 +9,17 @@ Treat raw PTY bytes, canonical grid rows, clean log output, agent transcript, an
 lifecycle state as separate evidence. Never call a visual anomaly database
 corruption until those layers have been compared.
 
+## Isolate the host clipboard before UI testing
+
+A named app instance and browser session do not isolate the operating system
+clipboard. Terminal selection can copy immediately, without a separate Copy
+command. Before selection/copy/paste E2E, intercept or deny clipboard access in
+the test browser and verify the interception; assert copied text inside that
+isolated capture. Do not select text in a test terminal before this is in place.
+Do not save/restore the host clipboard as a substitute: the user may change it
+concurrently. Browser screenshots and PTY/HTTP reads do not require clipboard
+access.
+
 ## Preserve volatile evidence first
 
 1. Identify the exact session and confirm its cwd/display name.
@@ -48,10 +59,10 @@ duplicated sentence. Count it independently in raw bytes and canonical rows.
 
 | Evidence | Interpretation |
 |---|---|
-| grid count exceeds raw count | Grid/reflow/history manufactured a copy |
-| grid count equals raw count | The terminal faithfully retained emitted output |
-| raw contains data absent from grid | Grid parsing, history, or delivery lost data |
-| transcript is complete but terminal is partial | Agent TUI repaint/display problem |
+| grid count exceeds raw count | Investigate duplication, accounting for redraws and the raw-ring retention window |
+| grid count equals raw count | Counts agree only; compare complete rows and ordering before claiming integrity |
+| raw contains data absent from grid | Replay erasure/overwrite and history eviction before classifying unintended loss |
+| transcript is complete but terminal is partial | Loss is downstream of the transcript; raw replay must distinguish agent TUI output from terminal handling |
 | transcript and raw are both incomplete | Agent/process stopped before emitting data |
 
 Do not deduplicate terminal history merely because adjacent rows share a prefix.
@@ -65,8 +76,9 @@ For Claude/Ink, specifically search for this sequence:
 3. Per-row `ESC[2K` erases.
 4. A full frame reprint beginning with the welcome banner.
 
-If raw and grid contain the same banner copies, classify the symptom as Ink
-full-frame repaint pollution, not FastAF grid corruption. The
+If raw and grid contain the same banner copies and exact replay reproduces
+those copies, attribute that duplication to Ink full-frame repaint output.
+Matching counts alone do not rule out other terminal defects. The
 `ink-banner-dup-raw-ring-2026-07-06` MDKB entry contains two real confirmations.
 
 ## Replay a live capture offline
@@ -244,3 +256,16 @@ evidence confirms the same failure class. Record:
 - synthetic scenario that preserves the regression.
 
 Never create competing memories for the same root cause.
+
+## Generated ANSI matrix
+
+Use `ansi_integrity.py` for ordered-pair and seeded-sequence coverage with
+concurrent scroll requests. Follow the setup, oracle policies, artifact format,
+and coverage boundaries in `README.md` → "Generated ANSI integrity matrix".
+It compares complete canonical and binary styled rows, not occurrence counts.
+A mismatch stays a failure until classified; consult a second emulator with
+`check_xterm.cjs` when cursor semantics differ. Raw occurrence counts alone do
+not prove equality: legitimate erase/overwrite can remove emitted text, and
+identical counts can hide reordered rows. Never claim GPU or browser coverage
+from this HTTP suite. Run the separately controlled legacy producer for
+concurrent resize, progressive output, and synchronized-update timeout cases.

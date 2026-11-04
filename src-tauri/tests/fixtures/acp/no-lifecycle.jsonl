@@ -1,0 +1,4 @@
+// An agent with no session capabilities at all. Nothing may be sent to it.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result":{"protocolVersion":1,"agentInfo":{"name":"ego","version":"fixture"},"agentCapabilities":{"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false}}}}
+{"step":"expect_no_frame"}

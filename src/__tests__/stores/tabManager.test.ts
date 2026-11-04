@@ -14,6 +14,19 @@ function makeTab(id: string, overrides: Partial<TestTab> = {}): TestTab {
 	return { id, label: `Tab ${id}`, ...overrides };
 }
 
+/**
+ * Park `activeId` on a neutral, always-visible tab.
+ *
+ * `_addTab` activates whatever it just added, and `getVisibleIds` exempts the
+ * active tab from scoping (a hidden active tab is a ghost pane — content the
+ * user cannot name or close). So a scoping test whose subject happens to be the
+ * LAST tab added is answered by that exemption rather than by the rule it means
+ * to check, and would keep passing if the rule were deleted.
+ */
+function parkActive(mgr: ReturnType<typeof createTabManager<TestTab>>): void {
+	mgr._addTab(makeTab("__parked"));
+}
+
 describe("createTabManager", () => {
 	let mgr: ReturnType<typeof createTabManager<TestTab>>;
 
@@ -110,6 +123,7 @@ describe("createTabManager", () => {
 			testInScope(() => {
 				mgr._addTab(makeTab("global")); // no branchKey, no pinned
 				mgr._addTab(makeTab("branch-scoped", { branchKey: "/repo|feature" }));
+				parkActive(mgr);
 
 				const visible = mgr.getVisibleIds("/repo|main");
 				expect(visible).toContain("global");
@@ -121,6 +135,7 @@ describe("createTabManager", () => {
 			testInScope(() => {
 				mgr._addTab(makeTab("in-main", { branchKey: "/repo|main" }));
 				mgr._addTab(makeTab("in-feature", { branchKey: "/repo|feature" }));
+				parkActive(mgr);
 
 				const visibleInMain = mgr.getVisibleIds("/repo|main");
 				expect(visibleInMain).toContain("in-main");
@@ -143,6 +158,7 @@ describe("createTabManager", () => {
 				mgr._addTab(makeTab("global")); // unscoped
 				mgr._addTab(makeTab("pinned", { pinned: true }));
 				mgr._addTab(makeTab("scoped", { branchKey: "/repo|main" }));
+				parkActive(mgr);
 
 				const visible = mgr.getVisibleIds(null);
 				expect(visible).toContain("global");
@@ -172,9 +188,65 @@ describe("createTabManager", () => {
 		it("repo-scoped tab is hidden when branchKey is null", () => {
 			testInScope(() => {
 				mgr._addTab(makeTab("repo-scoped", { pinned: true, repoPath: "/repo1" }));
+				parkActive(mgr);
 
 				const visible = mgr.getVisibleIds(null);
 				expect(visible).not.toContain("repo-scoped");
+			});
+		});
+
+		/**
+		 * The pane renders whatever `activeId` points at, so a hidden active tab is
+		 * content with no tab to close it, switch from, or even name — the "ghost
+		 * full-screen panel" that `remove()` already refuses to create by promotion.
+		 *
+		 * `_addTab` opens that hole from the other side: it activates unconditionally,
+		 * so opening a file that belongs to another repo (clicking an absolute path an
+		 * agent printed) filed the tab under the owning repo — correct — and the repo
+		 * gate then hid it while the pane kept drawing it.
+		 */
+		it("keeps the active tab visible even when its repo is not the current one", () => {
+			testInScope(() => {
+				mgr._addTab(makeTab("in-repo1", { repoPath: "/repo1", branchKey: "/repo1|main" }));
+				mgr._addTab(makeTab("from-repo2", { repoPath: "/repo2", branchKey: "/repo2|feature" }));
+				expect(mgr.state.activeId).toBe("from-repo2");
+
+				const visible = mgr.getVisibleIds("/repo1|main");
+				expect(visible).toContain("from-repo2");
+				expect(visible).toContain("in-repo1");
+			});
+		});
+
+		it("can check whether an active tab really belongs to the current repo", () => {
+			testInScope(() => {
+				mgr._addTab(makeTab("foreign", { repoPath: "/repo2", branchKey: "/repo2|main" }));
+				expect(mgr.getVisibleIds("/repo1|main", false)).not.toContain("foreign");
+				expect(mgr.getVisibleIds("/repo2|main", false)).toContain("foreign");
+			});
+		});
+
+		it("hides that same foreign tab again once it stops being active", () => {
+			testInScope(() => {
+				mgr._addTab(makeTab("in-repo1", { repoPath: "/repo1", branchKey: "/repo1|main" }));
+				mgr._addTab(makeTab("from-repo2", { repoPath: "/repo2", branchKey: "/repo2|feature" }));
+				mgr.setActive("in-repo1");
+
+				expect(mgr.getVisibleIds("/repo1|main")).not.toContain("from-repo2");
+			});
+		});
+
+		// The exemption is about the tab the user is looking at, not about foreign
+		// tabs in general — otherwise every repo's tabs would leak into every bar.
+		it("does not exempt non-active tabs from another repo", () => {
+			testInScope(() => {
+				mgr._addTab(makeTab("a", { repoPath: "/repo2", branchKey: "/repo2|feature" }));
+				mgr._addTab(makeTab("b", { repoPath: "/repo2", branchKey: "/repo2|feature" }));
+				mgr._addTab(makeTab("here", { repoPath: "/repo1", branchKey: "/repo1|main" }));
+
+				const visible = mgr.getVisibleIds("/repo1|main");
+				expect(visible).not.toContain("a");
+				expect(visible).not.toContain("b");
+				expect(visible).toContain("here");
 			});
 		});
 	});

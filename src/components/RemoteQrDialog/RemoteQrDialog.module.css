@@ -23,6 +23,7 @@
 	align-items: center;
 	justify-content: center;
 	width: fit-content;
+	max-width: 100%;
 	margin: 0 auto;
 	padding: 16px;
 	background: #ffffff;
@@ -32,7 +33,7 @@
 .qr {
 	display: block;
 	width: 320px;
-	height: 320px;
+	height: auto;
 	max-width: 100%;
 	image-rendering: pixelated;
 }
@@ -78,25 +79,30 @@
 	box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
+/* The URL is selectable text with its own Copy button beneath it. */
+.connection {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 14px;
+}
+
 .url {
 	display: block;
 	width: 100%;
-	margin-top: 14px;
 	padding: 8px 10px;
-	font-family: monospace;
+	font-family: var(--font-mono);
 	font-size: 11px;
 	text-align: center;
 	color: var(--fg-muted);
 	background: var(--bg-tertiary);
 	border: 1px solid var(--border-subtle);
 	border-radius: var(--radius-md);
-	cursor: pointer;
 	word-break: break-all;
-	transition: color var(--duration-fast) var(--ease-out),
-		border-color var(--duration-fast) var(--ease-out);
+	user-select: all;
 }
 
-.url:hover {
-	color: var(--fg-primary);
-	border-color: var(--accent);
-}
+.discoveryFailure { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.discoveryFailure p { margin: 0; color: var(--error); overflow-wrap: anywhere; }
+.discoveryFailure .retryActions { padding: 0; border: 0; background: transparent; }
+.retryActions button { flex: none; }

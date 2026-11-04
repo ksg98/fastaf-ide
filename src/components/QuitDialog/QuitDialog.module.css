@@ -62,8 +62,7 @@
 }
 
 /* Buttons compose from the shared controls vocabulary — local class names
-   (.cancel / .quit) are preserved because ApplicationOverlays.tsx imports
-   them. `.quit` = destructive filled primary, so it composes btnPrimary
+   (.cancel / .quit) are preserved because CloseDialog.tsx uses them. `.quit` = destructive filled primary, so it composes btnPrimary
    and overrides the background to --error. */
 .cancel {
   composes: btn from "../shared/controls.module.css";
@@ -78,4 +77,14 @@
 .quit:hover:not(:disabled) {
   background: color-mix(in srgb, var(--error) 85%, white);
   color: var(--text-on-error);
+}
+
+/* "Remember my choice" (CloseDialog, ask mode). */
+.remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
 }

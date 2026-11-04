@@ -103,9 +103,9 @@ describe("terminalsStore.update() — batch() when shellState changes", () => {
 	});
 });
 
-// ─── repositories.removeTerminalFromBranch() ─────────────────────────────
+// ─── repositories.removeTerminalFromWorkspace() ─────────────────────────────
 
-describe("repositoriesStore.removeTerminalFromBranch() — batch() coalescing", () => {
+describe("repositoriesStore.removeTerminalFromWorkspace() — batch() coalescing", () => {
 	let store: typeof import("../../stores/repositories").repositoriesStore;
 	let dispose: () => void;
 
@@ -128,17 +128,17 @@ describe("repositoriesStore.removeTerminalFromBranch() — batch() coalescing", 
 		createRoot((d) => {
 			dispose = d;
 			store.add({ path: "/repo", displayName: "test" });
-			store.setBranch("/repo", "main", {
+			store.setWorkspace("/repo", "main", {
 				savedTerminals: [{ name: "T1", cwd: "/repo", fontSize: 14, agentType: null }],
 			});
-			store.addTerminalToBranch("/repo", "main", "term-1");
+			store.addTerminalToWorkspace("/repo", "main", "term-1");
 
 			createEffect(() => {
-				// Track both fields changed by removeTerminalFromBranch when last terminal removed:
+				// Track both fields changed by removeTerminalFromWorkspace when last terminal removed:
 				// 1. terminals array (filtered)
 				// 2. savedTerminals array (cleared)
-				void store.get("/repo")?.branches["main"]?.terminals?.length;
-				void store.get("/repo")?.branches["main"]?.savedTerminals?.length;
+				void store.get("/repo")?.workspaces["main"]?.terminals?.length;
+				void store.get("/repo")?.workspaces["main"]?.savedTerminals?.length;
 				notificationCount++;
 			});
 		});
@@ -149,7 +149,7 @@ describe("repositoriesStore.removeTerminalFromBranch() — batch() coalescing", 
 		// Removing the last terminal triggers:
 		//   setState(terminals filter)    — removes terminal from list
 		//   setState(savedTerminals = []) — clears stale saved list
-		store.removeTerminalFromBranch("/repo", "main", "term-1");
+		store.removeTerminalFromWorkspace("/repo", "main", "term-1");
 
 		await flushEffects();
 
@@ -206,6 +206,6 @@ describe("uiStore.resetLayout() — batch() coalescing", () => {
 
 		// Verify values are actually reset to defaults
 		expect(store.state.sidebarWidth).toBe(300);
-		expect(store.state.settingsNavWidth).toBe(180);
+		expect(store.state.settingsNavWidth).toBe(232);
 	});
 });

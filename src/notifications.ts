@@ -25,13 +25,16 @@ export interface NotificationConfig {
 	volume: number; // 0.0 to 1.0
 	sounds: Record<NotificationSound, boolean>;
 	audio_device: string | null;
-	/** Drop the completion chime for MCP/HTTP-created sessions (`session create`,
-	 *  `agent spawn`) — an orchestration of many agents otherwise beeps per worker.
-	 *  Visual signals (activity item, badge, OS notification) are unaffected. */
+	/** Mute sounds and native notices for parented sessions. Also retains the
+	 *  legacy completion-chime mute for unparented MCP/HTTP-created sessions.
+	 *  Activity, bell entries and urgent cards are unaffected. */
 	silence_remote_completions: boolean;
 	/** Mirror every toast into the toolbar bell, so a message that auto-dismissed
 	 *  while the user looked elsewhere is still readable afterwards. */
 	toasts_in_bell: boolean;
+	/** Send an OS notification when a PR becomes ready, fails CI, gets changes
+	 *  requested or is merged — the toolbar bell is invisible while another app is focused. */
+	pr_native_notifications: boolean;
 }
 
 /** Default notification configuration */
@@ -49,6 +52,7 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
 	audio_device: null,
 	silence_remote_completions: true,
 	toasts_in_bell: true,
+	pr_native_notifications: true,
 };
 
 /** Notification manager — delegates audio playback to Rust via Tauri IPC.
@@ -57,8 +61,8 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
  *  AudioContext restrictions entirely. */
 export class NotificationManager {
 	private config: NotificationConfig;
-	private lastPlayTime: Map<NotificationSound, number> = new Map();
-	private readonly minInterval = 500; // Minimum ms between same sound
+	private lastPlayTime: number | null = null;
+	private readonly minInterval = 500; // Minimum ms between notification sounds
 	private consecutiveFailures = 0;
 	private backoffUntil = 0;
 
@@ -80,10 +84,11 @@ export class NotificationManager {
 			// Back off after repeated failures (exponential: 5s, 30s, 5min cap)
 			if (now < this.backoffUntil) return;
 
-			// Rate limit: prevent spam
-			const lastPlay = this.lastPlayTime.get(sound) || 0;
-			if (now - lastPlay < this.minInterval) return;
-			this.lastPlayTime.set(sound, now);
+			// One audio output serves every notification type. A per-sound limit let
+			// completion, question, and attention tones start on separate native
+			// threads and overlap during a burst, so throttle the shared output.
+			if (this.lastPlayTime !== null && now - this.lastPlayTime < this.minInterval) return;
+			this.lastPlayTime = now;
 		}
 
 		try {

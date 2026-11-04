@@ -2,6 +2,7 @@
    Transparent bar over the panel body so the editor surface reads as one
    continuous plane — the subtle rule below separates content, not chrome. */
 .header {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   gap: 8px;

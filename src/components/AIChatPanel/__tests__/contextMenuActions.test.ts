@@ -15,14 +15,26 @@ vi.mock("../../../stores/conversationStore", () => ({
 	},
 }));
 
+// The selection is read off the terminal ref: the grid is a canvas, so a
+// highlighted region is not a DOM selection.
+const terminals = vi.hoisted(() => ({}) as Record<string, unknown>);
 vi.mock("../../../stores/terminals", () => ({
 	terminalsStore: {
-		state: { terminals: {} },
+		state: { terminals },
 		getIds: () => [],
 		get: () => undefined,
 		setActive: vi.fn(),
 	},
 }));
+
+/** Put one terminal on screen whose selection is `selected` and whose buffer is empty. */
+function terminalWithSelection(sessionId: string, selected: string) {
+	for (const key of Object.keys(terminals)) delete terminals[key];
+	terminals.t1 = {
+		sessionId,
+		ref: { getSelection: () => selected, getBufferLines: vi.fn(async () => []) },
+	};
+}
 
 vi.mock("../../../stores/appLogger", () => ({
 	appLogger: {
@@ -84,9 +96,7 @@ describe("registerAiChatContextActions", () => {
 
 	it("explain action opens AI Chat panel and sends with sessionId", async () => {
 		// Provide a selection so the action has text to work with
-		vi.spyOn(window, "getSelection").mockReturnValue({
-			toString: () => "some selected output",
-		} as Selection);
+		terminalWithSelection("sess-1", "some selected output");
 
 		registerAiChatContextActions();
 		const actions = contextMenuActionsStore.getContextActions("terminal");
@@ -106,9 +116,7 @@ describe("registerAiChatContextActions", () => {
 	});
 
 	it("fix-error action opens AI Chat panel and sends error prompt with sessionId", async () => {
-		vi.spyOn(window, "getSelection").mockReturnValue({
-			toString: () => "Error: command not found",
-		} as Selection);
+		terminalWithSelection("sess-2", "Error: command not found");
 
 		registerAiChatContextActions();
 		const actions = contextMenuActionsStore.getContextActions("terminal");
@@ -124,16 +132,14 @@ describe("registerAiChatContextActions", () => {
 		expect(conversationStore.sendMessage).toHaveBeenCalledWith(expect.stringContaining("How to fix it"), "sess-2");
 	});
 
-	it("does not send message when no text is available", () => {
-		vi.spyOn(window, "getSelection").mockReturnValue({
-			toString: () => "",
-		} as Selection);
+	it("does not send message when no text is available", async () => {
+		terminalWithSelection("sess-3", "");
 
 		registerAiChatContextActions();
 		const actions = contextMenuActionsStore.getContextActions("terminal");
 		const explain = actions.find((a) => a.id === "ai-chat:explain")!;
 
-		explain.action({ target: "terminal", sessionId: "sess-3" });
+		await explain.action({ target: "terminal", sessionId: "sess-3" });
 
 		expect(conversationStore.sendMessage).not.toHaveBeenCalled();
 	});

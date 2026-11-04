@@ -5,18 +5,23 @@
   top: var(--app-top, 0px);
   left: 0;
   right: 0;
+  /* Keep viewport sizing: the recorded iOS band came from translucent
+     status-bar metadata, not a missing amount to add to this height. */
   height: var(--app-height, 100dvh);
   padding-top: env(safe-area-inset-top, 0px);
   background: var(--bg-primary);
   color: var(--fg-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 14px;
+  font-size: var(--mobile-body-size);
+  line-height: 22px;
   overflow: hidden;
   /* Prevent rubber-band overscroll on iOS */
   overscroll-behavior: none;
   /* Forced dark mode */
   color-scheme: dark;
 }
+
+:global(html[data-theme="vscode-light"]) .shell { color-scheme: light; }
 
 .content {
   flex: 1;
@@ -25,13 +30,23 @@
   -webkit-overflow-scrolling: touch;
 }
 
+.sessionPane {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.sessionPaneHidden {
+  display: none;
+}
+
 .updateBanner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
   background: var(--accent, #3b82f6);
-  color: var(--text-on-accent);
+  color: var(--mobile-update-foreground);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -39,20 +54,9 @@
 }
 
 .updateBanner:active {
-  opacity: 0.85;
+  background: var(--accent-hover);
 }
 
-.reconnectBanner {
-  padding: 10px 16px;
-  background: color-mix(in srgb, var(--attention) 40%, var(--bg-primary));
-  color: var(--warning);
-  font-size: 13px;
-  font-weight: 500;
-  text-align: center;
-  animation: reconnectPulse 2s ease-in-out infinite;
-}
-
-@keyframes reconnectPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
+/* Keep view state and drafts mounted during a connection outage. */
+.views { height: 100%; }
+.views[hidden] { display: none; }

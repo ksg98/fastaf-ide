@@ -14,7 +14,9 @@ import {
 	providerRegistryStore,
 	type SlotName,
 } from "../../../stores/providerRegistry";
+import { InfoBadge } from "../InfoBadge";
 import s from "../Settings.module.css";
+import { SectionCard, SettingPageHeader } from "../SettingsPrimitives";
 import { ChatGptSignIn } from "./ChatGptSignIn";
 
 // ---------------------------------------------------------------------------
@@ -55,7 +57,9 @@ const SLOT_DESCRIPTIONS: Record<SlotName, string> = {
 	headless: "Used by Smart Prompts in API mode for one-shot LLM calls (e.g. commit messages, code review).",
 };
 
-const SLOT_NAMES: SlotName[] = ["main", "triage"];
+// "triage" stays a valid slot name for configs written before 2.0, but nothing
+// uses it since diff triage was removed, so it is not offered here.
+const SLOT_NAMES: SlotName[] = ["main"];
 
 const LOCAL_PROVIDER_TYPES: ProviderType[] = ["ollama", "lm_studio", "lite_llm"];
 
@@ -129,79 +133,86 @@ const AddProviderForm: Component<{ onAdd: (e: ProviderEntry) => void; onCancel: 
 	}
 
 	return (
-		<div class={s.section} data-testid="add-provider-form">
-			<h3>Add Provider</h3>
-			<div class={s.group}>
-				<label>Type</label>
-				<select
-					data-testid="provider-type-select"
-					value={type()}
-					onChange={(e) => {
-						const next = e.currentTarget.value as ProviderType;
-						setType(next);
-						if (isSignIn(next) && !label().trim()) setLabel("ChatGPT");
-					}}
-				>
-					<For each={PROVIDER_TYPES}>
-						{(p) => (
-							<option value={p.value}>
-								{p.label}
-								{p.comingSoon ? " (coming soon)" : ""}
-							</option>
-						)}
-					</For>
-				</select>
-			</div>
-			<Show when={selectedDef()?.comingSoon}>
-				<p class={s.hint}>Bedrock and Vertex require additional SDK integration — coming soon.</p>
-			</Show>
-			<Show when={isSignIn(type())}>
-				<p class={s.hint}>
-					No API key: add it, then sign in with your ChatGPT Plus, Pro or Team account on its card. Every AI feature can
-					then use that plan's models.
-				</p>
-			</Show>
-			<div class={s.group}>
-				<label>Label</label>
-				<input
-					type="text"
-					placeholder="e.g. Anthropic (personal)"
-					value={label()}
-					onInput={(e) => setLabel(e.currentTarget.value)}
-				/>
-			</div>
-			<Show when={supportsBaseUrl(type())}>
+		<SectionCard title="Add provider">
+			<div data-testid="add-provider-form">
 				<div class={s.group}>
-					<label>Base URL (optional)</label>
+					<label>Type</label>
+					<select
+						data-setting-exclusion="fastaf.providers"
+						data-testid="provider-type-select"
+						value={type()}
+						onChange={(e) => {
+							const next = e.currentTarget.value as ProviderType;
+							setType(next);
+							if (isSignIn(next) && !label().trim()) setLabel("ChatGPT");
+						}}
+					>
+						<For each={PROVIDER_TYPES}>
+							{(p) => (
+								<option value={p.value}>
+									{p.label}
+									{p.comingSoon ? " (coming soon)" : ""}
+								</option>
+							)}
+						</For>
+					</select>
+				</div>
+				<Show when={selectedDef()?.comingSoon}>
+					<p class={s.hint}>Bedrock and Vertex require additional SDK integration — coming soon.</p>
+				</Show>
+				<Show when={isSignIn(type())}>
+					<p class={s.hint}>
+						No API key: add it, then sign in with your ChatGPT Plus, Pro or Team account on its card. Every AI feature
+						can then use that plan's models.
+					</p>
+				</Show>
+				<div class={s.group}>
+					<label>Label</label>
 					<input
+						data-setting-exclusion="fastaf.providers"
 						type="text"
-						placeholder="Leave blank to use default"
-						value={baseUrl()}
-						onInput={(e) => setBaseUrl(e.currentTarget.value)}
+						placeholder="e.g. Anthropic (personal)"
+						value={label()}
+						onInput={(e) => setLabel(e.currentTarget.value)}
 					/>
 				</div>
-			</Show>
-			<Show when={needsApiKey(type())}>
-				<div class={s.group}>
-					<label>API Key</label>
-					<input
-						type="password"
-						placeholder="sk-…"
-						value={apiKey()}
-						onInput={(e) => setApiKey(e.currentTarget.value)}
-					/>
+				<Show when={supportsBaseUrl(type())}>
+					<div class={s.group}>
+						<label>Base URL (optional)</label>
+						<input
+							data-setting-exclusion="fastaf.providers"
+							type="text"
+							placeholder="Leave blank to use default"
+							value={baseUrl()}
+							onInput={(e) => setBaseUrl(e.currentTarget.value)}
+						/>
+					</div>
+				</Show>
+				<Show when={needsApiKey(type())}>
+					<div class={s.group}>
+						<label>API Key</label>
+						<input
+							data-setting-exclusion="fastaf.providers"
+							type="password"
+							placeholder="sk-…"
+							value={apiKey()}
+							onInput={(e) => setApiKey(e.currentTarget.value)}
+						/>
+					</div>
+				</Show>
+				<Show when={error()}>
+					<p style={{ color: "var(--error)" }}>{error()}</p>
+				</Show>
+				<div class={s.actions}>
+					<button data-setting-exclusion="fastaf.providers" class={s.saveBtn} onClick={submit} disabled={saving()}>
+						{saving() ? "Adding…" : "Add"}
+					</button>
+					<button data-setting-exclusion="fastaf.providers" onClick={props.onCancel}>
+						Cancel
+					</button>
 				</div>
-			</Show>
-			<Show when={error()}>
-				<p style={{ color: "var(--error)" }}>{error()}</p>
-			</Show>
-			<div class={s.actions}>
-				<button class={s.saveBtn} onClick={submit} disabled={saving()}>
-					{saving() ? "Adding…" : "Add"}
-				</button>
-				<button onClick={props.onCancel}>Cancel</button>
 			</div>
-		</div>
+		</SectionCard>
 	);
 };
 
@@ -302,6 +313,7 @@ const AddModelForm: Component<{
 					when={showPicker()}
 					fallback={
 						<input
+							data-setting-exclusion="fastaf.providers"
 							type="text"
 							placeholder="e.g. claude-sonnet-4-5-20241022"
 							value={modelName()}
@@ -309,7 +321,12 @@ const AddModelForm: Component<{
 						/>
 					}
 				>
-					<select data-testid="model-select" value={modelName()} onChange={(e) => chooseModel(e.currentTarget.value)}>
+					<select
+						data-setting-exclusion="fastaf.providers"
+						data-testid="model-select"
+						value={modelName()}
+						onChange={(e) => chooseModel(e.currentTarget.value)}
+					>
 						<option value="">Select a model…</option>
 						<For each={options()}>
 							{(m) => (
@@ -329,7 +346,12 @@ const AddModelForm: Component<{
 			<Show when={showEffort()}>
 				<div class={s.group}>
 					<label>Reasoning effort</label>
-					<select data-testid="effort-select" value={effort()} onChange={(e) => setEffort(e.currentTarget.value)}>
+					<select
+						data-setting-exclusion="fastaf.providers"
+						data-testid="effort-select"
+						value={effort()}
+						onChange={(e) => setEffort(e.currentTarget.value)}
+					>
 						<option value="">unset — model decides</option>
 						<For each={effortOptions()}>{(level) => <option value={level}>{level}</option>}</For>
 					</select>
@@ -350,7 +372,7 @@ const AddModelForm: Component<{
 					<Show when={discovering()}>Discovering models…</Show>
 					<Show when={!discovering() && showPicker()}>
 						{options().length} model{options().length === 1 ? "" : "s"} from provider ·{" "}
-						<button class={s.inlineBtn} onClick={() => setManual(true)}>
+						<button data-setting-exclusion="fastaf.providers" class={s.inlineBtn} onClick={() => setManual(true)}>
 							enter manually
 						</button>
 					</Show>
@@ -359,6 +381,7 @@ const AddModelForm: Component<{
 							{discoveryError()}
 						</Show>{" "}
 						<button
+							data-setting-exclusion="fastaf.providers"
 							class={s.inlineBtn}
 							data-testid="retry-discovery"
 							onClick={() => {
@@ -373,7 +396,11 @@ const AddModelForm: Component<{
 			</Show>
 			<div class={s.group}>
 				<label>Tier</label>
-				<select value={tier()} onChange={(e) => setTier(e.currentTarget.value as ModelEntry["tier"])}>
+				<select
+					data-setting-exclusion="fastaf.providers"
+					value={tier()}
+					onChange={(e) => setTier(e.currentTarget.value as ModelEntry["tier"])}
+				>
 					<option value="economic">Economic</option>
 					<option value="standard">Standard</option>
 					<option value="premium">Premium</option>
@@ -383,10 +410,17 @@ const AddModelForm: Component<{
 				<p style={{ color: "var(--error)" }}>{error()}</p>
 			</Show>
 			<div class={s.actions}>
-				<button class={s.saveBtn} data-testid="submit-add-model" onClick={submit}>
+				<button
+					data-setting-exclusion="fastaf.providers"
+					class={s.saveBtn}
+					data-testid="submit-add-model"
+					onClick={submit}
+				>
 					Add model
 				</button>
-				<button onClick={props.onCancel}>Cancel</button>
+				<button data-setting-exclusion="fastaf.providers" onClick={props.onCancel}>
+					Cancel
+				</button>
 			</div>
 		</div>
 	);
@@ -488,6 +522,7 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 					</span>
 				</div>
 				<button
+					data-setting-exclusion="fastaf.providers"
 					class={s.groupDeleteBtn}
 					data-testid={`remove-provider-${props.provider.id}`}
 					onClick={() => providerRegistryStore.removeProvider(props.provider.id)}
@@ -505,13 +540,19 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 					<label>Base URL</label>
 					<div class={s.groupRow}>
 						<input
+							data-setting-exclusion="fastaf.providers"
 							type="text"
 							data-testid={`base-url-${props.provider.id}`}
 							placeholder="Leave blank to use default"
 							value={baseUrlInput()}
 							onInput={(e) => setBaseUrlInput(e.currentTarget.value)}
 						/>
-						<button class={s.inlineBtn} data-testid={`save-base-url-${props.provider.id}`} onClick={saveBaseUrl}>
+						<button
+							data-setting-exclusion="fastaf.providers"
+							class={s.inlineBtn}
+							data-testid={`save-base-url-${props.provider.id}`}
+							onClick={saveBaseUrl}
+						>
 							Save URL
 						</button>
 					</div>
@@ -535,6 +576,7 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 							<span>{model.model_name}</span>
 							<span class={s.hintInline}>({model.tier})</span>
 							<button
+								data-setting-exclusion="fastaf.providers"
 								class={s.groupDeleteBtn}
 								data-testid={`remove-model-${model.id}`}
 								onClick={() => providerRegistryStore.removeModel(model.id)}
@@ -555,6 +597,7 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 					when={showAddModel()}
 					fallback={
 						<button
+							data-setting-exclusion="fastaf.providers"
 							class={s.inlineBtn}
 							data-testid={`add-model-btn-${props.provider.id}`}
 							onClick={() => setShowAddModel(true)}
@@ -585,6 +628,7 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 				<div style={{ "margin-top": "8px" }}>
 					<div class={s.passwordRow}>
 						<input
+							data-setting-exclusion="fastaf.providers"
 							class={s.input}
 							type="password"
 							placeholder={hasKey() ? "Replace existing key…" : "Enter API key…"}
@@ -592,11 +636,22 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 							onInput={(e) => setKeyInput(e.currentTarget.value)}
 							data-testid={`key-input-${props.provider.id}`}
 						/>
-						<button class={s.saveBtn} onClick={saveKey} disabled={savingKey() || !keyInput().trim()}>
+						<button
+							data-setting-exclusion="fastaf.providers"
+							class={s.saveBtn}
+							onClick={saveKey}
+							disabled={savingKey() || !keyInput().trim()}
+						>
 							Save
 						</button>
 						<Show when={hasKey()}>
-							<button class={s.testBtn} onClick={deleteKey} disabled={savingKey()} style={{ color: "var(--error)" }}>
+							<button
+								data-setting-exclusion="fastaf.providers"
+								class={s.testBtn}
+								onClick={deleteKey}
+								disabled={savingKey()}
+								style={{ color: "var(--error)" }}
+							>
 								Remove
 							</button>
 						</Show>
@@ -647,13 +702,12 @@ const SlotAssignments: Component<{ detection: ReturnType<typeof useAgentDetectio
 				<Show when={showLabel()}>
 					<label>
 						{SLOT_LABELS[slotProps.slot]}{" "}
-						<span class={s.infoBadge}>
-							?<span class={s.infoBadgeTip}>{SLOT_DESCRIPTIONS[slotProps.slot]}</span>
-						</span>
+						<InfoBadge label={SLOT_LABELS[slotProps.slot]}>{SLOT_DESCRIPTIONS[slotProps.slot]}</InfoBadge>
 					</label>
 				</Show>
 				<div class={s.passwordRow}>
 					<select
+						data-setting-exclusion="fastaf.providers"
 						data-testid={`slot-select-${slotProps.slot}`}
 						value={currentModelId() ?? ""}
 						onChange={(e) => {
@@ -667,6 +721,7 @@ const SlotAssignments: Component<{ detection: ReturnType<typeof useAgentDetectio
 					</select>
 					<Show when={currentModelId()}>
 						<button
+							data-setting-exclusion="fastaf.providers"
 							class={s.testBtn}
 							data-testid={`test-slot-${slotProps.slot}`}
 							onClick={() => testSlot(slotProps.slot)}
@@ -684,92 +739,96 @@ const SlotAssignments: Component<{ detection: ReturnType<typeof useAgentDetectio
 	}
 
 	return (
-		<div class={s.section} data-testid="slot-assignments">
-			<h3>Slot Assignments</h3>
-			<For each={SLOT_NAMES}>{(slot) => <SlotRow slot={slot} />}</For>
+		<SectionCard title="Slot assignments">
+			<div data-testid="slot-assignments">
+				<For each={SLOT_NAMES}>{(slot) => <SlotRow slot={slot} />}</For>
 
-			{/* Headless / Smart Prompts — unified: agent selector + model slot */}
-			<div class={s.group} data-testid="slot-row-headless">
-				<label>
-					{SLOT_LABELS.headless}{" "}
-					<span class={s.infoBadge}>
-						?<span class={s.infoBadgeTip}>{SLOT_DESCRIPTIONS.headless}</span>
-					</span>
-				</label>
-				<select
-					value={agentConfigsStore.getHeadlessAgent() ?? ""}
-					onChange={(e) => {
-						const val = e.currentTarget.value;
-						agentConfigsStore.setHeadlessAgent(val ? (val as AgentType) : null);
-					}}
-				>
-					<option value="">— Not configured —</option>
-					<For
-						each={ALL_AGENT_TYPES.filter((t) => props.detection.isAvailable(t) && AGENTS[t]?.defaultHeadlessTemplate)}
-					>
-						{(type) => {
-							const configs = () => agentConfigsStore.getRunConfigs(type);
-							return (
-								<Show when={configs().length > 0} fallback={<option value={type}>{AGENTS[type]?.name ?? type}</option>}>
-									<optgroup label={AGENTS[type]?.name ?? type}>
-										<option value={type}>{AGENTS[type]?.name ?? type} (default)</option>
-										<For each={configs()}>
-											{(cfg) => (
-												<option value={`${type}:${cfg.name}`}>
-													{cfg.name}
-													{cfg.is_default ? " (default)" : ""}
-												</option>
-											)}
-										</For>
-									</optgroup>
-								</Show>
-							);
+				{/* Headless / Smart Prompts — unified: agent selector + model slot */}
+				<div class={s.group} data-testid="slot-row-headless">
+					<label>
+						{SLOT_LABELS.headless} <InfoBadge label={SLOT_LABELS.headless}>{SLOT_DESCRIPTIONS.headless}</InfoBadge>
+					</label>
+					<select
+						data-setting-exclusion="fastaf.providers"
+						value={agentConfigsStore.getHeadlessAgent() ?? ""}
+						onChange={(e) => {
+							const val = e.currentTarget.value;
+							agentConfigsStore.setHeadlessAgent(val ? (val as AgentType) : null);
 						}}
-					</For>
-					<option value="api">External API</option>
-				</select>
-				<Show when={isExternalApi()}>
-					{(() => {
-						const headlessModelId = () => providerRegistryStore.state.registry.slots["headless"];
-						return (
-							<div class={s.passwordRow} style={{ "margin-top": "8px" }}>
-								<select
-									data-testid="slot-select-headless"
-									value={headlessModelId() ?? ""}
-									onChange={(e) => {
-										const v = e.currentTarget.value;
-										if (v) providerRegistryStore.setSlot("headless", v);
-										else providerRegistryStore.clearSlot("headless");
-									}}
-								>
-									<option value="">— select model —</option>
-									<For each={allModels()}>{(model) => <option value={model.id}>{modelLabel(model.id)}</option>}</For>
-								</select>
-								<Show when={headlessModelId()}>
-									<button
-										class={s.testBtn}
-										data-testid="test-slot-headless"
-										onClick={() => testSlot("headless")}
-										title="Test connection"
+					>
+						<option value="">— Not configured —</option>
+						<For
+							each={ALL_AGENT_TYPES.filter((t) => props.detection.isAvailable(t) && AGENTS[t]?.defaultHeadlessTemplate)}
+						>
+							{(type) => {
+								const configs = () => agentConfigsStore.getRunConfigs(type);
+								return (
+									<Show
+										when={configs().length > 0}
+										fallback={<option value={type}>{AGENTS[type]?.name ?? type}</option>}
 									>
-										Test
-									</button>
-								</Show>
-							</div>
-						);
-					})()}
-					<Show when={testResults()["headless"]}>
-						<div class={s.hint}>{testResults()["headless"]}</div>
+										<optgroup label={AGENTS[type]?.name ?? type}>
+											<option value={type}>{AGENTS[type]?.name ?? type} (default)</option>
+											<For each={configs()}>
+												{(cfg) => (
+													<option value={`${type}:${cfg.name}`}>
+														{cfg.name}
+														{cfg.is_default ? " (default)" : ""}
+													</option>
+												)}
+											</For>
+										</optgroup>
+									</Show>
+								);
+							}}
+						</For>
+						<option value="api">External API</option>
+					</select>
+					<Show when={isExternalApi()}>
+						{(() => {
+							const headlessModelId = () => providerRegistryStore.state.registry.slots["headless"];
+							return (
+								<div class={s.passwordRow} style={{ "margin-top": "8px" }}>
+									<select
+										data-setting-exclusion="fastaf.providers"
+										data-testid="slot-select-headless"
+										value={headlessModelId() ?? ""}
+										onChange={(e) => {
+											const v = e.currentTarget.value;
+											if (v) providerRegistryStore.setSlot("headless", v);
+											else providerRegistryStore.clearSlot("headless");
+										}}
+									>
+										<option value="">— select model —</option>
+										<For each={allModels()}>{(model) => <option value={model.id}>{modelLabel(model.id)}</option>}</For>
+									</select>
+									<Show when={headlessModelId()}>
+										<button
+											data-setting-exclusion="fastaf.providers"
+											class={s.testBtn}
+											data-testid="test-slot-headless"
+											onClick={() => testSlot("headless")}
+											title="Test connection"
+										>
+											Test
+										</button>
+									</Show>
+								</div>
+							);
+						})()}
+						<Show when={testResults()["headless"]}>
+							<div class={s.hint}>{testResults()["headless"]}</div>
+						</Show>
 					</Show>
-				</Show>
-				<p class={s.hint}>
-					{isExternalApi()
-						? "Direct LLM calls via the model selected above"
-						: "Agent CLI for one-shot Smart Prompts, or select External API for direct LLM calls"}
-					{props.detection.loading() ? " — detecting..." : ""}
-				</p>
+					<p class={s.hint}>
+						{isExternalApi()
+							? "Direct LLM calls via the model selected above"
+							: "Agent CLI for one-shot Smart Prompts, or select External API for direct LLM calls"}
+						{props.detection.loading() ? " — detecting..." : ""}
+					</p>
+				</div>
 			</div>
-		</div>
+		</SectionCard>
 	);
 };
 
@@ -790,18 +849,29 @@ export const ProvidersTab: Component = () => {
 	const providers = () => providerRegistryStore.state.registry.providers;
 
 	return (
-		<div data-testid="providers-tab">
-			<div class={s.section}>
-				<h3>
-					Providers
+		<div class={s.section} data-testid="providers-tab">
+			<SettingPageHeader
+				title="Providers"
+				breadcrumb="AI / Providers"
+				scope="Application defaults"
+				description="Models behind FastAF's built-in AI features."
+			/>
+
+			<SectionCard
+				title="Configured providers"
+				headingActions={
 					<Show when={!showAddForm()}>
-						{" "}
-						<button class={s.inlineBtn} data-testid="add-provider-btn" onClick={() => setShowAddForm(true)}>
-							+ Add
+						<button
+							data-setting-exclusion="fastaf.providers"
+							class={s.inlineBtn}
+							data-testid="add-provider-btn"
+							onClick={() => setShowAddForm(true)}
+						>
+							Add provider
 						</button>
 					</Show>
-				</h3>
-
+				}
+			>
 				<Show when={showAddForm()}>
 					<AddProviderForm
 						onAdd={(entry) => {
@@ -818,7 +888,7 @@ export const ProvidersTab: Component = () => {
 				>
 					<For each={providers()}>{(provider) => <ProviderCard provider={provider} />}</For>
 				</Show>
-			</div>
+			</SectionCard>
 
 			<SlotAssignments detection={detection} />
 		</div>

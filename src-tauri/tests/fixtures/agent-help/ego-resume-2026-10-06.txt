@@ -1,0 +1,87 @@
+Continue a session; no ID = latest in this workspace.
+
+Usage: ego resume [OPTIONS] [ID] [PROMPT]
+
+Arguments:
+  [ID]      The session to continue. Omit it for the latest in this workspace
+  [PROMPT]  The prompt. `-` reads it from stdin
+
+Options:
+      --answer <QUESTION_ID=JSON>
+          Settle a pending question. Repeat for multiple sibling questions
+  -f, --file <FILE>
+          Read the instruction and its invocation configuration from an agent file
+      --var <KEY=VALUE>
+          Supply one declared agent-file template variable
+      --attach <IMAGE_PATH|HTTPS_IMAGE_URL>
+          Add exact image bytes as ordered context before the prompt text
+  -m, --model <MODEL>
+          provider/model slug, e.g. ollama/qwen3
+      --offline
+          No non-loopback egress from ego's own HTTP transport
+      --sandbox <SANDBOX>
+          Filesystem confinement: ro|workspace|off
+      --thinking <THINKING>
+          off|minimal|low|medium|high|xhigh|max
+      --system <SYSTEM>
+          Replace the system prompt. `@file` reads it from a file
+      --append-system <APPEND_SYSTEM>
+          Append to the system prompt. `@file` reads it from a file
+      --instructions <INSTRUCTIONS>
+          Use this instruction file instead of discovering one
+      --tools <TOOLS>
+          Restrict the builtin tools to this comma-separated list
+      --no-tools
+          Offer no tools at all
+      --allow <RULE>
+          Allow rule, e.g. 'read(src/**)'. Repeatable
+      --deny <RULE>
+          Deny rule, e.g. 'write(**)'. Repeatable
+      --profile <PROFILE>
+          Layer [profile.NAME] from config
+      --bare
+          No ambient discovery, even in a trusted workspace
+      --session <SESSION>
+          Named session: created or attached
+      --session-id <SESSION_ID>
+          A session id supplied by the caller
+      --ephemeral
+          Refused: every run uses a durable session
+      --session-dir <SESSION_DIR>
+          Override the store location
+  -C <DIR>
+          Run as if started in DIR
+      --output <OUTPUT>
+          text|json|jsonl [default: text] [possible values: text, json, jsonl]
+      --artifact-dir <ARTIFACT_DIR>
+          Override the sanitized run-artifact root for profile `ci`
+      --schema <SCHEMA>
+          JSON Schema the final answer must validate against; `@file` or inline
+      --schema-retries <SCHEMA_RETRIES>
+          How many times to re-prompt on a schema mismatch [default: 2]
+      --retry <RETRY>
+          Additional delivery-safe attempts for each candidate [default: 0]
+      --fallback <P/M>
+          Ordered provider/model candidate used after a delivery-safe failure
+      --budget <BUDGET>
+          Hard cap: '2.5$' or '400k' tokens
+      --max-turns <MAX_TURNS>
+          Cap the turns this run may take
+      --timeout <TIMEOUT>
+          Wall clock, e.g. '90s' or '10m'
+      --mcp <NAME|@FILE>
+          Attach a named effective or strict invocation-scoped JSON MCP server
+      --mode <MODE>
+          Permission mode: plan|default|auto|edits|yolo
+      --plan
+          Shorthand for --mode plan
+      --yolo
+          Shorthand for --mode yolo
+  -c, --set <K=V>
+          Dotted-path config override, value parsed as TOML
+  -q, --quiet
+          Suppress progress and diagnostics on stderr; stdout is unaffected
+      --no-color
+          Never emit ANSI colour, whatever the terminal claims to support
+  -h, --help
+          Print help

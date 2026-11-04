@@ -1,5 +1,14 @@
-import { createRoot } from "solid-js";
+import { fireEvent, render } from "@solidjs/testing-library";
+import { type ComponentProps, createRoot, createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
+
+const { mockRpc } = vi.hoisted(() => ({ mockRpc: vi.fn() }));
+vi.mock("../../transport", async (original) => ({
+	...(await original<typeof import("../../transport")>()),
+	rpc: mockRpc,
+}));
+vi.mock("../../stores/closeDialog", () => ({ closeDialogStore: { state: { request: null }, answer: vi.fn() } }));
+vi.mock("../../components/McpConfirmHost/McpConfirmHost", () => ({ McpConfirmHost: () => null }));
 
 vi.mock("../../components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
 vi.mock("../../components/ContextMenu", () => ({ ContextMenu: () => null }));
@@ -19,15 +28,64 @@ vi.mock("../../components/SettingsPanel", () => ({ SettingsPanel: () => null }))
 vi.mock("../../components/TaskQueuePanel", () => ({ TaskQueuePanel: () => null }));
 vi.mock("../../components/UpdateProgressDialog", () => ({ UpdateProgressDialog: () => null }));
 vi.mock("../../components/WhatsNewDialog/WhatsNewDialog", () => ({ WhatsNewDialog: () => null }));
+// FastAF dialogs: not under test here.
+vi.mock("../../components/CloneRepoDialog", () => ({ CloneRepoDialog: () => null }));
+vi.mock("../../components/ImportDialog", () => ({ ImportDialog: () => null }));
 vi.mock("../../invoke", () => ({ invoke: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../../stores/repositories", () => ({ repositoriesStore: { get: vi.fn() } }));
 vi.mock("../../stores/terminals", () => ({
 	terminalsStore: { getIds: vi.fn(() => []), get: vi.fn(), update: vi.fn() },
 }));
 
-import { folderDropMessage, useQuitDialogKeyCapture } from "../../components/ApplicationOverlays/ApplicationOverlays";
+import { ApplicationOverlays, folderDropMessage } from "../../components/ApplicationOverlays/ApplicationOverlays";
+import { useCloseDialogKeyCapture } from "../../components/QuitDialog/CloseDialog";
 
 describe("ApplicationOverlays", () => {
+	// Catches: browser Add Repository still mounts the text prompt instead of a browsable server picker.
+	it("opens server folders through the repository prompt and resolves selection or cancellation", async () => {
+		mockRpc.mockImplementation(async (command: string) => {
+			if (command === "get_home_directory") return "/overlay-home";
+			if (command === "list_directory") return [{ name: "projects", is_dir: true }];
+			throw new Error(`Unexpected picker command: ${command}`);
+		});
+		const [visible, setVisible] = createSignal(true);
+		const resolveRepoPath = vi.fn(() => setVisible(false));
+		// All unrelated overlays stay closed. Their own components are mocked above.
+		const closed = new Proxy({}, { get: () => () => null });
+		const props = {
+			panels: closed,
+			contextMenu: closed,
+			getContextMenuItems: () => [],
+			git: closed,
+			confirmations: closed,
+			utilities: closed,
+			cleanup: closed,
+			quitVisible: () => false,
+			setQuitVisible: vi.fn(),
+			forceQuit: vi.fn(),
+			prompts: {
+				terminalRenameVisible: () => false,
+				closeTerminalRename: vi.fn(),
+				terminalRenameDefault: () => "",
+				openPathVisible: () => false,
+				resolveOpenPath: vi.fn(),
+				repoPathVisible: visible,
+				resolveRepoPath,
+				remotePickerConnectionId: () => null,
+				resolveRemotePicker: vi.fn(),
+			},
+		} as unknown as ComponentProps<typeof ApplicationOverlays>;
+		const view = render(() => <ApplicationOverlays {...props} />);
+		await view.findByText("projects");
+		fireEvent.click(view.getByText("Add This Folder"));
+		expect(resolveRepoPath).toHaveBeenCalledWith("/overlay-home");
+		resolveRepoPath.mockClear();
+		setVisible(true);
+		await view.findByText("projects");
+		fireEvent.click(view.getByText("Cancel"));
+		expect(resolveRepoPath).toHaveBeenCalledExactlyOnceWith(null);
+	});
+
 	it("describes copy and move folder transfers", () => {
 		expect(folderDropMessage(null)).toBe("");
 		expect(folderDropMessage({ mode: "copy", paths: ["/a"], destDir: "/dest" })).toContain(
@@ -41,7 +99,10 @@ describe("ApplicationOverlays", () => {
 	it("captures Enter and Escape while quit confirmation is visible", () => {
 		const setQuitDialogVisible = vi.fn();
 		const dispose = createRoot((rootDispose) => {
-			useQuitDialogKeyCapture(() => true, setQuitDialogVisible);
+			useCloseDialogKeyCapture(
+				() => true,
+				() => setQuitDialogVisible(false),
+			);
 			return rootDispose;
 		});
 
@@ -58,7 +119,10 @@ describe("ApplicationOverlays", () => {
 	it("removes the quit key capture listener on unmount", () => {
 		const setQuitDialogVisible = vi.fn();
 		const dispose = createRoot((rootDispose) => {
-			useQuitDialogKeyCapture(() => true, setQuitDialogVisible);
+			useCloseDialogKeyCapture(
+				() => true,
+				() => setQuitDialogVisible(false),
+			);
 			return rootDispose;
 		});
 		dispose();

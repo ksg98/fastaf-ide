@@ -17,7 +17,6 @@ Agent-specific documents:
 - [Claude Code](agents/claude-code.md) — Ink-based, ANSI cursor positioning
 - [Codex CLI](agents/codex.md) — Ink-based, absolute positioning + scroll regions
 - [Gemini CLI](agents/gemini-cli.md) — Ink-like, relative positioning + prompt box
-- [Aider](agents/aider.md) — Sequential CLI, no TUI framework
 - [OpenCode](agents/opencode.md) — Bubble Tea full-screen TUI
 - [pi](agents/pi.md) — full-frame snapshot adapter around a stable footer
 
@@ -31,10 +30,9 @@ Each agent class requires a different parsing strategy:
 | Codex CLI | CLI inline (Ink) | Changed-rows delta analysis | Yes |
 | OpenCode | Full-screen TUI (Bubble Tea) | Screen snapshot analysis | No (all rows are "chrome") |
 | Gemini CLI | CLI inline | Changed-rows delta analysis | Yes |
-| Aider | CLI sequential | Changed-rows delta analysis | Yes |
 | pi | Full-screen TUI | Screen snapshot analysis | No (footer adapter) |
 
-**CLI inline agents** (CC, Codex, Gemini, Aider) render output into the
+**CLI inline agents** (CC, Codex, Gemini) render output into the
 terminal sequentially, with chrome at specific positions. `chrome.rs`
 functions work for these — `is_separator_line`, `is_prompt_line`,
 `is_chrome_row` classify individual rows.
@@ -81,7 +79,6 @@ box-drawing characters (`─ ━ ═ — ╌ ╍`). Not all agents use separator
 | Claude Code | Yes | `────` around prompt box |
 | Codex CLI | Partially | `────` between tool output and summary only |
 | Gemini CLI | No | — |
-| Aider | No | — |
 
 ### Interactive Menu Detection
 
@@ -118,11 +115,11 @@ Terminal escape sequences that carry structured metadata:
 
 ### Unified `chrome.rs` module
 
-All chrome detection is centralized in `src-tauri/src/chrome.rs`. The three
+All chrome detection is centralized in `src-tauri/crates/tuic-terminal/src/chrome.rs`. The three
 pipelines (pty.rs, session.rs, state.rs) all import from this single module:
 
 ```
-src-tauri/src/chrome.rs
+src-tauri/crates/tuic-terminal/src/chrome.rs
 ├── is_separator_line()    — run-of-4 box-drawing chars (─ ━ ═ — ╌ ╍)
 ├── is_prompt_line()       — all agent prompt chars: ❯ › >
 ├── is_agent_prompt_row()  — BARE prompt only (no echoed user message, no `> quote`)
@@ -168,14 +165,13 @@ Detected markers:
 - `·` (U+00B7) — CC middle-dot spinner prefix
 - `▀` (U+2580) — Gemini prompt box top border
 - `▄` (U+2584) — Gemini prompt box bottom border
-- `░` (U+2591) — Aider Knight Rider spinner
-- `█` (U+2588) — Aider Knight Rider spinner / CC context bar
+- `█` (U+2588) — Claude Code context bar
 - `■` (U+25A0) — Codex interrupt marker
 - `•` (U+2022) — Codex spinner (disambiguated: `• Working` = chrome, `• Created` = output)
 - U+2720–U+273F — CC spinner dingbats (✶✻✳✢ etc.)
 
 Used by `chrome_only` calculation (pty.rs) which also considers `has_status_line`
-from `parse_status_line` events (for Gemini braille/Aider spinners). Gates:
+from `parse_status_line` events (for Gemini braille spinners). Gates:
 - `last_output_ms` timestamp updates
 - `SHELL_BUSY` → `SHELL_IDLE` transitions
 - `SilenceState::on_chunk()`

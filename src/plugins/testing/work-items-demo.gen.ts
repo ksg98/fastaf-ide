@@ -1,0 +1,631 @@
+// Generated from the local-only work_items/demo.json. Do not edit.
+import type { WorkItemProviderSnapshot } from "../../types/work-items.gen";
+// biome-ignore format: preserve canonical JSON fixture formatting
+export const workItemsDemo = {
+	"providerId": "demo",
+	"accountId": "local",
+	"name": "Local demo",
+	"fields": [
+		{
+			"id": "priority",
+			"name": "Priority",
+			"kind": "enum",
+			"required": true,
+			"editable": true,
+			"options": [
+				{
+					"id": "high",
+					"name": "High"
+				},
+				{
+					"id": "low",
+					"name": "Low"
+				}
+			],
+			"sortable": false,
+			"groupable": true,
+			"filterable": true
+		},
+		{
+			"id": "state",
+			"name": "State",
+			"kind": "enum",
+			"required": false,
+			"editable": true,
+			"options": [
+				{
+					"id": "open",
+					"name": "Open"
+				},
+				{
+					"id": "closed",
+					"name": "Closed"
+				}
+			],
+			"sortable": false,
+			"groupable": true,
+			"filterable": true
+		},
+		{
+			"id": "assignees",
+			"name": "Assignees",
+			"kind": "user",
+			"required": false,
+			"editable": true,
+			"options": [],
+			"sortable": false,
+			"groupable": true,
+			"filterable": true
+		},
+		{
+			"id": "labels",
+			"name": "Labels",
+			"kind": "labels",
+			"required": false,
+			"editable": true,
+			"options": [],
+			"sortable": false,
+			"groupable": true,
+			"filterable": true
+		},
+		{
+			"id": "key",
+			"name": "Key",
+			"kind": "text",
+			"required": false,
+			"editable": false,
+			"options": [],
+			"sortable": true,
+			"groupable": false,
+			"filterable": false
+		},
+		{
+			"id": "title",
+			"name": "Title",
+			"kind": "text",
+			"required": false,
+			"editable": false,
+			"options": [],
+			"sortable": true,
+			"groupable": false,
+			"filterable": false
+		}
+	],
+	"savedFilters": [
+		{
+			"id": "high",
+			"name": "High priority",
+			"query": {
+				"filters": [
+					{
+						"fieldId": "priority",
+						"values": [
+							{
+								"kind": "enum",
+								"value": "high"
+							}
+						]
+					}
+				],
+				"savedFilterId": null,
+				"search": "",
+				"sort": null,
+				"cursor": null,
+				"limit": 50,
+				"groupBy": null
+			}
+		}
+	],
+	"boards": [
+		{
+			"id": "priority",
+			"name": "Priority",
+			"fieldId": "priority",
+			"columns": [
+				{
+					"id": "high",
+					"name": "High",
+					"action": {
+						"kind": "edit_field",
+						"value": {
+							"fieldId": "priority",
+							"value": {
+								"kind": "enum",
+								"value": "high"
+							}
+						}
+					}
+				},
+				{
+					"id": "low",
+					"name": "Low",
+					"action": {
+						"kind": "edit_field",
+						"value": {
+							"fieldId": "priority",
+							"value": {
+								"kind": "enum",
+								"value": "low"
+							}
+						}
+					}
+				}
+			]
+		}
+	],
+	"items": [
+		{
+			"item": {
+				"reference": {
+					"providerId": "demo",
+					"accountId": "local",
+					"id": "1"
+				},
+				"key": "DEMO-1",
+				"title": "Fix terminal resize",
+				"itemType": "issue",
+				"state": {
+					"id": "open",
+					"name": "Open",
+					"tone": "info"
+				},
+				"assignees": [],
+				"labels": [],
+				"updatedAt": "2026-10-10T00:00:00Z",
+				"url": "https://example.invalid/tasks/1",
+				"fields": {
+					"priority": {
+						"kind": "enum",
+						"value": "high"
+					},
+					"state": {
+						"kind": "enum",
+						"value": "open"
+					}
+				}
+			},
+			"body": "# Fix terminal resize\n\nSynthetic Tasks example.",
+			"fields": [
+				{
+					"id": "priority",
+					"name": "Priority",
+					"kind": "enum",
+					"required": true,
+					"editable": true,
+					"options": [
+						{
+							"id": "high",
+							"name": "High"
+						},
+						{
+							"id": "low",
+							"name": "Low"
+						}
+					],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "state",
+					"name": "State",
+					"kind": "enum",
+					"required": false,
+					"editable": true,
+					"options": [
+						{
+							"id": "open",
+							"name": "Open"
+						},
+						{
+							"id": "closed",
+							"name": "Closed"
+						}
+					],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "assignees",
+					"name": "Assignees",
+					"kind": "user",
+					"required": false,
+					"editable": true,
+					"options": [],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "labels",
+					"name": "Labels",
+					"kind": "labels",
+					"required": false,
+					"editable": true,
+					"options": [],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				}
+			],
+			"actions": [
+				{
+					"id": "edit",
+					"name": "Edit field",
+					"kind": "edit_field",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "closed",
+					"name": "Closed",
+					"kind": "transition",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "open",
+					"name": "Open",
+					"kind": "transition",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "comment",
+					"name": "Comment",
+					"kind": "comment",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "start",
+					"name": "Start work",
+					"kind": "start_work",
+					"enabled": true,
+					"disabledReason": null
+				}
+			],
+			"comments": {
+				"entries": [
+					{
+						"kind": "normal",
+						"value": {
+							"id": "demo-comment",
+							"author": {
+								"id": "demo-user",
+								"name": "Demo User",
+								"avatarUrl": null,
+								"bot": false
+							},
+							"body": "**Synthetic** review comment",
+							"createdAt": "2026-10-10T00:00:00Z",
+							"url": null
+						}
+					},
+					{
+						"kind": "review_thread",
+						"value": {
+							"id": "demo-thread",
+							"resolved": true,
+							"outdated": false,
+							"path": "src/example.rs",
+							"line": 12,
+							"originalLine": 12,
+							"commitId": "demo-sha",
+							"comments": [
+								{
+									"id": "demo-comment",
+									"author": {
+										"id": "demo-user",
+										"name": "Demo User",
+										"avatarUrl": null,
+										"bot": false
+									},
+									"body": "**Synthetic** review comment",
+									"createdAt": "2026-10-10T00:00:00Z",
+									"url": null
+								}
+							],
+							"finding": null
+						}
+					},
+					{
+						"kind": "review_summary",
+						"value": {
+							"comment": {
+								"id": "demo-comment",
+								"author": {
+									"id": "demo-user",
+									"name": "Demo User",
+									"avatarUrl": null,
+									"bot": false
+								},
+								"body": "**Synthetic** review comment",
+								"createdAt": "2026-10-10T00:00:00Z",
+								"url": null
+							},
+							"state": "APPROVED",
+							"commitId": "demo-sha"
+						}
+					}
+				],
+				"nextCursor": null
+			}
+		},
+		{
+			"item": {
+				"reference": {
+					"providerId": "demo",
+					"accountId": "local",
+					"id": "2"
+				},
+				"key": "DEMO-2",
+				"title": "Document shortcuts",
+				"itemType": "issue",
+				"state": {
+					"id": "open",
+					"name": "Open",
+					"tone": "info"
+				},
+				"assignees": [],
+				"labels": [],
+				"updatedAt": "2026-10-10T00:00:00Z",
+				"url": "https://example.invalid/tasks/2",
+				"fields": {
+					"priority": {
+						"kind": "enum",
+						"value": "low"
+					},
+					"state": {
+						"kind": "enum",
+						"value": "open"
+					}
+				}
+			},
+			"body": "# Document shortcuts\n\nSynthetic Tasks example.",
+			"fields": [
+				{
+					"id": "priority",
+					"name": "Priority",
+					"kind": "enum",
+					"required": true,
+					"editable": true,
+					"options": [
+						{
+							"id": "high",
+							"name": "High"
+						},
+						{
+							"id": "low",
+							"name": "Low"
+						}
+					],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "state",
+					"name": "State",
+					"kind": "enum",
+					"required": false,
+					"editable": true,
+					"options": [
+						{
+							"id": "open",
+							"name": "Open"
+						},
+						{
+							"id": "closed",
+							"name": "Closed"
+						}
+					],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "assignees",
+					"name": "Assignees",
+					"kind": "user",
+					"required": false,
+					"editable": true,
+					"options": [],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "labels",
+					"name": "Labels",
+					"kind": "labels",
+					"required": false,
+					"editable": true,
+					"options": [],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				}
+			],
+			"actions": [
+				{
+					"id": "edit",
+					"name": "Edit field",
+					"kind": "edit_field",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "closed",
+					"name": "Closed",
+					"kind": "transition",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "open",
+					"name": "Open",
+					"kind": "transition",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "comment",
+					"name": "Comment",
+					"kind": "comment",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "start",
+					"name": "Start work",
+					"kind": "start_work",
+					"enabled": true,
+					"disabledReason": null
+				}
+			],
+			"comments": {
+				"entries": [],
+				"nextCursor": null
+			}
+		},
+		{
+			"item": {
+				"reference": {
+					"providerId": "demo",
+					"accountId": "local",
+					"id": "3"
+				},
+				"key": "DEMO-3",
+				"title": "Review transport parity",
+				"itemType": "issue",
+				"state": {
+					"id": "open",
+					"name": "Open",
+					"tone": "info"
+				},
+				"assignees": [],
+				"labels": [],
+				"updatedAt": "2026-10-10T00:00:00Z",
+				"url": "https://example.invalid/tasks/3",
+				"fields": {
+					"priority": {
+						"kind": "enum",
+						"value": "high"
+					},
+					"state": {
+						"kind": "enum",
+						"value": "open"
+					}
+				}
+			},
+			"body": "# Review transport parity\n\nSynthetic Tasks example.",
+			"fields": [
+				{
+					"id": "priority",
+					"name": "Priority",
+					"kind": "enum",
+					"required": true,
+					"editable": true,
+					"options": [
+						{
+							"id": "high",
+							"name": "High"
+						},
+						{
+							"id": "low",
+							"name": "Low"
+						}
+					],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "state",
+					"name": "State",
+					"kind": "enum",
+					"required": false,
+					"editable": true,
+					"options": [
+						{
+							"id": "open",
+							"name": "Open"
+						},
+						{
+							"id": "closed",
+							"name": "Closed"
+						}
+					],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "assignees",
+					"name": "Assignees",
+					"kind": "user",
+					"required": false,
+					"editable": true,
+					"options": [],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				},
+				{
+					"id": "labels",
+					"name": "Labels",
+					"kind": "labels",
+					"required": false,
+					"editable": true,
+					"options": [],
+					"sortable": false,
+					"groupable": true,
+					"filterable": true
+				}
+			],
+			"actions": [
+				{
+					"id": "edit",
+					"name": "Edit field",
+					"kind": "edit_field",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "closed",
+					"name": "Closed",
+					"kind": "transition",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "open",
+					"name": "Open",
+					"kind": "transition",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "comment",
+					"name": "Comment",
+					"kind": "comment",
+					"enabled": true,
+					"disabledReason": null
+				},
+				{
+					"id": "start",
+					"name": "Start work",
+					"kind": "start_work",
+					"enabled": true,
+					"disabledReason": null
+				}
+			],
+			"comments": {
+				"entries": [],
+				"nextCursor": null
+			}
+		}
+	]
+} satisfies WorkItemProviderSnapshot;

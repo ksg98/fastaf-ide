@@ -2,6 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { mockInvoke } from "./mocks/tauri";
 
+// The logger writes to the Rust ring buffer over the same `invoke` bridge the
+// gateway uses, so an unmocked log line is indistinguishable here from an
+// executed command — and every assertion below that a blocked request went
+// nowhere is an assertion about `invoke`. Stubbed so that `invoke` means
+// "something happened" again, which is the only reading that can catch the bug
+// these tests exist for.
+vi.mock("../stores/appLogger", () => ({
+	appLogger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
 // isTauri() checks __TAURI_INTERNALS__ — set to ensure `initDeepLinkHandler`
 // (which bails in a non-Tauri context) would run. `handleDeepLink` is
 // exported separately and doesn't need this, but the module-level guard on

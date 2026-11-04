@@ -1,27 +1,33 @@
-import { type Accessor, createMemo } from "solid-js";
+import { type Accessor, createMemo, onCleanup } from "solid-js";
 import { type ActionEntry, getActionEntries } from "../actions/actionRegistry";
+import { t } from "../i18n";
 import { appLogger } from "../stores/appLogger";
 import { commandPaletteStore } from "../stores/commandPalette";
 import { contextMenuActionsStore } from "../stores/contextMenuActionsStore";
+import { designModeBrowsers, designModeStore } from "../stores/designMode";
 import { pluginStore } from "../stores/pluginStore";
 import { promptLibraryStore, type SavedPrompt } from "../stores/promptLibrary";
 import { repositoriesStore } from "../stores/repositories";
 import { terminalsStore } from "../stores/terminals";
 import { updaterStore } from "../stores/updater";
+import { runWithFeedback } from "../utils/promptContext";
 import type { useGitOperations } from "./useGitOperations";
 import type { ShortcutHandlers } from "./useKeyboardShortcuts";
+import type { SmartPromptResult } from "./useSmartPrompts";
 import type { useSplitPanes } from "./useSplitPanes";
 
 interface CommandPaletteActionOptions {
 	shortcutHandlers: ShortcutHandlers;
 	gitOps: ReturnType<typeof useGitOperations>;
 	splitPanes: ReturnType<typeof useSplitPanes>;
-	executeSmartPrompt: (prompt: SavedPrompt) => Promise<unknown>;
-	openCloneDialog: () => void;
+	executeSmartPrompt: (prompt: SavedPrompt) => Promise<SmartPromptResult>;
+	/** FastAF: opens the clone-from-GitHub dialog. */
+	openCloneDialog?: () => void;
 }
 
 /** Builds the command palette's static registry plus reactive repository, plugin, terminal, and prompt actions. */
 export function useCommandPaletteActions(options: CommandPaletteActionOptions): Accessor<ActionEntry[]> {
+	onCleanup(designModeStore.subscribe());
 	return createMemo(() => {
 		const entries = getActionEntries(options.shortcutHandlers);
 		const repos = Object.values(repositoriesStore.state.repositories);
@@ -37,7 +43,7 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 					// handleBranchSelect switches the active repo itself — setting it
 					// here first would make save-on-leave key the OLD layout under the
 					// NEW repo, losing the split when switching back.
-					const branch = repo.activeBranch || Object.keys(repo.branches)[0];
+					const branch = repo.activeWorkspaceId || Object.keys(repo.workspaces)[0];
 					if (branch) void options.gitOps.handleBranchSelect(repo.path, branch);
 					else repositoriesStore.setActive(repo.path);
 				},
@@ -53,31 +59,31 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 				keybinding: "",
 				execute: () => {
 					repositoriesStore.setPark(repo.path, false);
-					const branch = repo.activeBranch || Object.keys(repo.branches)[0];
+					const branch = repo.activeWorkspaceId || Object.keys(repo.workspaces)[0];
 					if (branch) void options.gitOps.handleBranchSelect(repo.path, branch);
 					else repositoriesStore.setActive(repo.path);
 				},
 			});
 		}
 
-		// Workspace switching (only when workspaces exist)
-		if (repositoriesStore.state.workspaceOrder.length > 0) {
+		// Named-workspace switching (only when named workspaces exist)
+		if (repositoriesStore.state.namedWorkspaceOrder.length > 0) {
 			entries.push({
 				id: "switch-workspace:all",
 				label: "All projects",
 				category: "Workspace",
 				keybinding: "",
-				execute: () => repositoriesStore.setActiveWorkspace(null),
+				execute: () => repositoriesStore.setActiveNamedWorkspace(null),
 			});
-			for (const wsId of repositoriesStore.state.workspaceOrder) {
-				const workspace = repositoriesStore.state.workspaces[wsId];
+			for (const wsId of repositoriesStore.state.namedWorkspaceOrder) {
+				const workspace = repositoriesStore.state.namedWorkspaces[wsId];
 				if (!workspace) continue;
 				entries.push({
 					id: `switch-workspace:${workspace.id}`,
 					label: `Workspace: ${workspace.name}`,
 					category: "Workspace",
 					keybinding: "",
-					execute: () => repositoriesStore.setActiveWorkspace(workspace.id),
+					execute: () => repositoriesStore.setActiveNamedWorkspace(workspace.id),
 				});
 			}
 		}
@@ -107,7 +113,7 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 				label: "Clone from GitHub",
 				category: "Repository",
 				keybinding: "",
-				execute: () => options.openCloneDialog(),
+				execute: () => options.openCloneDialog?.(),
 			},
 			{
 				id: "check-for-updates",
@@ -166,6 +172,30 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 		}
 
 		const activeTermId = terminalsStore.state.activeId;
+		// The active terminal only: the label names no tab, so a fallback to
+		// another session would open Chrome for an agent the user cannot see.
+		const designTarget = activeTermId ? terminalsStore.get(activeTermId) : undefined;
+		const designSessionId = designTarget?.agentType ? designTarget.sessionId : null;
+		if (designSessionId) {
+			const armed = designModeStore.isArmed(designSessionId);
+			if (armed)
+				entries.push({
+					id: "stop-design-mode",
+					label: t("tabBar.stopDesignMode", "Stop Design Mode"),
+					category: "Terminal",
+					keybinding: "",
+					execute: () => designModeStore.toggle(designSessionId),
+				});
+			if (!armed)
+				for (const browser of designModeBrowsers)
+					entries.push({
+						id: `start-design-mode-${browser.id}`,
+						label: `Start Design Mode in ${browser.label}`,
+						category: "Terminal",
+						keybinding: "",
+						execute: () => designModeStore.toggle(designSessionId, browser.id),
+					});
+		}
 		if (activeTermId) {
 			for (const worktree of options.gitOps.getWorktreeTargets(activeTermId)) {
 				entries.push({
@@ -185,9 +215,7 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 				category: "Smart Prompts",
 				keybinding: prompt.shortcut ?? "",
 				execute: () => {
-					options
-						.executeSmartPrompt(prompt)
-						.catch((error) => appLogger.error("prompts", "Smart prompt execution failed", error));
+					void runWithFeedback(prompt, () => options.executeSmartPrompt(prompt));
 				},
 			});
 		}

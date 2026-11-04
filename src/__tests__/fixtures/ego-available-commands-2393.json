@@ -1,0 +1,48 @@
+{
+  "sessionUpdate": "available_commands_update",
+  "availableCommands": [
+    {
+      "name": "adversarial-tdd",
+      "description": "Verification method for stories with behavioral changes. A short contract before coding, tests only where they protect real behavior (each names the bug it catches), one build and one targeted test run at the end of the story, a separate critic for medium/high-risk stories, and after-the-fact checks on the rb box (RED on the pre-fix commit for bug fixes, mutation on high-risk functions, CRAP). No RED \u2192 GREEN loop, no gate inside the story. Language-independent. Do not use for documentation-only or mechanical changes."
+    },
+    {
+      "name": "capture-meeting",
+      "description": "Extract a meeting into the operational memory graph (people/meeting/decision nodes)",
+      "input": {
+        "hint": "<path-to-notes | pasted text | Spinach reference>"
+      }
+    },
+    {
+      "name": "context-management",
+      "description": "Decide when to compact or clear context at a safe sub-task boundary, and continue the active goal."
+    },
+    {
+      "name": "imagegen",
+      "description": "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas."
+    },
+    {
+      "name": "openai-docs",
+      "description": "Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge\u2014including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex\u2014and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex."
+    },
+    {
+      "name": "research-lansweeper-with-quill",
+      "description": "Research Lansweeper-wide code and organizational knowledge through Quill, including cross-repository implementations, service ownership, dependencies, shared APIs, pipeline evidence, Confluence context, and organization-wide patterns. Use when an answer depends on repositories or documentation outside the active checkout, or for cross-repo gaps during substantial plan enrichment. Do not use for questions confined to one available repository; use local rg and source reads instead."
+    },
+    {
+      "name": "review-agent",
+      "description": "Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent delegates review of uncommitted changes, a base-branch diff, a commit, or custom review instructions."
+    },
+    {
+      "name": "skill-creator",
+      "description": "Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources."
+    },
+    {
+      "name": "skill-installer",
+      "description": "Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos)."
+    },
+    {
+      "name": "test-janitor",
+      "description": "Reduce a requested test suite in small batches while preserving distinct behavioral and regression protection. Use for test deletion or consolidation audits, with persistent test-to-mutant evidence. Never change production code; run mutations only on the authorized AWS box."
+    }
+  ]
+}

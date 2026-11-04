@@ -13,15 +13,20 @@ const TUI_WARNING: &str = "> ⚠️ Terminal is in fullscreen TUI mode — key s
 /// system prompt, or `None` when no relevant prior-session data exists.
 /// Scans all sessions whose cwd history overlaps the current session's repo root.
 pub fn build_cross_session_section(state: &AppState, session_id: &str) -> Option<String> {
-    let sandbox = state.file_sandboxes.get(session_id)?;
+    let sandbox = state.engine.file_sandboxes.get(session_id)?;
     let repo_path = sandbox.root().to_string_lossy().to_string();
-    super::knowledge::summarize_for_repo(&state.session_knowledge, &repo_path, session_id, 8_000)
+    super::knowledge::summarize_for_repo(
+        &state.engine.session_knowledge,
+        &repo_path,
+        session_id,
+        8_000,
+    )
 }
 
 /// Returns a markdown-formatted knowledge section for injection into the
 /// agent's system prompt, or `None` when no knowledge has been recorded.
 pub fn build_knowledge_section(state: &AppState, session_id: &str) -> Option<String> {
-    let entry = state.session_knowledge.get(session_id)?;
+    let entry = state.engine.session_knowledge.get(session_id)?;
     let k = entry.lock();
     build_section_from_knowledge(&k)
 }

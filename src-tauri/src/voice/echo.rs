@@ -172,7 +172,7 @@ mod tests {
 
         // A partial frame produces nothing and is carried.
         aec.process_capture(&vec![0.0; 100], &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
 
         // Completing it yields exactly one frame, with the remainder carried.
         aec.process_capture(&vec![0.0; 100], &mut out);
@@ -200,17 +200,17 @@ mod tests {
     fn silence_advances_the_render_stream() {
         let mut aec = EchoCanceller::new().unwrap();
         aec.push_render_silence(RENDER_FRAME * 3);
-        assert!(aec.render_pending.is_empty());
+        assert_eq!(aec.render_pending.len(), 0);
     }
 
     #[test]
     fn reset_drops_carried_audio() {
         let mut aec = EchoCanceller::new().unwrap();
-        aec.push_render(&vec![0.1; 10]);
-        aec.process_capture(&vec![0.1; 10], &mut Vec::new());
+        aec.push_render(&[0.1; 10]);
+        aec.process_capture(&[0.1; 10], &mut Vec::new());
         aec.reset();
-        assert!(aec.render_pending.is_empty());
-        assert!(aec.capture_pending.is_empty());
+        assert_eq!(aec.render_pending.len(), 0);
+        assert_eq!(aec.capture_pending.len(), 0);
     }
 
     /// The point of the whole module: a mic signal that is purely our own

@@ -1,6 +1,8 @@
 import { createSignal } from "solid-js";
 import { invoke } from "../invoke";
 import { ACTION_NAMES, type ActionName, DEFAULT_BINDINGS, normalizeCombo } from "../keybindingDefaults";
+import { reportSettingsConflicts, settingsRefresh } from "../services/settingsRefresh";
+import { createConfigDeltaWriter } from "../utils/configDeltaWriter";
 import { appLogger } from "./appLogger";
 
 interface KeybindingOverride {
@@ -27,6 +29,7 @@ export interface DynamicAction {
  * Exported as a factory for testability. The singleton is exported at the bottom.
  */
 export function createKeybindingsStore() {
+	const keybindingsWriter = createConfigDeltaWriter<KeybindingOverride[]>("save_keybindings");
 	// Action → display key (e.g. "Cmd+Shift+D"). Undefined means unbound.
 	let actionToKey = new Map<string, string>();
 	// Normalized combo → action name (for event dispatch)
@@ -41,6 +44,30 @@ export function createKeybindingsStore() {
 	// successful hydrate would overwrite keybindings.json with an empty/partial
 	// set. No successful hydrate, no persist.
 	let hydrated = false;
+
+	let publishing = false;
+	let publicationQueued = false;
+	let publicationTail: Promise<void> = Promise.resolve();
+	function publishActions(): Promise<void> {
+		publicationTail = publicationTail
+			.then(async () => {
+				if (!publishing) return;
+				const reply = await invoke<{ error?: unknown }>("settings_action", {
+					request: { action: "publish_plugin_keybinding_actions", actions: [...dynamicActions.keys()].sort() },
+				});
+				if (reply?.error) throw new Error("Plugin keybinding action publication refused");
+			})
+			.catch((error) => appLogger.warn("config", "Plugin shortcut choices unavailable", error));
+		return publicationTail;
+	}
+	function schedulePublication(): void {
+		if (!publishing || publicationQueued) return;
+		publicationQueued = true;
+		queueMicrotask(() => {
+			publicationQueued = false;
+			void publishActions();
+		});
+	}
 
 	/** Merge static defaults with dynamic plugin defaults */
 	function allDefaults(): Record<string, string | undefined> {
@@ -103,7 +130,43 @@ export function createKeybindingsStore() {
 	// Initialize with defaults
 	rebuildMaps({ ...DEFAULT_BINDINGS });
 
+	function applyOverrides(overrides: KeybindingOverride[]): void {
+		userOverrides = new Map();
+		for (const entry of overrides) {
+			if (!entry.action) continue;
+			// Accept both static and plugin: namespaced actions. Dynamic plugin
+			// overrides loaded here will bind once the plugin registers the action
+			// via registerDynamicAction (see rebuild below).
+			if (!(ACTION_NAMES as readonly string[]).includes(entry.action) && !entry.action.startsWith("plugin:")) {
+				continue;
+			}
+			userOverrides.set(entry.action, entry.key);
+		}
+
+		rebuildMaps(getMergedBindings());
+		setVersion((v) => v + 1);
+	}
+
 	return {
+		startRemoteSync(): () => void {
+			publishing = true;
+			const stop = settingsRefresh.register({
+				section: "keybindings",
+				read: async () => {
+					await publishActions();
+					return invoke<KeybindingOverride[]>("load_keybindings");
+				},
+				apply: (overrides) => {
+					const merged = keybindingsWriter.adopt(overrides ?? [], toOverridesArray());
+					applyOverrides(merged.value);
+					reportSettingsConflicts(merged.conflicts);
+				},
+			});
+			return () => {
+				publishing = false;
+				stop();
+			};
+		},
 		/** Reactivity accessor — read this in createEffect/createMemo to track changes */
 		get version() {
 			return version();
@@ -113,24 +176,12 @@ export function createKeybindingsStore() {
 		async hydrate(): Promise<void> {
 			try {
 				const overrides = await invoke<KeybindingOverride[]>("load_keybindings");
+				keybindingsWriter.loaded(Array.isArray(overrides) ? overrides : []);
 				// Load succeeded (even if empty/missing file) — unlock persistence
 				hydrated = true;
 				if (!Array.isArray(overrides) || overrides.length === 0) return;
 
-				userOverrides = new Map();
-				for (const entry of overrides) {
-					if (!entry.action) continue;
-					// Accept both static and plugin: namespaced actions. Dynamic plugin
-					// overrides loaded here will bind once the plugin registers the action
-					// via registerDynamicAction (see rebuild below).
-					if (!(ACTION_NAMES as readonly string[]).includes(entry.action) && !entry.action.startsWith("plugin:")) {
-						continue;
-					}
-					userOverrides.set(entry.action, entry.key);
-				}
-
-				rebuildMaps(getMergedBindings());
-				setVersion((v) => v + 1);
+				applyOverrides(overrides);
 			} catch (err) {
 				appLogger.error("config", "Failed to load keybindings overrides — persistence disabled for this session", err);
 				// Keep defaults; hydrated stays false so save() cannot clobber the file
@@ -145,6 +196,7 @@ export function createKeybindingsStore() {
 		 */
 		registerDynamicAction(dyn: DynamicAction): void {
 			dynamicActions.set(dyn.action, dyn);
+			schedulePublication();
 			rebuildMaps(getMergedBindings());
 			setVersion((v) => v + 1);
 		},
@@ -152,6 +204,7 @@ export function createKeybindingsStore() {
 		/** Remove a dynamic action (called on plugin unload) */
 		unregisterDynamicAction(action: string): void {
 			if (!dynamicActions.delete(action)) return;
+			schedulePublication();
 			// Leave any user override in place so re-registering later restores it,
 			// but drop from the active maps.
 			rebuildMaps(getMergedBindings());
@@ -237,7 +290,7 @@ export function createKeybindingsStore() {
 				return;
 			}
 			try {
-				await invoke("save_keybindings", { config: toOverridesArray() });
+				await keybindingsWriter.save(toOverridesArray());
 			} catch (err) {
 				appLogger.error("config", "Failed to save keybindings", err);
 			}

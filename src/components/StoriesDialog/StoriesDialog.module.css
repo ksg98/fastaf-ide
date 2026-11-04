@@ -1,0 +1,1324 @@
+/* Plans and Stories — a FastAF dialog (STYLE_GUIDE › Menus, popovers,
+   dialogs; Side panels for the columns). One material from --surface-overlay
+   (glass in a flat theme, tonal in Codex Dark), columns split by one hairline,
+   rows that light with --row-active, views as --row-selected pills, sentence
+   case throughout. */
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, calc(100vw - 32px));
+  height: 82vh;
+  max-height: 860px;
+  overflow: hidden;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+}
+
+.detachedHost {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.dialog.detached {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.dialog > .header,
+.dialog > .error,
+.dialog > .message {
+  flex-shrink: 0;
+}
+
+/* ── Header: title · project · view pills · action · window controls ── */
+
+.header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 6px 0 16px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+.header > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.header h2 {
+  flex-shrink: 0;
+  margin: 0;
+  font-size: var(--font-base);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* A path is context, not a name: muted, cut from the end. */
+.project {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.headerActions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.headerActions::-webkit-scrollbar {
+  display: none;
+}
+
+.headerActions > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* View pills: muted at rest, --row-selected behind the open view. */
+.viewTab {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--font-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.viewTab:hover:not(:disabled) {
+  background: var(--wash-0);
+  color: var(--fg-secondary);
+}
+
+.viewTab[aria-pressed="true"] {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+.viewTab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.viewTab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.headerActions > .headerAction {
+  margin-left: 10px;
+}
+
+.windowControls {
+  display: flex;
+  align-items: center;
+}
+
+.iconBtn {
+  composes: iconBtn from "../shared/controls.module.css";
+  flex-shrink: 0;
+}
+
+/* ── Three columns: plans | stories | detail ────────────────────────── */
+
+.content {
+  display: grid;
+  grid-template-columns: minmax(170px, 21%) minmax(230px, 28%) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.planColumn,
+.storyColumn,
+.detail {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.planColumn,
+.storyColumn {
+  border-right: var(--hairline-w) solid var(--hairline);
+}
+
+/* Column header: the section label, its actions as 28px icon buttons. */
+.columnHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 40px;
+  padding: 0 6px 0 14px;
+}
+
+.columnHeader > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.columnHeader h3 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 6px 8px;
+}
+
+/* A row: name, then muted context. Hover --wash-0, open --row-active. */
+button.item[data-control-layout="row"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 28px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: var(--font-md);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+button.item[data-control-layout="row"]:hover:not(:disabled) {
+  background: var(--wash-0);
+}
+
+button.item[data-control-layout="row"][aria-current="true"] {
+  background: var(--row-active);
+}
+
+button.item[data-control-layout="row"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.item[data-control-layout="row"] small {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.itemMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.itemMeta > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.itemMeta > * + *::before {
+  content: "·";
+  margin-right: 6px;
+}
+
+.itemMeta > :first-child {
+  flex-shrink: 0;
+  max-width: 55%;
+}
+
+/* A story row: the row, its phase picker at the right end. The whole row
+   lights, so the picker reads as part of the story it moves. */
+.storyListRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 4px;
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.storyListRow:hover {
+  background: var(--wash-0);
+}
+
+.storyListRow:has(> button.item[aria-current="true"]) {
+  background: var(--row-active);
+}
+
+.storyListRow > button.item[data-control-layout="row"] {
+  flex: 1 1 120px;
+  width: auto;
+  min-width: 0;
+}
+
+.storyListRow > button.item[data-control-layout="row"]:is(:hover, [aria-current="true"]) {
+  background: transparent;
+}
+
+/* Quiet until pointed at: the value is the story's phase, the chevron says
+   it can move. */
+.storyListRow select {
+  max-width: 120px;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--fg-secondary);
+}
+
+.storyListRow select:hover:enabled {
+  border-color: var(--border-subtle);
+  color: var(--fg-primary);
+}
+
+.phaseSelector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+/* In a list row the picker's value already says the phase. */
+.storyListRow > .phaseSelector {
+  flex-shrink: 0;
+}
+
+.storyListRow > .phaseSelector > span {
+  display: none;
+}
+
+/* ── Filters and inline forms ───────────────────────────────────────── */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 14px 10px;
+}
+
+.filters label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.filters select {
+  width: 100%;
+}
+
+.filters .archiveToggle {
+  flex-basis: 100%;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  cursor: pointer;
+}
+
+/* Archived plans/stories is a yes/no preference: the settings switch
+   (Settings › .toggle), 34×18, knob slides over on the accent. */
+.archiveToggle input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  background: var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.archiveToggle input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--fg-muted);
+  transition: transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.archiveToggle input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.archiveToggle input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+  background: var(--text-on-accent);
+}
+
+.archiveToggle input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.archiveToggle input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* List / Kanban: the shared segmented control, drawn as the panel's view
+   toggle — the pressed one --row-selected, no accent ring. */
+.filters .viewSwitch {
+  align-self: flex-end;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.filters .viewSwitch [role="tab"] {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.filters .viewSwitch [role="tab"]:hover:enabled {
+  background: var(--wash-0);
+  color: var(--fg-secondary);
+}
+
+.filters .viewSwitch [role="tab"][aria-selected="true"] {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+  box-shadow: none;
+}
+
+.filters .viewSwitch [role="tab"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.planActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 10px;
+}
+
+.planNotice {
+  margin: 0;
+  padding: 0 14px 8px;
+  color: var(--warning);
+  font-size: var(--font-sm);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+.form > p {
+  margin: 0;
+}
+
+.sourceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.form button small {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font: var(--font-xs) var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.form details {
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+/* Disclosures draw their own chevron, never the native triangle. */
+.form summary,
+.timeline summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.form summary::-webkit-details-marker,
+.timeline summary::-webkit-details-marker {
+  display: none;
+}
+
+.form summary::before,
+.timeline summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 2px 2px 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.form details[open] > summary::before,
+.timeline details[open] > summary::before {
+  margin-bottom: 4px;
+  transform: rotate(45deg);
+}
+
+.manualForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.form input,
+.form textarea,
+.form select,
+.inline select {
+  width: 100%;
+}
+
+.item:focus-visible,
+.form select:focus-visible,
+.inline select:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ── Detail ─────────────────────────────────────────────────────────── */
+
+.detail {
+  padding: 14px 20px 24px;
+}
+
+.detail section {
+  margin-top: 20px;
+}
+
+.detail h3 {
+  margin: 2px 0 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+/* Section labels: sentence case, 12px/600, no tracking. */
+.detail h4 {
+  margin: 0 0 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.detail ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.detailHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detailHeader > h4 {
+  margin: 0;
+}
+
+.eyebrow {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.planState {
+  margin: 0 0 12px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.planDetail p {
+  color: var(--fg-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* A state word as a tinted pill, never a solid fill. */
+.status {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.status[data-status="done"] {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.status[data-status="blocked"] {
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+}
+
+.status[data-status="review"] {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
+}
+
+.status[data-status="qa"] {
+  background: color-mix(in srgb, var(--attention) 14%, transparent);
+  color: var(--attention);
+}
+
+/* Acceptance criteria are a checklist: small boxes, the accent when done. */
+.detail .criteria {
+  padding-left: 0;
+  list-style: none;
+}
+
+.criteria li + li {
+  margin-top: 6px;
+}
+
+.criteria label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.criteria input[type="checkbox"],
+.editDependencies input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  top: 2px;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.criteria input[type="checkbox"]:checked,
+.editDependencies input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.criteria input[type="checkbox"]:checked::after,
+.editDependencies input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 4px;
+  width: 3px;
+  height: 7px;
+  border: solid var(--text-on-accent);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.criteria input[type="checkbox"]:focus-visible,
+.editDependencies input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.criteria input[type="checkbox"]:disabled,
+.editDependencies input[type="checkbox"]:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.criteria label:has(input:disabled) {
+  cursor: default;
+}
+
+.muted,
+.empty {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.empty {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: var(--font-md);
+}
+
+.path {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+}
+
+.inline {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.inline > select {
+  flex: 1;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: var(--hairline-w) solid var(--hairline);
+}
+
+.dependencyRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.storyHeaderActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.detailHeader:has(.storyHeaderActions) {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.detailHeader:has(.storyHeaderActions) > div:first-child {
+  flex-basis: 100%;
+}
+
+.metadata {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 16px 0 0;
+  font-size: var(--font-sm);
+}
+
+.metadata dt {
+  color: var(--fg-muted);
+}
+
+.metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.sessionId {
+  display: block;
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
+
+.transitionHistory {
+  padding-left: 18px;
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+.transitionHistory li + li {
+  margin-top: 6px;
+}
+
+.loadMore {
+  margin-top: 0;
+}
+
+/* ── Messages ───────────────────────────────────────────────────────── */
+
+.error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+.error button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.detail .error,
+.form .error {
+  border-radius: var(--radius-md);
+}
+
+.message {
+  margin: 0;
+  padding: 8px 16px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.editError {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+/* ── Kanban ─────────────────────────────────────────────────────────── */
+
+.kanbanContent {
+  grid-template-columns: minmax(170px, 18%) minmax(0, 1fr);
+  grid-template-rows: minmax(280px, 1fr) minmax(180px, 38%);
+}
+
+.kanbanContent .detail {
+  grid-column: 1 / -1;
+  min-height: 240px;
+  border-top: var(--hairline-w) solid var(--hairline);
+}
+
+.kanbanContent .storyColumn {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 0;
+}
+
+/* The plugin board is the visual reference; native membership comes from Rust. */
+.board {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: var(--hairline-w) solid var(--hairline);
+}
+
+.boardColumn {
+  display: flex;
+  flex: 1 0 150px;
+  flex-direction: column;
+  min-width: 150px;
+  border-right: var(--hairline-w) solid var(--hairline);
+}
+
+.boardColumn:last-child {
+  border-right: 0;
+}
+
+/* Column header: a state dot, the sentence-case name, the count. */
+.boardColumnHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 10px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.boardColumnHeader > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.boardColumnHeader > span:first-child::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.boardColumnHeader > span:last-child {
+  color: var(--fg-muted);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.boardColumnHeader[data-status="ready"] > span:first-child::before {
+  background: var(--accent);
+}
+
+.boardColumnHeader:is([data-status="in_progress"], [data-status="review"]) > span:first-child::before {
+  background: var(--warning);
+}
+
+.boardColumnHeader[data-status="qa"] > span:first-child::before {
+  background: var(--attention);
+}
+
+.boardColumnHeader[data-status="blocked"] > span:first-child::before {
+  background: var(--error);
+}
+
+.boardColumnHeader[data-status="done"] > span:first-child::before {
+  background: var(--success);
+}
+
+.boardCards {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 6px 6px;
+  overflow-y: auto;
+}
+
+/* A card: a --wash-0 block, no border; the open story --row-active. */
+button.boardCard[data-control-layout="card"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--wash-0);
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: var(--font-md);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  touch-action: pan-y;
+  user-select: none;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+button.boardCard[data-control-layout="card"]:hover {
+  background: var(--wash-1);
+}
+
+button.boardCard[data-control-layout="card"][aria-current="true"] {
+  background: var(--row-active);
+}
+
+button.boardCard[data-control-layout="card"]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+button.boardCard[data-control-layout="card"] small {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.boardCardId {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+button.boardCard[data-control-layout="card"] small.boardCardId {
+  font-size: var(--font-xs);
+}
+
+.boardEmpty {
+  margin: 0;
+  padding: 12px 4px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  text-align: center;
+}
+
+.boardColumn[data-drop-allowed="true"] {
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.45);
+}
+
+.boardColumn[data-drop-target="true"] {
+  background: rgba(var(--accent-rgb), 0.08);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ── Run history ────────────────────────────────────────────────────── */
+
+.runContent {
+  display: grid;
+  grid-template-columns: minmax(220px, 28%) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.runList,
+.runDetail {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.runList {
+  border-right: var(--hairline-w) solid var(--hairline);
+}
+
+.runDetail {
+  padding: 16px 20px 24px;
+}
+
+.runDetail h3 {
+  margin: 2px 0 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+.timeline {
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timeline li {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: var(--hairline-w) solid var(--hairline);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+/* "story started" → "Story started": sentence case on the event's name. */
+.timeline li > div > span:first-child {
+  display: inline-block;
+}
+
+.timeline li > div > span:first-child::first-letter {
+  text-transform: uppercase;
+}
+
+.timeline summary {
+  color: var(--fg-muted);
+}
+
+.timeline time,
+.eventSequence {
+  color: var(--fg-muted);
+  font: var(--font-xs) var(--font-mono);
+  white-space: nowrap;
+}
+
+.timeline pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: var(--font-xs) var(--font-mono);
+}
+
+.incidents {
+  margin: 20px 0;
+  padding-top: 16px;
+  border-top: var(--hairline-w) solid var(--hairline);
+}
+
+.incidents h4 {
+  margin: 0;
+  font-size: var(--font-sm);
+}
+
+/* An incident is a tinted callout, not a bordered box. */
+.incident {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--attention) 10%, transparent);
+}
+
+.incident > .eyebrow {
+  display: block;
+}
+
+.incident > .eyebrow::first-letter {
+  text-transform: uppercase;
+}
+
+.incidentCause {
+  margin: 6px 0;
+  color: var(--fg-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.incidentIds {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 8px 0;
+  color: var(--fg-muted);
+  font: var(--font-xs) var(--font-mono);
+}
+
+.incidentIds dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.incidentNext {
+  margin: 10px 0 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Editors (new story, edit story, edit plan) ─────────────────────── */
+
+.editorContent {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.editorContent > form,
+.editorHeading {
+  max-width: 720px;
+  margin-inline: auto;
+}
+
+.editorContent > form {
+  border-bottom: 0;
+}
+
+.editorHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-inline: 14px;
+}
+
+.editorHeading h3 {
+  margin: 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+/* Criteria and dependencies are sections of the form, not boxes in it. */
+.editCriteria,
+.editDependencies {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.editCriteria legend,
+.editDependencies legend {
+  float: left;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.editCriteria > button {
+  align-self: flex-start;
+}
+
+.editCriterion {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.editCriterion .inline {
+  margin-top: 0;
+}
+
+.editDependencies label {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  cursor: pointer;
+}
+
+.sourceRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.sourceRow > button {
+  flex-shrink: 0;
+}
+
+.sourcePath {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: var(--font-xs) var(--font-mono);
+}
+
+.notes {
+  min-width: 0;
+}
+
+/* ── Narrow windows ─────────────────────────────────────────────────── */
+
+@media (max-width: 760px) {
+  .content {
+    grid-template-columns: minmax(135px, 34%) minmax(0, 1fr);
+  }
+
+  .detail {
+    grid-column: 1 / -1;
+    min-height: 260px;
+    border-top: var(--hairline-w) solid var(--hairline);
+  }
+
+  .storyColumn {
+    border-right: 0;
+  }
+
+  .runContent {
+    grid-template-columns: minmax(145px, 38%) minmax(0, 1fr);
+  }
+
+  .runDetail {
+    padding: 14px;
+  }
+
+  .timeline li {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .timeline time {
+    grid-column: 2;
+  }
+
+  .header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    height: auto;
+    min-height: 40px;
+    padding-block: 6px;
+  }
+
+  .headerActions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+  }
+
+  .header > .windowControls {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .headerActions button {
+    white-space: nowrap;
+  }
+}

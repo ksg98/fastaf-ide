@@ -1,0 +1,39 @@
+{
+  "version": "1.7.6",
+  "notes": "Download the appropriate installer for your platform.",
+  "pub_date": "2026-09-03T20:37:22.610Z",
+  "platforms": {
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWFnT0dZSlBQRDRBV3VHK2kvVU95T3ZMYmQ5d1B5QzJoa2ZtTGdUdHA5T01rUTZpdmtpOEY3RmdZNW1xUGN3Y2FlTXEyZ1ZRcjBMcitwUlBrZXVpR0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY2OTY1CWZpbGU6VFVJQ29tbWFuZGVyXzEuNy42X2FtZDY0LkFwcEltYWdlCmRLbWRlRWtKWUVvaUorMUNwMkdaTXhJa3RTREtXZmVUS2RqRzluNFJjRmZNcnlzU0hYNnFqcDNQMHMrNnR4M1dLM25STFc0Ym5aeDNYRG1YYzVEL0RRPT0K",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_1.7.6_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWFnT0dZSlBQRDRBV3VHK2kvVU95T3ZMYmQ5d1B5QzJoa2ZtTGdUdHA5T01rUTZpdmtpOEY3RmdZNW1xUGN3Y2FlTXEyZ1ZRcjBMcitwUlBrZXVpR0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY2OTY1CWZpbGU6VFVJQ29tbWFuZGVyXzEuNy42X2FtZDY0LkFwcEltYWdlCmRLbWRlRWtKWUVvaUorMUNwMkdaTXhJa3RTREtXZmVUS2RqRzluNFJjRmZNcnlzU0hYNnFqcDNQMHMrNnR4M1dLM25STFc0Ym5aeDNYRG1YYzVEL0RRPT0K",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_1.7.6_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWZtWXhpQjhCSXQ3UUkwOWJpa0dPWE9CaUFCeXNsV2RLbnVzdjRJQ0UxNkxneDV4NUZ4NEFkZkhMdW04YjFaN0s0VmtNa1RCOEJjb3RVV0NrQk9tZ3c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY2OTY1CWZpbGU6VFVJQ29tbWFuZGVyXzEuNy42X2FtZDY0LmRlYgpRRWVaUE5GT1dFVlZ0eVdEQk1KQlJCWWx2MmVIT0NSb0EyY2hyNkw1VEwzTUxKM0J3YktIcTFoVytvbUhKWFZnNGM3cTVJenpoNW9pY29FL0dkWTlBdz09Cg==",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_1.7.6_amd64.deb"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWMwZDMwNElLUloxclRFL0FjY3BhcHo0Yk9SMmwyV0lZeGw0aHQzT2cvd2VpTDFIVFpQWU9mY2lBZm5Bdis0eFVQN0xadjI2QXZ5cU9yKy9YKzdndmdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY2OTY1CWZpbGU6VFVJQ29tbWFuZGVyLTEuNy42LTEueDg2XzY0LnJwbQpoTXBZQU5QbENwTWlNWmlULysvY2N5bkMwaHRGSDIrWVJIYmxzQ3lQOVhvc2Vham9LRW9EajEzbDdDN0FGd3dlRGx5UkpjZ01DZ3FvNEZJK0xnd2pBdz09Cg==",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander-1.7.6-1.x86_64.rpm"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWEzdnd2bEUwZ2pid2RSUGFXaVhoNHRSMXJuNXFHZEdaUnZTTnlwZlF4T0NCQnZjNnBkMGoySmVWWW5ILzREbFdMTDY5S0N1UzNBVGdpTm12NmtiRVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY3NjczCWZpbGU6VFVJQ29tbWFuZGVyLmFwcC50YXIuZ3oKVnFJL21QMVJWd1pvai9tRWhXMStUK2xnMW0xdVFOS1ZYbjl4dkNFdmtrYUxZNE1oQ3lBcFRPbERjNUE1a1ErVEQrVytnNHdqNXhnSXlCNVZJcVhJQ0E9PQo=",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_aarch64.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWEzdnd2bEUwZ2pid2RSUGFXaVhoNHRSMXJuNXFHZEdaUnZTTnlwZlF4T0NCQnZjNnBkMGoySmVWWW5ILzREbFdMTDY5S0N1UzNBVGdpTm12NmtiRVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY3NjczCWZpbGU6VFVJQ29tbWFuZGVyLmFwcC50YXIuZ3oKVnFJL21QMVJWd1pvai9tRWhXMStUK2xnMW0xdVFOS1ZYbjl4dkNFdmtrYUxZNE1oQ3lBcFRPbERjNUE1a1ErVEQrVytnNHdqNXhnSXlCNVZJcVhJQ0E9PQo=",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_aarch64.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWVoRlJzNDdpSm5tTDRkN09tazJKN3JrTkJRWDlmbXFNSG9mbkZiL2RMS2gwQm44SGFHWUpuNndDczdOOU9DbjR3Q05xWUh0VXplVXRxT09MTmhWZ1FJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY3ODM4CWZpbGU6VFVJQ29tbWFuZGVyXzEuNy42X3g2NC1zZXR1cC5leGUKYWczQUJ6UHhPQ3ZwZUFlcm1SSVp3UDk0QjQ5TDVOZEVqM3JPOFNVSk5yMTdLdlVYUE9sZGlnbkZPVVpLOVV4STVaTlgyYzIwZWlTbno0TkVDMXV0Q0E9PQo=",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_1.7.6_x64-setup.exe"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRE1EVGRzbllNNWVoRlJzNDdpSm5tTDRkN09tazJKN3JrTkJRWDlmbXFNSG9mbkZiL2RMS2gwQm44SGFHWUpuNndDczdOOU9DbjR3Q05xWUh0VXplVXRxT09MTmhWZ1FJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDY3ODM4CWZpbGU6VFVJQ29tbWFuZGVyXzEuNy42X3g2NC1zZXR1cC5leGUKYWczQUJ6UHhPQ3ZwZUFlcm1SSVp3UDk0QjQ5TDVOZEVqM3JPOFNVSk5yMTdLdlVYUE9sZGlnbkZPVVpLOVV4STVaTlgyYzIwZWlTbno0TkVDMXV0Q0E9PQo=",
+      "url": "https://github.com/sstraus/tuicommander/releases/download/v1.7.6/TUICommander_1.7.6_x64-setup.exe"
+    }
+  }
+}

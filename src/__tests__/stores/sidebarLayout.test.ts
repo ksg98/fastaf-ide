@@ -40,7 +40,7 @@ describe("sidebarLayout selectors", () => {
 
 	const addRepo = (path: string, displayName: string) => {
 		repositoriesStore.add({ path, displayName });
-		repositoriesStore.setBranch(path, "main");
+		repositoriesStore.setWorkspace(path, "main");
 	};
 
 	describe("getVisibleLayout()", () => {
@@ -60,8 +60,8 @@ describe("sidebarLayout selectors", () => {
 				const gid = repositoriesStore.createGroup("Work")!;
 				repositoriesStore.addRepoToGroup("/b", gid);
 
-				const ws = repositoriesStore.createWorkspace("Client", ["/a", "/c"])!;
-				repositoriesStore.setActiveWorkspace(ws);
+				const ws = repositoriesStore.createNamedWorkspace("Client", ["/a", "/c"])!;
+				repositoriesStore.setActiveNamedWorkspace(ws);
 
 				const visible = layout.getVisibleLayout();
 				// The group only contained /b (non-member) → dropped entirely
@@ -73,8 +73,8 @@ describe("sidebarLayout selectors", () => {
 		it("keeps workspace membership entries for unknown repo paths harmless", () => {
 			testInScope(() => {
 				addRepo("/a", "Alpha");
-				const ws = repositoriesStore.createWorkspace("Client", ["/a", "/removed-elsewhere"])!;
-				repositoriesStore.setActiveWorkspace(ws);
+				const ws = repositoriesStore.createNamedWorkspace("Client", ["/a", "/removed-elsewhere"])!;
+				repositoriesStore.setActiveNamedWorkspace(ws);
 				expect(flatPaths(layout.getVisibleLayout())).toEqual(["/a"]);
 			});
 		});
@@ -84,11 +84,11 @@ describe("sidebarLayout selectors", () => {
 				addRepo("/a", "Alpha");
 				addRepo("/b", "Beta");
 				addRepo("/c", "Gamma");
-				repositoriesStore.addTerminalToBranch("/b", "main", "term-1");
-				repositoriesStore.addTerminalToBranch("/c", "main", "term-2");
+				repositoriesStore.addTerminalToWorkspace("/b", "main", "term-1");
+				repositoriesStore.addTerminalToWorkspace("/c", "main", "term-2");
 
-				const ws = repositoriesStore.createWorkspace("Client", ["/a", "/b"])!;
-				repositoriesStore.setActiveWorkspace(ws);
+				const ws = repositoriesStore.createNamedWorkspace("Client", ["/a", "/b"])!;
+				repositoriesStore.setActiveNamedWorkspace(ws);
 				uiStore.setRepoFilterActiveOnly(true);
 
 				// /a is a member but inactive; /c is active but not a member

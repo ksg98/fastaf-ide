@@ -82,6 +82,7 @@ describe("partial-row flag on the wire", () => {
 		const frame = decodeBinaryFrame(buildFrame([{ index: 0, text: "XY", startCol: 3 }], 8), base);
 
 		expect(frame?.needsFullFrame).toBe(false);
+		expect(frame?.hasPartialRows).toBe(true);
 		expect(frame?.rows).toHaveLength(1);
 		expect(rowText(frame!.rows[0])).toBe("aaaXYaaa");
 		expect(frame?.rows[0].count).toBe(8);
@@ -147,6 +148,7 @@ describe("partial-row flag on the wire", () => {
 		const frame = decodeBinaryFrame(buildFrame([{ index: 0, text: "hello" }], 5));
 
 		expect(frame?.needsFullFrame).toBe(false);
+		expect(frame?.hasPartialRows).toBe(false);
 		expect(rowText(frame!.rows[0])).toBe("hello");
 		expect(frame?.rows[0].count).toBe(5);
 	});

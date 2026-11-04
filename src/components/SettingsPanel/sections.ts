@@ -4,3 +4,6 @@
  * to the block instead of opening a long tab at the top, where the block the
  * caller promised sits below the fold. */
 export const SETTINGS_SECTION_UPSTREAM_MCP = "settings-upstream-mcp";
+
+/** The ego executable and profile controls on General. */
+export const SETTINGS_SECTION_EGO = "settings-ego";

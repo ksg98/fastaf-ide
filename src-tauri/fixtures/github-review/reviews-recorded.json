@@ -1,0 +1,50 @@
+[
+  {
+    "id": 5475535051,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5475535051",
+    "state": "COMMENTED",
+    "commit_id": "9fda32cfe19fbae6e25f26651763aab0e4ad5397"
+  },
+  {
+    "id": 5475542874,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5475542874",
+    "state": "DISMISSED",
+    "commit_id": "9fda32cfe19fbae6e25f26651763aab0e4ad5397"
+  },
+  {
+    "id": 5475586535,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5475586535",
+    "state": "COMMENTED",
+    "commit_id": "9fda32cfe19fbae6e25f26651763aab0e4ad5397"
+  },
+  {
+    "id": 5475631871,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5475631871",
+    "state": "COMMENTED",
+    "commit_id": "7926288fd77e8fe9f86fb54228583c4454c66801"
+  },
+  {
+    "id": 5476315395,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5476315395",
+    "state": "COMMENTED",
+    "commit_id": "7926288fd77e8fe9f86fb54228583c4454c66801"
+  },
+  {
+    "id": 5476330484,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5476330484",
+    "state": "COMMENTED",
+    "commit_id": "7926288fd77e8fe9f86fb54228583c4454c66801"
+  },
+  {
+    "id": 5476341693,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5476341693",
+    "state": "COMMENTED",
+    "commit_id": "7926288fd77e8fe9f86fb54228583c4454c66801"
+  },
+  {
+    "id": 5476355283,
+    "html_url": "https://github.com/microsoft/vscode/pull/340803#pullrequestreview-5476355283",
+    "state": "APPROVED",
+    "commit_id": "7926288fd77e8fe9f86fb54228583c4454c66801"
+  }
+]

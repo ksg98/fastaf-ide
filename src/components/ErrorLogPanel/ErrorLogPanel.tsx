@@ -192,7 +192,7 @@ export const ErrorLogPanel: Component = () => {
 					{/* Header */}
 					<div class={s.header}>
 						<h3>Error Log</h3>
-						<button class={s.close} onClick={() => errorLogStore.close()}>
+						<button type="button" class={s.close} aria-label="Close error log" onClick={() => errorLogStore.close()}>
 							&times;
 						</button>
 					</div>
@@ -203,13 +203,15 @@ export const ErrorLogPanel: Component = () => {
 							<For each={AUDIENCE_OPTIONS}>
 								{(opt) => (
 									<button
+										type="button"
 										class={`${s.levelBtn} ${audienceFilter() === opt.value ? s.levelBtnActive : ""}`}
+										aria-pressed={audienceFilter() === opt.value}
 										onClick={() => setAudienceFilter(opt.value)}
 										title={
 											opt.value === "user"
 												? "Issues relevant to you (default)"
 												: opt.value === "diagnostic"
-													? "App-internal telemetry (TUIC debugging)"
+													? "App-internal telemetry (FastAF debugging)"
 													: "Show every entry"
 										}
 									>
@@ -224,7 +226,9 @@ export const ErrorLogPanel: Component = () => {
 							<For each={LEVEL_OPTIONS}>
 								{(opt) => (
 									<button
+										type="button"
 										class={`${s.levelBtn} ${levelFilter() === opt.value ? s.levelBtnActive : ""}`}
+										aria-pressed={levelFilter() === opt.value}
 										onClick={() => setLevelFilter(opt.value)}
 										title={opt.value === "all" ? "Show all log levels" : `Show ${opt.label} and more severe levels`}
 									>
@@ -279,7 +283,13 @@ export const ErrorLogPanel: Component = () => {
 											</span>
 										)}
 									</span>
-									<button class={s.copyBtn} onClick={() => handleCopy(entry)} title="Copy to clipboard">
+									<button
+										type="button"
+										class={s.copyBtn}
+										aria-label="Copy to clipboard"
+										onClick={() => handleCopy(entry)}
+										title="Copy to clipboard"
+									>
 										<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
 											<path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
 										</svg>

@@ -1,0 +1,9 @@
+// The agent answers a method its own initialize response advertised with
+// method-not-found. `session/new` is baseline in v1, so this is not a refusal
+// the client can pass on to a caller and carry on from - it is the agent
+// contradicting the snapshot every later decision is made against.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"error","to":"new","code":-32601,"message":"Method not found"}
+{"step":"await_stdin_eof"}

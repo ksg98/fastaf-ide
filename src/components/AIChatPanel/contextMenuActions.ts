@@ -1,6 +1,9 @@
 /**
  * AI Chat context menu actions — "Explain with AI" and "Fix this error"
  * registered on terminal right-click.
+ *
+ * FastAF's chat is bound to a terminal, so both send the question straight to
+ * the conversation of the terminal that was right-clicked.
  */
 
 import { appLogger } from "../../stores/appLogger";
@@ -13,93 +16,68 @@ import { switchToTerminalBySession } from "../../utils/switchToTerminalBySession
 const PLUGIN_ID = "ai-chat";
 const MAX_CHARS = 2000;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Truncate text to maxChars, appending a marker if truncated. */
+/** Cut text to `maxChars`, saying so where it was cut. */
 export function truncateText(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	return text.slice(0, maxChars) + "\n[... truncated]";
+	return `${text.slice(0, maxChars)}\n[... truncated]`;
 }
 
 /**
- * Get terminal text for the AI action.
+ * The output to ask about: what is selected, or the tail of the screen.
  *
- * Prefers selected text (via window.getSelection). Falls back to the last 50
- * buffer lines from the active terminal ref.
+ * The selection comes off the terminal rather than off the document: the grid
+ * is drawn on a canvas, so a highlighted region is not a DOM selection and
+ * `window.getSelection()` returns nothing for it.
  */
-async function getTerminalText(sessionId?: string): Promise<string> {
-	const sel = window.getSelection()?.toString().trim();
-	if (sel) return sel;
-
+async function terminalText(sessionId?: string): Promise<string> {
 	if (!sessionId) return "";
-	const terminals = terminalsStore.state.terminals;
-	const entry = Object.values(terminals).find((t) => t.sessionId === sessionId);
+	const entry = Object.values(terminalsStore.state.terminals).find((terminal) => terminal.sessionId === sessionId);
+	const selected = entry?.ref?.getSelection().trim();
+	if (selected) return selected;
 	if (!entry?.ref) return "";
-
 	try {
-		const allLines = await entry.ref.getBufferLines(0, 999_999);
-		const tail = allLines.slice(-50);
-		return tail.join("\n").trimEnd();
-	} catch (e) {
-		appLogger.warn("ai-chat", "Failed to read terminal buffer", { error: String(e) });
+		const lines = await entry.ref.getBufferLines(0, 999_999);
+		return lines.slice(-50).join("\n").trimEnd();
+	} catch (error) {
+		appLogger.warn("ai-chat", "Failed to read terminal buffer", { error: String(error) });
 		return "";
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Registration
-// ---------------------------------------------------------------------------
+/** Open the panel on the right-clicked terminal and send a question about its output. */
+async function ask(sessionId: string | undefined, question: (output: string) => string): Promise<void> {
+	const raw = await terminalText(sessionId);
+	if (!raw) {
+		appLogger.info("ai-chat", "No terminal text to ask about");
+		return;
+	}
+	uiStore.setAiChatPanelVisible(true);
+	if (sessionId) switchToTerminalBySession(sessionId);
+	conversationStore.sendMessage(question(truncateText(raw, MAX_CHARS)), sessionId ?? null);
+}
 
 export function registerAiChatContextActions(): Array<{ dispose(): void }> {
-	const disposables: Array<{ dispose(): void }> = [];
-
-	// ── Explain with AI ────────────────────────────────────────────────
-	disposables.push(
+	return [
 		contextMenuActionsStore.registerContextAction(PLUGIN_ID, {
 			id: "ai-chat:explain",
 			label: "Explain with AI",
 			target: "terminal",
-			action: async (ctx) => {
-				const raw = await getTerminalText(ctx.sessionId);
-				if (!raw) {
-					appLogger.info("ai-chat", "Explain: no terminal text available");
-					return;
-				}
-				const text = truncateText(raw, MAX_CHARS);
-				uiStore.setAiChatPanelVisible(true);
-				if (ctx.sessionId) switchToTerminalBySession(ctx.sessionId);
-				conversationStore.sendMessage(
-					`Explain this terminal output:\n\n\`\`\`\n${text}\n\`\`\``,
-					ctx.sessionId ?? null,
-				);
+			action: async (context) => {
+				await ask(context.sessionId, (output) => `Explain this terminal output:\n\n\`\`\`\n${output}\n\`\`\``);
 			},
 		}),
-	);
-
-	// ── Fix this error ─────────────────────────────────────────────────
-	disposables.push(
 		contextMenuActionsStore.registerContextAction(PLUGIN_ID, {
 			id: "ai-chat:fix-error",
 			label: "Fix this error",
 			target: "terminal",
-			action: async (ctx) => {
-				const raw = await getTerminalText(ctx.sessionId);
-				if (!raw) {
-					appLogger.info("ai-chat", "Fix error: no terminal text available");
-					return;
-				}
-				const text = truncateText(raw, MAX_CHARS);
-				uiStore.setAiChatPanelVisible(true);
-				if (ctx.sessionId) switchToTerminalBySession(ctx.sessionId);
-				conversationStore.sendMessage(
-					`Analyze this terminal error and suggest a fix:\n\n\`\`\`\n${text}\n\`\`\`\n\nExplain: 1) What went wrong 2) The root cause 3) How to fix it`,
-					ctx.sessionId ?? null,
+			action: async (context) => {
+				await ask(
+					context.sessionId,
+					(output) =>
+						`Analyze this terminal error and suggest a fix:\n\n\`\`\`\n${output}\n\`\`\`\n\n` +
+						"Explain: 1) What went wrong 2) The root cause 3) How to fix it",
 				);
 			},
 		}),
-	);
-
-	return disposables;
+	];
 }

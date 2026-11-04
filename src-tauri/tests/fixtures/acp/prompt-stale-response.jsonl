@@ -1,0 +1,16 @@
+// A prompt is left unanswered while the session is closed and loaded again;
+// the late answer arrives after the session is back under a new attachment.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"stale"}
+{"step":"expect","method":"session/close","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"close"}
+{"step":"respond","to":"close","result":{}}
+{"step":"expect","method":"session/load","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"load"}
+{"step":"respond","to":"load","result":{"configOptions":[]}}
+{"step":"respond","to":"stale","result":{"stopReason":"end_turn"}}
+{"step":"expect","method":"session/prompt","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"fresh"}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fresh"}}}}
+{"step":"respond","to":"fresh","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

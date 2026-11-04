@@ -367,7 +367,7 @@ fn listen_loop(
 fn spawn_transcription(app: AppHandle, audio: Vec<f32>, barge_gate: Option<Playback>) {
     let seconds = audio.len() as f64 / 16_000.0;
     tauri::async_runtime::spawn(async move {
-        match crate::dictation::commands::transcribe_utterance(&app, audio).await {
+        match crate::dictation::commands::transcribe_voice_utterance(&app, audio).await {
             Ok(text) if text.trim().is_empty() => {
                 if let Some(playback) = &barge_gate {
                     playback.restore_volume();

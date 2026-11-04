@@ -1,0 +1,57 @@
+[package]
+name = "tuic-dictation"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = []
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+
+[dependencies]
+tuic-core = { path = "../tuic-core", features = ["audio-output"] }
+cpal = "0.18.2"
+# Playback only: Pocket renders PCM and the external engine's WAV is read by
+# speech::external, so no decoder is needed.
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+whisper-rs = "0.16"
+# FastAF links ONNX Runtime statically (ort's default download-binaries), the
+# same build its voice agent (Kokoro, Silero) has always used: one ort for the
+# whole binary, so Pocket TTS runs on that static runtime too and never loads
+# the library that travels with its models. Upstream used `load-dynamic`, which
+# feature unification would have forced on the voice agent as well, leaving it
+# with no runtime until a Pocket download happened.
+ort = { version = "=2.0.0-rc.13" }
+# The bundles use SentencePiece Unigram; the C++ sentencepiece crate links a
+# protobuf version that conflicts with onnxruntime.
+sentencepiece-model = "0.1"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+safetensors = "0.6"
+# Bundled WebRTC APM avoids a system-library dependency across the three OSes.
+webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+rand = "0.10"
+tracing = "0.1"
+flate2 = "1.1"
+tar = "0.4"
+# DEFERRED (2026-10-09) — share the root's ZIP codecs; retain extraction compatibility.
+zip = "9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSDictionary", "NSString", "NSValue"] }
+block2 = "0.6"
+
+[dev-dependencies]
+tuic-core = { path = "../tuic-core", features = ["test-support"] }
+tuic-test-support = { path = "../tuic-test-support" }
+
+[lints]
+workspace = true

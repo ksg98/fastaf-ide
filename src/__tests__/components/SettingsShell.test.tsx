@@ -22,6 +22,25 @@ describe("SettingsShell", () => {
 		vi.clearAllMocks();
 	});
 
+	it("keeps navigation names and actions when an optional icon is present", () => {
+		const view = render(() => (
+			<SettingsShell
+				{...defaultProps}
+				tabs={[
+					{ key: "general", label: "General", icon: <svg data-testid="nav-icon" /> },
+					{ key: "appearance", label: "Appearance" },
+				]}
+			>
+				<p>content</p>
+			</SettingsShell>
+		));
+		const button = view.getByRole("button", { name: "General" });
+		expect(button.querySelector('[aria-hidden="true"] svg')).not.toBeNull();
+		fireEvent.click(button);
+		expect(defaultProps.onTabChange).toHaveBeenCalledWith("general");
+		expect(view.getByRole("button", { name: "Appearance" }).querySelector("svg")).toBeNull();
+	});
+
 	it("does not render when visible=false", () => {
 		const { container } = render(() => (
 			<SettingsShell {...defaultProps} visible={false}>

@@ -45,18 +45,27 @@ export function isMergeMethodNotAllowed(error: unknown): boolean {
 	return String(error).includes("405");
 }
 
+/** Whether the merge was refused because the PR head moved since the user reviewed it
+ *  (backend marker `PR head changed`). Never retry: the new commits were not seen. */
+export function isMergeHeadChanged(error: unknown): boolean {
+	return String(error).includes("PR head changed");
+}
+
 /** Whether the PR was already merged (GitHub returns 409 or "not mergeable"). */
 export function isAlreadyMerged(error: unknown): boolean {
 	const msg = String(error);
+	if (isMergeHeadChanged(error)) return false;
 	return msg.includes("not mergeable") || msg.includes("already been merged") || msg.includes("409");
 }
 
 /** Try to merge a PR, automatically falling back through all merge methods on 405.
+ *  Every attempt is pinned to `expectedHeadSha` (the head the user saw).
  *  Returns the method that succeeded. Throws on non-405 errors or if all methods fail. */
 export async function mergeWithFallback(
 	repoPath: string,
 	prNumber: number,
 	preferred: MergeStrategy,
+	expectedHeadSha: string,
 ): Promise<MergeStrategy> {
 	const methodOrder = [preferred, ...MERGE_METHODS.filter((m) => m !== preferred)];
 	let lastError: unknown;
@@ -66,6 +75,7 @@ export async function mergeWithFallback(
 				repoPath,
 				prNumber,
 				mergeMethod: method,
+				expectedHeadSha,
 			});
 			return method;
 		} catch (e) {

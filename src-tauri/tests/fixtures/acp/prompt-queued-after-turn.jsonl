@@ -1,0 +1,12 @@
+// The phone's prompt must not reach ego until the desktop turn answers.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","prompt":[{"type":"text","text":"desktop"}]},"capture":"desktop"}
+{"step":"expect","method":"session/list","capture":"barrier"}
+{"step":"respond","to":"barrier","result":{"sessions":[]}}
+{"step":"respond","to":"desktop","result":{"stopReason":"end_turn"}}
+{"step":"expect","method":"session/prompt","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","prompt":[{"type":"text","text":"phone"}]},"capture":"phone"}
+{"step":"respond","to":"phone","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

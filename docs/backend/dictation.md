@@ -1,21 +1,130 @@
 # Voice Dictation
 
-**Module:** `src-tauri/src/dictation/`
+**Domain crate:** `src-tauri/crates/tuic-dictation/`
+
+**Application adapters:** `src-tauri/src/dictation/`
+
+The application enables native dictation with the non-default Cargo feature
+`dictation`. Plain application Cargo dev/test builds omit Whisper and WebRTC;
+use `--features dictation` to check or test the voice adapters. Tauri builds
+(including `make dev` and releases) enable the feature in `tauri.conf.json`,
+and desktop CI enables it explicitly. `cuda` and `vulkan` imply `dictation`.
+Headless `tuic-remote --no-default-features` does not compile the audio stack.
+
+Notification audio remains available in desktop builds without dictation. Both
+notification and speech output share `tuic-core::audio_output`, behind its
+optional `audio-output` feature. The output-device selection is unchanged.
+
+The application, `tuic-core` and `tuic-dictation` use rodio 0.23 with CPAL
+0.18.2. Capture explicitly starts its stream and retains F32/I16 input handling:
+if CPAL prefers a higher-precision default, capture selects a supported F32/I16
+configuration, retaining the default sample rate when that range supports it.
+Captured audio still becomes 16 kHz mono PCM. Playback retains the selected-device
+then system-default routing, notification volume/envelopes and rodio's output
+buffer policy.
+
 
 Local voice-to-text using Whisper with Metal acceleration on macOS. Push-to-talk workflow with streaming partial results: hold hotkey to record, see partial transcriptions in real-time, release to finalize.
+
+Fn down/up listeners use the current WebviewWindow target, not global event listeners.
+Global (`Any`) listeners also receive labeled events and would create competing recording owners.
+Each window disposes its guarded subscriptions when its hook scope ends.
+
+On macOS, Fn key-down is sent to the detached AI Chat WebView when it has focus,
+or to the secondary terminal WebView when it has focus, otherwise to the main
+WebView. Each owns its DOM target and dictation hooks.
+Key-up reaches all three supported WebViews; only the handler that saw key-down can
+stop a take. Losing a supported window's focus does not release a physically held Fn key.
+The local event monitor still handles ordinary key-up. After focus loss, a
+temporary AppKit timer checks the current modifier flags every 50 ms, stops
+capture and emits key-up once Fn is released, then invalidates itself. The timer
+runs in common main-run-loop modes so menu tracking does not suspend it. It
+requests no global keyboard-monitor permission and does not poll while idle.
+The file log records `Fn focus loss observed` with the physical key state; a
+release found by the timer records `origin="fn-state-poll"`.
+
+## Long text delivery to Claude
+
+Push-to-talk sends long Claude CLI text as a bracketed paste, with or without
+Auto-send. The frontend and backend frame Claude text above 500 UTF-8 bytes;
+short dialog answers remain key events. Codex keeps its existing character
+threshold. Recording limits and Whisper decode flags do not change.
+
+Claude Code 2.1.311 accepted only the last 137 characters of an isolated
+1159-character plain write. The same text inside bracketed paste markers reached
+its native transcript in full. The recorded fixture is
+`src-tauri/src/fixtures/agent_prompts/claude-long-dictation-2502.json`.
+`Dictation delivered` records a completed target write, not proof that the
+external CLI accepted every character. Compare the actual CLI transcript with
+that log before attributing a missing beginning to audio capture or Whisper.
+
+## Diagnose speech that also appears in the mobile composer
+
+Hands-free terminal targets use `pty::write_voice_turn`; AI Chat targets use the existing ACP prompt submission. The mobile
+`input_line` feed observes that terminal prompt; it does not choose the voice
+destination. Correlate `Hands-free turn accepted` and `Hands-free turn typed now`
+with the session ID before treating a mobile draft as a delivery failure. The
+typed log alone does not prove that the agent accepted the submission.
+
+Check the mobile client build as well as `/api/version`. The mobile
+`Update available: <client> → <server>` log identifies an older loaded bundle.
+Before the #1662 fix, an empty composer accepted any nonempty PTY input as an
+echo, so a voice paste could remain as a local draft after terminal delivery.
+Current clients accept only explicitly requested completion/history responses.
+Save any local draft, then use the mobile update action to load the current
+bundle. A desktop rebuild does not replace JavaScript already loaded on a phone.
 
 ## Module Structure
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | `DictationState` — shared state for all dictation operations |
+| root `mod.rs` | `DictationState` — shared application state for dictation |
 | `audio.rs` | Audio capture from microphone via CPAL (VecDeque ring buffer) |
-| `commands.rs` | Tauri command handlers |
-| `model.rs` | Whisper model download and management |
+| root `commands.rs` | Tauri command handlers, AppState and event integration |
+| root `browser.rs` | Browser audio transport and Tokio broadcast |
+| root `adapters.rs` | PTY and ACP delivery and target checks for hands-free mode |
+| root `model_download.rs` | Tokio/HTTP Whisper model download |
+| root `asset_download.rs` | Tokio/HTTP staging of pinned speech assets |
+| `model.rs` | Whisper model catalogue and local file management |
 | `transcribe.rs` | `Transcriber` trait + `WhisperTranscriber` implementation via whisper-rs |
-| `streaming.rs` | Streaming transcription loop with adaptive windows and VAD |
-| `vad.rs` | Voice Activity Detection (energy-based, ported from whisper.cpp) |
+| `streaming.rs` | Streaming transcription loop with adaptive windows and shared speech gates |
+| `vad.rs` | Tail-silence detector (energy-based, ported from whisper.cpp; not a whole-window speech gate) |
 | `corrections.rs` | Post-processing text corrections |
+| `continuous.rs` | Hands-free mode: utterance segmentation and session-bound delivery |
+| `speaker.rs` | The reply queue: `Speaker` (bounded, generation-stamped), the `Output` port and its rodio adapter |
+| `speech.rs` | The speech port: `Speech`, `SpeechAudio`, `SpeechError`, `SpeechCancel`, `budget_seconds` — no engine named |
+| `speech/pocket/` | The Pocket TTS adapter: `pocket.rs` (the port impl), `bundle.rs` (manifest + streaming state), `tokenizer.rs` (SentencePiece Unigram), `engine.rs` (the four ONNX graphs) |
+| `speech/external.rs` | The bring-your-own-engine adapter: a configured command plus a RIFF/WAVE reader |
+| `speech/assets.rs` | The pinned, allowlisted catalogue and local install rules: `Asset`, `Fetch`, `status`, `promote`, `remove` |
+| `speech/assets_voices.rs` | Generated by `scripts/speech-assets/gen_voice_catalogue.py`. Do not edit. The 150 voices that download one by one |
+| `loudness.rs` | The loudness stage for spoken replies: levelling, gain, limiter, clamp. `speaker.rs` runs it on every reply and on a voice preview |
+| `speech/library.rs` | `SpeechLibrary`: one engine per language, loaded lazily, and the order that keeps installing from racing speaking |
+| `echo.rs` | Acoustic echo cancellation: the `Canceller` port, the `FarEnd` pacing buffer and `EchoGuard` |
+| `echo/webrtc.rs` | The WebRTC AEC3 adapter |
+
+All unqualified files in this table are in `tuic-dictation/src/`. The domain crate has no Tauri or Tokio dependency. `DictationConfig` is defined in the root `config.rs` and re-exported at its previous command path. The root keeps the desktop feature gate, commands, downloads, PTY ports and event emission.
+
+## Screen wake lock while capturing
+
+`holdScreenAwake()` (`src/utils/screenWakeLock.ts`) owns the one Screen Wake Lock of a browser client.
+Browser hands-free (`connectBrowserVoice`, only when the microphone opens) and mobile push-to-talk
+(`useBrowserDictation`) take it at capture start and release it at stop, failure or cancel. The page
+releases it when hidden and requests it again on return while capture runs. The per-device setting
+`tuic-mobile-keep-awake` (mobile Settings, default on) turns it off. A missing API or a refused request
+is logged once and never blocks capture. Safari supports the API from 16.4, but home-screen web apps
+only from iOS 18.4 ([WebKit bug 254545](https://bugs.webkit.org/show_bug.cgi?id=254545)).
+
+## Whisper build cache
+
+`src-tauri/.cargo/config.toml` sets `GGML_CCACHE=OFF` for Cargo builds. The
+`whisper-rs-sys` build script passes this value to whisper.cpp's CMake build, so
+ggml does not add its own sccache or ccache compiler wrapper. That wrapper can
+fail when it invokes an mbx compiler shim. mbx still caches the Cargo build,
+including the resulting `whisper-rs-sys` artifacts. Run
+`cargo check -p tuic-dictation` from `src-tauri/` to verify the native build.
+On macOS, `tuic-dictation/build.rs` also links Xcode's `libclang_rt.osx.a` for
+ggml-metal's availability checks. Keeping this directive in the domain crate
+lets standalone release tests link without building the Tauri root package.
 
 ## Tauri Commands
 
@@ -24,8 +133,34 @@ Local voice-to-text using Whisper with Metal acceleration on macOS. Push-to-talk
 | Command | Description |
 |---------|-------------|
 | `start_dictation()` | Start recording + streaming transcription |
-| `stop_dictation_and_transcribe()` | Stop streaming, final pass on full captured audio, return `TranscribeResponse { text, skip_reason, duration_s, truncated_s }` |
+| `stop_dictation_and_transcribe()` | Stop streaming, apply the hands-free sustained-speech gate to the full capture, then run the final transcription pass. Return `TranscribeResponse { text, skip_reason, duration_s, truncated_s }`. A gate skip keeps its specific reason; only an empty successful pass uses `no speech detected`. |
 | `inject_text(text)` | Apply corrections to text (called after transcription) |
+
+### Hands-free
+
+AI Chat targets use opaque `acp:<connectionId>:<sessionId>` binding ids, not PTY ids. The shared voice sink submits through `AcpClientManager::prompt_with_context`, the same path as typed `acp_session_prompt` input. The existing ACP actor owns queuing and transcript events. The visible chat publishes its effective pinned-or-viewed repository through `acp_session_set_viewed_repo` / `POST /acp/connections/{cid}/sessions/{sid}/viewed-repo`. The voice sink forwards that live attachment-local hint through the existing prompt context parameter, including a cleared hint; it does not change the session cwd or add a prompt queue. Context is discarded on detach or connection replacement. Open permissions hold speech; a removed attachment or settled connection fails the target probe. MCP-over-ACP speech resolves the bound target only when its native channel owns the exact live connection and generation. Terminal voice routing is unchanged.
+
+`get_voice_targets` / `GET /dictation/hands-free/targets` lists attached host-managed chats as `{ id, name, chatSessionId }`. Both docked and detached panels use this host-owned list. Closing a chat tab, changing its selected session, stopping ego or closing its last view releases its voice binding. HTTP disarm runs on a blocking worker so an ACP exit notice cannot block the async executor.
+
+
+| Command | HTTP | Description |
+|---------|------|-------------|
+| `arm_hands_free_dictation(sessionId, owner)` | `POST /dictation/hands-free/arm` | Bind the delivery target and the audio owner, open a generation, return `HandsFreeStatus`. Refused when the target cannot take hands-free input (neither an agent PTY session nor an attached AI Chat). Does **not** open a microphone. |
+| `disarm_hands_free_dictation()` | `POST /dictation/hands-free/disarm` | Disarm the whole mode, drop the transcript that never reached the model, return `HandsFreeDisarmed`. Idempotent. |
+| `get_hands_free_status()` | `GET /dictation/hands-free` | `HandsFreeStatus`. |
+| `get_hands_free_default_notice()` | `GET /dictation/hands-free/default-notice` | The built-in start notice (`MODE_ENTRY_HINT`) as a string, so a settings surface can show it and reset to it without a copy of the text. |
+
+Both transports serialize the same structs, camelCase on the wire:
+`HandsFreeStatus { armed, phase, sessionId, owner, generation, pendingText, holdBackMs, error, deliveredTurns, droppedTurns }` and
+`HandsFreeDisarmed { wasArmed, generation, discardedPending, discardedCapture, status }`.
+`sessionId` and `owner` are bounded at 256 bytes and may not be blank.
+`phase` is one of `disarmed`, `waiting`, `capturing`, `wake_confirmed`, `transcribing`,
+`holding_back`, `delivered`, `error`.
+`deliveredTurns` (bumped in `HandsFree::note_written`) and `droppedTurns`
+(bumped on `TranscriptOutcome::Rejected`) are monotonic for the process and
+never reset on arm; the frontend plays its earcons when one moves between two
+polls (`turnEarcon` in `stores/dictation.ts`), unless `hands_free_earcons`
+(dictation config, default **true**, read by the frontend only) is `false`.
 
 ### Tauri Events
 
@@ -42,13 +177,101 @@ Local voice-to-text using Whisper with Metal acceleration on macOS. Push-to-talk
 | `download_whisper_model(model_name)` | Download model (emits progress events) |
 | `delete_whisper_model(model_name)` | Delete a downloaded model |
 
+### Speech assets
+
+The catalogue is an allowlist: `asset` is an id from it, and an id that is not
+in it is refused before it can become a path or a URL. See "Where the bytes come
+from" below.
+
+| Command | Description |
+|---------|-------------|
+| `get_speech_assets()` | Every installable asset with its state: `absent`, `downloading`, `incomplete` (with the missing files named) or `ready` |
+| `download_speech_asset(asset)` | Download and install, verifying every sha256 (emits `speech-download-progress`) |
+| `cancel_speech_download(asset)` | Abandon a download in flight; succeeds with a note when there was none |
+| `delete_speech_asset(asset)` | Unload the engine, then remove the files |
+
+A voice asset (id `voice-<language>-<voice>`, see "Every voice is an asset of
+its own" below) is accepted by `download_speech_asset`, `cancel_speech_download`
+and `delete_speech_asset`. `get_speech_assets` lists the runtime and the
+languages first, then every catalogue voice (`kind: "voice"`, with `language` as
+the Whisper code and `voice` as the voice name). `choose_voice` accepts a voice
+from `installed_voices`: the shipped voice, a catalogue voice that is fully
+downloaded, or a voice file the user imported. A catalogue voice that is not
+downloaded is refused with a message that says to download it. It does not
+check that the language itself is downloaded; that is reported where the engine
+opens. `available_voices`, which `get_speech_voices` returns, is the same list
+but empty while the language is not fully downloaded: no voice speaks without
+the language's model.
+
+### Voices
+
+`language` is always the Whisper code (`"it"`), as in the rest of this API.
+
+| Command | HTTP | Description |
+|---------|------|-------------|
+| `get_edge_voices(language)` | `GET /dictation/speech/edge-voices?language=` | Retired in FastAF: always answers the error "Edge voices are not available in FastAF" and never reaches the network. Kept so an older client gets that answer rather than a missing route |
+| `get_speech_voices(language)` | `GET /dictation/speech/voices?language=` | The voices the language can speak with now, as `[{ id, source }]` with `source` `"default"`, `"downloaded"` or `"user"`, in that order |
+| `import_speech_voice(language, name, dataBase64)` | `POST /dictation/speech/voices/import` | Store a voice file the user chose (the whole file as base64). Checked before it is stored — see "Voice files the user adds" below. This route alone accepts a body of about 85 MiB (`SPEECH_VOICE_IMPORT_BODY_BYTES`); every other route keeps the 2 MB limit |
+| `delete_speech_voice(language, name)` | `POST /dictation/speech/voices/delete` | Remove a voice file the user imported. A file that is already absent is success |
+| `preview_speech_voice(language, voice, text)` | `POST /dictation/speech/voices/preview` | Speak `text` (at most 200 characters) in `voice` on this machine's speaker, through the configured engine (Pocket; an external command names its own voices and is refused), the same loudness stage and echo tap as a reply. Needs no hands-free conversation and does not change `speech_voice`. Refused, not queued, while a hands-free reply is queued, rendering or playing |
+
+The HTTP body of the import uses the same camelCase key as the IPC argument
+(`dataBase64`).
+
+### Spoken replies
+
+**Hands-free listening and spoken replies are two independent settings** (`hands_free_listening`, `hands_free_spoken_replies`, both default true). Listening on, replies off: speech is captured and the model is told to answer in text. Listening off, replies on (*replies-only*): arming binds the terminal, opens the reply queue and sends the entry hint, but never opens a microphone — the runtime runs against a `MutedVoiceEndpoint` that only reports whether the owner is still there, so a closed terminal or lost client still ends the conversation. Input stays push-to-talk, and the language Whisper detects for a push-to-talk take is recorded on the conversation (`note_push_to_talk_language`) so `auto` can voice a reply. Both off: arming is refused. **Migration:** a config without `hands_free_listening` reads as true, so every existing user keeps today's behaviour (listening on, replies unchanged). `hands_free_listening` is read at arm time only; `HandsFreeStatus.listening` reports what the running conversation does.
+
+**Spoken replies** is on by default. The persisted hands_free_spoken_replies preference applies to the backend device and its armed conversation, shared by mobile and Settings. Turning it off cancels queued speech, refuses new replies before engine access, and makes the arming notice request text replies. Dictation continues.
+
+Available only while hands-free is armed **and** the conversation opened with a
+working voice. Every one of them answers `available: false` with a reason rather
+than failing, so a caller can always ask.
+
+| Command | HTTP | Description |
+|---------|------|-------------|
+| `speak_reply(text, turn?)` | `POST /dictation/speech/speak` | Queue one reply, at most 2000 characters. Returns `SpokenReply { utteranceId, state, error?, turn }` with `state: "queued"` — never `"finished"`. `turn` refuses a reply written for a turn the user has already talked over; omitting it means "now". |
+| `stop_speech()` | `POST /dictation/speech/stop` | Stop now, drop the queue, open a new turn. Returns the `SpeechStatus` afterwards, so the caller learns the new turn. |
+| `pause_speech()` | `POST /dictation/speech/pause` | Hold the reply where it is (`paused: true`, `speaking: false`). No-op with nothing playing. Sticky: the capture loop's own resume never lifts it; a stop still drops it. |
+| `resume_speech()` | `POST /dictation/speech/resume` | Continue a reply the user held. |
+| `get_speech_status(utterance?)` | `GET /dictation/speech/status?utterance=` | `SpeechStatus`. With `utterance` it also carries that one reply's `SpokenReply`; an id this conversation no longer remembers comes back as `state: "unknown"` rather than as an absent field. |
+
+A model does not call these. It calls the `voice` MCP tool, which supplies its
+own identity so the binding can be checked — see "Who may speak" below.
+
+### Investigate gaps in spoken replies
+
+The speech port returns a complete utterance before output starts. Pocket text
+chunks are assembled inside the synthesis adapter; they are not device playback
+chunks. The speaker worker can render the next
+queued utterance while the preceding audio plays. Its 25 ms completion poll is
+not an inter-buffer scheduling timer. `Speaking` means handed to the output,
+not an acoustic start timestamp.
+
+For isolated native timing, build the `speech_gap_probe` example in
+`tuic-dictation` through the authorized native build slot and mbx. It opens no
+microphone or app instance and sends silence to the output while preserving
+synthesized rates and lengths. Default mode records synthesis, append, and
+mixer source-consumption boundaries; `--direct` uses production `DeviceOutput`
+and records append/drain state. Source-consumption times are not DAC or acoustic
+measurements. `--load` adds bounded synthetic load and needs explicit authority
+on a shared machine.
+
+The 2605-53fc measurements and repeat instructions are in
+`src-tauri/crates/tuic-dictation/fixtures/playback-2605/README.md`.
+Pocket did not reproduce a native boundary gap under the measured partial
+load; the report records the limits of that result. Historical capture-loop pause/resume entries are a separate
+candidate mechanism, not proof of a synthesis or device-scheduling defect.
+Do not increase buffers or remove the activation-verdict hold without a failing
+capture that distinguishes those mechanisms.
+
 ### Configuration
 
 | Command | Description |
 |---------|-------------|
 | `get_dictation_status()` | Model status, recording/processing state, and normalized `audio_level` (0–1). The preview polls this shared IPC/HTTP response while recording. |
-| `get_dictation_config()` | Load dictation configuration |
-| `set_dictation_config(config)` | Save dictation configuration |
+| `get_dictation_config()` | Load dictation configuration (includes `rms_threshold` and `no_speech_threshold` — see "Speech gates") |
+| `set_dictation_config(base, config)` | Save dictation configuration (includes `hands_free_hold_back_ms`, `hands_free_activation_phrase`, `hands_free_notify_model`, `hands_free_start_notice`, `hands_free_earcons`, `speech_engine`, `speech_command`, `speech_edge_voice`, `speech_voice`, `speech_volume_db` and `speech_levelling`). Applies the caller's changes to the latest document — see "Configuration persistence" |
 | `get_correction_map()` | Load text correction dictionary |
 | `set_correction_map(map)` | Save text correction dictionary |
 | `list_audio_devices()` | List available audio input devices |
@@ -65,10 +288,19 @@ pub struct DictationState {
     pub streaming: Mutex<Option<StreamingSession>>,
     pub transcriber_arc: Mutex<Option<Arc<dyn Transcriber>>>,
     pub accumulated_partials: Arc<Mutex<String>>,
+    pub hands_free: Mutex<HandsFree>,
+    /// The armed conversation's reply queue and voice. `None` while nothing is
+    /// armed, and while a conversation is armed without a working voice.
+    pub speaker: Mutex<Option<speaker::Armed>>,
 }
 ```
 
 Managed as Tauri state alongside `AppState`.
+
+`speaker` is emptied **first** on both `shutdown` and `disarm_hands_free`, before
+the engine and the runtime go: dropping the queue cancels the reply in flight and
+stops the device, which is what makes disarm revoke speech whether or not the
+model ever acknowledged anything.
 
 ## Transcriber Trait
 
@@ -82,7 +314,9 @@ pub trait Transcriber: Send + Sync {
 
 ## Recording Guard (TOCTOU)
 
-`start_dictation()` uses `compare_exchange(false, true, AcqRel, Acquire)` on the `recording` flag to prevent TOCTOU races from concurrent IPC calls. If two calls arrive simultaneously, only the first succeeds; the second returns `"Already recording"`. A drop guard resets `recording = false` on any early error return.
+`start_dictation(source?)` uses `compare_exchange(false, true, AcqRel, Acquire)` on the `recording` flag to prevent TOCTOU races from concurrent IPC calls. If two calls arrive simultaneously, only the first succeeds; the second returns `"Already recording"`. A drop guard resets `recording = false` on any early error return. A native Fn start passes `source: "fn"`; if the key was released before the command arrived, recording is refused. Other callers use `"hotkey"` or `"ui"`.
+
+The macOS Fn monitor stops the CPAL capture directly on key-up, before the WebView processes the event. Losing window focus synthesizes the release in both Rust and the hotkey hook; other DOM hotkeys also release on blur. If key-up races microphone initialization, the native stop remains pending and closes the stream as soon as it opens. The later stop command joins streaming and transcribes the audio already captured. File logs record Fn edges, stop request and execution timestamps/latency, retained and lost audio seconds, and final/partial character counts without transcript text.
 
 ## Streaming Architecture
 
@@ -98,7 +332,7 @@ start_dictation()
     │       ├── Poll audio buffer (50ms interval)
     │       ├── Accumulate in step_buf
     │       ├── When step_buf >= window size:
-    │       │       ├── VAD check → skip if silence
+    │       │       ├── Skip all-zero window; otherwise use shared speech gates
     │       │       ├── Build window: [keep_tail | step_buf]
     │       │       ├── whisper_full(window)
     │       │       └── Send partial via mpsc::channel
@@ -110,6 +344,9 @@ start_dictation()
     └── Set recording = true
     │
 User releases hotkey
+    │
+    ▼
+Native Fn release stops CPAL immediately (macOS); window blur recovers a missed release
     │
     ▼
 stop_dictation_and_transcribe()  [async]
@@ -129,12 +366,472 @@ Frontend injects text into focus target
 
 ## VAD (Voice Activity Detection)
 
-Ported from whisper.cpp `common.cpp` `vad_simple()`:
+The legacy `vad_simple` helper detects a quiet **tail**, not an entirely silent
+window. Streaming must not use it to discard a complete window: a short phrase
+followed by a pause still contains speech. Streaming skips only all-zero windows
+and passes other audio to the transcriber's shared RMS and speech-confidence
+gates. The complete retained recording still goes through the final pass.
+
+The tail detector is ported from whisper.cpp `common.cpp` `vad_simple()`:
 
 - **Algorithm:** Compare absolute energy of last `last_ms` (1000ms) vs entire buffer
 - **High-pass filter:** First-order RC at 100Hz removes ambient noise (HVAC, fans)
 - **Threshold:** `vad_thold = 0.6` — if `energy_last / energy_all < 0.6`, silence detected
 - **Relative:** Microphone gain doesn't affect detection (ratio-based)
+
+## Hands-free mode (`continuous.rs`)
+
+Push-to-talk is unchanged by this module and does not use it. Hands-free is a
+separate mode with two independent state machines, neither of which reads a
+clock — the caller supplies frame durations and `now_ms`.
+
+**`Segmenter`** cuts the capture stream into utterances over 20 ms frames:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `pre_roll_ms` | 300 | audio kept ahead of the first speech frame, so a soft first syllable survives |
+| `trailing_silence_ms` | 1 500 | quiet interval that ends an utterance |
+| `min_speech_ms` | 200 | below this the utterance is discarded, not sent |
+| `max_utterance_ms` | 30 000 | hard cap; a monologue is cut rather than buffered without limit |
+| `activity_rms` | 0.01 | frame RMS at or above which a frame counts as speech |
+
+While nobody speaks the only retained audio is the bounded pre-roll ring, so an
+armed microphone in a quiet room holds constant memory and runs no inference.
+`vad_simple` is **not** used here: it answers "is the tail quiet", which is a
+different question from "where does this utterance end".
+
+**`HandsFree`** owns the mode. Arming binds a target session **and** an audio
+owner and opens a generation. A focus change is not an input to this machine at
+all, which is what makes a redirected delivery impossible rather than merely
+unlikely. Every asynchronous result carries the generation it was captured
+under; one that no longer matches is rejected as stale.
+
+A transcript is held back for a visible interval **before** it is written, so
+an unintended turn can be stopped while nothing has been typed yet. A manual abort
+disarms the whole mode — pending capture, transcription and the held-back
+transcript are discarded, and nothing re-arms by itself. Target closure, audio
+owner disconnect and device failure disarm the same way.
+
+**Delivery is a direct write, not the Compose queue.** `VoiceSink` is the only
+exit, and its one production implementation is `pty::write_voice_turn`. It
+types the turn into the bound agent's composer at once, **even while the agent
+is busy** — the same as a line the user types by hand into a working Claude
+Code, which the agent queues or takes mid-turn itself. The Compose queue is for
+something else ("one message, let the agent work, then the next"), so a voice
+turn never enters it and never reorders it. Parking speech there until idle
+measured a median delay of 103 s, max 594 s.
+
+The write is the framed path every injection uses (`run_claimed_injection`:
+Ctrl-U, the text, then a separate Enter), never raw text plus `\r`. An idle
+agent is claimed IDLE→BUSY like any injection, without the confirmed-idle
+requirement. A busy agent is claimed without touching its BUSY atom, and a
+write that does not start never reports the agent idle.
+
+Two holds remain, and they are the reason this is not a raw write:
+
+| Hold (`pty::VoiceHold`) | Why |
+|---|---|
+| `Question` | a confident question or permission dialog owns the composer; speech must never answer it |
+| `Draft` | the user has text in the composer; the opening Ctrl-U would erase it |
+| `InFlight` | another write holds the composer, or an earlier one is uncertain |
+| `WriteNotStarted` | the PTY refused the first byte |
+
+A held turn stays **in the mode**: `pendingText` still shows it, the phase is
+`holding_back`, and `deliver_due` retries it on every tick. Speech that
+arrives meanwhile joins it, so turns that were held reach the model as one
+message, in spoken order, with a line break between phrases. The PTY sink wraps
+the multiline turn in bracketed paste (`ESC[200~`, LF-separated text,
+`ESC[201~`), then sends one separate CR to submit. The embedded LF is composer
+content, not a submit key. Transcript trimming prevents a trailing newline from
+adding a blank line between phrases. A disarm drops a held turn like one still inside its
+hold-back (`discardedPending`). A target that cannot take hands-free input is
+refused at `arm` and at the sink; it stays unavailable, with no fallback.
+
+The shipping segmenter waits for 1.5 s of silence before closing speech, so a
+one-second breath stays in one transcription. With an activation phrase, the
+effective hold-back is at least 5 s even if the saved setting is shorter.
+Speech that starts before this deadline keeps the pending turn in the mode
+until its transcription can be appended. The 15 s activation window still
+decides whether a later, separate turn needs the phrase again.
+
+Each attempt is logged at INFO with the session: `Hands-free turn typed now`,
+or `Hands-free turn held` with the reason — a hold once, not once per tick.
+
+### The runtime that drives it
+
+The state machines above are inert. `spawn_runtime` starts the thread that feeds
+them: it wakes every `POLL_INTERVAL_MS` (50 ms) and calls `tick`, which is the
+whole capture -> segment -> transcribe -> hold-back -> write path in one
+clock-free function. `tick` takes `now_ms` from the driver, so every test drives
+the real production path with a fake clock instead of sleeping.
+
+One tick, in order:
+
+1. read the binding; if the mode is not armed, do nothing;
+2. `TargetProbe::accepts` — a session that has gone away disarms with
+   `TargetClosed`;
+3. `VoiceEndpoint::connected` — a released audio owner disarms with
+   `OwnerDisconnected`;
+4. `VoiceEndpoint::drain` — an error disarms with `DeviceFailed` carrying the
+   device's own message, and a stream that returns no samples at all for
+   `DEVICE_SILENCE_TIMEOUT_MS` (5 s) disarms the same way. A silent *room* still
+   delivers samples, so this catches a dead device rather than a quiet one;
+5. push the samples through the `Segmenter`;
+6. for each closed utterance: mark transcribing, read the generation, **release
+   the mode lock**, transcribe, re-acquire and offer the transcript. The lock is
+   deliberately not held across inference, which is what lets a manual abort
+   land mid-transcription and reject the result that arrives after it;
+7. `deliver_due` — write a held start notice first, else whatever the
+   hold-back has now cleared; a held write goes back into the mode.
+
+Three details that are load-bearing rather than incidental:
+
+- **Never lock the mode in a `match` scrutinee.** `parking_lot` is not
+  reentrant and a temporary in the scrutinee lives for the whole `match`, so
+  `match deliver_due(&mut mode.lock(), ..)` deadlocks the runtime — and every
+  status poll behind it — the first time the sink refuses a delivery. Bind the
+  result in its own statement.
+- A refused delivery is **not** a disarm: `note_send_failed` records the message
+  and returns the mode to `Waiting`, still armed.
+- `HandsFreeRuntime` stops and joins its thread on `Drop`, so dropping it out of
+  `DictationState` is the only shutdown handshake there is.
+
+### Two endpoints, and no fallback between them (832-e730)
+
+`VoiceEndpoint` is the port: a microphone plus a recogniser. There are two
+adapters, and which one `open_endpoint` builds is decided by the owner name
+alone:
+
+| Owner | Adapter | Microphone | Speaker |
+|---|---|---|---|
+| `DESKTOP_OWNER` (`"desktop"`) | `DesktopVoiceEndpoint` (`commands.rs`) | `cpal` on this machine | `DeviceOutput` on this machine |
+| anything else | `BrowserVoiceEndpoint` (`browser.rs`) | the client's socket | `BrowserOutput` on the same socket |
+
+**Neither direction falls back.** An owner with no registered socket is refused
+with `No client is connected for audio owner '<owner>'` rather than handed the
+local microphone, and the desktop owner ignores a connected browser client even
+when one exists. A silent fallback here is not a degraded experience, it is a
+laptop user being listened to — or answered out loud — by the machine running
+FastAF, in another room or another building. Both directions have a test,
+with the desktop case as the negative control
+(`a_desktop_conversation_ignores_a_connected_browser_client`).
+
+The desktop adapter shares push-to-talk's transcriber `Arc` (loading a second
+multi-gigabyte Whisper model would be absurd) and its permission and model
+helpers, but **not** its capture. `cpal::Stream` is `!Send`, so the capture stays
+in `DictationState::hands_free_audio` — a slot distinct from `audio`, which is
+push-to-talk's — and only the sample buffer handle crosses to the worker thread.
+The two modes therefore cannot arm or stop each other. Because the runtime thread
+cannot drop a `!Send` stream, a runtime that disarmed itself is reaped on the
+next `hands_free_status` poll, which is where the device is actually released.
+
+`DictationState::shutdown` clears the owner flag and disarms with
+`OwnerDisconnected` itself before dropping the runtime, rather than relying on
+the thread noticing — the thread may already be parked on its way out.
+
+### The browser endpoint (`browser.rs`, 832-e730)
+
+A browser tab has a microphone and a speaker; what it does not have is a way to
+be one. `BrowserEndpoints` is the registry that closes that gap: a `DashMap` of
+owner id to `Arc<BrowserLink>`, where a link is one client's audio socket seen
+from the conversation's side — a bounded capture queue, a broadcast channel for
+playback, an alive flag, and the deadline of whatever is currently speaking.
+`GET /dictation/hands-free/audio?owner=<id>` (`mcp_http/dictation_routes.rs`)
+registers one and serves it; the frontend half is `src/utils/browserVoice.ts`.
+
+**iPhone Now Playing.** The browser keeps `navigator.audioSession.type` at
+`play-and-record` and resumes its capture context in the arming gesture, retaining
+simultaneous microphone and reply playback. WebKit's
+[`AudioContext::isNowPlayingEligible`](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/Modules/webaudio/AudioContext.cpp)
+checks a connected destination and the explicit `playback` or `play-and-record`
+category. This explains eligibility even before a reply; there is no HTML audio
+element in this path. Boss observed music controls on iPhone; attribution to this
+WebKit path is source-based inference until the device build is inspected.
+Neither the [Audio Session](https://www.w3.org/TR/audio-session/) nor
+[Media Session](https://www.w3.org/TR/mediasession/) web API exposes a switch to
+hide Now Playing while keeping these audio semantics. Changing categories while
+listening is not a proven safe fix for reply volume or background behavior.
+
+Instead the dictation store uses Media Session metadata **FastAF hands-free**
+and the [custom Now Playing actions documented by Apple](https://developer.apple.com/videos/play/wwdc2021/10189/).
+Play/Pause use the pill's reply resume/pause commands, leaving capture active;
+Stop disarms the conversation, stopping capture and dropping replies. Backend
+speech state updates the displayed playback state. Ending hands-free clears the
+metadata, handlers and explicit playback state; iOS decides when its card disappears.
+Real iPhone lock-screen rendering, action delivery and media volume still need
+the device check in `to-test.md`.
+
+**A link outlives its socket, and that is the whole design.** The socket handler
+owns the `Arc` it registered and drops it on close, but the conversation holds
+its own clone through `BrowserVoiceEndpoint`, so a tab that vanishes mid-turn
+leaves a link that answers `connected() == false` instead of a dangling lookup.
+`tick` then disarms with `OwnerDisconnected` on exactly the path a lost desktop
+device takes — no second shutdown route, no special case
+(`a_browser_client_that_closed_its_socket_disarms_the_conversation_it_owned`
+drives the real `tick` to prove it).
+
+**Eviction is by identity, not by key.** `disconnect(owner, link)` uses
+`remove_if(owner, |_, current| Arc::ptr_eq(current, link))`, because a reconnect
+under the same owner replaces the entry: without the pointer check, the *old*
+socket's late close would evict its successor and disarm a conversation that had
+just been re-established. `connect` deliberately disconnects the link it
+replaced, so the conversation armed against the old socket disarms rather than
+silently migrating to whoever reconnected under that name.
+
+**Capture is bounded and drops the oldest.** `MAX_CAPTURE_SAMPLES` is 60 s at
+16 kHz. A client that ships audio nobody drains — armed, then the runtime dies —
+must not grow without limit, and when the drain resumes the newest audio is what
+matters: the user is still talking now.
+
+**`is_speaking` has no device to ask.** A `cpal` stream knows whether it is still
+playing; a browser cannot be interrogated, only told. `BrowserOutput` therefore
+treats the rendered duration as the authority (`speaking_until`), takes the
+client's `playback-ended` ack as an early-out, and reports `false` outright for a
+dead link. Without the last of those, a closed tab would strand a reply in
+`Speaking` for ever and barge-in would never resolve.
+
+**The frontend decides nothing.** `browserVoice.ts` captures 1024-sample frames
+at 16 kHz and ships them, including silence — whether an utterance ended is the
+`Segmenter`'s call in Rust, and a frontend that dropped quiet frames would be a
+second segmenter that disagreed with the first one only on browsers. That is
+asserted directly (`sends silence too, rather than deciding the user stopped
+talking`), because it is the property that is invisible once it breaks.
+
+Since 832-e730 the Dictation settings page renders in browser mode. Two groups stay behind
+`isTauri()`: the global hotkey, which the browser cannot register, and the
+microphone device list, which enumerates the *server's* devices — offering a
+browser user a device in another building is worse than offering nothing.
+
+### Early wake acknowledgement
+
+`waiting` and VAD-only `capturing` both display **Listening**. With a configured
+activation phrase, the shared continuous runtime recognizes prefixes of the open
+utterance at one-second audio intervals, up to four seconds. A recognized
+leading phrase changes the phase to `wake_confirmed` (**Go ahead**) while the
+utterance is still open. Recognition uses the same endpoint, model, language,
+speech gates and phrase matcher on desktop and browser capture. No extra model
+or parallel inference worker is created.
+
+There are at most four prefix passes per utterance, each borrowing at most
+64,000 samples (256 KB at 16 kHz mono f32). Backlogged cadence points are skipped
+rather than queued. Idle capture, an unset phrase and an already confirmed wake
+run no prefix inference. A failed prefix is best effort; final transcription
+still owns error reporting. Slow inference can delay the next capture-loop tick;
+this is not a dedicated keyword spotter or a fixed-latency guarantee.
+
+The acknowledgement does not open the activation window, schedule delivery or
+change the spoken language. The final transcript still passes through
+`Activation::admit`, including when it revises a matching partial. Closing the
+utterance changes the phase to **Transcribing**. A disarm or generation change
+invalidates an in-flight prefix, and an old capture cannot adopt a new arm.
+Successful acknowledgement logs `prefix_ms` and `inference_ms`; these are probe
+measurements, not a measured acoustic wake-to-display latency.
+
+### The activation phrase
+
+`hands_free_activation_phrase` is optional. Empty, every recognised utterance is
+a turn. Set, it must open each new turn, and three properties are the contract:
+
+- **It is local.** Whisper runs on this machine on every utterance *before* the
+  gate sees anything — the gate reads text, not audio. A phrase does not reduce
+  what is recognised; it reduces what is submitted.
+- **It gates new model input, never the microphone.** The match sits in
+  `HandsFree::accept_transcript`, after transcription and before the send slot.
+  A rejected transcript never enters that slot, and `poll_send` is the only
+  thing `deliver_due` can hand to the sink — which is the module's only
+  exit. "It never reaches PTY, ACP or MCP" is therefore structural, not a check
+  repeated per call site.
+- **It bounds a conversation, not a sentence.** One accepted turn opens
+  `ACTIVATION_WINDOW_MS` (15s) in which follow-ups need no phrase. Every
+  accepted turn restarts it; every disarm — manual, target closed, owner
+  disconnected, capture failure — closes it, so a fresh arm is always gated.
+
+Matching is on **complete leading words**, where a word is a maximal run of
+alphanumeric characters. Both the setting and the transcript are lowercased and
+accent-folded (`fold_word`: `à á â … → a`, `ç → c`, `ñ → n`), so case,
+punctuation and accents never decide a match — `"Attività, Tuic!"` matches
+`attività tuic`, and `"Sentì, Mac."` matches `senti mac`. Two spellings Whisper
+invents are tolerated, and nothing else:
+
+- **Joined words.** One heard word may be several phrase words run together, in
+  order — `Sentimac` matches `senti mac`. `Sentimento` does not.
+- **One extra trailing letter** on a phrase word of three or more letters —
+  `Mack` matches `mac`. The tolerance is one-sided on purpose: a shorter word or
+  a different last letter is how ordinary speech starts (`Senti, ma…`,
+  `Senti mai…`, `Senti Max…` are a person being addressed), so none of those
+  match. There is no general edit distance.
+
+A longer word that merely starts with the phrase is otherwise a different word
+rather than a prefix — `Tuicommander` does not match `tuic`. A
+phrase heard mid-sentence does not activate: it must lead. The phrase is
+stripped from what is submitted, including when it is repeated inside an open
+window, so a model never reads it. Spoken alone, it opens the window and submits
+nothing.
+
+The window is anchored on **acceptance, not on the model's reply**: this module
+writes and observes nothing coming back, which is what keeps the sink its only
+exit. A user who waits out a long answer will need the phrase again.
+Story 816-cbbf adds spoken playback and is the first caller that will know when
+an answer ended; the anchor is worth revisiting there. Interrupting playback is
+that story's work and belongs *upstream* of this gate — stopping a speaker is
+not new model input — but whatever stops playback, the words that follow are new
+model input and stay gated whenever a phrase is configured.
+
+### Telling the model the mode changed (821-842a)
+
+A model cannot see a microphone open. The `voice` tool is listed whether or not
+anything is armed, and a model with no reason to speak writes text — so without
+a notice the feature ships a voice nobody ever hears. Two constants in
+`continuous.rs` carry it:
+
+| Constant | Sent when | Says |
+|---|---|---|
+| `MODE_ENTRY_HINT` | `arm_hands_free_with`, before the runtime starts | what arrives from now on was spoken, and the `voice` tool can answer out loud |
+| `MODE_EXIT_HINT` | both disarm paths | the tool can no longer speak here; reply as text |
+
+`hands_free_notify_model` (default **true**) controls both. Off sends neither
+and changes nothing else — in particular, a disarm still revokes speech, because
+that is a fact about this machine rather than a message to a model.
+
+`hands_free_start_notice` (default empty) replaces the start notice with the
+user's own text; empty or blank means `MODE_ENTRY_HINT`. It is read at arm time
+and passed through `entry_hint_text`, which folds line breaks and whitespace
+runs to single spaces — the settings field is multiline, and the sink submits
+on a newline. The reply language is **not** part of the user's text:
+`deliver_entry_hint` appends `Reply in <Name>.` by code when the dictation
+setting names a language, so a custom notice cannot drop it. Under `auto` the
+notice names nothing and the first spoken turn carries the language instead —
+see "The requirement travels in the spoken entry". The exit notice is not
+configurable.
+
+Five rules, and each of them is a test:
+
+- **The sink, like every spoken turn.** `deliver_entry_hint` goes through
+  `VoiceSink::write`, so the notice is typed at once — into a busy agent too —
+  and lands in the session the mode bound to rather than in whatever tab the
+  user has since focused. It is one line, for the reason `compose_entry` gives:
+  the sink types an entry and submits it, and a newline submits half of it.
+- **A held notice waits in the mode, first.** A dialog or a draft holds it as
+  `EntryHint::Pending`; `deliver_due` retries it on every tick **before** any
+  spoken turn, so no turn reaches the model ahead of the notice it depends on.
+  A disarm drops it with the mode. It does **not** move the phase: the phase
+  describes what the user's speech is doing, and nothing has been said.
+- **The exit notice is owed only to a model that read the entry notice.** The
+  evidence is `Disarmed::entry_hint_written`: a notice still held at disarm was
+  never typed, so the model never read it, and an exit notice after it would be
+  the only thing it ever heard about a mode it never had. A typed notice cannot
+  be retracted, so the model believes it can speak and has to be told
+  otherwise. That is `deliver_exit_hint`, and it is why a rapid arm/disarm
+  leaves no contradictory pair. The exit notice gets one attempt: the mode is
+  gone, so a dialog or a draft on screen at disarm drops it with a warning log.
+- **Driven by what this arm sent, never by the setting as it now reads.** A user
+  who turns the notices off mid-conversation has changed what the *next* arm
+  says; a model already holding "you can answer out loud" still gets its exit
+  notice. `disarm_hands_free` therefore never re-reads the config.
+- **Both disarm paths, not just the user's.** `report_exit_hint` is called from
+  `disarm_hands_free` and from the runtime thread's `Tick::Disarmed` arm, so a
+  closed target, a lost owner and a dead microphone all end the model's
+  expectation too. A target that has gone away refuses the write; that is
+  reported, not swallowed — there is nobody left to tell.
+
+A refused entry notice does not fail the arm. The microphone works and ordinary
+turns may still land; the reason lands in `HandsFreeStatus::error` via
+`note_send_failed`, and the notice was never typed, so no exit notice follows
+either.
+
+Push-to-talk shares none of this. It never calls `arm_hands_free`, so it opens
+no VAD runtime, reads no activation phrase, makes no speech available and sends
+no notice — asserted at the surface in
+`push_to_talk_alone_arms_nothing_and_tells_the_model_nothing`.
+
+### Configuration persistence
+
+`set_dictation_config` accepts the loaded `base` and edited `config`, then
+applies only their delta to the latest file under its lock. Every hands-free
+field carries `#[serde(default)]` so a config written before the field existed
+still loads. A caller must keep the loaded snapshot and override only the
+fields it changed. A recovered malformed document is rewritten from its
+salvaged values as before; ordinary saves refuse to overwrite a newly corrupt
+file. `dictationStore.saveConfig` reads the stored config and overrides only the
+field in the request, and
+`src/__tests__/stores/dictation.test.ts` drives that field list off this crate's
+struct so a newly added field is covered by whoever adds it.
+
+## Speech gates
+
+Whisper transcribes whatever it is given. On room noise it invents subtitle
+boilerplate. Before the final push-to-talk pass, the captured audio goes through
+the hands-free `Segmenter` with its 20 ms frame and `min_speech_ms` duration rule.
+Push-to-talk takes the frame activity floor from the configured transcription
+`rms_threshold`; hands-free retains its own `activity_rms` default. A short
+burst or capture below that floor returns `no sustained speech` without invoking
+Whisper; an utterance still open at key release counts. Three further gates in
+`transcribe()` decide whether the admitted audio is speech at all. They run in
+order and each returns a `skip_reason` the push-to-talk stop
+response, store and status show verbatim.
+
+| Gate | Rejects | Tunable |
+|---|---|---|
+| RMS floor | audio quieter than `rms_threshold` — never reaches Whisper | yes |
+| `no_speech_probability` | the segments Whisper itself scores above `no_speech_threshold` | yes |
+| `is_hallucination` | known subtitle boilerplate and bare thanks | no |
+
+**The two thresholds are settings, not constants** (`VoiceGates`, read from
+`DictationConfig` on every start). The right RMS floor depends on the room and
+the microphone: a headset a metre away picks up enough noise to clear a fixed
+floor, which is how an empty room ends up transcribed. Settings > Dictation
+exposes both against a live meter — see the user guide.
+
+`no_speech_probability()` is read per segment and **filters per segment**
+(`filter_speech_segments`): a segment above the threshold is dropped, the rest
+are kept, and only a run where every segment was rejected skips the whole
+transcript. It generalises where a phrase list cannot, because it rejects
+whatever the model invented rather than only the wordings someone remembered to
+add to a list. Note that whisper.cpp does not implement the `no_speech_thold`
+*parameter*, so the value must be compared after the run, not set on
+`FullParams`.
+
+The gate used to take the worst score across the run and discard everything on
+it. That was harmless while a run was one segment, and wrong as soon as
+recordings longer than one window started decoding into many: an ordinary pause
+inside a long dictation scores as no-speech, so one silent segment threw away a
+transcript that was almost entirely speech.
+
+**`is_hallucination` matches per sentence, not on the whole trimmed string.**
+The short-phrase list (`HALLUCINATION_EXACT`) holds words a user genuinely
+dictates, so it only fires when *every* sentence is boilerplate — `"Grazie."`
+is filtered, `"Grazie. Ora committa e pusha."` is not. Matching the trimmed
+string as one unit missed the repeated form: streaming windows are 1.5–3 s and
+produce one bare `"Grazie."`, but the final pass runs on the whole buffer, where
+Whisper loops into `"Grazie. Grazie."` — the form that actually reached the
+terminal. A bare `"Grazie a tutti."` is also filtered, while an instruction
+containing those words survives. `HALLUCINATION_SUBSTRING` holds channel
+boilerplate nobody dictates, so one occurrence anywhere condemns the transcript.
+
+## Decode flags depend on audio length
+
+`decode_flags_for` picks `single_segment` and `no_timestamps` from the sample
+count, split at `SINGLE_WINDOW_SAMPLES` (30 s — one whisper encoder window).
+Both flags are set at or under one window and cleared above it.
+
+`no_timestamps` suppresses every timestamp token outright (`whisper.cpp:6191`),
+so `has_ts` never becomes true. With either flag set, the end of a segment forces
+the window shift to a whole chunk (`whisper.cpp:7381`, `seek_delta =
+100*WHISPER_CHUNK_SIZE`) and `seek += seek_delta` (`whisper.cpp:7734`) advances a
+full 30 s no matter how much the decoder actually reached. An early end-of-text
+token or the 220-token decode limit (`whisper.cpp:7184`) then drops the rest of
+that window permanently — with timestamps on, `seek` would instead advance only
+to the last decoded timestamp and the remainder would be re-decoded.
+
+A 127.7 s dictation came back with 1175 characters against 1442 from the
+streaming partials before this split existed. At or under one window the loss
+cannot happen, because the loop breaks once `seek` reaches the end of the audio
+(`whisper.cpp:7008`) — which is why short dictation keeps both flags and the
+hallucination suppression they were added for (whisper.cpp issue 1724).
+
+Streaming windows are 1.5–3 s, so they keep the flags by the same rule; a
+`MAX_BUFFER_S` forced flush is the one window that can cross the line, and
+clearing the flags there is correct for the same reason.
 
 ## Recording cap
 
@@ -150,11 +847,15 @@ memmove is rare), and once by `cap_finished_recording` in
 joined result. A slow final whisper window makes that tail long, so without the
 second pass the buffer handed to the final transcription can exceed the cap.
 
-The trim is reported, never silent: both passes count the dropped samples,
+The CPAL callback's pending queue also keeps up to 300 s, instead of silently
+discarding the first samples after 30 s while a streaming Whisper pass is busy.
+Its cap and any real-time lock-contention losses are counted with the streaming
+losses. The trim is reported, never silent: both passes count the dropped samples,
 `StreamingSession::stop()` returns the loop's count in `StreamingAudio`, and the
 command converts the sum to `truncated_s`. `useDictation` turns a non-zero value
-into a status message instead of "Ready", so a transcription missing its
-beginning cannot read as a complete one.
+into a status message instead of "Ready", so a transcription missing audio
+cannot read as a complete one. Losses from lock contention may be gaps within
+the recording rather than a prefix.
 
 `StreamingAudio.interrupted` marks a panicked streaming thread. Its audio is
 gone, so what remains in the capture buffer is a fragment; the command returns
@@ -249,7 +950,7 @@ Stored in dictation config. Applied after transcription, before injecting into t
 
 ## Microphone Permission Detection
 
-**Module:** `src-tauri/src/dictation/permission.rs`
+**Module:** `src-tauri/crates/tuic-dictation/src/permission.rs`
 
 On macOS, microphone access is gated by the TCC (Transparency, Consent, and Control) framework. The `MicPermission` enum tracks the current state:
 
@@ -267,3 +968,1062 @@ On macOS, microphone access is gated by the TCC (Transparency, Consent, and Cont
 **Platform behavior:**
 - **macOS:** Full TCC integration via AVFoundation
 - **Linux/Windows:** Always returns `Authorized` (no TCC framework)
+
+## Speech engines
+
+Two engines sit behind the `Speech` port; `speech_engine` picks one: `pocket`
+(the default, on-device) or `external`. No reply text ever goes to an online
+speech service. Anything but an explicit `external` speaks with Pocket,
+including a value left by an older configuration. Echo cancellation, hush, loudness and the stale-generation checks live
+in `speaker.rs` and `echo.rs` and see only `SpeechAudio`, so they behave the same
+for every engine.
+
+On desktop the Dictation page does not show Spoken replies or its engine
+selector at all: FastAF's voice agent (Kokoro) speaks there. The engines below
+serve upstream's hands-free conversation in browser mode.
+
+**Which engine a configuration means.** `get_dictation_config` never returns
+an empty `speech_engine`. While the file has none, the answer is derived
+(`legacy_speech_engine` in `dictation/commands.rs`): a configured
+`speech_command` is `external`; a chosen `speech_voice` or a Pocket runtime on
+disk is `pocket`; everything else, including a fresh install, is `pocket` too.
+The settings panel writes the key as soon as the user picks an engine in the
+Expert section, after which the derivation is never consulted. A stored `edge`
+resolves to `pocket` (`with_resolved_engine`), and `save_dictation_config`
+refuses a config that names `edge`. `speech_edge_voice` is a leftover field kept so older
+files load: it has no `x-choice-resolver`, so All settings offers no choices
+for it and a refresh of its choices is refused as `unavailable`.
+
+## Pocket TTS speech synthesis (`speech/pocket/`)
+
+This engine is selected with `speech_engine: "pocket"` (Expert section of the
+settings).
+
+Spoken replies are rendered locally by [Pocket TTS](https://github.com/kyutai-labs/pocket-tts),
+run in-process over ONNX Runtime. There is no Python, no external service, and
+no fallback to either.
+
+Kokoro was here first and was removed. Its Italian voices graded C, Boss
+rejected all twelve evaluation samples, and it dragged GPL-3.0 espeak-ng into
+an Apache-2.0 repository. That is the reason `speech.rs` is a port and names
+no engine: the engine behind it has already changed once.
+
+### Nothing of the model is in this repository
+
+A bundle is a directory downloaded at runtime under the dictation models
+directory, not a build artifact:
+
+```text
+<config dir>/models/speech/
+  onnxruntime/libonnxruntime.dylib     the runtime library, also downloaded
+  italian/
+    bundle.json  tokenizer.model  *.onnx
+    voices/giovanni.safetensors        the voice the language ships with
+  voices/italian/jean.safetensors      a voice downloaded on its own
+```
+
+The weights are Kyutai's, CC-BY-4.0, attributed in `THIRD_PARTY_NOTICES.md`.
+Every absence is a typed `SpeechError::ModelUnavailable` naming the missing
+file, never a panic and never silence.
+
+### Where the bytes come from (`speech/assets.rs`)
+
+The catalogue is Rust, not a JSON file beside the binary, and that is the whole
+security property: a manifest the installer could rewrite is not an allowlist.
+Every file is named by a URL pinned to an immutable revision and checked against
+a sha256 written in the source, so an upstream that is compromised — or merely
+re-tagged — produces a refused install rather than a different model.
+
+| Part | Published by | Source | Pinned to |
+|---|---|---|---|
+| ONNX graphs, tokenizer, `bundle.json` | `KevinAHM/pocket-tts-onnx` (exports of Kyutai's weights) | Hugging Face | commit `58a6d00c` |
+| Speaker embeddings (voices) | Kyutai (`kyutai/pocket-tts-without-voice-cloning`) | Hugging Face | commit `8843db76`; French (`french_24l`) commit `00eac05e` |
+| onnxruntime | Microsoft | GitHub release | `v1.23.0` |
+
+The voices do not come from `kyutai/pocket-tts`: that repository is **gated**,
+because it ships the weights that clone a voice from a sample, so an application
+cannot download from it on a user's behalf. Kyutai's
+`kyutai/pocket-tts-without-voice-cloning` is public, leaves those weights out,
+and carries the same speaker embeddings byte for byte (same sha256). Only the
+preset voices are used, so nothing is re-hosted.
+
+**onnxruntime is pinned at 1.23.0 rather than the newest release.** 1.24 dropped
+the macOS Intel and universal2 builds and FastAF still ships for Intel
+Macs. `ort` 2.0.0-rc.13 needs API version 17 or later and 1.23 provides 23, so
+nothing is given up.
+
+Microsoft ships a whole SDK, of which one shared library is wanted. The member
+is found by rule, not by a hardcoded path: a regular file under a `lib/`
+component whose name starts with the platform stem and a dot. The trailing dot
+is what excludes `libonnxruntime_providers_shared.so`; the `lib/` component is
+what excludes `pkgconfig/libonnxruntime.pc`; "regular file" is what excludes the
+symlinks Linux uses for the unversioned name. macOS ships both
+`libonnxruntime.dylib` and `libonnxruntime.1.23.0.dylib` as real files, so an
+exact name is preferred rather than required — and two candidates with no exact
+match are refused rather than guessed between.
+
+### Every voice is an asset of its own
+
+Each of the six languages has 26 Kyutai voices. One voice ships in the language
+payload: giovanni (Italian), alba (English), estelle (French), juergen
+(German), rafael (Portuguese) and lola (Spanish). The other 25 per language are
+separate downloads. The user downloads only the voices they want. That makes
+150 voice assets, in `VOICES` (`speech/assets_voices.rs`). They are not in
+`CATALOGUE`, because a voice is chosen within its language and is not a row of
+its own. `find` looks in `CATALOGUE` first, then in `VOICES`.
+
+**Where a downloaded voice goes.** `Kind::Voice { language, voice }` installs at
+`<speech>/voices/<language>/<voice>.safetensors`. This directory is outside the
+language directory on purpose. `promote` replaces a language directory whole,
+so a voice kept inside it would be deleted when the user reinstalls or updates
+the language. A voice stages into its own `.staging/<id>/` and `promote_voice`
+moves one file into place. It never renames a directory, because that would
+replace the other downloaded voices of the language. `remove` of a voice deletes
+its file only.
+
+`pocket::voice_path` looks in three places, in this order:
+
+1. `<language>/voices/<voice>.safetensors` (the shipped voice). A shipped voice
+   wins over a download with the same name.
+2. `<speech>/voices/<language>/<voice>.safetensors` (a downloaded voice). A voice
+   downloaded for another language is not found.
+3. `<speech>/user-voices/<language>/<voice>.safetensors` (a voice file the user
+   imported).
+
+**Voice files the user adds.** FastAF does not make voices. A user who
+wants another voice makes a `.safetensors` voice file with other tools and
+imports it into one language. `import_speech_voice` stores it at
+`<speech>/user-voices/<language>/<name>.safetensors`, outside the language
+directory, so a reinstall of the language keeps it. Before it writes anything,
+`library::import_speech_voice` checks, in this order:
+
+1. The name uses only letters, digits, `-` and `_`, with at most 32 characters
+   (`MAX_USER_VOICE_NAME`), the same rule `voice_path` applies.
+2. The name is not the name of a catalogue voice of that language.
+3. The file is at most 64 MB (`MAX_USER_VOICE_BYTES`), more than the largest
+   24-layer voice.
+4. The language is downloaded, and the file fits its model:
+   `PocketSpeech::validate_voice` parses it with `VoiceState::from_bytes` and
+   `bundle::check_voice` compares every tensor with the language's state
+   manifest. A tensor the model has no place for, or a shape larger than its
+   slot, is refused. This refuses a 24-layer voice in a 6-layer language, and a
+   `french_24l` voice from `8843db76` (it carries `self_attn/pad`), which would
+   otherwise stop after one frame.
+
+A file that fails a check is refused with the reason and is never stored. A
+file that passes is written beside its final name and renamed into place, so a
+failed write never leaves half a voice in the list.
+
+**Two revisions, and why French stays behind.** The voices of five languages
+are pinned at `kyutai/pocket-tts-without-voice-cloning` commit `8843db76`.
+French (`french_24l`) is pinned at commit `00eac05e`. The French voices at
+`8843db76` have 72 tensor keys: they add a `self_attn/pad` key per layer and a
+KV cache for a newer model than the ONNX export at `58a6d00c`. With that export,
+every one of them stops on the first frame and renders 0.72 s, in this engine
+and in the reference runtime. The French voices at `00eac05e` render normally.
+The macro `voice_revision!` in `assets.rs` gives each language its revision.
+The test `every_voice_url_carries_its_languages_revision` holds every voice URL,
+default voices included, to that revision.
+
+**The catalogue is generated, never typed.** `scripts/speech-assets/gen_voice_catalogue.py`
+reads the sha256 and the size of each voice from Hugging Face (`paths-info`, the
+LFS object id) at the pinned revision, and writes `speech/assets_voices.rs` with
+a do-not-edit header. It also checks that the default voice of each language in
+`assets.rs` has the same revision, sha256 and size that Hugging Face reports,
+and fails if it does not. Run it with `uv run scripts/speech-assets/gen_voice_catalogue.py`.
+
+**The gate comes before the catalogue.** Do not add a voice that
+`scripts/speech-assets/verify_voices.py` has not rendered with the same
+revisions. For each language and each of its 26 voices, the script renders one
+sentence in that language with the reference runtime of the ONNX export at
+`58a6d00c` (downloaded at run time, not copied into this repository). A voice
+passes when its audio is not empty, contains no NaN and no infinity, and lasts
+0.5x to 3x as long as the language's default voice on the same sentence. The
+sentence must be in the language of the model: a model that reads a foreign
+sentence can continue for seconds, and then the probe measures the sentence,
+not the voice. The script writes nothing into the repository; all downloads go
+to `--cache-dir`. A failure exits non-zero. The result at the pinned revisions
+is 156/156.
+
+```bash
+uv run scripts/speech-assets/verify_voices.py --cache-dir ~/Gits/.tmp/pocket-voices
+```
+
+### Installing is two steps, and the split is the point
+
+```text
+download and verify into .staging   <- no lock held; the engine may be speaking
+unload the engine for this language <- waits for the sentence in flight
+rename .staging into place          <- microseconds, nothing can speak
+next synthesis loads the new files  <- lazily, as it always did
+```
+
+The long part holds nothing; the part that excludes synthesis is a rename.
+`SpeechLibrary` (`speech/library.rs`) owns that order — `assets.rs` deliberately
+does not take the lock itself, so the two cannot be collapsed by accident.
+
+The old directory is removed *before* the new one is renamed in, which leaves a
+window where neither exists. That is the right way round: a crash inside it
+leaves the language absent, which the status query reports honestly and the user
+can fix by downloading again. The other order can leave a directory half
+belonging to each version, which passes every existence check and then fails
+somewhere inside onnxruntime.
+
+**Readiness is checked by size, not by hash.** The hash is verified once, while
+the bytes are arriving; re-reading 125 MB to answer a status query would make
+opening a settings panel cost a disk sweep. A file truncated after install still
+shows the wrong size, which is the failure this has to catch. The three states
+are distinct on purpose — `absent` offers a download, `incomplete` names what is
+missing, and only `ready` lets a language be used.
+
+### `bundle.json` is the contract, not the code
+
+The manifest publishes the streaming-state shape — 18 flow-LM and 56 Mimi
+tensors, each with input name, output name, module, key, dtype, fill and shape
+— plus sample rate, frame rate, chunk size and text-preparation flags.
+`bundle.rs` carries that state between steps, so a bundle for a new language
+loads unmodified. This is why English works with no language-specific branch.
+
+A voice file is the flow-LM cache itself, keyed `module/key`. Voices disagree
+about its size (Italian `giovanni` holds 94 frames in 12 tensors, English
+`cosette` 126 frames in 18, with an extra `pad` key), so `copy_overlap` copies
+the voice into the corner of the graph's larger cache instead of assuming a
+shape.
+
+### The runtime library is loaded explicitly
+
+`ort` is built in `load-dynamic` mode: its default feature downloads
+onnxruntime during the build and then has to be bundled on three platforms,
+while here the library travels with the model it serves.
+
+**That mode panics if left to itself.** `ort` resolves the library through the
+system loader on first use and `expect`s the result, so a half-finished
+download would abort the process. `load_runtime` calls `ort::init_from` on an
+explicit path before any session is built, turning it into
+`ModelUnavailable`. It memoises only success, so a user who downloads the
+runtime after a failed attempt gets speech on the next request rather than
+after a restart. `ORT_DYLIB_PATH` still wins when it is set.
+
+### The tokenizer is not the `sentencepiece` crate
+
+That crate statically links protobuf 3.14 while onnxruntime links 3.21, and
+the two abort the process on first use. `tokenizer.rs` reads the model proto
+with `sentencepiece-model` and runs the Unigram Viterbi through `tokenizers`,
+both pure Rust. `ids_match_the_reference_tokenizer` holds it byte-identical to
+Python `sentencepiece` on the real Italian bundle.
+
+### Cancellation and the budget
+
+Unlike the Kokoro C ABI, this one can stop: generation is a loop this process
+drives, so `SpeechCancel` is checked at the chunk, frame and decode loops and
+an abandoned reply stops within a frame.
+
+Generative TTS also runs away — one evaluation candidate produced 195 KB and
+675 KB of audio for the same sentence across four runs. `budget_seconds`
+states the ceiling once for every adapter, `Bundle::frames_for` converts it to
+frames, and `remaining_frames` returns `SpeechError::Runaway` rather than
+letting a chunk mint audio the input never warranted.
+
+### Threading
+
+An `ort::Session` is driven by `&mut` while the port hands out `&self`, so the
+engine sits behind a mutex and synthesis serialises. One spoken reply at a
+time is the actual requirement, not a limitation.
+
+## Bring your own engine (`speech/external.rs`)
+
+The bundled bundles cover English, French, German, Italian, Portuguese and
+Spanish. Japanese, Chinese, Korean and Russian are not among them, and no
+engine stays the best one for long. `speech_command` in the dictation config
+makes the engine a setting: FastAF hands a command the text and a path
+to write, and reads the audio back through the same port the bundled adapter
+implements. Neither adapter knows the other exists.
+
+### The template
+
+The command is **argv, not a shell line**. Three markers say where the pieces
+go, and each is replaced inside the argument that holds it — so
+`--output={out}` works as well as `-o {out}`.
+
+| Marker | Meaning |
+|---|---|
+| `{out}` | the file the command must write. **Required** |
+| `{text}` | the text to speak. Omit it and the text goes to the command's stdin instead |
+| `{voice}` | the voice identifier, as the engine spells it |
+
+Japanese, with [piper](https://github.com/rhasspy/piper) — a language the
+bundled engine does not reach:
+
+```json
+"speech_command": [
+  "piper",
+  "--model", "/Users/me/voices/ja_JP-test-medium.onnx",
+  "--output_file", "{out}"
+]
+```
+
+piper reads its text on stdin, so there is no `{text}`. macOS `say` takes it
+as an argument and names its voices, so both markers appear:
+
+```json
+"speech_command": [
+  "say", "-v", "{voice}", "-o", "{out}",
+  "--data-format=LEF32@22050", "{text}"
+]
+```
+
+### It runs as you
+
+**The configured command runs as the user who is running FastAF, with
+that user's environment, permissions and files** — exactly like a shell alias
+they wrote. Nothing here sandboxes it, and nothing here should: the point of
+the setting is to run an engine the application does not know about.
+
+What the application does guarantee is narrower and worth stating exactly:
+no shell is involved. The command is spawned directly, so the transcribed
+text is one argument (or stdin), never part of a line something parses. A
+sentence containing `;` or a backtick is a sentence. A `{voice}` that is not a
+plain identifier is rejected as `UnknownVoice` before spawning, because that
+one does become argv.
+
+### Failure is never silence
+
+| What the command does | What the port returns |
+|---|---|
+| is not installed | `ModelUnavailable` naming the program |
+| has no `{out}`, or none is configured | `ModelUnavailable` naming what is missing, before anything is spawned |
+| exits non-zero | `Failed` with the exit status and the tail of its stderr |
+| exits 0 and writes nothing, or an empty file | `Failed` — the silent success this exists to prevent |
+| writes something that is not 16-bit PCM or 32-bit float WAVE | `Failed` naming the encoding it did write |
+| does not finish in time | `Failed`, after being killed. The budget is 30 s or four times the audio the text justifies, whichever is larger — a cold engine loads a model before it says the first word |
+| is abandoned mid-run | `Cancelled`, after the next poll stops the command tree and reaps the direct child |
+| returns more audio than the text can justify | `Runaway`, at the same ceiling the bundled adapter stops itself at |
+
+Timeout and cancellation stop the owned Unix process group, or the Windows
+process tree through `taskkill /T /F`, before reaping the direct child. This
+also stops an engine started by a shell wrapper, rather than leaving it
+running with the stderr pipe open. Commands that deliberately detach from
+their process group are outside this cleanup contract.
+
+Stereo is mixed down to mono rather than refused. `WAVE_FORMAT_EXTENSIBLE`
+headers are read through to the encoding inside them.
+
+## Speaking the replies (`speaker.rs`)
+
+`Speaker` is a bounded queue and one render thread between the model's text and
+the speaker. It carries the same generation counter the hands-free state
+machine uses for turns, and it exists for one case: **a reply can finish
+rendering after the turn it answers is over.**
+
+```text
+  say(generation, text)
+       │
+       ▼
+  [queue]  <= MAX_QUEUED (4); a reply whose generation is over never reaches an engine
+       │
+       ▼
+  synthesis   holds a SpeechCancel; both adapters check it as they go
+       │
+       ▼
+  generation checked again   <-- finished, correct audio is discarded here
+       │
+       ▼
+  output.play()
+```
+
+Three checks, because a reply can go stale at three moments and only the last
+of them has audio to throw away. Cancellation covers the first two; nothing
+can cancel a request that already returned.
+
+### The loudness stage (`loudness.rs`)
+
+The render thread runs `loudness::process` on every reply after synthesis and
+before `output.play()`. The audio it gives to the output is therefore also the
+echo canceller's reference. Rendered voices differ in level by more than 10 dB,
+and one reply also changes level within itself. The stage brings every reply to
+one level.
+
+Two `DictationConfig` fields control it: `speech_volume_db` (default -18 dBFS,
+the "Voice volume" slider) and `speech_levelling` (default 0.67, the
+"Levelling" slider). `set_dictation_config` gives the new values to the armed
+speaker with `set_loudness`. The next reply uses them; the queue is not dropped
+and the speaker is not rebuilt. A voice preview goes through the same stage
+with the saved values.
+
+It runs offline on the whole rendered buffer, in place, in four steps. It does
+not run as a streaming rodio source: the reply is fully rendered before
+playback, so a level measured over the whole reply costs nothing. A causal AGC
+increases the gain slowly during the first words and boosts the silence.
+
+1. **Levelling.** A 300 ms running RMS envelope drives a gain toward the reply's
+   own speech level. The ratio comes from `levelling`: 0 gives 1:1 (off), 1
+   gives 4:1 (`1 + 3 × levelling`). The boost is at most +12 dB. A sample whose
+   envelope is below the -50 dBFS gate is silence and is not levelled.
+2. **Gain to `volume_db`.** The speech level is measured over a 20 ms envelope,
+   on the samples above the gate only, so the silence next to a sentence does
+   not pull the level down. A gated sample never gets more than unity gain, so
+   the noise floor between sentences does not increase.
+3. **A look-ahead limiter** at -1 dBFS, for the peaks that the gain moved near
+   full scale. It is not rodio's `Limit`, which is a streaming limiter.
+4. **A hard clamp at -1 dBFS**, because a limiter with an attack time can let the
+   first samples of a transient through.
+
+`Loudness { volume_db, levelling }` takes `volume_db` in dBFS (-30 to -12; the
+config clamps a stored value into that range) and
+`levelling` from 0 to 1. The envelopes use a running sum, so the cost is O(n).
+The test `a_thirty_second_reply_is_processed_within_budget` holds 30 s of audio
+at 24 kHz to 5 ms in release (50 ms in debug). It is excluded from coverage
+builds because instrumentation changes the work being timed; run the normal
+release test to verify the 5 ms budget. Empty audio, a zero sample rate and
+audio with no sample above the gate are not changed.
+
+### What `hush` guarantees
+
+`Speaker::hush()` is what the user talking over the reply calls. It bumps the
+generation, clears the queue, cancels the in-flight request and stops the
+device, then returns the new generation. It does the device stop **outside**
+the state lock and never waits on the render thread, so its cost is an atomic
+store rather than the remainder of an utterance.
+
+The render thread plays **while holding the state lock**, on purpose. Released
+between the generation check and the `play`, an interruption landing in that
+window would bump the generation, stop an idle device, and then have the stale
+audio appended behind it. `play` only queues a buffer, so `hush` waits on the
+order of a mixer append.
+
+Two `hush` calls are two turns. That is not an accident of the counter: two
+interruptions in a row *are* two turns, and a reply addressed to the first one
+is no more current than a reply addressed to the turn before it.
+
+### Failures are reported, never retried in place
+
+| What happens | What the queue does |
+|---|---|
+| the engine cannot render (missing bundle, bad voice) | records the message in `SpeakerStatus.last_error`, drops the reply, takes the next one |
+| the device refuses the audio | same, and the render thread stays alive |
+| the engine returns `Cancelled` | nothing — somebody asked for that |
+| a fifth reply is queued | refused as `SpeakError::Full` while the queue is still short enough to drain |
+| a reply arrives for a turn that is over | refused as `SpeakError::Stale`, before any engine is called |
+| the `Speaker` is dropped | shutdown flag, queue cleared, in-flight request cancelled, device stopped, worker joined |
+
+`last_error` is cleared by the next reply that plays, so the UI cannot show a
+problem that is over.
+
+### Utterance identity: accepting a reply is not the user hearing it
+
+`say` returns a `UtteranceId`, and the queue remembers the last 64 of them with
+what became of each. A caller polls `Speaker::utterance(id)` — through
+`get_speech_status` or the `voice` tool — to find out.
+
+| State | Means |
+|---|---|
+| `queued` | accepted, nothing has been rendered |
+| `rendering` | synthesis is running |
+| `speaking` | handed to the device |
+| `finished` | the device went quiet with this reply behind it — **the only state that means somebody heard it** |
+| `interrupted` | the turn ended first, or `hush` arrived mid-sentence |
+| `failed: <reason>` | never audible; the reason is the engine's or the device's |
+
+The distinction is structural, not documentary. `finished` is written in exactly
+one place — `note_playback_drained`, which runs only when `Output::is_speaking()`
+is false. And `hush` reads the device **before** stopping it, so a reply already
+heard to the end is not rewritten as `interrupted` just because an interruption
+followed it.
+
+The device reports one boolean for its whole queue, so replies handed to it
+resolve together when it goes quiet. That is correct rather than approximate: it
+drains in order.
+
+Finding out costs a timed condvar wait of 25 ms — but only while something is
+actually playing. An idle speaker blocks on the condvar and never queries the
+device at all.
+
+### Who may speak
+
+Speech belongs to a conversation, not to the application. `Caller` is the whole
+rule:
+
+| Caller | May drive |
+|---|---|
+| `Owner` — the user's own UI, on either transport | always |
+| `Model(session)` — an MCP connection, named by the TUIC session it is bound to | only the conversation armed for that same session |
+
+An MCP connection with no TUIC session is refused outright rather than falling
+back to `Owner`: that path exists for the user's UI, and handing it to a model
+would let any client speak into whichever conversation happened to be armed.
+`status` checks the binding too — the fields alone say what somebody else's
+conversation is doing, and a model that can see a queue will try to speak into
+it.
+
+### The same speech contract on every transport (817-f67c)
+
+There is one implementation per operation and every transport reaches it. That
+is the parity, and it is structural rather than mirrored by hand:
+
+| Transport | Entry point | Caller |
+|---|---|---|
+| Tauri IPC | `#[tauri::command] speak_reply` / `stop_speech` / `get_speech_status` | `Owner` |
+| HTTP | `dictation_routes.rs` → the **same** `dictation::commands` functions | `Owner` |
+| MCP (HTTP and the collapsed `call_tool` path) | `mcp_transport.rs::handle_voice` | `Model(session)` |
+
+The `Owner` surfaces are the user's own UI on either transport; the MCP surface
+is the model's, and the split is the ownership rule in *Who may speak* above.
+There is no WebSocket surface for speech and none is wanted: a WS lane is for
+high-frequency streams, and a reply produces a handful of state changes.
+
+Three tests hold it. `command_table_paths_all_hit_a_registered_route` proves
+every `COMMAND_TABLE` speech path resolves to a registered route.
+`the_speech_status_wire_shape_names_every_field_a_client_reads` and
+`a_reply_looks_the_same_whether_it_was_accepted_or_polled_for` pin the two wire
+shapes — the second compares the *keys* of an accepted reply against the keys of
+the same reply polled for, because the render thread moves the state between the
+two reads and a value comparison would be a race dressed as a contract.
+`voice_binds_to_the_calling_terminal_on_the_direct_and_collapsed_paths` proves
+the MCP identity survives both dispatch paths.
+
+### The push half, on both transports (833-6fd4)
+
+Three pushes leave the backend, and each one is dual-emitted: a desktop
+`app.emit(name, payload)` **and** `state.event_bus.send(AppEvent::…{ payload })`
+for the `/events` SSE stream. There is no bus→window forwarder, so a producer
+that emits only one of the two reaches only one kind of client.
+
+| Event | Fires when | Payload |
+|---|---|---|
+| `dictation-download-progress` | a Whisper model is downloading | `{ downloaded, total, percent }` |
+| `speech-download-progress` | a speech asset is downloading, and once more when it ends | the same, plus `asset`; the last event is `{ asset, done: true }` on success and failure alike |
+| `speech-utterance` | a reply changes state | the `SpokenReply` shape `speak_reply` returns |
+
+**One serializer feeds both.** Each `AppEvent` variant carries an
+already-built `serde_json::Value`; the desktop `emit` gets `payload.clone()` and
+the SSE arm returns `payload.clone()`. The two cannot drift, because there is
+only one place the body is built. `every_dictation_push_names_and_shapes_itself_the_same_on_both_transports`
+pins the half that still can — the SSE event name, and its refusal to re-wrap a
+body that is already the payload.
+
+**`asset` distinguishes the two downloads, and only the speech one carries it.**
+A client that renders both bars needs to know which one moved; a Whisper model
+download has no asset id to give. `only_a_speech_download_names_its_asset` holds
+that.
+
+**Utterance state is pushed by the speaker, not by `speak_reply`.** The
+transitions that matter happen on the render thread, seconds after the call that
+queued the reply returned: `Finished` and `Interrupted` have no caller to return
+to. So `speaker.rs` carries an `UtteranceObserver` port, `commands.rs` installs
+the `AppHandle`-backed adapter at startup, and every `track`/`set` is announced.
+Two details are load-bearing:
+
+- **Transitions are buffered and dispatched with the lock released.**
+  `State::set` runs inside the render thread's critical section — several times
+  per `hush` — so calling an observer there would run arbitrary caller code under
+  the speaker's mutex.
+- **`next_reply` drains before it waits.** The last reply of a conversation is
+  marked `Finished` and then the loop blocks on the condvar; without a drain at
+  that point the final transition would wait for a next reply that never comes.
+
+A speaker nobody watches is the ordinary case for a unit test and for the
+headless build, so the observer slot is a `OnceLock` that stays empty and the
+buffered transitions are dropped rather than accumulated.
+
+### The engine's own sample rate reaches the device
+
+`DeviceOutput` passes `SpeechAudio::sample_rate` straight through and lets
+rodio resample to whatever the device wants. Pocket TTS renders at 24 kHz; a
+user-supplied command renders at whatever its engine likes, and assuming a rate
+here would pitch-shift every external engine. A zero rate or an empty buffer is
+rejected before the buffer is built, because `SamplesBuffer::new` **panics** on
+a zero rate and a panic on the render thread would take the queue down with no
+message.
+
+### Echo cancellation is not in this file
+
+Deciding *when* to interrupt means hearing the user over the speaker, which is
+acoustic echo cancellation. Whoever detects near-end speech calls `hush`; this
+module has no microphone and no opinion. The split is deliberate — the queue's
+correctness is provable without audio hardware, and an audio-hardware test
+cannot prove the queue. It lives in `echo.rs`, below.
+
+### Barge-in: pause on voice, stop on the wake word (1376-f33e)
+
+Voice activity alone does not stop a reply: a turn needs the activation phrase,
+and so does interrupting one. The capture loop in `continuous.rs` drives the
+`Interruptible` port it holds for the armed conversation:
+
+- **Voice pauses.** When the open utterance first holds a voice, `pause()` holds
+  the reply where it is. Nothing queued is dropped and no turn changes.
+- **The transcript decides.** An accepted turn (`HeldBack`, or `Activated` for
+  the phrase alone) calls `hush()`: the reply stops and the turn begins. Any
+  other verdict (`Rejected`, `Empty`, `Stale`), an utterance dropped for too
+  little speech, the end of the loop, or `PAUSE_LIMIT_MS` (8 s) calls
+  `resume()`. Measured on the log of 2026-10-02, voice edge to accepted turn is
+  2.2 s for a short command, plus the length of longer speech.
+- **A voice is a run, not a sum.** `Segmenter::has_voice` needs `min_speech_ms`
+  of activity with dips of at most `VOICE_GAP_MS` (60 ms). `has_speech` adds up
+  every active frame of an utterance that stays open until 1.5 s of quiet, so
+  scattered residual echo (a frame in every 200 ms) reached the bar within a
+  second and hushed replies 600-900 ms in. Speech keeps the `has_speech` rule
+  for sending.
+- **After the canceller, on the edge.** `capture.echo.lock().clean(...)` runs
+  first; the trigger is the edge of the voice, not its level.
+- **The echo reference follows the pause.** `FarEndTap` marks the far end paused
+  only when the output holds its audio (`Output::can_pause`), from the position
+  the microphone had recorded when it paused and symmetrically on resume; capture
+  recorded before the pause heard the reply.
+- **The slot, not the queue, and never lost.** The port is
+  `commands::ArmedSpeaker`, which holds `DictationState.speaker` rather than the
+  `Speaker` that was in it when the loop started. A command that meets a rebuild
+  in `speak` is recorded (latest wins) and applied by a thread once the slot
+  frees; the capture loop never waits for it, and the verdict on a pause is
+  never dropped.
+- **Outputs.** `DeviceOutput` pauses the rodio `Player`; `BrowserOutput` sends
+  `pause`/`resume` frames and the client stops the audio node and continues from
+  the same position, keeping a reply that arrives while held.
+
+The queue is built in `arm_hands_free_with` **before** the runtime is spawned
+whenever a language is already known, for this reason alone: a loop started
+first would spend its first ticks unable to interrupt anything.
+
+### Correlated hold diagnostics (2605-53fc)
+
+After a Rust rebuild/restart, each capture hold writes two structured INFO events
+with `source="dictation"`: `barge-in hold opened` and `barge-in hold resolved`.
+Pair them by `hold_id`, `owner` and `generation` within the same process run.
+The process-local hold ID starts again after a restart. No new transcript text
+or PCM is retained. Existing admission logs are unchanged.
+
+The opening event is sampled before requesting the output pause:
+
+| Fields | Meaning and limits |
+|---|---|
+| `output_nonempty`, `can_pause` | Best-effort output probe. `Some(true)` for nonempty means queued or paused audio, **not** acoustic activity. `None` means the slot is busy, absent, or has no probe. The probe does not wait for a voice rebuild. |
+| `raw_rms`, `raw_peak` | Mono 16 kHz energy of the drained batch before cancellation. This is not the normalized UI level. |
+| `cleaned_rms_max`, `cleaned_active_frames` | Maximum RMS and active count over complete 20 ms frames of this cleaned batch. Frames follow this batch's start; they can differ from the segmenter's carried-frame boundaries. |
+| `longest_run_ms`, `activity_rms`, `min_speech_ms` | Longest sustained run in the open/closed utterance and the actual segmenter thresholds that caused the edge. A long batch can open and close an utterance in one tick. |
+| `drained_samples`, `backlog_samples`, `partial_samples` | Batch size, best-effort endpoint backlog after drain, and echo cleaner's carried partial 10 ms frame. `None` backlog means the capture buffer was busy or unavailable; it is not zero. |
+| `capture_batches`, `dropped_samples` | Cumulative capture counters: native CPAL callback batches/lost 16 kHz samples, or browser received WS batches/server overflow samples. Browser counters do not measure hardware callbacks or audio lost before receipt. An old drop count alone does not date the loss. |
+| `far_end_samples`, `far_end_position`, `far_end_dropped` | Reference queue length, capture-sample cursor and cumulative reference overflow, sampled under the echo lock just after cleaning this batch. Queue length can include alignment silence, not only reply PCM. |
+| `last_render_age_ms` | Time since reference registration, not time since DAC onset; `None` if no reply has registered for this capture. |
+| `drain_to_clean_us`, `tick_interval_ms` | Time from drain completion until the echo lock is acquired, and wall time between tick entries (`None` on the first tick). The latter includes inline recognition and scheduling, not just scheduler delay. |
+
+The resolution event has the same identity plus `reason`, monotonic `elapsed_ms`
+since opening, and cumulative `inference_us` spent in prefix/final recognition
+while that hold was pending. `inference_us=0` is valid when no recognition ran.
+Resolution reasons are:
+
+| Reason | Existing decision |
+|---|---|
+| `accepted` | Final transcript was admitted with content; hush the old reply. |
+| `activated` | Final transcript was the activation phrase alone; hush the old reply. |
+| `rejected` | Final transcript did not pass activation; resume. |
+| `empty` | Final recognition returned no text, including downstream speech-gate skips; resume. |
+| `stale` | Final recognition belonged to a withdrawn/unarmed generation; resume. |
+| `discard` | Capture returned to no open utterance without a qualifying closed result; resume. |
+| `limit` | A tick observed elapsed capture time strictly greater than the 8000 ms hold limit; resume. |
+| `release` | Runtime cleanup released a still-pending hold, including a device/recognition failure, stop, or prefix-generation withdrawal. |
+
+Only the first resolution of a pending hold is recorded. Runtime release after
+an admitted/rejected/limited hold does not add another event. The existing
+`speech: resumed, nothing addressed to us` message stays for compatibility;
+use the new `reason` rather than inferring rejection from that old text.
+The eight-second limit still runs on ticks and cannot preempt synchronous
+recognition. Diagnostics do not change VAD, admission or output policy.
+
+Read the existing instance-local daily `logs/tuic.log.YYYY-MM-DD`, or use the
+existing log panel/API when enabled, and filter for `barge-in hold `. Compare
+raw and cleaned energy, the reference queue and capture-drop counters at an
+edge, then its actual verdict. A nonempty output plus high residual and a
+capture discontinuity is useful evidence, not proof that the residual is echo.
+Numeric aggregates cannot distinguish room speech from TTS echo or reconstruct
+reference alignment. PCM replay requires a separate, explicitly authorized,
+bounded opt-in capture; this diagnostic does not record or open a microphone.
+
+### What barge-in measures (816-cbbf)
+
+The barge-in tests above this one all use `Subtract`, a perfect non-adaptive
+canceller. It answers *is the wiring right* and cannot answer *how long does it
+take* or *how often does it fire when nobody spoke*, because a perfect
+subtraction leaves no residual to misjudge.
+`talking_over_the_reply_stops_it_without_losing_the_first_words` in
+`continuous.rs` drives the shipping AEC3 adapter through the same `tick` and
+turns those into numbers. Measured 2026-09-22, macOS 27 arm64:
+
+| | |
+|---|---|
+| Stop latency | **200 ms** (re-measured 2026-09-23) — `min_speech_ms` of sustained speech, landing on a `POLL_INTERVAL_MS` tick. Was 50 ms while the hush fired on the first frame over the floor; that edge let residual echo stop every reply. |
+| False triggers | **0** over 1200 ms of reply reaching the microphone with no user speech at all |
+| Pre-roll preserved | **280 ms** of audio ahead of the user's first sample, out of the 300 ms ring |
+| Utterance length | **1720 ms**, against 280 ms of pre-roll plus 600 ms of speech — nothing was truncated |
+
+The fixture is a **room model, not a recording**: the microphone hears the
+rendered reply 40 ms late and at 0.35 of its level, with the user's voice added
+on top at a different pitch so the canceller cannot subtract the user by
+subtracting the echo and still look correct. That is the signal an echo
+canceller is specified against — a linear path with a delay — which is what
+makes the numbers comparable between runs. It deliberately does not model
+reverberation, the microphone's noise floor, or a speaker driven into
+distortion.
+
+`without_the_canceller_the_same_room_interrupts_the_reply_on_its_own_echo` is
+the control, and the only reason the zero above means anything: the same room
+with `PassThrough` installed *must* interrupt the reply before the user has said
+a word. Without it, a false-trigger count of zero would be equally consistent
+with a fixture too quiet to trip anything.
+
+`a_residual_echo_burst_does_not_stop_the_reply` models what the linear room
+cannot: a 100 ms burst the canceller cannot see, above the activity floor but
+below `min_speech_ms`. It must not hush the reply.
+
+**Neither is a substitute for a real microphone and a real speaker in a room.**
+That probe is in `to-test.md`.
+
+### The eight states the conversation has to survive (820-21a5)
+
+Story 820 names eight scenarios and asks for each one to be verified rather than
+argued about. They are spread across `continuous.rs` and `commands.rs` because
+they belong to two different layers — the mode's own bookkeeping, and the
+commands that arm and disarm it — so this table is the index. A row with no test
+beside it is a gap, not an omission from the documentation.
+
+| Scenario | Held by |
+|---|---|
+| Optional activation, on and off | `an_empty_activation_phrase_lets_every_turn_through`, `speech_without_the_activation_phrase_never_reaches_the_queue`, `a_configured_activation_phrase_decides_which_speech_reaches_the_model`, `a_configured_phrase_gates_a_turn_and_is_stripped_from_what_is_sent` |
+| Phrase matching tolerates Whisper spellings, not look-alike speech | `the_phrase_matches_the_spellings_whisper_invents_for_it`, `speech_that_only_resembles_the_phrase_does_not_activate`, `an_accented_or_capitalised_phrase_setting_matches_the_plain_transcript`, `the_rejection_excerpt_keeps_the_first_words_verbatim_and_nothing_more` |
+| Phrase-only timeout | `the_phrase_alone_opens_the_window_without_sending_anything`, `follow_up_speech_inside_the_window_needs_no_phrase`, `speech_after_the_window_expires_needs_the_phrase_again` |
+| Hold-back cancellation | `nothing_is_enqueued_before_the_hold_back_expires`, `an_abort_inside_the_hold_back_sends_nothing` |
+| Pause mid-sentence during the hold-back — the continuation is appended to the pending text and restarts the hold-back, never replaces it | `a_one_second_breath_keeps_both_phrases_in_one_utterance`, `speech_that_arrives_during_the_hold_back_joins_the_pending_turn`, `keyword_turn_keeps_a_five_second_follow_up_in_the_same_terminal_message`, `speech_started_before_the_five_second_deadline_is_not_submitted_mid_phrase` |
+| Manual disarm | `a_manual_abort_disarms_the_whole_mode_and_discards_the_pending_send`, `disarming_a_mode_that_was_never_armed_reports_no_work` |
+| Busy or dialog target | `a_busy_target_takes_the_turn_a_dialog_holds_it_and_all_stay_targets`, `a_turn_the_composer_holds_stays_in_the_mode_and_is_retried`, `arming_types_speech_into_a_busy_session_and_leaves_its_compose_queue_alone`, `arming_against_a_target_that_cannot_take_a_compose_entry_is_refused` |
+| Target closure | `a_closed_target_disarms_the_running_mode`, `a_closed_target_disarms_and_a_different_session_does_not`, `closing_the_bound_session_disarms_the_running_mode_and_releases_the_device` |
+| Owner disconnect | `a_disconnected_owner_disarms_the_running_mode`, `a_disconnected_owner_disarms_and_a_different_owner_does_not` |
+| No stale submission | `a_transcript_from_a_previous_generation_cannot_send`, `a_transcription_that_finishes_after_a_disarm_never_reaches_the_sink`, `an_abort_during_transcription_lands_and_its_result_is_refused` |
+| No stale playback | `disarming_while_a_reply_is_playing_stops_the_device`, `a_reply_written_for_a_turn_the_user_talked_over_is_refused` |
+
+Two of those rows are worth reading before changing anything near them.
+
+**Busy is not closed, and not a hold.** `PtyTargetProbe::accepts` asks whether
+the target exists and can take voice at all — never what it is doing. A probe
+that also answered "is it free right now" would end the conversation on the
+first reply the user asked for. A busy agent takes the turn at once; only a
+dialog or a draft holds it, and the hold lives in the mode, never in the
+Compose queue. That is why the busy row asserts on `VoiceWrite` for three
+sessions at once — idle, busy, and idle with a confident question — with the
+idle one as the control, and checks that none of them gained a Compose entry.
+
+**Disarming silences by dropping, not by hushing.** `disarm_hands_free` sets the
+speaker slot to `None`; `Drop for Speaker` cancels the render in flight and calls
+`Output::stop`. Asserting that the slot is empty is therefore not the same
+assertion as asserting the room went quiet, and only the second one is what a
+user experiences. The test uses an output that reports itself speaking until it
+is stopped, because `QuietOutput` is never speaking and cannot tell a silenced
+device from one nobody ever asked to stop.
+
+## The language of the conversation
+
+Boss's requirement is one sentence: **the model and the voice use the language
+Whisper is transcribing, and nothing replies in English by accident.** Four
+places enforce it, and they all read the same source.
+
+| Where | What it does |
+|---|---|
+| `transcribe.rs` | `TranscribeResult.language` — the two-letter code whisper used, read off `full_lang_id_from_state()` |
+| `continuous.rs` | `HandsFree.turn_language`, set by `accept_transcript`, cleared on arm and disarm |
+| `continuous.rs` | `HandsFree.announced_language` — the language the model was last told; `compose_entry` appends `(reply in <Name>)` only when a turn's language differs from it |
+| `commands.rs` | `speech_language` picks the voice, and `Armed.language` records which one |
+
+**There is one language, not one per subsystem.** The dictation setting is the
+source when it names a language; under `auto` the source is what whisper
+actually detected, carried out of the transcript by `Transcript.language`. There
+is no separate TTS language setting, and the `voice` MCP tool takes no language
+and no voice — a model that could pass either would be a second source, and the
+two would disagree the first time the user switched languages.
+
+**`auto` before the first turn has no language, and that is a state.**
+`speech_status` reports `available: false` with a reason naming Auto, and
+`speak` refuses. It is the one moment in a conversation where no reply can be
+spoken, and inventing English to fill it is exactly the bug this exists to
+prevent. The voice opens on the first `speak` after somebody has spoken.
+
+**Confidence is not available on this path.** `whisper_full_lang_id_from_state`
+returns the id and nothing else, so an ambiguous detection is indistinguishable
+from a certain one. The probabilities live behind `WhisperState::lang_detect`,
+which needs its own mel and encoder pass and would double the cost of every
+utterance. What *is* handled is a missing answer: an id that maps to no code
+leaves `language: None`, which reaches the model as the transcript alone — no
+requirement rather than a guessed one.
+
+**A language with no bundle is named, never substituted.** `for_language_code`
+answers `None` for Korean, and the status says `No speech bundle ships for
+language "ko"`. Picking the Italian voice because it is installed is how an
+assistant answers a Korean conversation in Italian.
+
+**Which of the language's voices speaks is a setting; which language speaks is
+not.** `speech_voice` names one of the voices the chosen language ships — the
+Dictation panel offers them from `voices` on the asset, and the setting is empty
+in an untouched configuration, which `choose_voice` reads as "whatever this
+language ships first". That is also what every configuration written before the
+setting existed says, so no migration is needed. A user-supplied engine ignores
+the setting: it names its own voices inside its command template.
+
+**A named voice the language does not ship is an error, not a fall back.**
+`choose_voice` answers with the offered names instead of speaking in the first
+one. Two things get you here — a catalogue that dropped a voice, and a language
+the user changed underneath the setting — and in both, speaking in a voice
+nobody chose is worse than saying why nothing was spoken. The message reaches
+the user through the hands-free status rather than a log.
+
+**The requirement travels in the spoken entry, once per conversation.**
+`esegui i test` is typed as `esegui i test (reply in Italian)`; the next
+Italian turn is typed as spoken, and a turn in English announces
+`(reply in English)` again. The model is told once, not on every message:
+`HandsFree.announced_language` records the language last stated, set only when
+the sink typed the entry that stated it (a held or refused entry told the
+model nothing) and cleared on arm and disarm. A turn with no nameable language
+leaves it alone. With a fixed dictation language the start notice already
+states it, so the first turn carries nothing either. In the entry rather than
+only in a mode hint, because hints are optional and this is not; on one line, because the sink types
+the entry into a terminal and submits it, and a newline in the middle submits
+half a sentence. The English name comes from `dictation/language.rs`, whose
+table is checked against `WHISPER_LANGUAGES` in `src/stores/dictation.ts` by a
+test that reads the TypeScript.
+
+**Changing the language stops the replies written for the old one.**
+`save_dictation_config` drops `DictationState.speaker` when `language`,
+`speech_engine`, `speech_command`, `speech_edge_voice` or `speech_voice` moves — and on nothing else, because cutting
+a reply off mid-word because somebody moved a threshold slider would be the
+worse bug. A voice belongs to a conversation as much as a language does: a
+sentence half said in one voice does not finish in another. The
+next `speak` opens a voice for the language now configured. The same rebuild
+happens mid-conversation under Auto: `speak` compares `Armed.language` against
+the turn language and, when they differ, hushes the old queue before building
+the new one. That `hush` is what invalidates the replies in flight — it opens a
+new turn, and `say` refuses anything addressed to the turn before it.
+
+**Lock order: the mode, then the speaker.** Resolving a language takes
+`hands_free`; rebuilding takes `speaker`. `speak` and `speech_status` both
+resolve everything they need from the mode *before* taking the speaker lock, and
+`open_speaker_for` is handed the language rather than looking it up, so the
+rebuild under the speaker lock cannot invert the order.
+
+## Hearing the user over our own voice (`echo.rs`)
+
+The microphone hears the speaker. Left alone, the energy VAD in `continuous.rs`
+opens a turn on the reply the application is speaking, transcribes it, and
+answers itself. Muting capture while speaking would stop that and would also
+stop the user interrupting, which is the one thing hands-free has to get right,
+so the capture stream stays open and the echo is subtracted from it instead.
+
+```
+speaker::render_loop ──note_rendered(SpeechAudio)──┐
+                                                   v
+                                              ┌─────────┐
+                                              │ FarEnd  │  16 kHz, ≤120 s
+                                              └────┬────┘
+                                                   │ take(n), padded with silence
+ capture (mono 16 kHz) ──clean(&[f32])──> EchoGuard┴──> Canceller ──> cleaned capture
+                                          10 ms frames          │        │
+                                          remainder carried     │        v
+                                                                │   segmenter.push
+                                          hush ──note_stopped───┘
+```
+
+### The two streams must arrive in step
+
+A canceller subtracts a delayed, filtered copy of the **far end** (what we
+played) from the **near end** (what the microphone heard). It can only do that
+if it is fed both at the same pace: one 10 ms frame of each, in turn.
+
+Our two sources do not behave that way. Capture arrives in small chunks as the
+device produces them, while `speaker.rs` hands over a whole rendered utterance
+at once — seconds of audio in one call, before a single sample of it has left
+the speaker. Pushing that straight into a canceller would put it seconds ahead
+of the microphone, and it would subtract nothing.
+
+`FarEnd` is the buffer that fixes the pace: the reply goes in whole and comes
+out only as fast as capture is consumed, padded with silence whenever nothing is
+playing. Alignment is therefore by **sample count**, not by wall clock, and the
+residual offset — the device's own output latency — is what the canceller's
+delay estimator is for. `note_stopped` (called on `hush`) clears the buffer,
+because audio that will never be heard must never be subtracted.
+
+The buffer must hold **every reply the speaker has accepted**, not a window of
+recent audio. A reply is pushed whole before any of it plays, and the next
+reply is pushed while the current one is still playing. So the head of the
+buffer is always what the microphone hears next. The bound is 120 s (~7.7 MB,
+only while that much is queued). It is reached only when capture stops
+consuming, and then the **newest** samples are dropped, counted in
+`dropped_far_end()` and logged at WARN (`echo: far-end reference full`).
+
+Until 2026-09-23 the bound was two seconds and the *oldest* samples were
+dropped. The oldest samples were the start of the reply, which had not played
+yet. Every reply longer than 2 s was cut to its last two seconds: the start of
+playback was matched against the end of the reply, then against silence.
+Nothing was cancelled, and with laptop speakers hands-free heard itself, cut
+its own replies off and sent them back as turns.
+`a_reply_longer_than_two_seconds_reaches_the_canceller_from_its_first_sample`
+holds that closed.
+
+**The start of a reply is aligned to the capture backlog.** Sample counting
+works only if the far end starts counting when the device starts playing. The
+capture loop drains every `POLL_INTERVAL_MS` and runs Whisper inline, so when a
+reply is handed over, up to several seconds of capture can still wait in the
+endpoint's buffer. That audio was recorded *before* the reply. So
+`note_rendered`, when the far end is empty, first queues silence equal to that
+backlog plus the carried partial frame, and then the reply. Otherwise the
+reference runs ahead of its echo, which AEC3 cannot cancel. A reply queued
+behind one still playing gets no padding, because the device plays it
+back-to-back. The backlog is read through `EchoGuard::attach_capture(Backlog)`,
+a probe installed by `open_endpoint` for the desktop buffer and for
+`BrowserLink::pending_capture`. Attaching a stream also clears what the
+previous stream left behind.
+
+Two log lines make a self-heard episode reconstructible from `tuic.log`:
+`speech: hushed, turn N begins` (INFO, `speaking`, `into_playback_ms` since the
+current run of replies was handed to the device, `interrupted`) and
+`Hands-free turn accepted` (INFO, `heard=` the first four words), to compare
+with the reply text.
+
+### Everything runs at 16 kHz
+
+Not a preference. `audio.rs` already converts capture to mono 16 kHz for
+Whisper, and 16 kHz is one of the rates the WebRTC APM accepts, so the near end
+needs no conversion at all. The far end is whatever the speech engine rendered —
+24 kHz for Pocket TTS, anything at all for a user-supplied command — and is
+resampled on the way in. That resampling is **linear**, not the nearest-neighbour
+`audio.rs` uses for Whisper: a canceller subtracts a waveform, and
+nearest-neighbour's step artefacts are error it would have to model.
+
+### The port exists so the pacing is provable without hardware
+
+| Adapter | What it is for |
+|---|---|
+| `webrtc::WebRtc` | The real one: WebRTC AEC3, one instance, 10 ms frames |
+| `PassThrough` | No cancellation. A build without a canceller, and the tests for everything in `EchoGuard` that is not the subtraction itself |
+
+`PassThrough` is not a silent fallback — whoever installs it owns saying so. It
+exists because a hands-free mode that refuses to arm is worse than one that
+cannot be interrupted over the speaker: headphones still work.
+
+AEC3 runs with `stream_delay_ms: None`, so it estimates the offset itself. We
+could not supply an honest number anyway: the far end is handed over when the
+reply is *rendered*, and how long the OS and the device then hold it before it
+reaches the air is not something this process is told. One consequence worth
+knowing — the estimator has to converge, so the first fraction of a second of a
+reply is cancelled poorly or not at all.
+
+The render frame is **analyzed, never processed**. The APM offers to filter the
+playback stream too; by the time we see it that audio is already on its way to
+the device, so any change to our copy would be a change nobody hears while the
+microphone still hears the original.
+
+Noise suppression, gain control and high-pass filtering are all left off. The
+same capture stream feeds Whisper, which was trained on speech that has not been
+gated or gain-ridden.
+
+### The fork this needs (`patches/webrtc-audio-processing-sys/`)
+
+`webrtc-audio-processing` 2.1.0 is used with the `bundled` feature — it
+statically links the APM rather than looking for a system library, because there
+is one on Linux, a brew-only one on macOS, and none at all on Windows. Upstream
+CI runs `ubuntu-latest` and `macos-latest` only, and the `bundled` build does not
+work on Windows at all; five of our six patches exist for that, and one
+for a macOS link failure. They are listed, with the exact symptom each one fixes,
+in the `[patch.crates-io]` comment in `src-tauri/Cargo.toml`.
+
+#### Build prerequisites
+
+Every platform needs **meson**, **ninja**, a C++20 compiler and **libclang**
+(for bindgen) on `PATH`, plus network access: the meson wrap fetches
+abseil-cpp 20240722.0 from github.com while the build runs. None of this
+reaches `tuic-remote` — `cargo tree --no-default-features -i
+webrtc-audio-processing` matches no packages, so the headless binary needs
+neither meson nor ninja.
+
+Windows MSVC targets force Meson's Visual Studio environment with `--vsenv`,
+so MinGW on `PATH` cannot become the bundled library's compiler. Compilation
+and installation run through `meson compile` and `meson install` to reactivate
+that environment in each subprocess.
+MSVC setup uses `--wipe` so a restored Meson cache cannot retain a previously
+selected MinGW compiler; other targets continue to use `--reconfigure`.
+
+| Platform | Extra | Why |
+|---|---|---|
+| Windows | `set CARGO_TARGET_DIR=C:\t` | abseil's `hashtablez_sampler_force_weak_definition.cc` resolves one character past `MAX_PATH` (260) from the meson build directory under a normal target path. `cl` reports it as `C1083: Cannot open source file` for a file that is plainly there. Not fixable by a patch — it is a path-length limit. |
+| Linux | a libclang with its builtin headers (`clang-devel`, not the pip `libclang` wheel) | The wheel ships `libclang.so` and no resource directory, so bindgen fails on `'stddef.h' file not found`. Recoverable with `BINDGEN_EXTRA_CLANG_ARGS=-I/usr/lib/gcc/<triple>/<ver>/include`. |
+| macOS | — | Xcode's clang and a brew meson are enough. |
+
+**Do not `tar` the fork on a Mac without `COPYFILE_DISABLE=1`.** bsdtar writes
+an AppleDouble `._abseil-cpp.wrap` beside the real one, meson globs `*.wrap`,
+and the build dies with `UnicodeDecodeError: 'utf-8' codec can't decode byte
+0xa3` — a message that points at the wrap file rather than at the sidecar.
+
+#### Packaging evidence
+
+A probe that builds the fork, links it, and asserts the canceller measurably
+changes a 440 Hz capture frame:
+
+| Platform | Toolchain | Result |
+|---|---|---|
+| macOS 27 (arm64) | Xcode clang, meson 1.12.0 | `PROBE OK` |
+| Windows 10.0.26200 (x86_64) | VS 2022 BuildTools 14.44.35207, meson 1.12.0 | `PROBE OK` |
+| RHEL 9.4 (x86_64) | gcc 11, meson 1.11.2 | `PROBE OK` |
+
+Linux is not a formality here: patch 3 replaced the pkg-config abseil lookup
+with an unconditional vendored subproject, and Linux is the one platform that
+*has* a system abseil for pkg-config to find. It is therefore the platform
+that patch most plausibly broke, and the only one upstream CI covered.
+
+## Voice settings choice owners (#1909-0d24)
+
+The internal voice settings owner uses cache-only `describe` and explicit `refresh` for input devices, Whisper models, and installed Pocket voices. Refresh reads the configured language through the strict voice file owner. Model options include installed/downloadable state; installed voice options retain their source. Input backend failure is unavailable, not a supported empty list. Edge refresh may fetch the service catalogue; describe never fetches or downloads.
+
+`VoiceAction` provides typed assets, model download/delete, speech asset download/cancel/delete and voice import/delete. It delegates to the existing command owners and their allowlisted asset IDs, size validation and runtime locks. These are internal host methods for later transport publication, not an arbitrary command executor. Existing engine/language descriptors and runtime invalidation remain authoritative. Builds without dictation still describe unavailable voice fields.
+
+Pocket voice recovery: a missing configured catalogue voice uses the ready bundle’s default voice in the same language. Each reply resolves the voice again before enqueueing, so a completed download takes effect on the next reply without rebuilding the language model. Unknown voice names remain errors. No voice or model from another language is substituted.
+
+### Settings correction owner (#1992-d4fa)
+
+The machine-scoped `corrections` Settings store projects the existing
+`dictation-corrections.json` map as `/replacements` records keyed by `from`.
+Discover `corrections.replacements.{from}.from` and `.to`, then create/remove
+records or set `/replacements/<escaped heard text>/to` with the current owner
+revision. JSON Pointer escaping applies to heard text containing `/` or `~`.
+The file format remains a plain string-to-string map.
+
+Both the Settings facade and the legacy IPC/HTTP map writer use TextCorrector's
+strict locked update and atomic persistence. Invalid maps and corrupt files do
+not replace the live dictionary. Empty match keys are rejected because replacement scanning must advance.
+Settings applies stable-key rules to requested paths and create/remove keys,
+plus transaction size bounds. Existing legacy keys outside those rules remain
+unchanged when ordinary sibling records are edited, created or removed;
+legacy maps retain their existing string-to-string representation.
+The live corrector is refreshed from the latest committed map, not an older
+transaction result. Durable writes publish value-free `corrections` generations;
+open Voice pages reload the saved map without replacing the new-entry draft.
+Builds without dictation describe this family as unavailable. No microphone or
+speech service is needed for correction configuration.
+
+### Isolated speech diagnostics
+
+An authorized `make agent-test AGENT_TEST_INSTANCE=agent-test-<name> AGENT_TEST_SPEECH_OUTPUT=1` can exercise spoken replies without microphone input. The runtime forces hands-free listening off and refuses microphone permission/capture. It does not claim global input ownership. Each actual reply synthesis logs its engine, resolved voice, language and completion, but not reply text or external command arguments. The default agent-test build still excludes dictation.
+
+Voice saves normalize the latest locked engine selection before applying the caller’s field delta (in FastAF a stored `edge` normalizes to `pocket`). An unchanged resolved engine choice must not remain unset on disk and later migrate to an inactive external command or Pocket voice. A concurrent explicit engine choice is retained unless this caller changed that field.
+
+ACP channel origins do not identify an individual session within a shared connection. If another session on that connection has an unsettled turn, voice calls are unavailable rather than attributed to the wrong chat. Settled turn history does not mute the target.
+
+### Browser reply scheduling (2605-53fc)
+
+The browser appends complete downlink buffers on `AudioContext.currentTime`.
+Each source starts at the preceding source's end, without waiting for the
+main-thread `ended` callback. Pause stops scheduled sources and retains their
+positions; resume reschedules the active remainder before later replies. Stop
+and teardown invalidate every scheduled source and its stale callbacks.
+
+Each binary reply has a sample rate, a monotonically increasing 64-bit sequence,
+and PCM samples. Per-reply `playback-ended` controls echo the sequence as a
+string. The backend uses one locked playback state for appends, holds, stops and
+ACKs, adds queued durations, and ignores ACKs that would retire newer audio.
+Client and backend ship together; reload an old browser tab after updating.
+
+This fixes browser truncation present since `f03ec66af5`. It does not establish
+that browser playback caused the reported native stutter. The retained native
+probe and capture-hold evidence describe separate mechanisms and limitations.

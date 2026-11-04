@@ -1,0 +1,21 @@
+// An elicitation in a mode this client never said it could handle.
+//
+// `initialize` advertises `elicitation.form` and nothing else, so a `url` mode
+// is a question the agent was told would not be taken. It is declined at once,
+// which is the same answer a question with no seat gets and for the same
+// reason: there is nobody this client can honestly put it to.
+//
+// Asked mid-turn, and that is not decoration. Sent right after the `session/new`
+// response it would race the attachment — the response and the request arrive on
+// different channels inside the client — and a decline could then mean nothing
+// worse than "that session was not attached yet". Inside a running turn the
+// attachment is certain, so the mode is the only thing left to decline it for.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"request","id":7,"method":"elicitation/create","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","mode":"url","elicitationId":"elicit-1","url":"https://example.invalid/authorize","message":"Approve this in your browser"}}
+{"step":"expect_response","id":7,"result":{"action":"cancel"}}
+{"step":"respond","to":"prompt","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

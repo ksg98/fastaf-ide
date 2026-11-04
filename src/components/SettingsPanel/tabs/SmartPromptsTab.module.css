@@ -151,203 +151,15 @@
   color: var(--fg-secondary);
 }
 
-.editorInput {
-  width: 100%;
-  padding: 6px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  box-sizing: border-box;
-}
+.editorInput { width: 100%; }
 
-.editorInput:focus {
-  outline: none;
-  border-color: var(--accent);
-}
 
-.editorInput:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
-.editorTextarea {
-  width: 100%;
-  padding: 8px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  font-family: var(--font-mono);
-  resize: vertical;
-  min-height: 120px;
-  box-sizing: border-box;
-}
 
-.editorTextarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
 
-.placementGrid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
+.editorTextarea { width: 100%; font-family: var(--font-mono); min-height: 120px; }
 
-.placementCheck {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-sm);
-  color: var(--fg-secondary);
-  cursor: pointer;
-}
 
-.autoExecLabel {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-sm);
-  color: var(--fg-secondary);
-  cursor: pointer;
-  padding: 6px 0;
-}
-
-.fieldHint {
-  font-size: var(--font-2xs);
-  color: var(--fg-muted);
-  margin: 0;
-}
-
-/* Variable dropdown */
-
-.varDropdownWrap {
-  position: relative;
-}
-
-.varDropdownBtn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.varDropdownBtn:hover {
-  border-color: var(--accent);
-  color: var(--fg-primary);
-}
-
-.varChevron {
-  font-size: 8px;
-  transition: transform 0.15s;
-}
-
-.varChevronOpen {
-  transform: rotate(180deg);
-}
-
-.varDropdownList {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  margin-top: 2px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--highlight-inset), var(--shadow-popup);
-  z-index: 10;
-  max-height: 280px;
-  overflow-y: auto;
-}
-
-.varGroupLabel {
-  padding: 4px 10px 2px;
-  font-size: var(--font-2xs);
-  font-weight: 700;
-  color: var(--fg-muted);
-  background: var(--bg-secondary);
-  position: sticky;
-  top: 0;
-}
-
-.varItem {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  width: 100%;
-  padding: 4px 10px;
-  background: none;
-  border: none;
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.1s;
-}
-
-.varItem:hover {
-  background: var(--bg-highlight);
-}
-
-.varName {
-  font-family: var(--font-mono);
-  font-size: var(--font-xs);
-  color: var(--accent);
-  flex-shrink: 0;
-  min-width: 120px;
-}
-
-.varDesc {
-  color: var(--fg-muted);
-  font-size: var(--font-xs);
-}
-
-/* Actions row */
-
-.editorActions {
-  display: flex;
-  gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
-.smallBtn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.smallBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-  border-color: var(--accent);
-}
-
-.dangerBtn {
-  composes: smallBtn;
-}
-
-.dangerBtn:hover {
-  background: rgba(248, 81, 73, 0.1);
-  color: var(--error);
-  border-color: var(--error);
-}
 
 /* Footer add button */
 
@@ -368,4 +180,10 @@
   border-color: var(--accent);
   color: var(--accent);
   background: var(--bg-tertiary);
+}
+
+@media (max-width: 800px) {
+  .promptHeader, .editorRow { flex-wrap: wrap; }
+  .promptName { min-width: 0; overflow-wrap: anywhere; }
+  .promptMeta { flex-wrap: wrap; }
 }

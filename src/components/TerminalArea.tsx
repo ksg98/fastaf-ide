@@ -23,6 +23,8 @@ import { repoSettingsStore } from "../stores/repoSettings";
 import { repositoriesStore } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
 import { terminalsStore } from "../stores/terminals";
+import { uiStore } from "../stores/ui";
+import { markdownDocumentPanelId } from "../utils/markdownDocumentPanelId";
 import { applyTrackResize, computeGrid } from "../utils/multiviewGrid";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { getRepoColor } from "../utils/repoColor";
@@ -293,6 +295,7 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 							>
 								<PaneNodeView
 									node={root()}
+									visible={() => !hasActiveOrphan()}
 									onCloseTab={props.onCloseTab}
 									onOpenFilePath={props.onOpenFilePath}
 									onTerminalFocus={props.onTerminalFocus}
@@ -337,7 +340,8 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 											const owner = mvOwner();
 											if (!owner) return name;
 											const repoName = repositoriesStore.getRepoForTerminal(id) ?? owner.repoPath;
-											return `${repoName} · ${owner.branchName} · ${name}`;
+											const branchName = repositoriesStore.branchNameFor(owner.repoPath, owner.workspaceId);
+											return `${repoName} · ${branchName} · ${name}`;
 										};
 										const mvStatus = (): "input" | "busy" | "idle" => {
 											if (terminalsStore.get(id)?.awaitingInput) return "input";
@@ -459,7 +463,7 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 												classList={{ active: shouldShow(id, mdTabsStore.state.activeId === id) }}
 												onContextMenu={(e) => e.stopPropagation()}
 											>
-												{mdTab && (
+												{mdTab && !uiStore.isDetached(markdownDocumentPanelId(id)) && (
 													<MdTabContent
 														tab={mdTab}
 														onClose={() => props.onCloseTab(id)}
@@ -489,6 +493,7 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 															fsRoot={editTab.fsRoot}
 															filePath={editTab.filePath}
 															initialLine={editTab.initialLine}
+															initialCol={editTab.initialCol}
 															externalEditable={editTab.externalEditable}
 															onClose={() => props.onCloseTab(id)}
 														/>

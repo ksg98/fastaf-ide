@@ -562,7 +562,7 @@ const RETENTION_DAYS: u64 = 30;
 /// newest ones don't. Retention (file lifetime) stays at 30 days. (#612-9a22)
 const MAX_RESIDENT_SESSIONS: usize = 40;
 
-/// Load persisted session files into `state.session_knowledge`. Called once at
+/// Load persisted session files into `state.engine.session_knowledge`. Called once at
 /// startup so agent context injection has access to historical sessions.
 ///
 /// Prunes files older than `RETENTION_DAYS`, then loads only the
@@ -612,13 +612,14 @@ pub fn load_all(state: &crate::state::AppState) {
         // before this loop reaches it — `knowledge_entry` already read the file
         // and appended to it. Inserting the file's state over that would drop the
         // outcome, and the next flush would write the truncated record to disk.
-        if state.session_knowledge.contains_key(&sid) {
+        if state.engine.session_knowledge.contains_key(&sid) {
             continue;
         }
         if let Some(k) = load(&sid) {
             // `entry` rather than `insert`: the check above can go stale between
             // the read of the file and the write into the map.
             state
+                .engine
                 .session_knowledge
                 .entry(sid)
                 .or_insert_with(|| parking_lot::Mutex::new(k));
@@ -697,6 +698,7 @@ pub fn spawn_persist_task(state: std::sync::Arc<crate::state::AppState>) {
 /// clone of a record that can reach several MB.
 pub fn flush_dirty(state: &crate::state::AppState) {
     let dirty: Vec<String> = state
+        .engine
         .knowledge_dirty
         .iter()
         .map(|e| e.key().clone())
@@ -717,17 +719,79 @@ pub fn flush_session(state: &crate::state::AppState, session_id: &str) {
     // Clear the flag FIRST. A concurrent record_outcome between this line and
     // the read below will re-insert the flag and be picked up by the next tick
     // (or by the failure path below).
-    if state.knowledge_dirty.remove(session_id).is_none() {
+    if state.engine.knowledge_dirty.remove(session_id).is_none() {
         return;
     }
-    let Some(entry) = state.session_knowledge.get(session_id) else {
+    let Some(entry) = state.engine.session_knowledge.get(session_id) else {
         return;
     };
     let knowledge = entry.lock();
     if let Err(e) = persist(session_id, &knowledge) {
         tracing::warn!(session_id, error = %e, "knowledge persist failed, will retry");
         drop(knowledge);
-        state.knowledge_dirty.insert(session_id.to_string(), ());
+        state
+            .engine
+            .knowledge_dirty
+            .insert(session_id.to_string(), ());
+    }
+}
+
+impl crate::state::AppState {
+    /// This session's knowledge record, read off disk when it is not resident.
+    ///
+    /// The startup load is capped at `MAX_RESIDENT_SESSIONS`, so a session with
+    /// a file on disk is not necessarily in memory. Starting a blank record for
+    /// it is how resuming an older session erased its own history: the next
+    /// flush persists what is in memory, over a file nothing had read.
+    pub(crate) fn knowledge_entry(
+        &self,
+        session_id: &str,
+    ) -> dashmap::mapref::one::RefMut<'_, String, parking_lot::Mutex<SessionKnowledge>> {
+        self.engine
+            .session_knowledge
+            .entry(session_id.to_string())
+            .or_insert_with(|| parking_lot::Mutex::new(load_or_start_fresh(session_id)))
+    }
+
+    /// Record a command outcome into this session's knowledge store and mark it
+    /// dirty for the background persister. Creates the entry on first use.
+    ///
+    /// When the session has AI suggestions on, a failed or timed-out command
+    /// also raises an `ai-suggestion` (see [`super::triggers`]).
+    pub(crate) fn record_outcome(&self, session_id: &str, outcome: CommandOutcome) -> u64 {
+        // Evaluate before recording: `record` takes the outcome by value.
+        let suggestion = super::triggers::suggestions_enabled(self, session_id)
+            .then(|| {
+                self.engine
+                    .trigger_classifier
+                    .evaluate(session_id, &outcome)
+            })
+            .flatten();
+
+        let id = self.knowledge_entry(session_id).lock().record(outcome);
+        self.engine
+            .knowledge_dirty
+            .insert(session_id.to_string(), ());
+
+        if let Some(suggestion) = suggestion {
+            self.notify_suggestion(&suggestion);
+        }
+        id
+    }
+
+    /// One payload for both transports: there is no bus→window forwarder.
+    fn notify_suggestion(&self, suggestion: &super::triggers::Suggestion) {
+        let Ok(payload) = serde_json::to_value(suggestion) else {
+            return;
+        };
+        #[cfg(feature = "desktop")]
+        if let Some(app) = self.app_handle.read().as_ref() {
+            use tauri::Emitter;
+            let _ = app.emit(super::triggers::SUGGESTION_EVENT, payload.clone());
+        }
+        let _ = self
+            .event_bus
+            .send(crate::state::AppEvent::AiSuggestion { payload });
     }
 }
 
@@ -769,8 +833,8 @@ mod persist_tests {
         let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
         let state = make_test_app_state();
         state.record_outcome("s1", sample_outcome());
-        assert!(state.knowledge_dirty.contains_key("s1"));
-        let k = state.session_knowledge.get("s1").unwrap();
+        assert!(state.engine.knowledge_dirty.contains_key("s1"));
+        let k = state.engine.session_knowledge.get("s1").unwrap();
         assert_eq!(k.lock().commands.len(), 1);
     }
 
@@ -789,11 +853,11 @@ mod persist_tests {
         crate::pty::cleanup_session("s1", &state);
 
         assert!(
-            state.session_knowledge.contains_key("s1"),
+            state.engine.session_knowledge.contains_key("s1"),
             "a closed session's knowledge must stay readable to the next session"
         );
         assert!(
-            state.knowledge_dirty.contains_key("s1"),
+            state.engine.knowledge_dirty.contains_key("s1"),
             "the pending flush must survive the close, or the outcome never lands"
         );
     }
@@ -806,7 +870,7 @@ mod persist_tests {
         let state = make_test_app_state();
         state.record_outcome("s1", sample_outcome());
         flush_dirty(&state);
-        assert!(!state.knowledge_dirty.contains_key("s1"));
+        assert!(!state.engine.knowledge_dirty.contains_key("s1"));
         let disk_path = dir.path().join(SESSIONS_DIR).join("s1.json");
         assert!(disk_path.exists(), "persisted file should exist");
         let loaded = load("s1").expect("load from disk");
@@ -826,7 +890,7 @@ mod persist_tests {
         let state = std::sync::Arc::new(make_test_app_state());
 
         state.record_outcome("s-race", sample_outcome());
-        assert!(state.knowledge_dirty.contains_key("s-race"));
+        assert!(state.engine.knowledge_dirty.contains_key("s-race"));
 
         // Spawn a background writer that keeps appending while the flush runs.
         // With the old "snapshot → persist → unconditional remove" ordering,
@@ -856,9 +920,9 @@ mod persist_tests {
         // Final drain after the writer has stopped. Any leftover dirty flag
         // means a write was correctly preserved across the flush.
         flush_dirty(&state);
-        assert!(!state.knowledge_dirty.contains_key("s-race"));
+        assert!(!state.engine.knowledge_dirty.contains_key("s-race"));
 
-        let in_memory = state.session_knowledge.get("s-race").unwrap();
+        let in_memory = state.engine.session_knowledge.get("s-race").unwrap();
         let in_memory_count = in_memory.lock().commands.len();
         drop(in_memory);
         let on_disk = load("s-race").expect("load from disk");
@@ -932,7 +996,7 @@ mod persist_tests {
                 .iter()
                 .any(|c| c.command == "the outcome that must survive")
         );
-        assert!(!state.knowledge_dirty.contains_key("s-slow"));
+        assert!(!state.engine.knowledge_dirty.contains_key("s-slow"));
     }
 
     /// The startup load is spawned asynchronously, so a command can be recorded
@@ -957,6 +1021,7 @@ mod persist_tests {
         state.record_outcome("s-live", newer);
         assert_eq!(
             state
+                .engine
                 .session_knowledge
                 .get("s-live")
                 .unwrap()
@@ -970,6 +1035,7 @@ mod persist_tests {
 
         assert_eq!(
             state
+                .engine
                 .session_knowledge
                 .get("s-live")
                 .unwrap()
@@ -1068,7 +1134,7 @@ mod persist_tests {
 
         flush_dirty(&state);
         assert!(
-            state.knowledge_dirty.contains_key("s-fail"),
+            state.engine.knowledge_dirty.contains_key("s-fail"),
             "dirty flag must be re-inserted on persist failure so the next flush retries"
         );
     }
@@ -1084,7 +1150,7 @@ mod persist_tests {
 
         let state = make_test_app_state();
         load_all(&state);
-        let restored = state.session_knowledge.get("s-restored").unwrap();
+        let restored = state.engine.session_knowledge.get("s-restored").unwrap();
         assert_eq!(restored.lock().commands.len(), 1);
     }
 
@@ -1106,7 +1172,7 @@ mod persist_tests {
         // A fresh process that never loaded this file — exactly what the cap
         // leaves behind for everything past the 40 newest sessions.
         let state = make_test_app_state();
-        assert!(!state.session_knowledge.contains_key("s-nonresident"));
+        assert!(!state.engine.session_knowledge.contains_key("s-nonresident"));
 
         state.record_outcome("s-nonresident", sample_outcome());
         flush_dirty(&state);
@@ -1148,19 +1214,20 @@ mod persist_tests {
         load_all(&state);
 
         assert_eq!(
-            state.session_knowledge.len(),
+            state.engine.session_knowledge.len(),
             MAX_RESIDENT_SESSIONS,
             "startup load must be capped"
         );
         // The newest file must be resident, the oldest must not.
         assert!(
             state
+                .engine
                 .session_knowledge
                 .contains_key(&format!("s{}", total - 1)),
             "newest session must be loaded"
         );
         assert!(
-            !state.session_knowledge.contains_key("s0"),
+            !state.engine.session_knowledge.contains_key("s0"),
             "oldest session must be skipped, not loaded"
         );
     }
@@ -1205,7 +1272,7 @@ mod persist_tests {
         std::fs::write(sessions.join("broken.json"), "not json").unwrap();
         let state = make_test_app_state();
         load_all(&state); // must not panic
-        assert!(state.session_knowledge.is_empty());
+        assert!(state.engine.session_knowledge.is_empty());
     }
 
     #[test]
@@ -1250,7 +1317,7 @@ mod persist_tests {
         // Reload into a fresh state to verify persistence round-trips.
         let fresh = make_test_app_state();
         load_all(&fresh);
-        let k = fresh.session_knowledge.get("s-e2e").unwrap();
+        let k = fresh.engine.session_knowledge.get("s-e2e").unwrap();
         let k = k.lock();
         assert_eq!(k.commands.len(), 2);
         assert!(k.error_fix_pairs.contains_key("rust_compilation"));

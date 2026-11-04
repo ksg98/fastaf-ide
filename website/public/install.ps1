@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repo = "sstraus/tuicommander"
+$repo = "ksg98/fastaf-ide"
 $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
 
 Write-Host "Fetching latest FastAF release..." -ForegroundColor Cyan

@@ -24,6 +24,9 @@ export interface PostMergeCleanupDialogProps {
 	hasDirtyFiles?: boolean;
 	/** The branch's own worktree has uncommitted changes — archiving or deleting it destroys them */
 	worktreeDirty?: boolean;
+	/** Backend removal preview, including branch history and live sessions. */
+	removalWarnings?: string[];
+	submoduleUnpushedCommits?: Array<{ path: string; count: number }>;
 	onExecute: (steps: CleanupStep[], options?: { unstash?: boolean }) => void;
 	onSkip: () => void;
 	/** When true, checkboxes and buttons are disabled */
@@ -172,11 +175,23 @@ export const PostMergeCleanupDialog: Component<PostMergeCleanupDialogProps> = (p
 												</span>
 											</Show>
 										</div>
+										<Show when={step.id === "worktree" && step.checked && props.removalWarnings?.length}>
+											<div class={s.dirtyWarning} data-testid="worktree-removal-warnings">
+												<For each={props.removalWarnings}>{(warning) => <div>{warning}</div>}</For>
+											</div>
+										</Show>
 										<Show when={step.id === "worktree" && step.checked && props.worktreeDirty}>
 											<div class={s.dirtyWarning} data-testid="worktree-dirty-warning">
 												{props.worktreeAction === "delete"
 													? `The ${props.branchName} worktree has uncommitted changes. Deleting it removes the directory — that work is lost.`
 													: `The ${props.branchName} worktree has uncommitted changes. They move to __archived/ with it.`}
+												<For each={props.submoduleUnpushedCommits ?? []}>
+													{(entry) => (
+														<div>
+															{entry.path}: {entry.count} commits not on a remote-tracking branch
+														</div>
+													)}
+												</For>
 											</div>
 										</Show>
 										<Show when={step.id === "switch" && step.checked && props.hasDirtyFiles}>
@@ -211,10 +226,22 @@ export const PostMergeCleanupDialog: Component<PostMergeCleanupDialogProps> = (p
 					</ul>
 				</div>
 				<div class={d.actions}>
-					<button class={d.cancelBtn} data-testid="skip-btn" onClick={props.onSkip} disabled={!!props.executing}>
+					<button
+						type="button"
+						class={d.cancelBtn}
+						data-testid="skip-btn"
+						onClick={props.onSkip}
+						disabled={!!props.executing}
+					>
 						Skip
 					</button>
-					<button class={d.primaryBtn} data-testid="execute-btn" onClick={handleExecute} disabled={!!props.executing}>
+					<button
+						type="button"
+						class={d.primaryBtn}
+						data-testid="execute-btn"
+						onClick={handleExecute}
+						disabled={!!props.executing}
+					>
 						Execute
 					</button>
 				</div>

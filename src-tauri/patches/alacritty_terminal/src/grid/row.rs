@@ -2,7 +2,7 @@
 
 use std::cmp::{max, min};
 use std::ops::{Index, IndexMut, Range, RangeFrom, RangeFull, RangeTo, RangeToInclusive};
-use std::{ptr, slice};
+use std::{iter, slice};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,11 @@ pub struct Row<T> {
     /// stale WRAPLINE from natural terminal wrapping from causing incorrect merges.
     #[cfg_attr(feature = "serde", serde(default))]
     pub reflow_wrap: bool,
+
+    /// The predecessor of this retained row was discarded. Full erasure/reset
+    /// starts new content and restores a known origin.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub copy_origin_unknown: bool,
 }
 
 impl<T: PartialEq> PartialEq for Row<T> {
@@ -38,30 +43,14 @@ impl<T: PartialEq> PartialEq for Row<T> {
 
 impl<T: Default> Row<T> {
     /// Create a new terminal row.
-    ///
-    /// Ideally the `template` should be `Copy` in all performance sensitive scenarios.
     pub fn new(columns: usize) -> Row<T> {
-        debug_assert!(columns >= 1);
-
-        let mut inner: Vec<T> = Vec::with_capacity(columns);
-
-        // This is a slightly optimized version of `std::vec::Vec::resize`.
-        unsafe {
-            let mut ptr = inner.as_mut_ptr();
-
-            for _ in 1..columns {
-                ptr::write(ptr, T::default());
-                ptr = ptr.offset(1);
-            }
-            ptr::write(ptr, T::default());
-
-            inner.set_len(columns);
-        }
+        let inner = iter::repeat_with(T::default).take(columns).collect();
 
         Row {
             inner,
             occ: 0,
             reflow_wrap: false,
+            copy_origin_unknown: false,
         }
     }
 
@@ -72,6 +61,8 @@ impl<T: Default> Row<T> {
             return;
         }
 
+        // Avoid geometric over-allocation on every terminal width increase.
+        self.inner.reserve_exact(columns - self.inner.len());
         self.inner.resize_with(columns, T::default);
     }
 
@@ -88,11 +79,14 @@ impl<T: Default> Row<T> {
 
         // Split off cells for a new row.
         let mut new_row = self.inner.split_off(columns);
+        // split_off leaves the original allocation behind, even after a large resize.
+        self.inner.shrink_to_fit();
         let index = new_row
             .iter()
             .rposition(|c| !c.is_empty())
             .map_or(0, |i| i + 1);
         new_row.truncate(index);
+        new_row.shrink_to_fit();
 
         self.occ = min(self.occ, columns);
 
@@ -125,6 +119,7 @@ impl<T: Default> Row<T> {
 
         self.occ = 0;
         self.reflow_wrap = false;
+        self.copy_origin_unknown = false;
     }
 }
 
@@ -136,6 +131,7 @@ impl<T> Row<T> {
             inner: vec,
             occ,
             reflow_wrap: false,
+            copy_origin_unknown: false,
         }
     }
 
@@ -311,5 +307,35 @@ impl<T> IndexMut<RangeToInclusive<Column>> for Row<T> {
     fn index_mut(&mut self, index: RangeToInclusive<Column>) -> &mut [T] {
         self.occ = max(self.occ, *index.end + 1);
         &mut self.inner[..=(index.end.0)]
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+    use crate::term::cell::Cell;
+
+    /// Catches: split_off leaves the wide allocation behind after a narrow resize.
+    #[test]
+    fn shrink_releases_old_capacity_and_grow_does_not_double_it() {
+        let mut row = Row::<Cell>::new(220);
+        row[Column(219)].c = 'z';
+        let removed = row.shrink(80).expect("retained tail content");
+        assert_eq!(row.inner.capacity(), 80);
+        assert_eq!(removed.last().unwrap().c, 'z');
+        assert_eq!(removed.capacity(), removed.len());
+        row.grow(221);
+        assert_eq!(row.inner.capacity(), 221);
+        assert_eq!(row[Column(220)].c, ' ');
+        assert!(row.shrink(1).is_none());
+        assert_eq!(row.inner.capacity(), 1);
+    }
+
+    /// Catches: the old unsafe initializer writes into a zero-capacity allocation.
+    #[test]
+    fn new_zero_columns_is_empty() {
+        let row = Row::<Cell>::new(0);
+        assert_eq!(row.len(), 0);
+        assert_eq!(row.inner.capacity(), 0);
     }
 }

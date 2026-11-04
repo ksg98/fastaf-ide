@@ -1,0 +1,58 @@
+/* Settings › AI Chat — the Scheduled tasks card. Rows are SettingsPrimitives'
+   ListRow; this only lays out the job list and the add form under it. */
+
+.jobs {
+  margin-bottom: 12px;
+  border-bottom: var(--hairline-w, 1px) solid var(--hairline, var(--border));
+}
+
+.remove {
+  color: var(--fg-secondary);
+}
+
+.remove:hover:enabled {
+  color: var(--error);
+}
+
+.addForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.addControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.every {
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.addControls .interval {
+  width: 64px;
+  flex: none;
+}
+
+.addControls .unit {
+  width: 104px;
+  flex: none;
+}
+
+.once {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 0 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: normal;
+  cursor: pointer;
+}
+
+.add {
+  margin-left: auto;
+}

@@ -1,10 +1,14 @@
 use axum::Json;
 use axum::extract::Query;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use super::types::*;
 use super::{err_500, json_result, validate_path_string, validate_repo_path};
+
+pub(super) async fn home_directory_http() -> Response {
+    json_result(crate::fs::get_home_directory())
+}
 
 // `list_directory_http` intentionally omits `State` + `indexer_throttle`: the
 // throttle exists to bound *concurrent* blocking walks (search, content grep,
@@ -125,6 +129,50 @@ pub(super) async fn fs_read_file_http(Query(q): Query<FsFileQuery>) -> Response 
     json_result(crate::fs::fs_read_file(q.repo_path, q.file).await)
 }
 
+/// Serve Markdown images through the authenticated HTTP router. Canonical paths
+/// keep both `..` and symlinks from escaping the selected repository.
+pub(super) async fn markdown_image_http(Query(q): Query<FsFileQuery>) -> Response {
+    const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+    if let Err(e) = validate_repo_path(&q.repo_path) {
+        return e.into_response();
+    }
+    let root = match tokio::fs::canonicalize(&q.repo_path).await {
+        Ok(root) => root,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let image = match tokio::fs::canonicalize(root.join(&q.file)).await {
+        Ok(image) => image,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    if !image.starts_with(&root) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let mime = mime_guess::from_path(&image).first_or_octet_stream();
+    if mime.type_().as_str() != "image" {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    let metadata = match tokio::fs::metadata(&image).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let bytes = match tokio::fs::read(&image).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// Repo file read for the code editor, at the larger `MAX_EDITOR_LARGE_FILE_SIZE` cap.
 pub(super) async fn read_editor_file_http(Query(q): Query<FsFileQuery>) -> Response {
     if let Err(e) = validate_repo_path(&q.repo_path) {
@@ -173,28 +221,27 @@ fn deny_unless_in_roots(path: &str, roots: &[String]) -> Option<Response> {
     None
 }
 
-/// Extract registered repository root paths from the opaque repos JSON. The
-/// document keys them under `repos` (`stores/repositories.ts`, and every other
-/// reader of it); asking for any other key finds nothing and denies every gated
-/// route, which is what the `repositories` this once read did.
+/// Registered repository root paths.
 fn registered_repo_roots() -> Vec<String> {
-    crate::config::load_repositories()
-        .get("repos")
-        .and_then(|r| r.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default()
+    crate::config::registered_repo_paths()
 }
 
-pub(super) async fn read_external_file_http(Query(q): Query<FsExternalFileQuery>) -> Response {
-    // Restrict to files within registered repos — prevents arbitrary file reads via HTTP
-    if let Some(resp) = deny_unless_in_roots(&q.path, &registered_repo_roots()) {
+pub(super) async fn read_external_file_http(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Query<FsExternalFileQuery>,
+) -> Response {
+    // The local browser belongs to the desktop user. Network callers retain
+    // their existing registered-repository boundary, after HTTP authentication.
+    if !addr.ip().is_loopback()
+        && let Some(resp) = deny_unless_in_roots(&q.path, &registered_repo_roots())
+    {
         return resp;
     }
     json_result(crate::read_external_file(q.path).await)
 }
 
 /// External (absolute-path) file read for the code editor, at the larger
-/// `MAX_EDITOR_LARGE_FILE_SIZE` cap. Same repo-root restriction as `read_external_file_http`.
+/// `MAX_EDITOR_LARGE_FILE_SIZE` cap. This editor route remains repo-root restricted.
 pub(super) async fn read_editor_file_external_http(
     Query(q): Query<FsExternalFileQuery>,
 ) -> Response {
@@ -224,6 +271,19 @@ pub(super) async fn create_file_http(Json(body): Json<FsFileCreateRequest>) -> R
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => err_500(&e),
     }
+}
+
+/// `Ok(true)` body is `true` (written), `false` means the file changed on disk first.
+pub(super) async fn write_file_if_unchanged_http(
+    Json(body): Json<FsWriteIfUnchangedRequest>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
+    }
+    json_result(
+        crate::fs::write_file_if_unchanged(body.repo_path, body.file, body.expected, body.content)
+            .await,
+    )
 }
 
 pub(super) async fn create_directory_http(Json(body): Json<FsDirCreateRequest>) -> Response {
@@ -306,6 +366,12 @@ pub(super) async fn resolve_terminal_paths_http(
     json_result(crate::fs::resolve_terminal_paths(body.cwd, body.candidates).await)
 }
 
+pub(super) async fn resolve_markdown_link_http(
+    Json(body): Json<FsResolveMarkdownLinkRequest>,
+) -> Response {
+    json_result(crate::fs::resolve_markdown_link(body.root, body.current_file, body.href).await)
+}
+
 /// Stat an absolute path. Metadata-only (exists/is_dir/size/mtime), no content,
 /// so it is not repo-root gated — `stat_path_impl` already refuses TCC-protected dirs.
 pub(super) async fn stat_path_http(Query(q): Query<FsExternalFileQuery>) -> Response {
@@ -315,7 +381,8 @@ pub(super) async fn stat_path_http(Query(q): Query<FsExternalFileQuery>) -> Resp
 }
 
 /// Warm the BM25 content index for a repo (fire-and-forget; build runs in the
-/// background). Mirrors `search_content_http`'s use of `ensure_index`.
+/// background). Mirrors the `warm_content_index` IPC command, gate included —
+/// `warm_index` honours `index_strategy`, `ensure_index` would not.
 pub(super) async fn warm_content_index_http(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
     Json(body): Json<FsWarmIndexRequest>,
@@ -323,14 +390,14 @@ pub(super) async fn warm_content_index_http(
     if let Err(e) = validate_repo_path(&body.repo_path) {
         return e.into_response();
     }
-    crate::content_index::ensure_index(&state, &body.repo_path);
+    crate::content_index::warm_index(&state, &body.repo_path);
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 /// Write a file at an absolute path (editor saves for files outside any repo).
-/// Gated to registered repo roots for the HTTP boundary, matching
-/// `read_external_file_http` — the editor can only *open* repo-root files over
-/// HTTP, so saves target the same set. `write_external_file` also confines to $HOME.
+/// Gated to registered repo roots for the HTTP boundary, matching external
+/// network reads. Loopback preview reads do not grant write access.
+/// `write_external_file` also confines to $HOME.
 pub(super) async fn write_external_file_http(Json(body): Json<FsExternalWriteRequest>) -> Response {
     if let Some(resp) = deny_unless_in_roots(&body.path, &registered_repo_roots()) {
         return resp;
@@ -394,6 +461,14 @@ pub(super) async fn fs_transfer_paths_http(Json(body): Json<FsTransferPathsReque
     ))
 }
 
+/// The existing router/auth middleware also owns this streaming binary RPC.
+pub(super) async fn upload_copy_http(
+    Query(q): Query<crate::remote_transfer::UploadQuery>,
+    body: axum::body::Body,
+) -> Response {
+    json_result(crate::remote_transfer::receive_copy(q, &registered_repo_roots(), body).await)
+}
+
 /// 403 response for an absolute path that escapes every registered repo root.
 fn access_denied() -> Response {
     (
@@ -416,25 +491,70 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Asking the repositories document for `repositories` instead of `repos`
-    /// found no roots, so every gated route — `/fs/copy-abs`, `/fs/move-abs`,
-    /// `/fs/paste`, `/fs/read-external` — refused every browser and remote client.
+    /// A `repositories.json` shaped exactly like the frontend writes it: the repo map
+    /// lives under `repos`, next to unrelated top-level keys.
+    fn write_real_shaped_repositories(config_dir: &Path, repo: &Path) {
+        let doc = serde_json::json!({
+            "activeRepoPath": repo.to_string_lossy(),
+            "groupOrder": [],
+            "groups": {},
+            "repoOrder": [repo.to_string_lossy()],
+            "repos": {
+                repo.to_string_lossy(): {"path": repo.to_string_lossy(), "displayName": "r", "branches": {}}
+            }
+        });
+        std::fs::write(config_dir.join("repositories.json"), doc.to_string()).unwrap();
+    }
+
     #[test]
-    fn registered_repo_roots_reads_the_repos_the_app_saves() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _config = crate::config::set_config_dir_override(tmp.path().to_path_buf());
-        crate::config::replace_repositories_for_test(serde_json::json!({
-            "repos": { "/Users/dev/project-a": {}, "/Users/dev/project-b": {} },
-            "repoOrder": ["/Users/dev/project-a", "/Users/dev/project-b"]
-        }))
-        .unwrap();
+    #[serial_test::serial]
+    fn registered_repo_roots_returns_the_keys_of_the_repos_map() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+        write_real_shaped_repositories(cfg.path(), Path::new("/Users/dev/project-a"));
 
-        let mut roots = registered_repo_roots();
-        roots.sort();
+        assert_eq!(
+            registered_repo_roots(),
+            vec!["/Users/dev/project-a".to_string()]
+        );
+    }
 
-        assert_eq!(roots, vec!["/Users/dev/project-a", "/Users/dev/project-b"]);
-        assert!(deny_unless_in_roots("/Users/dev/project-a/src/main.rs", &roots).is_none());
-        assert!(deny_unless_in_roots("/Users/dev/elsewhere/x.rs", &roots).is_some());
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn read_external_serves_a_file_inside_a_registered_repo_and_refuses_one_outside() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+        let repo = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::write(repo.path().join("AGENTS.md"), "inside").unwrap();
+        std::fs::write(outside.path().join("secret.md"), "outside").unwrap();
+        write_real_shaped_repositories(cfg.path(), repo.path());
+
+        let get = |p: std::path::PathBuf| {
+            read_external_file_http(
+                axum::extract::ConnectInfo(std::net::SocketAddr::from(([203, 0, 113, 1], 4444))),
+                Query(FsExternalFileQuery {
+                    path: p.to_string_lossy().into_owned(),
+                }),
+            )
+        };
+        assert_eq!(
+            get(repo.path().join("AGENTS.md")).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get(outside.path().join("secret.md")).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn registered_repo_roots_is_empty_when_no_repositories_are_registered() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+
+        assert_eq!(registered_repo_roots(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -537,4 +657,22 @@ mod tests {
                 .is_some()
         );
     }
+}
+
+/// HTTP twin of the Tasks brief builder, using the same input object as IPC.
+pub(super) async fn start_work_prompt_http(Json(body): Json<StartWorkPromptRequest>) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
+    }
+    json_result(
+        crate::work_items::start_work_prompt::build_start_work_prompt(body.repo_path, body.input)
+            .await,
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct StartWorkPromptRequest {
+    repo_path: String,
+    input: crate::work_items::start_work_prompt::PromptInput,
 }

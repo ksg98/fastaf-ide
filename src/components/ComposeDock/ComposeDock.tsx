@@ -1,8 +1,9 @@
-import { type Component, createEffect, createSignal, For, on, Show, untrack } from "solid-js";
+import { type Component, createEffect, createSignal, For, on, onCleanup, Show, untrack } from "solid-js";
 import { AGENTS } from "../../agents";
 import { usePty } from "../../hooks/usePty";
 import { t } from "../../i18n";
 import { appLogger } from "../../stores/appLogger";
+import { chatViewStore } from "../../stores/chatView";
 import { dictationStore } from "../../stores/dictation";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
@@ -11,6 +12,8 @@ import { cx } from "../../utils";
 import s from "./ComposeDock.module.css";
 import type { StartTarget } from "./composeTargets";
 import { DotWave } from "./DotWave";
+import { composeDockBridge } from "./dockBridge";
+import { dockSendMode } from "./dockSend";
 
 export interface ComposeDockProps {
 	/**
@@ -170,7 +173,7 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 		if (!term) return null;
 		const repoPath = repositoriesStore.getRepoPathForTerminal(term.id);
 		const owner = repoPath ? repositoriesStore.get(repoPath) : undefined;
-		return Object.values(owner?.branches ?? {}).find((b) => b.terminals.includes(term.id))?.name ?? null;
+		return Object.values(owner?.workspaces ?? {}).find((w) => w.terminals.includes(term.id))?.branchName ?? null;
 	};
 
 	const terminalState = (): "awaiting" | "busy" | "idle" => {
@@ -230,6 +233,27 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 		if (!isHero()) setExpanded(false);
 	};
 
+	// The dock is the active terminal's one input, Chat view included: a
+	// terminal hands it typing, the compose shortcut and smart-prompt text.
+	if (!isHero()) {
+		const unregister = composeDockBridge.register({
+			open(request) {
+				if (disabled()) return false;
+				if (request?.replace !== undefined) setText(request.replace);
+				expand(true);
+				const insert = request?.insert;
+				if (insert && field) {
+					const start = field.selectionStart ?? field.value.length;
+					field.setRangeText(insert, start, field.selectionEnd ?? start, "end");
+					setText(field.value);
+					autoResize();
+				}
+				return true;
+			},
+		});
+		onCleanup(unregister);
+	}
+
 	const send = async (mode: "now" | "queue") => {
 		const value = text().trim();
 		if (!value || sending() || disabled()) return;
@@ -242,12 +266,23 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 			} else {
 				const term = terminal();
 				if (!term?.sessionId) return;
-				if (mode === "queue" && term.agentType) {
-					const outcome = await pty.enqueueCommand(term.sessionId, value);
+				const sessionId = term.sessionId;
+				if (dockSendMode(term, mode) === "queue") {
+					const outcome = await pty.enqueueCommand(sessionId, value);
 					// Trust the call's own count — the chip must react to the keypress, not the 1s poll.
 					terminalsStore.update(term.id, { queuedCommands: outcome.queued });
+					// The Chat view lists the queue as pending turns; show this one now, not on its next poll.
+					if (term.viewMode === "chat") void chatViewStore.refreshQueue(sessionId).catch(() => {});
 				} else {
-					await pty.sendCommand(term.sessionId, value, term.agentType);
+					// An open Chat view shows the prompt as pending until the agent's transcript has it.
+					// Outside Chat this is a no-op.
+					const rollback = chatViewStore.beginSubmission(sessionId, value);
+					try {
+						await pty.sendCommand(sessionId, value, term.agentType);
+					} catch (err) {
+						rollback();
+						throw err;
+					}
 				}
 				drafts.delete(term.id);
 			}
@@ -496,7 +531,7 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 							<IconFolder />
 							{r().displayName}
 						</span>
-						<Show when={r().activeBranch}>
+						<Show when={r().activeWorkspaceId && r().workspaces[r().activeWorkspaceId as string]?.branchName}>
 							{(branch) => (
 								<span class={s.contextChip}>
 									<IconBranch />

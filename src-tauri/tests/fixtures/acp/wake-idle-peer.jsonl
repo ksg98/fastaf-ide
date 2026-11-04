@@ -1,0 +1,9 @@
+// An idle ego is woken with one prompt carrying the mail notice; while that
+// turn runs, a second wake writes nothing.
+{"step":"expect_env","name":"TUIC_SESSION","value":"550e8400-e29b-41d4-a716-446655440a01"}
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","prompt":[{"type":"text","text":"[TUIC] message available — read it with: agent action=inbox"}]},"capture":"prompt"}
+{"step":"expect_no_frame"}

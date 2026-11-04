@@ -47,7 +47,7 @@ function createMultiviewStore() {
 	const shownTileIds = (): string[] => {
 		const ids = terminalsStore.getAttachedIds().filter(isEligible);
 		if (ids.length <= MAX_MULTIVIEW_TILES) return ids;
-		const byRecency = [...ids].sort(
+		const byRecency = ids.toSorted(
 			(a, b) => (terminalsStore.get(b)?.lastDataAt ?? 0) - (terminalsStore.get(a)?.lastDataAt ?? 0),
 		);
 		const shown = new Set(byRecency.slice(0, MAX_MULTIVIEW_TILES));

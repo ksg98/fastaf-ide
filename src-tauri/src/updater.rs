@@ -1,4 +1,4 @@
-//! Update channel checker for nightly releases.
+//! Update channel checker for prerelease feeds.
 //!
 //! Owns URL mapping, HTTP fetch (with timeout + size cap), manifest parsing,
 //! and error classification. The TypeScript frontend is a pure state consumer.
@@ -22,6 +22,8 @@ struct ChannelConfig {
     release_page: &'static str,
 }
 
+// FastAF publishes no beta feed: upstream's `beta` channel pointed at
+// sstraus/tuicommander, so it is deliberately absent. Nightly is FastAF's own.
 const CHANNELS: &[(&str, ChannelConfig)] = &[(
     "nightly",
     ChannelConfig {
@@ -127,13 +129,24 @@ async fn fetch_channel_manifest(
     })
 }
 
-/// Check a nightly update channel for available updates.
+async fn fetch_update_channel(
+    channel: &str,
+    manifest_url: &str,
+) -> Result<UpdateCheckResult, String> {
+    let config = get_channel_config(channel)?;
+    fetch_channel_manifest(manifest_url, config.release_page).await
+}
+
+/// Check a prerelease update channel for available updates.
 ///
 /// URLs are hardcoded — no user-supplied URLs accepted (SSRF prevention).
 #[tauri::command]
 pub async fn check_update_channel(channel: String) -> Result<UpdateCheckResult, String> {
+    if crate::agent_test::active() {
+        return Err("Updater is disabled in agent-test".into());
+    }
     let config = get_channel_config(&channel)?;
-    fetch_channel_manifest(config.manifest_url, config.release_page).await
+    fetch_update_channel(&channel, config.manifest_url).await
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +180,37 @@ mod tests {
     #[test]
     fn test_get_channel_config_valid() {
         assert!(get_channel_config("nightly").is_ok());
+    }
+
+    // Catches: a feed upstream publishes but FastAF does not (sstraus beta)
+    // sneaking back in through a merge.
+    #[test]
+    fn beta_channel_is_not_offered() {
+        assert!(get_channel_config("beta").is_err());
+        for (name, cfg) in CHANNELS {
+            assert!(
+                !cfg.manifest_url.contains("sstraus") && !cfg.release_page.contains("sstraus"),
+                "Channel {name} points at upstream"
+            );
+        }
+    }
+
+    // Catches: a missing nightly feed turns a valid channel into an error.
+    #[tokio::test]
+    async fn channel_before_first_release_is_informational() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/nightly/latest.json")
+            .with_status(404)
+            .create_async()
+            .await;
+        let result =
+            fetch_update_channel("nightly", &format!("{}/nightly/latest.json", server.url()))
+                .await
+                .unwrap();
+        assert!(!result.available);
+        assert!(result.not_found);
+        mock.assert_async().await;
     }
 
     #[test]

@@ -8,7 +8,7 @@ How FastAF transforms raw PTY output into structured, styled terminal content fo
 PTY (raw bytes)
   │
   ▼
-VtLogBuffer (vt100 parser)
+VtLogBuffer (TerminalGrid — the patched alacritty_terminal fork)
   ├── scrollback → LogLine[] (styled spans)
   ├── screen_rows → String[] (plain text)
   └── prompt_input_text → String (user-typed, no ghost text)
@@ -28,68 +28,72 @@ VtLogBuffer (vt100 parser)
 
 ---
 
-## 1. VtLogBuffer — VT100 Parsing Engine
+## 1. VtLogBuffer — VT Parsing Engine
 
-**File:** `src-tauri/src/state.rs`
+**File:** `src-tauri/crates/tuic-terminal/src/vt_log.rs` (buffer) · `src-tauri/crates/tuic-terminal/src/terminal_grid.rs` (grid)
+
+There is **no `vt100` crate**. `VtLogBuffer` wraps a `TerminalGrid`, TUIC's patched
+`alacritty_terminal` fork — see [`alacritty-integration.md`](./alacritty-integration.md).
+Every parsing, changed-row and scrollback query below is delegated to that grid.
 
 ### Configuration
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Scrollback | 10,000 lines (`VT100_SCROLLBACK`) | Internal vt100 parser buffer |
+| Scrollback | 10,000 lines (`GRID_SCROLLBACK`) | Grid history, sized so it cannot fill between two `process()` calls |
 | Log capacity | 10,000 lines (`VT_LOG_BUFFER_CAPACITY`) | Ring buffer of finalized LogLines |
 | Default size | 24 rows × 80 cols | Resizable via `resize()` |
 
 ```rust
 VtLogBuffer::new(rows, cols, capacity)
-// Parser created with: vt100::Parser::new(rows, cols, VT100_SCROLLBACK)
+// Grid created with: TerminalGrid::new(rows, cols, GRID_SCROLLBACK)
 ```
 
-### `process(data: &[u8])` — Core Pipeline
+### `process(data: &[u8]) -> Vec<ChangedRow>` — Core Pipeline
 
 Called for every PTY read chunk. Steps:
 
-1. **Feed bytes** to vt100 parser
-2. **Detect changed rows** by diffing current screen against `prev_rows` cache
-3. **Extract scrollback delta:**
+1. **Detect a screen switch** (primary ↔ alternate). On a switch, `grid.clear_prev_rows()`
+   forces the next diff to report every non-empty row.
+2. **Feed bytes** to the grid — `grid.process(data)` parses and returns the changed rows
+   itself; `VtLogBuffer` keeps no `prev_rows` of its own.
+3. **Extract the scrollback delta**, primary screen only:
    ```
-   total_sb = scrollback_count()        // query vt100 internal counter
-   delta = total_sb - self.scrollback_read
-   new_lines = read_scrollback_lines(delta)
+   total_sb  = self.grid.scrollback_count();
+   delta     = total_sb.saturating_sub(self.scrollback_read);
+   new_lines = self.grid.read_scrollback_log_lines(delta);
    ```
-4. **Trim agent chrome** from new lines (remove prompt/separator lines)
-5. **Push to log ring buffer**
-6. **Update `prev_rows`** snapshot for next diff
-7. **Return changed row indices** (for output parser)
+4. **Mark agent chrome** on the new lines (`mark_agent_chrome`).
+5. **Stamp `cols`** with the current PTY width and **push to the log ring buffer**.
+6. **Return the changed rows** (for the output parser).
+
+Changed rows are reported for **both** screens, so parsers still see status lines and
+intent tokens from alternate-screen agents (Claude Code / Ink). Log capture is skipped
+on the alternate screen, while `suppress_capture` is set (a side panel halved the
+width), and for inline TUIs (mouse reporting on the primary screen, e.g.
+`grok --no-alt-screen`) — but `scrollback_read` is still advanced so the cursor stays
+in sync.
 
 ### Scrollback Extraction
 
-The vt100 parser maintains an internal scrollback buffer. Lines are "scrolled off" when a line feed occurs at the bottom of the screen (real scroll), but NOT when cursor-based TUI redraws happen.
+The grid accumulates history when lines scroll off the top of the primary screen (a
+real line feed at the bottom), but NOT when cursor-based TUI redraws repaint in place.
+
+**Key invariant:** `scrollback_read` is monotonically increasing. Each `process()` call
+reads only the delta since the last call. `resize()` re-syncs it to
+`grid.primary_scrollback_count()` — the primary coordinate space — so a resize taken
+while an alt-screen app is active cannot strand the durable-log cursor.
+
+### `TerminalGrid::extract_log_line(&self, line: Line) -> LogLine` — Styled Cell Extraction
+
+Converts one grid line into a `LogLine` with colored spans:
 
 ```rust
-fn scrollback_count(&mut self) -> usize {
-    // Temporarily set max scrollback window to query total count
-    self.parser.screen_mut().set_scrollback(usize::MAX);
-    let count = self.parser.screen().scrollback();
-    self.parser.screen_mut().set_scrollback(0);
-    count
+struct LogLine {
+    spans: Vec<LogSpan>,
+    cols: u16,     // PTY width at capture time — lets the frontend spot narrow-captured lines
+    chrome: bool,  // Agent UI chrome; never serialized, readers skip it
 }
-
-fn read_scrollback_lines(&mut self, count, screen_height) -> Vec<LogLine> {
-    // Page through scrollback in screen_height-sized chunks
-    // using set_scrollback(offset) to position the view
-    // Extract each row via extract_log_line()
-}
-```
-
-**Key invariant:** `scrollback_read` is monotonically increasing. Each `process()` call reads only the delta since the last call.
-
-### `extract_log_line(screen, row)` — Styled Cell Extraction
-
-Converts a vt100 screen row into a `LogLine` with colored spans:
-
-```rust
-struct LogLine { spans: Vec<LogSpan> }
 struct LogSpan {
     text: String,
     fg: Option<LogColor>,   // Idx(u8) or Rgb(r,g,b)
@@ -107,12 +111,15 @@ Algorithm:
 - Flush span when attributes change
 - Trim trailing empty/whitespace-only spans with default styling
 
+`mark_agent_chrome` **flags** lines from `find_scrollback_chrome_cutoff` down as
+`chrome: true`; it does not delete them. A misclassification therefore hides text
+rather than destroying it.
+
 ### `screen_rows()` — Current Screen Content
 
-Returns the visible terminal content as plain text strings.
-
-- **Fast path:** Returns cached `prev_rows` from last `process()` call
-- **Fallback:** Reads directly from parser (before first process or after resize)
+Returns the visible terminal content as plain text strings, from the grid's cached
+snapshot (`grid.screen_text_rows()`). `screen_rows_ref()` borrows the same snapshot so
+a caller already holding the lock avoids the clone.
 
 ### `prompt_input_text()` — User Input Extraction
 
@@ -309,7 +316,7 @@ Used for all PTY input: typed characters, escape sequences (arrow keys), control
 
 Renders combined log history + current screen with auto-scroll management.
 
-**Text wrapping strategy:** Normal text uses `pre-wrap` so long lines wrap on narrow screens. Consecutive lines containing box-drawing characters (U+2500–U+257F) are grouped into scrollable `tableBlock` containers with `white-space: pre` and `overflow-x: auto`, preserving alignment for tables, tree views, and bordered output. Grouping is done by `groupLineBlocks()` and detection by `hasBoxDrawing()` in `src/mobile/utils/logLine.ts`.
+**Text wrapping strategy:** `reflowDisplayLines()` joins prose rows that the agent hard-wrapped before they reached the phone. It estimates the agent's wrap width from the widest row in a contiguous prose run; `LogLine.cols` provides a lower-bound gate because Claude may wrap near 80 columns inside a much wider PTY. Short lines, paragraph breaks, lists, indented code, and box drawing stay separate. The browser then wraps the joined paragraph once at the phone width. Normal text uses `pre-wrap`; consecutive box-drawing lines stay in scrollable `tableBlock` containers with `white-space: pre` and `overflow-x: auto`. The rendering helpers live in `src/mobile/utils/logLine.ts`.
 
 **Initialization:**
 1. HTTP fetch: `GET /sessions/{id}/output?format=log`
@@ -419,10 +426,8 @@ Displays slash command menu items detected from the terminal.
 
 **Selection flow:**
 1. User taps item → `onSelect(command)` callback
-2. Parent sets `inputPrefill` signal with `{ text, seq }` counter
-3. CommandInput receives prefill, sets textarea value, focuses
-4. Also sends `Ctrl-U + text` to PTY so terminal shows it
-5. User reviews, optionally edits, presses Enter to submit
+2. CommandInput replaces the slash fragment, updates the textarea, and sends its text delta to the PTY
+3. User reviews, optionally edits, and submits; CommandInput waits for the last write and the agent's Enter gap before sending Enter
 
 ### SessionDetailScreen — Orchestration
 
@@ -434,10 +439,8 @@ Wires everything together:
 OutputView ──onStateChange──→ wsState signal
            ──onInputLine───→ ptyInputLine signal
                                     │
-SlashMenuOverlay ──onSelect──→ inputPrefill signal
-                                    │
-CommandInput ←── prefillValue ──────┘
-             ←── ptyInputLine ──────┘
+                                    ▼
+                              CommandInput ←── SlashMenuOverlay selection
 ```
 
 **State merging:** WebSocket state is authoritative when present; 3s poll state fills gaps.

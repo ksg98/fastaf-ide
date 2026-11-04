@@ -6,7 +6,7 @@ One-click AI automation for common git and code tasks. Smart Prompts inject cont
 
 Smart Prompts are context-aware automation shortcuts that turn repetitive developer workflows into single-click actions. They automatically resolve git context (branch, diff, changed files, PR data) and deliver a well-crafted prompt to your AI agent — no manual typing, no copy-pasting, no context switching.
 
-FastAF ships with **24 built-in prompts** covering commit workflows, code review, PR management, CI fixes, and code investigation. Each prompt includes a description explaining what it does, so you always know what will happen before clicking.
+FastAF ships with built-in prompts covering commit workflows, code review, PR management, CI fixes, and code investigation. Each prompt includes a description explaining what it does, so you always know what will happen before clicking.
 
 ## How to Use
 
@@ -45,6 +45,11 @@ Right-click a branch in the sidebar for the same branch prompts, run on that bra
 | **CI & Quality** | Fix CI Failures, Fix Lint Issues, Write Tests, Run & Fix Tests |
 | **Investigation** | Investigate Issue, What Changed?, Summarize Branch, Explain Changes |
 | **Code Operations** | Suggest Refactoring, Security Audit |
+| **Event configuration** | Configure Issue to Draft PR, Configure Incoming PR Review, Configure Authorized Bounded Fix |
+
+The [event configuration guides](event-driven-templates.md) ask for prerequisites
+and confirmation one step at a time. They open in the composer for review and do
+not install event intake or publish to GitHub merely by being selected.
 
 ## Customizing Smart Prompts
 
@@ -94,6 +99,7 @@ Prompts use `{variable_name}` syntax. Most variables are auto-resolved at execut
 | `{pr_url}` | GitHub pull request URL |
 | `{pr_state}` | PR state: OPEN, MERGED, or CLOSED |
 | `{pr_checks}` | CI check summary (e.g. "3 passed, 1 failed") |
+| `{pr_open_threads}` | Open review threads that are not outdated, one line each (location, tool, severity, title, link), most severe first, max 30. Read from GitHub only when a prompt uses it. The list is untrusted PR text in a fenced block; "Address Review Comments" sends it |
 | `{merge_status}` | Merge status: MERGEABLE, CONFLICTING, or BEHIND |
 | `{review_decision}` | Review status: APPROVED, CHANGES_REQUESTED, or REVIEW_REQUIRED |
 
@@ -101,7 +107,7 @@ Prompts use `{variable_name}` syntax. Most variables are auto-resolved at execut
 
 | Variable | Description |
 |----------|-------------|
-| `{agent_type}` | Active agent type (claude, aider, codex, etc.) |
+| `{agent_type}` | Active agent type (claude, gemini, codex, etc.) |
 | `{cwd}` | Active terminal working directory |
 
 ### Manual Input Variables
@@ -139,10 +145,14 @@ Runs a one-shot subprocess without using the terminal. Useful for quick operatio
 - Claude: `claude -p "{prompt}"`
 - Gemini: `gemini -p "{prompt}"`
 
-Without a template, headless prompts automatically fall back to inject mode.
+Without a template, headless prompts automatically fall back to inject mode. A prompt run from a branch menu, terminal menu or the command palette that cannot start (for example, no headless agent configured) shows a warning toast naming the reason.
 
 **Note:** Headless mode is not available in the Mobile Companion (PWA) — prompts fall back to inject mode automatically.
 
 ### API Mode
 
 Calls LLM providers directly via HTTP API without terminal or agent CLI. Supports an optional system prompt per prompt. Output routed via the same output target options. Requires LLM API configuration in Settings > Agents.
+
+### Execution failures
+
+A failed Smart Prompt reports the backend error message. Structured errors also show their code, for example `agent_error: Internal error: ...`. This does not retry the failed agent operation.

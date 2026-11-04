@@ -1,0 +1,15 @@
+import { render } from "solid-js/web";
+import { SessionDetailScreen } from "../../src/mobile/screens/SessionDetailScreen";
+import type { SessionState } from "../../src/mobile/useSessions";
+import "../../src/mobile/mobile.css";
+import commander from "../../src-tauri/src/themes/commander.json";
+import paper from "../../src-tauri/src/themes/vscode-light.json";
+import styles from "../../src/mobile/MobileApp.module.css";
+import data from "./recorded-states.json";
+const params = new URLSearchParams(location.search);
+const theme = params.get("theme") === "light" ? paper : commander;
+const tokens: Record<string, string> = {background:"bg-primary",surface:"bg-secondary",surfaceElevated:"bg-tertiary",highlight:"bg-highlight",foreground:"fg-primary",foregroundSecondary:"fg-secondary",mutedForeground:"fg-muted",accentHover:"accent-hover",accentForeground:"text-on-accent",errorForeground:"text-on-error"};
+for (const [key, value] of Object.entries(theme.appChrome)) document.documentElement.style.setProperty(`--${tokens[key] ?? key}`, String(value));
+const mode = params.get("mode") ?? "single";
+const recorded = data.find(row => row.fixture === `ego-${mode}-44-1973.tcap`)!;
+render(() => <main class={styles.shell}><div class={styles.sessionPane}><SessionDetailScreen session={{session_id:"isolated-question-fixture",display_name:`Recorded ego ${mode}`,cwd:"/recorded",worktree_path:null,worktree_branch:null,state:recorded.state as SessionState}} sessionExists subscribeChatWake={() => () => {}} onBack={() => {}} onOpenFiles={() => {}} /></div></main>, document.getElementById("mobile-app")!);

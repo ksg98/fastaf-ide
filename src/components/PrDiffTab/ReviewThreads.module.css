@@ -1,0 +1,174 @@
+/* Review threads, pending comments and the submit bar on the PR Files tab.
+   FastAF: threads are quiet cards in the diff well — a hairline, a 2px state
+   edge on the left, raised one step (`--bg-tertiary`) above the diff — and
+   every control comes from shared/controls (28px). */
+.thread,
+.draft {
+  margin: 8px 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  white-space: normal;
+}
+
+.resolved {
+  border-left-color: var(--success);
+  opacity: 0.8;
+}
+
+.outdated {
+  border-left-color: var(--warning);
+}
+
+.draft {
+  border-left-color: var(--fg-muted);
+  border-style: dashed;
+}
+
+.threadHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.threadPath {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+}
+
+.badge {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+}
+
+.badgeOpen {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.badgeResolved {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.badgeOutdated {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
+}
+
+.badgeBot {
+  color: var(--fg-muted);
+}
+
+.comment {
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+.commentHeader {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.commentHeader strong {
+  font-weight: 500;
+}
+
+.commentHeader time {
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.draftBody {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 12px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.submitBar {
+  padding: 8px 12px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+  background: var(--bg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+}
+
+.submitBar .row {
+  justify-content: flex-start;
+}
+
+.pendingCount {
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.alert {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+
+/* Controls — composed from the shared 28px set. */
+.btn {
+  composes: btn from "../shared/controls.module.css";
+  flex-shrink: 0;
+}
+
+.btnPrimary {
+  composes: btnPrimary from "../shared/controls.module.css";
+  flex-shrink: 0;
+}
+
+.textarea {
+  composes: textarea from "../shared/controls.module.css";
+  min-height: 56px;
+  font-size: var(--font-sm);
+}
+
+.input {
+  composes: input from "../shared/controls.module.css";
+  flex: 1;
+  width: auto;
+  min-width: 120px;
+}
+
+.select {
+  composes: select from "../shared/controls.module.css";
+  width: auto;
+}

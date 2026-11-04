@@ -291,6 +291,6 @@ mod live {
     fn an_empty_utterance_produces_no_audio() {
         let mut engine = Kokoro::load(KokoroModel::Q8F16).expect("model should load");
         let voice = Voice::load("af_heart").expect("voice should load");
-        assert!(engine.synthesize("   ", &voice, 1.0).unwrap().is_empty());
+        assert_eq!(engine.synthesize("   ", &voice, 1.0).unwrap().len(), 0);
     }
 }

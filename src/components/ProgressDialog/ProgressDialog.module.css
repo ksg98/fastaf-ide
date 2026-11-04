@@ -1,0 +1,344 @@
+/* The dialog is the whole Progress UI: a FastAF dialog (--surface-overlay,
+   radius 12, one hairline under a 40px header). It is wider than the shared
+   .popover because its content is one list of prose lines, not a form. */
+.dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, calc(100vw - 48px));
+  max-height: min(72vh, 720px);
+  overflow: hidden;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+}
+
+/* The Flow view is a row of columns, not a column of prose. */
+.wide {
+  width: min(1120px, calc(100vw - 48px));
+}
+
+.embedded {
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Header: title · project, then the scope, the view and the filter, close. */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 6px 0 16px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+.title {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.title h4 {
+  flex-shrink: 0;
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: var(--font-base);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.project {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.terminalSelect {
+  min-width: 110px;
+  max-width: 210px;
+}
+
+.close {
+  composes: iconBtn from "../shared/controls.module.css";
+  flex-shrink: 0;
+}
+
+/* List / Flow: the shared segmented control drawn as a view toggle — the
+   open view on --row-selected, no accent ring. */
+.header .viewToggle {
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.header .viewToggle [role="tab"] {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.header .viewToggle [role="tab"]:hover:enabled {
+  background: var(--wash-0);
+  color: var(--fg-secondary);
+}
+
+.header .viewToggle [role="tab"][aria-selected="true"] {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+  box-shadow: none;
+}
+
+.header .viewToggle [role="tab"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Blocked only is a yes/no preference: the settings switch, 34×18. */
+.filter input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  background: var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.filter input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--fg-muted);
+  transition: transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.filter input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.filter input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+  background: var(--text-on-accent);
+}
+
+.filter input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+@media (max-width: 600px) {
+  .embedded .header { flex-wrap: wrap; }
+  .embedded .title { flex: 1 1 100%; }
+  .embedded .terminalSelect { min-width: 110px; max-width: 210px; }
+  .embedded .viewToggle, .embedded .filter { flex: 0 0 auto; }
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.list[hidden] {
+  display: none;
+}
+
+.entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 10px 10px 16px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+.entry:last-child {
+  border-bottom: 0;
+}
+
+/* Hover-reveal like TabBar's .tabClose: no opacity transition. WKWebView left
+   the icon at full opacity after the pointer moved off the row when the fade
+   was still running, so every row the pointer had crossed kept its bin. */
+@media (hover: hover) {
+  .entry:hover .delete { opacity: 1; }
+}
+
+.body {
+  flex: 1;
+  min-width: 0;
+}
+
+.text {
+  margin: 0;
+  color: var(--fg-primary);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.textCollapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.more {
+  margin-top: 4px;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+/* Only an intent carries a word: it is the one line that says what the agent
+   started, not what it finished, and muted italics alone do not say that.
+   Sentence case: "Set out to", "Delegated to Reviewer". */
+.kindLabel::first-letter {
+  text-transform: uppercase;
+}
+
+/* Blocked is the one entry the reader must not miss; intent is the one they may
+   skip. Everything else sits at the default weight. */
+.entry[data-kind="blocked"] .text { color: var(--error); }
+.entry[data-kind="intent"] .text { color: var(--fg-muted); font-style: italic; }
+
+.icon { flex: 0 0 auto; margin-top: 2px; color: var(--fg-muted); }
+.entry[data-kind="blocked"] .icon { color: var(--error); }
+.entry[data-kind="done"] .icon { color: var(--success); }
+
+.delete {
+  composes: iconBtn from "../shared/controls.module.css";
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin-top: -3px;
+  opacity: 0;
+}
+
+.delete:focus-visible { opacity: 1; }
+
+/* The last-visit divider. Frozen while the dialog is open, so it never slides
+   out from under the line the reader is on. */
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: var(--hairline-w);
+  background: var(--hairline);
+}
+
+.error {
+  margin: 0;
+  padding: 8px 16px;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  margin: 0;
+  padding: 36px 16px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.loadOlder {
+  display: block;
+  margin: 8px auto;
+}
+
+/* Embedded mobile surface only: desktop keeps its compact journal. */
+.embedded { background: var(--bg-primary); }
+.mobileHeader { flex: 0 0 auto; padding: 0 16px 14px; }
+.mobileHeader h4 { display: flex; align-items: center; min-height: 60px; margin: 0; font-size: 20px; line-height: 26px; font-weight: 600; }
+.mobileControls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 12px; }
+.mobileControls select { width: 100%; min-width: 0; }
+.mobileProject { align-self: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.mobileViewRow { display: flex; align-items: center; gap: 12px; }
+.scope { margin-left: auto; min-width: 0; color: var(--fg-secondary); font-size: 13px; line-height: 20px; text-align: right; overflow-wrap: anywhere; }
+.mobileFilters { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-xl); }
+.mobileFilters label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg-secondary); }
+.embedded .list { padding: 0 12px 12px; }
+.embedded .entry { padding: 14px 12px; margin-bottom: 10px; border: 0; border-radius: var(--radius-xl); background: var(--bg-secondary); }
+.embedded .entry .text { font-size: 15px; line-height: 22px; font-weight: 400; color: var(--fg-primary); font-style: normal; }
+.eventHeader { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--fg-secondary); }
+.eventHeader .icon { margin: 0; color: inherit; }
+.eventHeader time { margin-left: auto; color: var(--fg-secondary); font-weight: 400; }
+.embedded .entry[data-kind="done"] .eventHeader { color: var(--success); }
+.embedded .entry[data-kind="blocked"] .eventHeader, .embedded .entry[data-kind="blocked"] .icon { color: var(--attention); }
+.mobileMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; color: var(--fg-secondary); font-size: 13px; line-height: 20px; }
+.mobileMeta > span { min-width: 0; overflow-wrap: anywhere; }
+.entryDetail { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 20px; color: var(--fg-secondary); overflow-wrap: anywhere; }
+.embedded .divider { padding: 10px 4px 12px; color: var(--fg-secondary); font-size: 13px; }
+.embedded .divider::before, .embedded .divider::after { display: none; }
+.embedded .empty { color: var(--fg-secondary); font-size: 15px; }
+
+.popupStatus {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}

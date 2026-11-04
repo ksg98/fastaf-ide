@@ -1,0 +1,17 @@
+{
+  "protocolVersion": 1,
+  "agentInfo": { "name": "ego", "version": "fixture" },
+  "agentCapabilities": {
+    "loadSession": true,
+    "promptCapabilities": { "image": true, "audio": false, "embeddedContext": false },
+    "mcpCapabilities": { "http": true, "sse": false, "acp": true },
+    "sessionCapabilities": { "list": {}, "delete": {}, "fork": {}, "resume": {}, "close": {} },
+    "auth": {},
+    "_meta": {
+      "ego": {
+        "compact": { "version": 1, "method": "_ego/compact" },
+        "hold": { "version": 1, "pause": "_ego/pause", "resume": "_ego/resume" }
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+p67263
+fcwd
+n/Users/stefano.straus/Gits/personal/tuicommander__wt/feat-design-mode-v2-1672/.tmp/design-v2/discovery
+p67265
+fcwd
+n/Users/stefano.straus/Gits/personal/tuicommander__wt/feat-design-mode-v2-1672/.tmp/design-v2/discovery/app

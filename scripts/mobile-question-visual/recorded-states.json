@@ -1,0 +1,76 @@
+[
+  {
+    "fixture": "ego-single-44-1973.tcap",
+    "state": {
+      "awaiting_input": true,
+      "question_text": "Which release checks should we run?",
+      "question_confident": true,
+      "rate_limited": false,
+      "last_activity_ms": 1792223640929,
+      "agent_type": "ego",
+      "agent_intent": "Call ask_question now, mode single, free_text false. Ask exactly: Which release",
+      "choice_prompt": {
+        "title": "Which release checks should we run?",
+        "options": [
+          {
+            "key": "1",
+            "label": "Parser regression Replay the recorded terminal output",
+            "highlighted": true,
+            "destructive": false
+          },
+          {
+            "key": "2",
+            "label": "Mobile answer controls Verify the mobile question card",
+            "highlighted": false,
+            "destructive": false
+          }
+        ],
+        "selection_mode": "navigate-enter",
+        "dismiss_key": "cancel"
+      }
+    }
+  },
+  {
+    "fixture": "ego-multiple-44-1973.tcap",
+    "state": {
+      "awaiting_input": true,
+      "question_text": "Which release checks should we run?",
+      "question_confident": true,
+      "rate_limited": false,
+      "last_activity_ms": 1792223640955,
+      "agent_type": "ego",
+      "agent_intent": "Call ask_question now, mode multiple, free_text false. Ask exactly: Which releas",
+      "choice_prompt": {
+        "title": "Which release checks should we run?",
+        "options": [
+          {
+            "key": "1",
+            "label": "[ ] Parser regression Replay the recorded terminal output",
+            "highlighted": true,
+            "destructive": false
+          },
+          {
+            "key": "2",
+            "label": "[ ] Mobile answer controls Verify the mobile question card",
+            "highlighted": false,
+            "destructive": false
+          }
+        ],
+        "selection_mode": "toggle-enter",
+        "dismiss_key": "cancel"
+      }
+    }
+  },
+  {
+    "fixture": "ego-free_text-44-1973.tcap",
+    "state": {
+      "awaiting_input": true,
+      "question_text": "Which release checks should we run?",
+      "question_confident": true,
+      "rate_limited": false,
+      "last_activity_ms": 1792223640981,
+      "agent_type": "ego",
+      "agent_intent": "Call ask_question now, mode free_text, free_text true. Ask exactly: Which releas"
+    }
+  }
+]

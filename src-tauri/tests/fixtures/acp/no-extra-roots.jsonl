@@ -1,0 +1,5 @@
+// Ego's own capabilities, which do not include additionalDirectories.
+// A session asking for extra roots may not be sent to this agent at all.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect_no_frame"}

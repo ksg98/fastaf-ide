@@ -3,6 +3,7 @@ import { invoke } from "../../invoke";
 import { branchSwitcherStore } from "../../stores/branchSwitcher";
 import { registerModal } from "../../stores/modalStack";
 import shared from "../shared/dialog.module.css";
+import { Input } from "../ui/Input";
 import s from "./BranchSwitcher.module.css";
 
 interface BranchInfo {
@@ -53,7 +54,7 @@ export const BranchSwitcher: Component<BranchSwitcherProps> = (props) => {
 		}
 
 		// Sort: current first, then main, then locals alphabetical, then remotes alphabetical
-		return [...items].sort((a, b) => {
+		return items.toSorted((a, b) => {
 			if (a.is_current && !b.is_current) return -1;
 			if (!a.is_current && b.is_current) return 1;
 			if (a.is_main && !b.is_main) return -1;
@@ -145,7 +146,7 @@ export const BranchSwitcher: Component<BranchSwitcherProps> = (props) => {
 			<div class={shared.overlayTop} onClick={() => branchSwitcherStore.close()}>
 				<div class={s.palette} onClick={(e) => e.stopPropagation()}>
 					<div class={s.search}>
-						<input
+						<Input
 							ref={inputRef}
 							type="text"
 							placeholder="Switch to branch..."

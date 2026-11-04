@@ -43,6 +43,7 @@ export const LastPromptBar: Component<LastPromptBarProps> = (props) => {
 	return (
 		<div
 			class={cx(s.bar, expanded() ? s.expanded : s.collapsed)}
+			data-terminal-context
 			onClick={toggle}
 			title={expanded() ? "Click to collapse" : "Click to expand"}
 		>

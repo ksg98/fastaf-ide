@@ -1,9 +1,10 @@
-import { type Accessor, createEffect, lazy, onCleanup, type Setter, Show, Suspense } from "solid-js";
+import { type Accessor, lazy, type Setter, Show, Suspense } from "solid-js";
 import releaseNotes from "../../assets/release-notes.json";
 import type { useConfirmDialog } from "../../hooks/useConfirmDialog";
 import type { FolderDropRequest } from "../../hooks/useFileDrop";
 import type { useGitOperations } from "../../hooks/useGitOperations";
 import { invoke } from "../../invoke";
+import { remoteConnectionsStore } from "../../stores/remoteConnections";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
 import { CloneRepoDialog } from "../CloneRepoDialog";
@@ -22,8 +23,9 @@ import {
 } from "../PostMergeCleanupDialog/PostMergeCleanupDialog";
 import { ProcessManagerModal } from "../ProcessManagerModal/ProcessManagerModal";
 import { PromptDialog } from "../PromptDialog";
-import qd from "../QuitDialog/QuitDialog.module.css";
+import { CloseDialog } from "../QuitDialog/CloseDialog";
 import { RemoteQrDialog } from "../RemoteQrDialog";
+import { RemoteRepoPicker } from "../RemoteRepoPicker";
 import { RenameBranchDialog } from "../RenameBranchDialog";
 import { RunCommandDialog } from "../RunCommandDialog";
 import type { SettingsContext } from "../SettingsPanel";
@@ -83,6 +85,9 @@ interface PromptOverlaysContract {
 	resolveOpenPath: (value: string | null) => void;
 	repoPathVisible: Accessor<boolean>;
 	resolveRepoPath: (value: string | null) => void;
+	/** The machine the remote repo picker is browsing, or null when it is closed. */
+	remotePickerConnectionId: Accessor<string | null>;
+	resolveRemotePicker: (value: string | null) => void;
 }
 
 interface ConfirmationOverlaysContract {
@@ -126,9 +131,6 @@ interface ApplicationOverlaysProps {
 	confirmations: ConfirmationOverlaysContract;
 	utilities: UtilityOverlaysContract;
 	cleanup: CleanupOverlayContract;
-	quitVisible: Accessor<boolean>;
-	setQuitVisible: Setter<boolean>;
-	forceQuit: () => void | Promise<void>;
 }
 
 export function folderDropMessage(request: FolderDropRequest | null): string {
@@ -136,21 +138,6 @@ export function folderDropMessage(request: FolderDropRequest | null): string {
 	const verb = request.mode === "copy" ? "copy" : "move";
 	const items = request.paths.length === 1 ? "1 item" : `${request.paths.length} items`;
 	return `About to recursively ${verb} ${items} into ${request.destDir}. Existing files with the same name will be skipped.`;
-}
-
-export function useQuitDialogKeyCapture(visible: Accessor<boolean>, setVisible: Setter<boolean>): void {
-	createEffect(() => {
-		if (!visible()) return;
-		const cancelQuit = (event: KeyboardEvent) => {
-			if (event.key !== "Escape" && event.key !== "Enter") return;
-			event.preventDefault();
-			event.stopPropagation();
-			event.stopImmediatePropagation();
-			setVisible(false);
-		};
-		document.addEventListener("keydown", cancelQuit, true);
-		onCleanup(() => document.removeEventListener("keydown", cancelQuit, true));
-	});
 }
 
 function GitDialogOverlays(props: { contract: GitOverlaysContract }) {
@@ -206,9 +193,14 @@ function ConfirmationOverlays(props: { contract: ConfirmationOverlaysContract })
 				confirmLabel={confirmations.dialogState()?.confirmLabel}
 				cancelLabel={confirmations.dialogState()?.cancelLabel}
 				discardLabel={confirmations.dialogState()?.discardLabel}
+				discardDanger={confirmations.dialogState()?.discardDanger}
+				discardDisabled={confirmations.dialogState()?.discardDisabled}
+				archiveChecklist={confirmations.dialogState()?.archiveChecklist}
+				workspaceName={confirmations.dialogState()?.workspaceName}
 				kind={confirmations.dialogState()?.kind}
 				defaultButton={confirmations.dialogState()?.defaultButton}
 				autoCancelMs={confirmations.dialogState()?.autoCancelMs}
+				autoConfirmMs={confirmations.dialogState()?.autoConfirmMs}
 				onClose={confirmations.onClose}
 				onConfirm={confirmations.onConfirm}
 				onDiscard={confirmations.onDiscard}
@@ -237,17 +229,19 @@ function CleanupOverlay(props: { contract: CleanupOverlayContract }) {
 			{(() => {
 				const context = props.contract.context()!;
 				const repo = repositoriesStore.get(context.repoPath);
-				const branch = repo?.branches[context.branchName];
+				const branch = repo?.workspaces[context.workspaceId];
 				return (
 					<PostMergeCleanupDialog
 						branchName={context.branchName}
 						baseBranch={context.baseBranch}
 						repoPath={context.repoPath}
-						isOnBaseBranch={(repo?.activeBranch ?? "") === context.baseBranch}
+						isOnBaseBranch={(repo?.activeWorkspaceId ?? "") === context.baseBranch}
 						isDefaultBranch={branch?.isMain ?? false}
 						hasTerminals={(branch?.terminals.length ?? 0) > 0}
 						hasDirtyFiles={context.hasDirtyFiles}
 						worktreeDirty={context.worktreeDirty}
+						removalWarnings={context.removalWarnings}
+						submoduleUnpushedCommits={context.submoduleUnpushedCommits}
 						worktreeAction={props.contract.action()}
 						onWorktreeActionChange={props.contract.setAction}
 						executing={props.contract.executing()}
@@ -265,8 +259,6 @@ function CleanupOverlay(props: { contract: CleanupOverlayContract }) {
 
 /** Renders application dialogs and owns overlay-only keyboard behavior. */
 export function ApplicationOverlays(props: ApplicationOverlaysProps) {
-	useQuitDialogKeyCapture(props.quitVisible, props.setQuitVisible);
-
 	const whatsNewEntry = () => {
 		const version = props.utilities.whatsNewVersion();
 		if (!version) return null;
@@ -320,14 +312,23 @@ export function ApplicationOverlays(props: ApplicationOverlaysProps) {
 				onClose={() => props.prompts.resolveOpenPath(null)}
 				onConfirm={props.prompts.resolveOpenPath}
 			/>
-			<PromptDialog
+			<RemoteRepoPicker
 				visible={props.prompts.repoPathVisible()}
-				title="Add Repository"
-				placeholder="Enter absolute path to repository"
-				confirmLabel="Add"
+				connectionName={window.location.host}
 				onClose={() => props.prompts.resolveRepoPath(null)}
 				onConfirm={props.prompts.resolveRepoPath}
 			/>
+			<Show when={props.prompts.remotePickerConnectionId()}>
+				{(connectionId) => (
+					<RemoteRepoPicker
+						visible={true}
+						connectionId={connectionId()}
+						connectionName={remoteConnectionsStore.getConnections()[connectionId()]?.connection.name ?? connectionId()}
+						onClose={() => props.prompts.resolveRemotePicker(null)}
+						onConfirm={props.prompts.resolveRemotePicker}
+					/>
+				)}
+			</Show>
 			<ConfirmationOverlays contract={props.confirmations} />
 			<Show when={props.utilities.processManagerVisible()}>
 				<ProcessManagerModal onClose={props.utilities.closeProcessManager} />
@@ -354,25 +355,7 @@ export function ApplicationOverlays(props: ApplicationOverlaysProps) {
 			<Suspense>
 				<HelpPanel visible={props.panels.helpVisible()} onClose={props.panels.closeHelp} />
 			</Suspense>
-			<Show when={props.quitVisible()}>
-				<div class={qd.overlay} onClick={() => props.setQuitVisible(false)}>
-					<div class={qd.dialog} onClick={(event) => event.stopPropagation()}>
-						<h3>Quit FastAF?</h3>
-						<p>
-							You have {terminalsStore.getIds().filter((id) => terminalsStore.get(id)?.sessionId).length} active
-							terminal session(s). Quitting will close all sessions.
-						</p>
-						<div class={qd.actions}>
-							<button class={qd.cancel} onClick={() => props.setQuitVisible(false)}>
-								Cancel
-							</button>
-							<button class={qd.quit} onClick={() => void props.forceQuit()}>
-								Quit
-							</button>
-						</div>
-					</div>
-				</div>
-			</Show>
+			<CloseDialog />
 		</>
 	);
 }

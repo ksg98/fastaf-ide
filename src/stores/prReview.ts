@@ -1,17 +1,19 @@
-// PR AI-review helpers — pure functions shared by the review UI and tests.
+// PR AI-review state and the pure helpers around it.
 //
-// The review engine (Rust `run_pr_review`) already confidence-gates findings
-// server-side (see diff_triage.rs `filter_findings_by_confidence`), so the
-// frontend never re-filters on confidence — it only flattens the per-file
-// results into a flat, selectable list and enforces the GitHub inline-comment
-// gate (a finding needs a concrete line to be postable as an inline comment).
+// The confidence gate lives in Rust (`pr_review::filter_findings_by_confidence`,
+// applied before the result leaves the backend), so this side never re-filters
+// on confidence — a finding that arrives here is a finding worth showing. What
+// is left for the frontend is two things the backend cannot decide: a stable
+// identity so a selection survives re-renders, and GitHub's rule that an inline
+// review comment needs a concrete line.
 
 import { createStore } from "solid-js/store";
 import { invoke } from "../invoke";
-import type { FileClassification, Finding } from "./aiTriageStore";
+import type { PrReviewResult, ReviewedFile, ReviewFinding } from "../types";
 import { appLogger } from "./appLogger";
 
-export interface ReviewFinding extends Finding {
+/** A finding lifted out of its file, with what the list needs to render it. */
+export interface SelectableFinding extends ReviewFinding {
 	/** Stable identity for selection state: `path:line-or-file:index`. */
 	id: string;
 	/** The owning file's one-line summary, for context in the list. */
@@ -19,12 +21,13 @@ export interface ReviewFinding extends Finding {
 }
 
 /**
- * Flatten per-file classifications into a single ordered finding list.
+ * Flatten per-file results into a single ordered finding list.
  * The id is stable per (path, line, per-file index) so selection survives
  * re-renders and repeated flattens of the same result.
  */
-export function flattenReviewFindings(files: FileClassification[]): ReviewFinding[] {
+export function flattenReviewFindings(files: ReviewedFile[]): SelectableFinding[] {
 	return files.flatMap((file) =>
+		// Tolerate a file reported without a findings array.
 		(file.findings ?? []).map((finding, index) => ({
 			...finding,
 			id: `${finding.path}:${finding.line ?? "file"}:${index}`,
@@ -39,21 +42,13 @@ export function flattenReviewFindings(files: FileClassification[]): ReviewFindin
  * findings (line == null) are shown but not postable — GitHub's review API
  * requires a line for each `comments[]` entry.
  */
-export function postableFindings(findings: ReviewFinding[], selectedIds: ReadonlySet<string>): ReviewFinding[] {
+export function postableFindings(findings: SelectableFinding[], selectedIds: ReadonlySet<string>): SelectableFinding[] {
 	return findings.filter((finding) => selectedIds.has(finding.id) && finding.line != null);
 }
 
 /** Whether a finding can be selected/posted at all (has a concrete line). */
-export function isPostable(finding: Pick<Finding, "line">): boolean {
+export function isPostable(finding: Pick<ReviewFinding, "line">): boolean {
 	return finding.line != null;
-}
-
-/** Raw result shape returned by the Rust `run_pr_review` command. */
-export interface PrReviewResult {
-	summary: string | null;
-	files: FileClassification[];
-	llm_used: boolean;
-	llm_model: string | null;
 }
 
 export type ReviewStatus = "idle" | "running" | "done" | "error";
@@ -72,6 +67,10 @@ interface ReviewEntry {
 interface PrReviewStoreState {
 	entries: Record<string, ReviewEntry>;
 }
+
+/** Appended to every finding posted for ego, so the thread split counts it as
+ *  ego's rather than a human's. Must equal `review_bots::EGO_MARKER` in Rust. */
+export const EGO_MARKER = "<!-- tuic:ego-review -->";
 
 const reviewKey = (repoPath: string, prNumber: number): string => `${repoPath}#${prNumber}`;
 
@@ -101,6 +100,9 @@ function createPrReviewStore() {
 			const selectedIds = flattenReviewFindings(result.files).map((finding) => finding.id);
 			setState("entries", key, { status: "done", result, error: null, selectedIds, posting: false });
 		} catch (e) {
+			// The message is the review engine's own — "no provider is configured",
+			// a provider error. Replacing it with a generic one here is exactly the
+			// silent-empty-result criterion 5 forbids.
 			setState("entries", key, { status: "error", result: null, error: String(e), selectedIds: [], posting: false });
 			appLogger.warn("github", "Failed to run PR AI review", { error: String(e) });
 		}
@@ -117,7 +119,7 @@ function createPrReviewStore() {
 	}
 
 	/** Post the given findings to GitHub as inline review comments. */
-	async function post(repoPath: string, prNumber: number, findings: ReviewFinding[]): Promise<void> {
+	async function post(repoPath: string, prNumber: number, findings: SelectableFinding[]): Promise<void> {
 		const key = reviewKey(repoPath, prNumber);
 		if (findings.length === 0 || state.entries[key]?.posting) return;
 		setState("entries", key, "posting", true);
@@ -132,7 +134,7 @@ function createPrReviewStore() {
 					path: finding.path,
 					line: finding.line,
 					side: "RIGHT",
-					body: finding.message,
+					body: `${finding.message}\n\n${EGO_MARKER}`,
 				})),
 			});
 		} catch (e) {

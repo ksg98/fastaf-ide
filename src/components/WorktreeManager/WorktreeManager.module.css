@@ -114,7 +114,8 @@
 
 .searchInput {
   composes: input from "../shared/controls.module.css";
-  flex: 1;
+  flex: 0 0 auto;
+  width: 100%;
   min-width: 0;
   height: 36px;
   padding: 0 8px;
@@ -128,6 +129,7 @@
 
 .batchBar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 6px 16px;
@@ -406,4 +408,28 @@
 
 .footerRight {
   margin-left: auto;
+}
+
+/* Dirty worktree warning. */
+.dirtyBadge {
+  font-size: var(--font-2xs);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.lifecycleBadge {
+  font-size: var(--font-2xs);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--fg-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
 }

@@ -134,13 +134,11 @@ fn batch_query_viewer_is_not_cross_contaminated() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn candidate_order_is_env_env_oauth_ghcli_ghcli() {
+fn candidate_order_is_env_env_oauth() {
     let got = github_auth::order_token_candidates(
         Some("gh".into()),
         Some("github".into()),
         Some("oauth".into()),
-        Some("ghtok".into()),
-        Some("ghcli".into()),
     );
     assert_eq!(
         got,
@@ -148,8 +146,6 @@ fn candidate_order_is_env_env_oauth_ghcli_ghcli() {
             ("gh".to_string(), TokenSource::Env),
             ("github".to_string(), TokenSource::Env),
             ("oauth".to_string(), TokenSource::OAuth),
-            ("ghtok".to_string(), TokenSource::GhCli),
-            ("ghcli".to_string(), TokenSource::GhCli),
         ]
     );
 }
@@ -161,8 +157,6 @@ fn candidate_order_dedupes_by_value_keeping_earliest() {
         Some("same".into()),
         Some("same".into()),
         Some("other".into()),
-        None,
-        None,
     );
     assert_eq!(
         got,
@@ -175,20 +169,18 @@ fn candidate_order_dedupes_by_value_keeping_earliest() {
 
 #[test]
 fn candidate_order_collapses_identical_across_all_sources() {
-    let got = github_auth::order_token_candidates(
-        None,
-        None,
-        Some("x".into()),
-        Some("x".into()),
-        Some("x".into()),
-    );
-    assert_eq!(got, vec![("x".to_string(), TokenSource::OAuth)]);
+    let got =
+        github_auth::order_token_candidates(Some("x".into()), Some("x".into()), Some("x".into()));
+    assert_eq!(got, vec![("x".to_string(), TokenSource::Env)]);
 }
 
 #[test]
 fn candidate_order_empty_when_no_sources() {
-    let got = github_auth::order_token_candidates(None, None, None, None, None);
-    assert!(got.is_empty());
+    let got = github_auth::order_token_candidates(None, None, None);
+    assert_eq!(
+        got,
+        [] as [(std::string::String, tuic_git::github_auth::TokenSource); 0]
+    );
 }
 
 #[test]
@@ -208,7 +200,7 @@ fn diagnostics_fresh_state_reports_healthy_empty() {
     let diag = github_auth::compute_diagnostics(&state);
     assert!(!diag.circuit_breaker_open);
     assert_eq!(diag.circuit_breaker_status, "OK");
-    assert!(diag.repos_not_found.is_empty());
+    assert_eq!(diag.repos_not_found, [] as [std::string::String; 0]);
     assert_eq!(diag.repos_monitored, 0);
 }
 
@@ -224,18 +216,18 @@ fn diagnostics_reports_cooldown_and_monitored_repos() {
         "octocat/expired".to_string(),
         std::time::Instant::now() - std::time::Duration::from_secs(1),
     );
-    // A cached status counts as a monitored repo.
+    // Cached query payloads alone do not register a running monitor.
     state
         .git_cache
         .github_status
         .insert("/path/zero".to_string(), std::sync::Arc::new(vec![]));
-    // moka's entry_count() is eventually consistent; flush pending tasks so the
-    // insert is counted before compute_diagnostics reads it.
+    // Flush cache maintenance so this also checks that a populated cache is not
+    // mistaken for a running poller.
     state.git_cache.github_status.run_pending_tasks();
 
     let diag = github_auth::compute_diagnostics(&state);
     assert_eq!(diag.repos_not_found, vec!["octocat/hello".to_string()]);
-    assert_eq!(diag.repos_monitored, 1);
+    assert_eq!(diag.repos_monitored, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +254,7 @@ fn cooldown_key_is_owner_slash_name_for_github_com() {
 #[tokio::test]
 async fn viewer_login_returns_cached_value_without_network() {
     let state = make_test_app_state();
-    *state.github_viewer_login.write() = Some("octocat".to_string());
+    *state.github.viewer_login.write() = Some("octocat".to_string());
     // Cache hit short-circuits before any GraphQL call (no token configured).
     let login = github::get_viewer_login(&state).await.unwrap();
     assert_eq!(login, "octocat");

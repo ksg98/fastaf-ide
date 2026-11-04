@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import ts from "@typescript/typescript6";
@@ -14,7 +13,15 @@ if (sourceRootIndex >= 0 && !process.argv[sourceRootIndex + 1]) {
 }
 
 if (selfTest) {
-	const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tuic-cycle-checker-"));
+	const repoRoot = path.resolve(import.meta.dirname, "..");
+	const candidate = process.env.TMPDIR;
+	const gitsRoot = process.env.HOME && path.join(process.env.HOME, "Gits");
+	const scratchRoot = candidate && (
+		candidate.startsWith(`${repoRoot}${path.sep}`)
+		|| (gitsRoot && candidate.startsWith(`${gitsRoot}${path.sep}`))
+	) ? candidate : path.join(repoRoot, ".tmp/tuic-tests");
+	fs.mkdirSync(scratchRoot, { recursive: true });
+	const fixtureRoot = fs.mkdtempSync(path.join(scratchRoot, "tuic-cycle-checker-"));
 	const checker = path.resolve("scripts/check-frontend-cycles.mjs");
 	const runChecker = () =>
 		spawnSync(process.execPath, [checker, "--source-root", fixtureRoot], {

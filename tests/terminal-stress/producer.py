@@ -177,19 +177,30 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--count", type=int, default=2000)
+    parser.add_argument("--controlled", action="store_true", help="Wait for the HTTP runner before writing")
     args = parser.parse_args()
     if args.count < 1 or args.count > 9999:
         parser.error("--count must be between 1 and 9999")
-    if args.scenario == "slash-pressure":
-        emit_slash_pressure(args.count)
-    elif args.scenario == "reflow":
-        emit_reflow(args.count)
-    elif args.scenario == "scrollout":
-        emit_scrollout(args.count)
-    elif args.scenario == "ink-repaint":
-        emit_ink_repaint(args.count)
-    else:
-        emit(args.scenario, args.count)
+    original = termios.tcgetattr(0) if args.controlled else None
+    try:
+        if args.controlled:
+            tty.setraw(0)
+            os.write(1, f"\r\nTUIC_PRODUCER_READY:{args.scenario}\r\n".encode())
+            if os.read(0, 1) != b"g":
+                raise RuntimeError("producer start handshake failed")
+        if args.scenario == "slash-pressure":
+            emit_slash_pressure(args.count)
+        elif args.scenario == "reflow":
+            emit_reflow(args.count)
+        elif args.scenario == "scrollout":
+            emit_scrollout(args.count)
+        elif args.scenario == "ink-repaint":
+            emit_ink_repaint(args.count)
+        else:
+            emit(args.scenario, args.count)
+    finally:
+        if original is not None:
+            termios.tcsetattr(0, termios.TCSADRAIN, original)
 
 
 if __name__ == "__main__":

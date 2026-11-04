@@ -1,6 +1,6 @@
 # Error Classification
 
-**Module:** `src-tauri/src/error_classification.rs`
+**Module:** `src-tauri/crates/tuic-core/src/error_classification.rs`
 
 Classifies terminal error messages and calculates exponential backoff delays for retry logic.
 

@@ -1,0 +1,41 @@
+/* One presentation contract for session Chat and AI Chat on desktop and mobile.
+ * Theme colors remain owned by the selected app palette. */
+:root {
+  /* The user's question in the terminal grid and the chat view; the answer keeps its green. */
+  --prompt-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+  --prompt-bar: var(--accent);
+  /* Shared answer indicator: preserve the dark rule; Paper uses its darker success green. */
+  --answer-rule: rgba(94,190,140,0.9);
+
+  /* Font size scale */
+  --font-3xs: 8px;
+  --font-2xs: 10px;
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-md: 13px;
+  --font-base: 14px;
+  --font-lg: 15px;
+  --font-xl: 17px;
+  --font-2xl: 20px;
+  --font-3xl: 24px;
+}
+
+[data-theme="vscode-light"] {
+  --answer-rule: var(--success);
+}
+
+/* Desktop hosts supply only a terminal zoom delta. Mobile retains its device-local
+ * reading preference. Keep AI Chat's default reading scale
+ * in one place, independent of the terminal grid's default font size. */
+[data-chat-typography] {
+  --font-base: clamp(8px, calc(14px + var(--chat-zoom-step, 0px)), 32px);
+  --font-3xs: calc(var(--font-base) * 8 / 14);
+  --font-2xs: calc(var(--font-base) * 10 / 14);
+  --font-xs: calc(var(--font-base) * 11 / 14);
+  --font-sm: calc(var(--font-base) * 12 / 14);
+  --font-md: calc(var(--font-base) * 13 / 14);
+  --font-lg: calc(var(--font-base) * 15 / 14);
+  --font-xl: calc(var(--font-base) * 17 / 14);
+  --font-2xl: calc(var(--font-base) * 20 / 14);
+  --font-3xl: calc(var(--font-base) * 24 / 14);
+}

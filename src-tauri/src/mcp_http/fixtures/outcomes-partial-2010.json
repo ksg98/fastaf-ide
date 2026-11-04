@@ -1,0 +1,61 @@
+{
+  "captured_at": "2026-10-19T15:18:10.926049+00:00",
+  "transport": "local_unix_ipc",
+  "server_version": {
+    "version": "2.0.0",
+    "git_hash": "c281128313"
+  },
+  "ego_selected_call": {
+    "call_id": "54abdfd2-d2bd-4d2f-808a-41bd66703bf3",
+    "client_call_id": "01a154bc-6e5c-75c0-a222-128c9f7bb7f1",
+    "parent_operation_id": null,
+    "operation": "agent.list_peers",
+    "target_digest": "e668ff6e698706f77bb95c1ead88a564e69cfce40ee36ba4d329530ad0ef1780",
+    "started_ms": 1792422998159,
+    "response_text_bytes": 742,
+    "application_error": false,
+    "transport_error": "unobserved_after_reply_construction",
+    "effect": "unknown"
+  },
+  "outcomes": [
+    {
+      "observation": "application_refusal",
+      "curl_exit": 0,
+      "audit": {
+        "call_id": "b3c4332b-5e5c-4a4d-8520-e5694196d9f6",
+        "client_call_id": "d9397b0d-aa1e-46df-ad23-1f10106e4891",
+        "parent_operation_id": null,
+        "operation": "session.status",
+        "target_digest": "59e2b9241eb12d4cd31d21314942e138e515816c3076f1d8cf32cfcd9b2510d8",
+        "started_ms": 1792423090547,
+        "response_text_bytes": 68,
+        "application_error": true,
+        "transport_error": "unobserved_after_reply_construction",
+        "effect": "unknown"
+      }
+    },
+    {
+      "observation": "client_disconnected",
+      "curl_exit": 28,
+      "audit": {
+        "call_id": "f1f34440-610e-4fa5-9013-dce4e50a2c47",
+        "client_call_id": "38f1564b-24ae-4e87-bd55-a224ab4f6f01",
+        "parent_operation_id": null,
+        "operation": "session.wait",
+        "target_digest": "d7f31c4f75ab3d5f64abe56a619741f71df9111aece4806126f31e22441cafbf",
+        "started_ms": 1792423090586,
+        "response_text_bytes": null,
+        "application_error": null,
+        "transport_error": "cancelled_before_reply",
+        "effect": "unknown"
+      }
+    }
+  ],
+  "speech_prerequisite": {
+    "available": false,
+    "unavailableReason": "Hands-free is not armed",
+    "rendering": false,
+    "speaking": false,
+    "utterance": null
+  }
+}

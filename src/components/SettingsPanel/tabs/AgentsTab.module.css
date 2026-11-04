@@ -4,6 +4,7 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  margin-top: 16px;
   background: var(--border);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -50,7 +51,6 @@
   justify-content: center;
   font-size: var(--font-xs);
   font-weight: 700;
-  color: white;
   flex-shrink: 0;
 }
 
@@ -86,6 +86,11 @@
 .badge[data-type="disabled"] {
   background: color-mix(in srgb, var(--error) 10%, transparent);
   color: var(--fg-muted);
+}
+
+.badge[data-type="limited"] {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--attention);
 }
 
 .badge[data-type="mcp"] {
@@ -184,21 +189,6 @@
   flex-shrink: 0;
 }
 
-.smallBtn {
-  composes: btn from "../../shared/controls.module.css";
-  min-height: 0;
-  background: transparent;
-  font-size: var(--font-sm);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-}
-
-.smallBtn.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--error) 12%, transparent);
-  color: var(--error);
-  border-color: var(--error);
-}
-
 /* More-actions dropdown */
 
 .menuWrap {
@@ -221,28 +211,7 @@
   overflow: hidden;
 }
 
-.menuItem {
-  display: block;
-  width: 100%;
-  padding: 5px 10px;
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.menuItem:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.menuItem.danger:hover {
-  background: color-mix(in srgb, var(--error) 12%, transparent);
-  color: var(--error);
-}
+.menuItem { width: 100%; justify-content: flex-start; text-align: left; }
 
 /* Add config form */
 
@@ -264,22 +233,10 @@
   margin-bottom: 0;
 }
 
-.formInput {
-  composes: input from "../../shared/controls.module.css";
-  flex: 1;
-  width: 100%;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-sm);
-  box-sizing: border-box;
-}
+.formInput { flex: 1; width: 100%; }
 
 .formInput.mono {
   font-family: var(--font-mono);
-}
-
-.formInput.inputError {
-  border-color: var(--error);
 }
 
 .validationError {
@@ -288,36 +245,28 @@
   padding: 0 4px 4px;
 }
 
+.validationWarning {
+  color: var(--warning);
+  font-size: 0.75rem;
+  padding: 0 4px 4px;
+}
+
+.argChip {
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+  align-self: center;
+}
+
 /* Action buttons row */
 
 .actionsRow {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.actionBtn {
-  composes: btn from "../../shared/controls.module.css";
-  min-height: 0;
-  background: transparent;
-  font-size: var(--font-sm);
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-}
-
-.actionBtn:hover:not(:disabled) {
-  border-color: var(--accent);
-}
-
-.actionBtn.installed {
-  border-color: var(--success);
-  color: var(--success);
-}
-
-.actionBtn.installed:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--error) 12%, transparent);
-  color: var(--error);
-  border-color: var(--error);
 }
 
 /* MCP status indicator */
@@ -355,40 +304,6 @@
   font-size: var(--font-sm);
   color: var(--fg-primary);
   cursor: pointer;
-}
-
-.toggleRow input[type="checkbox"] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
-  min-height: 16px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  cursor: pointer;
-  position: relative;
-  flex-shrink: 0;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.toggleRow input[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.toggleRow input[type="checkbox"]:checked::after {
-  content: "";
-  display: block;
-  position: absolute;
-  top: 2px;
-  left: 5px;
-  width: 4px;
-  height: 8px;
-  border: solid white;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
 }
 
 /* Run config row wrapper (for inline env editing) */
@@ -522,34 +437,9 @@
   white-space: nowrap;
 }
 
-.envFlagSelect {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
-  font-size: var(--font-2xs);
-  font-family: var(--font-mono);
-  padding: 1px 4px;
-  flex-shrink: 0;
-}
+.envFlagSelect { flex-shrink: 0; }
 
-.envFlagInput {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
-  font-size: var(--font-2xs);
-  font-family: var(--font-mono);
-  padding: 1px 4px;
-  width: 80px;
-  flex-shrink: 0;
-}
-
-.envFlagInput:focus,
-.envFlagSelect:focus {
-  outline: none;
-  border-color: var(--accent);
-}
+.envFlagInput { width: 80px; flex-shrink: 0; }
 
 .remoteBanner {
   display: flex;
@@ -586,3 +476,64 @@
   color: var(--error);
   font-size: 13px;
 }
+
+/* Settings restyle: local presentation only; context owns the edited machine. */
+.page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.machineScope { min-width: 0; }
+.agentHeader { padding: 16px; align-items: center; }
+.agentName { font-size: 13px; }
+.agentExpanded { padding: 16px; }
+.badge, .defaultBadge, .envBadge { font-family: var(--font-ui); font-size: 11px; border: 1px solid var(--border); border-radius: 999px; text-transform: none; letter-spacing: normal; line-height: 18px; }
+.agentVersion { font-family: var(--font-ui); font-size: 11px; color: var(--fg-secondary); border: 1px solid var(--border); border-radius: 999px; padding: 1px 6px; }
+.expandedLabel, .envVarsLabel { font-size: 13px; color: var(--fg-primary); text-transform: none; letter-spacing: normal; }
+.expandedSection { margin-bottom: 16px; }
+.expandedSection > label:not(.toggleRow) { display: block; margin: 8px 0; font-size: 13px; font-weight: 600; }
+.configRow { padding: 12px; flex-wrap: wrap; gap: 8px; }
+.configName { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.configCommand { color: var(--fg-secondary); flex-basis: 180px; }
+.addConfigForm, .envEditPanel { padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
+.editorTitle { display: block; font-size: 13px; margin-bottom: 12px; }
+.formRow { margin-bottom: 12px; flex-wrap: wrap; }
+.formInput { min-width: 0; }
+.envVarsHeader { margin-bottom: 8px; gap: 8px; }
+.envVarsList { gap: 8px; }
+@media (max-width: 600px) {
+ .agentHeader, .agentExpanded, .addConfigForm, .envEditPanel { padding: 12px; }
+ .configActions { width: 100%; flex-wrap: wrap; }
+ .configCommand { flex-basis: 100%; }
+ .envFlagRow { flex-wrap: wrap; }
+ .envFlagDesc { white-space: normal; flex-basis: 100%; }
+ .envVarRow { flex-wrap: wrap; }
+ .envVarKey { flex: 1 1 35%; }
+}
+
+.cleanupCard { border: 1px solid var(--error); border-radius: 8px; padding: 16px; }
+
+.permissionRows { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 260px); align-items: center; gap: 16px; }
+.permissionRows label { font-size: 13px; font-weight: 600; color: var(--fg-primary); }
+.permissionRows > p { grid-column: 1 / -1; }
+@media (max-width: 600px) { .permissionRows { grid-template-columns: 1fr; gap: 8px; } }
+
+.fieldRow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 260px); align-items: center; gap: 16px; padding: 12px 0; }
+.fieldRow label, .editorFieldLabel { font-size: 13px; font-weight: 600; color: var(--fg-primary); }
+.editorFieldLabel { flex-basis: 100%; }
+@media (max-width: 600px) { .fieldRow { grid-template-columns: 1fr; gap: 8px; } }
+.minutesControl { display: flex; align-items: center; gap: 8px; }
+.minutesControl input { max-width: 96px; }
+
+.instructionsPreview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font: 12px/1.5 var(--font-mono);
+}
+
+.page > [data-settings-page-header] { margin-bottom: 8px; }
+
+.machineScope:empty { display: none; }

@@ -1,5 +1,6 @@
 import { type Component, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { AgentType } from "../../agents";
+import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
 import { executeCleanup } from "../../hooks/usePostMergeCleanup";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
@@ -8,16 +9,17 @@ import { appLogger } from "../../stores/appLogger";
 import { githubStore } from "../../stores/github";
 import { mdTabsStore } from "../../stores/mdTabs";
 import type { SavedPrompt } from "../../stores/promptLibrary";
-import { repoDefaultsStore } from "../../stores/repoDefaults";
 import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
 import { cx } from "../../utils";
+import { prepareAgentLaunchCommand } from "../../utils/agentSession";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { isAlreadyMerged, mergeWithFallback } from "../../utils/prMerge";
+import { preferredMergeStrategy } from "../../utils/prMergeStrategy";
 import { prContextVariables } from "../../utils/promptContext";
-import { getRepoColor } from "../../utils/repoColor";
+import { getRepoTextColor } from "../../utils/repoColor";
 import { interpolateTemplate } from "../../utils/templateInterpolation";
 import {
 	type CleanupStep,
@@ -84,7 +86,8 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 		if (!p || p.state === "merged" || p.state === "closed") return null;
 
 		const repo = repositoriesStore.get(props.repoPath);
-		const branch = repo?.branches[props.branch];
+		const workspaceId = repositoriesStore.workspaceIdOnBranch(props.repoPath, props.branch);
+		const branch = workspaceId ? repo?.workspaces[workspaceId] : undefined;
 		if (!branch?.terminals?.length) return null;
 
 		// Find first terminal with a detected agent
@@ -111,27 +114,34 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 			pr_url: p.url ?? null,
 		};
 		const args = reviewCfg.args.map((a) => interpolateTemplate(a, vars)).join(" ");
-		return `${reviewCfg.command}${args ? " " + args : ""}`;
+		return {
+			agentType,
+			command: `${reviewCfg.command}${args ? " " + args : ""}`,
+		};
 	});
 
 	const isOnBaseBranch = () => {
 		const ctx = cleanupCtx();
 		if (!ctx) return false;
 		const repo = repositoriesStore.get(props.repoPath);
-		return repo?.activeBranch === ctx.baseBranch;
+		return repo?.activeWorkspaceId === ctx.baseBranch;
 	};
 
 	const hasTerminals = () => {
 		const ctx = cleanupCtx();
 		if (!ctx) return false;
 		const repo = repositoriesStore.get(props.repoPath);
-		const branch = repo?.branches[ctx.branchName];
+		// The dialog context holds a branch (it came from a PR); the row it belongs
+		// to comes from the single branch->id seam.
+		const workspaceId = repositoriesStore.workspaceIdOnBranch(props.repoPath, ctx.branchName);
+		const branch = workspaceId ? repo?.workspaces[workspaceId] : undefined;
 		return (branch?.terminals?.length ?? 0) > 0;
 	};
 
-	const closeTerminalsForBranch = async (repoPath: string, branchName: string) => {
+	/** Called by `executeCleanup`, which passes the workspace id it was given. */
+	const closeTerminalsForBranch = async (repoPath: string, workspaceId: string) => {
 		const repo = repositoriesStore.get(repoPath);
-		const branch = repo?.branches[branchName];
+		const branch = repo?.workspaces[workspaceId];
 		if (branch) {
 			for (const termId of branch.terminals) {
 				try {
@@ -153,6 +163,10 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 
 		await executeCleanup({
 			repoPath: props.repoPath,
+			// A PR names its head branch, so the workspace is resolved through the
+			// single documented branch->id seam; the id addresses the row and the
+			// checkout, the branch stays the ref to delete.
+			workspaceId: repositoriesStore.workspaceIdOnBranch(props.repoPath, ctx.branchName) ?? ctx.branchName,
 			branchName: ctx.branchName,
 			baseBranch: ctx.baseBranch,
 			steps: steps.map((s) => ({ id: s.id, checked: s.checked })),
@@ -187,11 +201,10 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 		setMerging(true);
 		setMergeError(null);
 		try {
-			const preferred =
-				repoSettingsStore.getEffective?.(props.repoPath)?.prMergeStrategy ?? repoDefaultsStore.state.prMergeStrategy;
+			const preferred = preferredMergeStrategy(props.repoPath);
 			const startMethod = effectiveMergeMethod(pr, preferred);
 			try {
-				const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod);
+				const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod, pr.head_ref_oid);
 				// Persist the working method so future merges use it directly
 				if (usedMethod !== preferred) {
 					const repo = repositoriesStore.get(props.repoPath);
@@ -234,8 +247,7 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 	const mergeLabel = () => {
 		const pr = prData();
 		if (!pr) return t("prDetail.merge", "Merge");
-		const preferred =
-			repoSettingsStore.getEffective?.(props.repoPath)?.prMergeStrategy ?? repoDefaultsStore.state.prMergeStrategy;
+		const preferred = preferredMergeStrategy(props.repoPath);
 		const method = effectiveMergeMethod(pr, preferred);
 		if (method === "squash") return t("prDetail.mergeSquash", "Squash & Merge");
 		if (method === "rebase") return t("prDetail.mergeRebase", "Rebase & Merge");
@@ -247,11 +259,11 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 		if (!pr) return;
 		setDiffLoading(true);
 		try {
-			const diff = await invoke<string>("get_pr_diff", {
+			const { diff, headSha } = await invoke<{ diff: string; headSha: string }>("get_pr_diff", {
 				repoPath: props.repoPath,
 				prNumber: pr.number,
 			});
-			mdTabsStore.addPrDiff(props.repoPath, pr.number, pr.title, diff);
+			mdTabsStore.addPrDiff(props.repoPath, pr.number, pr.title, diff, headSha);
 			props.onClose();
 		} catch (e) {
 			const msg = String(e);
@@ -271,6 +283,9 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 			props.onClose();
 		}
 	};
+
+	// Non-modal: see useOutsideDismiss. The cleanup dialog replaces the popover, so it is not an outside press.
+	useOutsideDismiss({ inside: () => [popoverEl], onClose: props.onClose, enabled: () => !cleanupCtx() });
 
 	// Flip to top-anchor when the bottom-anchored popover would overflow the
 	// viewport top (clipping the repo/title header). Monotonic: only ever flips
@@ -304,7 +319,7 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 
 	const shouldAnchorTop = () => props.anchor === "top" || (!props.anchor && flippedTop());
 
-	const repoColor = createMemo(() => getRepoColor(props.repoPath));
+	const repoColor = createMemo(() => getRepoTextColor(props.repoPath));
 
 	const stateClass = () => {
 		if (prData()?.is_draft) return "draft";
@@ -348,7 +363,6 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 			</Show>
 
 			<Show when={!cleanupCtx()}>
-				<div class={s.overlay} onClick={props.onClose} />
 				<div ref={popoverEl} class={cx(s.popover, shouldAnchorTop() && s.anchorTop)}>
 					<Show
 						when={prData()}
@@ -374,28 +388,35 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 									<span
 										class={cx(s.number, s.link)}
 										onClick={() => pr().url && handleOpenUrl(pr().url)}
-										title={t("prDetail.openOnGithub", "Open PR on GitHub")}
+										title={t("prDetail.openOnGithub", "Open on GitHub")}
 									>
 										#{pr().number}
 									</span>
-									<button class={s.close} onClick={props.onClose}>
+									<button type="button" class={s.close} aria-label="Close" onClick={props.onClose}>
 										&times;
 									</button>
 								</div>
 
 								{/* Shared body content: status pills, labels, meta, CI, checks, open link */}
-								<PrDetailContent repoPath={props.repoPath} branch={props.branch}>
+								<PrDetailContent repoPath={props.repoPath} branch={props.branch} onConversationOpen={props.onClose}>
 									<div class={s.actions}>
-										<button class={s.viewDiffBtn} onClick={handleViewDiff} disabled={diffLoading()}>
+										<button type="button" class={s.viewDiffBtn} onClick={handleViewDiff} disabled={diffLoading()}>
 											{diffLoading() ? t("prDetail.loadingDiff", "Loading...") : t("prDetail.viewDiff", "View Diff")}
 										</button>
 										<Show when={reviewCommand()}>
 											<button
+												type="button"
 												class={s.viewDiffBtn}
-												onClick={() => {
-													const cmd = reviewCommand();
-													if (cmd && props.onReview) {
-														props.onReview(props.repoPath, props.branch, cmd);
+												onClick={async () => {
+													const launch = reviewCommand();
+													if (launch && props.onReview) {
+														const command = await prepareAgentLaunchCommand(
+															launch.command,
+															null,
+															launch.agentType,
+															props.repoPath,
+														);
+														props.onReview(props.repoPath, props.branch, command);
 														props.onClose();
 													}
 												}}
@@ -404,12 +425,13 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 											</button>
 										</Show>
 										<Show when={canMergePr(pr())}>
-											<button class={s.mergeBtn} onClick={() => handleMerge()} disabled={merging()}>
+											<button type="button" class={s.mergeBtn} onClick={() => handleMerge()} disabled={merging()}>
 												{merging() ? t("prDetail.merging", "Merging...") : mergeLabel()}
 											</button>
 										</Show>
 										<Show when={pr().url}>
 											<button
+												type="button"
 												class={s.viewDiffBtn}
 												onClick={() => handleOpenUrl(pr().url)}
 												title={t("prDetail.openOnGithub", "Open on GitHub")}

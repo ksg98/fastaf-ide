@@ -1,11 +1,23 @@
-import { createMemo, createSignal, For, Index, Show } from "solid-js";
+import { createMemo, createSignal, For, Index, mapArray, Show } from "solid-js";
+import { Button } from "../../components/ui/Button";
+import { Input } from "../../components/ui/Input";
 import { appLogger } from "../../stores/appLogger";
 import { rpc } from "../../transport";
 import { HeroMetrics } from "../components/HeroMetrics";
 import { NewSessionSheet } from "../components/NewSessionSheet";
 import { SessionCard } from "../components/SessionCard";
+import type { SessionStatus } from "../components/StatusBadge";
 import type { SessionInfo } from "../useSessions";
+import {
+	readRecentSessionIds,
+	readSessionSort,
+	recentFirst,
+	type SessionSort,
+	writeSessionSort,
+} from "../utils/recentSessions";
 import { ptysLast } from "../utils/sessionKind";
+import { nestUnderParents, parentLabel } from "../utils/sessionTree";
+import { useDebouncedStatus } from "../utils/useDebouncedStatus";
 import styles from "./SessionsScreen.module.css";
 
 interface SessionsScreenProps {
@@ -19,15 +31,69 @@ interface SessionsScreenProps {
 
 const PULL_THRESHOLD = 60;
 
+// The Working counter already includes delegated work; filtering must use that same group.
+const counterStatus = (status: SessionStatus) => (status === "sub-tasks" ? "busy" : status);
+
 export function SessionsScreen(props: SessionsScreenProps) {
+	// Key by session id: polling replaces session objects, but must not reset the busy hold.
+	const sessionsById = createMemo(() => new Map(props.sessions.map((session) => [session.session_id, session])));
+	const sessionStatuses = mapArray(
+		() => [...sessionsById().keys()],
+		(sessionId) => ({ sessionId, status: useDebouncedStatus(() => sessionsById().get(sessionId)!) }),
+	);
+	const statusById = createMemo(() => new Map(sessionStatuses().map(({ sessionId, status }) => [sessionId, status])));
+	const counts = createMemo(() => {
+		const totals = { busy: 0, idle: 0, question: 0 };
+		for (const { status } of sessionStatuses()) {
+			const value = counterStatus(status());
+			if (value === "busy" || value === "idle" || value === "question") totals[value]++;
+		}
+		return totals;
+	});
 	const [pulling, setPulling] = createSignal(false);
 	const [pullY, setPullY] = createSignal(0);
 	const [showNewSession, setShowNewSession] = createSignal(false);
+	const [searchOpen, setSearchOpen] = createSignal(false);
+	const [searchQuery, setSearchQuery] = createSignal("");
+	const [selectedStates, setSelectedStates] = createSignal<ReadonlySet<SessionStatus>>(new Set());
+	function toggleState(status: SessionStatus) {
+		setSelectedStates((previous) => {
+			const next = new Set(previous);
+			if (next.has(status)) next.delete(status);
+			else next.add(status);
+			return next;
+		});
+	}
 	const [repos, setRepos] = createSignal<string[]>([]);
 	// Memoized so the sort runs on a real list change, not on every render.
 	// `reconcileSessions` hands back the same array reference for an idle poll,
 	// which keeps this inert — and keeps `<For>` from rebuilding every card.
-	const ordered = createMemo(() => ptysLast(props.sessions));
+	const [sort, setSort] = createSignal<SessionSort>(readSessionSort());
+	const [sortOpen, setSortOpen] = createSignal(false);
+	// The list screen is unmounted while a detail is open, so reading once per mount sees every open.
+	const recentIds = readRecentSessionIds();
+	const ordered = createMemo(() =>
+		sort() === "recent" ? recentFirst(props.sessions, recentIds) : ptysLast(props.sessions),
+	);
+	const visibleSessions = createMemo(() => {
+		const query = searchQuery().trim().toLowerCase();
+		return ordered().filter((session) => {
+			const status = statusById().get(session.session_id)?.();
+			if (selectedStates().size > 0 && (!status || !selectedStates().has(counterStatus(status)))) return false;
+			return (
+				!query ||
+				[
+					session.display_name,
+					session.cwd,
+					session.worktree_path,
+					session.worktree_branch,
+					session.state?.agent_type,
+				].some((value) => value?.toLowerCase().includes(query))
+			);
+		});
+	});
+	// Nest after filtering: a child whose parent was filtered out stays a visible top-level row.
+	const rows = createMemo(() => nestUnderParents(visibleSessions()));
 	let startY = 0;
 	let listEl: HTMLDivElement | undefined;
 
@@ -72,8 +138,127 @@ export function SessionsScreen(props: SessionsScreenProps) {
 		setPulling(false);
 	}
 
+	function chooseSort(next: SessionSort) {
+		setSort(next);
+		writeSessionSort(next);
+		setSortOpen(false);
+	}
+
+	function toggleSearch() {
+		if (searchOpen()) setSearchQuery("");
+		setSearchOpen(!searchOpen());
+	}
+
 	return (
 		<div ref={listEl} class={styles.list} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+			<div class={styles.searchHeader}>
+				<div class={styles.searchRow}>
+					<span class={styles.sectionTitle}>Sessions</span>
+					<div class={styles.sortMenu}>
+						<Button
+							type="button"
+							shape="icon"
+							variant="ghost"
+							aria-label="Sort sessions"
+							aria-haspopup="menu"
+							aria-expanded={sortOpen()}
+							onClick={() => setSortOpen(!sortOpen())}
+						>
+							<svg
+								width="20"
+								height="20"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								aria-hidden="true"
+							>
+								<path d="M4 7h16M7 12h10M10 17h4" />
+							</svg>
+						</Button>
+						<Show when={sortOpen()}>
+							<div class={styles.sortList} role="menu" aria-label="Sort sessions">
+								<For
+									each={
+										[
+											["default", "Default"],
+											["recent", "Recent"],
+										] as const
+									}
+								>
+									{([value, label]) => (
+										<Button
+											type="button"
+											role="menuitemradio"
+											aria-checked={sort() === value}
+											variant="ghost"
+											class={styles.sortOption}
+											classList={{ [styles.sortOptionActive]: sort() === value }}
+											onClick={() => chooseSort(value)}
+										>
+											{label}
+										</Button>
+									)}
+								</For>
+							</div>
+						</Show>
+					</div>
+					<Button
+						type="button"
+						shape="icon"
+						variant="ghost"
+						aria-label={searchOpen() ? "Close session search" : "Search sessions"}
+						aria-expanded={searchOpen()}
+						onClick={toggleSearch}
+					>
+						<Show
+							when={searchOpen()}
+							fallback={
+								<svg
+									width="20"
+									height="20"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									aria-hidden="true"
+								>
+									<circle cx="11" cy="11" r="7" />
+									<path d="m16 16 5 5" />
+								</svg>
+							}
+						>
+							<svg
+								width="20"
+								height="20"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								aria-hidden="true"
+							>
+								<path d="M18 6 6 18M6 6l12 12" />
+							</svg>
+						</Show>
+					</Button>
+				</div>
+				<Show when={searchOpen()}>
+					<div class={styles.searchField}>
+						<Input
+							ref={(element) => queueMicrotask(() => element.focus())}
+							type="search"
+							aria-label="Filter sessions"
+							placeholder="Name, repository, branch or agent"
+							value={searchQuery()}
+							onInput={(event) => setSearchQuery(event.currentTarget.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Escape") toggleSearch();
+							}}
+						/>
+					</div>
+				</Show>
+			</div>
 			<Show when={pullY() > 0}>
 				<div class={styles.pullIndicator} style={{ height: `${pullY()}px` }}>
 					<span classList={{ [styles.pullReady]: pullY() >= PULL_THRESHOLD }}>
@@ -96,8 +281,11 @@ export function SessionsScreen(props: SessionsScreenProps) {
 
 			<Show when={props.sessions.length > 0}>
 				<HeroMetrics
-					activeCount={props.sessions.length}
-					awaitingCount={props.sessions.filter((s) => s.state?.awaiting_input).length}
+					workingCount={counts().busy}
+					idleCount={counts().idle}
+					awaitingCount={counts().question}
+					selectedStates={selectedStates()}
+					onToggleState={toggleState}
 				/>
 			</Show>
 
@@ -128,19 +316,58 @@ export function SessionsScreen(props: SessionsScreenProps) {
 				</div>
 			</Show>
 
-			<For each={ordered()}>
-				{(session) => <SessionCard session={session} onSelect={props.onSelectSession} onKill={handleKill} />}
+			<Show
+				when={
+					(searchQuery().trim() || selectedStates().size > 0) &&
+					visibleSessions().length === 0 &&
+					props.sessions.length > 0
+				}
+			>
+				<div class={styles.noMatch}>
+					<span class={styles.emptyTitle}>No matching sessions</span>
+					<span class={styles.emptyHint}>Try another state, name, repository, branch or agent</span>
+				</div>
+			</Show>
+
+			<For each={rows()}>
+				{(row) => (
+					<SessionCard
+						session={row.session}
+						status={statusById().get(row.session.session_id)}
+						depth={row.depth}
+						lastInGroup={row.last}
+						spawnedBy={row.session.parent_session ? parentLabel(rows(), row.session) : undefined}
+						onSelect={props.onSelectSession}
+						onKill={handleKill}
+					/>
+				)}
 			</For>
 
-			<button class={styles.fab} onClick={openNewSessionSheet} data-testid="new-session-fab">
-				<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<line x1="12" y1="5" x2="12" y2="19" />
-					<line x1="5" y1="12" x2="19" y2="12" />
-				</svg>
-			</button>
+			<div class={styles.fab}>
+				<Button
+					shape="icon"
+					circular
+					variant="primary"
+					aria-label="New session"
+					onClick={openNewSessionSheet}
+					data-testid="new-session-fab"
+				>
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<line x1="12" y1="5" x2="12" y2="19" />
+						<line x1="5" y1="12" x2="19" y2="12" />
+					</svg>
+				</Button>
+			</div>
 
 			<Show when={showNewSession()}>
-				<NewSessionSheet repos={repos()} onDismiss={() => setShowNewSession(false)} />
+				<NewSessionSheet
+					repos={repos()}
+					onDismiss={() => setShowNewSession(false)}
+					onCreated={(sessionId) => {
+						props.onSelectSession(sessionId);
+						props.onRefresh();
+					}}
+				/>
 			</Show>
 		</div>
 	);

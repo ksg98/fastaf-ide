@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Upstream sync: TUICommander 2.0.0
+
+FastAF now includes TUICommander 2.0.0 (Apache-2.0, by Stefano Straus), merged into FastAF's own design and
+AI engine. AI Chat, Smart Prompts API mode, PR review, changelog generation and story drafts keep running on
+FastAF's built-in engine and providers; nothing needs the external ego agent.
+
+#### Added
+- Chat view for agent terminals: read a Claude Code or Codex session as a conversation. Switch with the
+  CLI | Chat pill; the Speak/Type dock stays the one place to type.
+- Plans and Stories, Automations, a Workflow designer and a Progress view.
+- Tasks for GitHub, GitLab and Jira work items, once a work-item provider plugin is installed.
+- Back and forward history buttons in the title bar.
+- Pull request readiness badges, PR notifications that open the right conversation, and CircleCI failure logs
+  in the PR popover.
+- Tab suspend, detached tabs, and an agent picker on a long press of +.
+- Settings search, grouped navigation and an Expert view of every setting.
+- Files panel: symlinks, folders outside the repository, and touch drag.
+- A live Markdown editor, and an archive-safety checklist before removing worktrees.
+
+#### Changed
+- Upstream's speed and reliability work on the terminal renderer, agent state detection, git refresh and
+  dictation (now a separate on-device crate).
+- AI Chat keeps its scheduled tasks; jobs saved before the upgrade keep running. They now ask before a
+  destructive command (a toast with Approve and Deny) instead of running it unattended, so a job that needs
+  approval while nobody answers ends at its timeout.
+- Scheduled tasks run on even intervals only (every 5, 6, 10, 12, 15, 20 or 30 minutes, every 1, 2, 3, 4,
+  6, 8 or 12 hours, or daily at 09:00 UTC), and each task reuses its own terminal instead of opening a new
+  one every run.
+- Plan Tracker and Stories Ticker stay built in.
+
+#### Removed
+- Notes, AI Triage, Watchers and Knowledge History (removed upstream).
+- Aider agent detection, and the AI agent's external MCP terminal tools (removed upstream).
+
+#### Security
+- No plugin registry and no automatic mdkb download: FastAF downloads no third-party code on its own.
+- Spoken replies use on-device engines only; the Microsoft Edge online voice is not available.
+- MCP clients can't manage automations unless you allow it.
+- The remote access token changes every time remote access is turned on, and Settings warns when the
+  connection is unencrypted.
+- Remote access set to one network address no longer falls back to every network when that address is
+  missing (for example before Tailscale is up): it pauses, serving this machine only, until it appears.
+- Local scripts can't start, steer or approve AI conversations, or add scheduled tasks, and each approval
+  answers one request only.
+- The shell installer only installs a FastAF.app signed by FastAF's Developer ID, and keeps the installed
+  app if the swap fails.
+- Release builds fail instead of shipping an unsigned or un-notarized app; CI actions are pinned to exact
+  commits.
+
 ## [2.0.4] - 2026-10-22
 
 ### Changed
@@ -1951,3 +2000,10 @@ Everything sstraus/tuicommander shipped between v1.6.2 and v1.7.6, plus its unre
 
 ### Known Issues
 - Tabs from all worktrees visible when switching branches (fix planned)
+
+- Add Telegram setup in desktop and mobile Settings: token check/replacement, expiring one-use pairing or explicit chat IDs, live agent selection and safe daemon status.
+
+- Reuse explicitly finished, clean, integrated worktrees while preserving ignored build artifacts. Reserve new allocations before returning them.
+
+
+- Wake suspended sessions through one Rust path for tab open, submit and peer mail; concurrent wakes reuse one PTY and keep its TUIC identity (#1807-4f1f).

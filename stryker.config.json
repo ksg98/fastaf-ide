@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "node scripts/ts-mutants.mjs --runner"
+  },
+  "coverageAnalysis": "off",
+  "ignorePatterns": [
+    "**",
+    "!src/**/*",
+    "!src-tauri/src/**/*.rs",
+    "!src-tauri/src/mcp_http/command_table_paths.txt",
+    "!src-tauri/{src,crates,fixtures,tests}/**/*.json",
+    "!src-tauri/tests/fixtures/acp/*.jsonl",
+    "!src-tauri/crates/tuic-terminal/src/terminal_grid.rs",
+    "!vitest.config.ts",
+    "!scripts/ts-mutants.mjs",
+    "!scripts/build-stall-replay.mjs",
+    "!tsconfig.json",
+    "!package.json"
+  ],
+  "tsconfigFile": ".stryker-unused-tsconfig.json",
+  "checkers": [],
+  "concurrency": 1,
+  "reporters": ["clear-text", "json"]
+}

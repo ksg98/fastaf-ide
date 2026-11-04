@@ -148,3 +148,40 @@ fn ref_test(dir: &Path) {
 
     assert_eq!(grid, term_grid);
 }
+
+#[test]
+fn parser_retains_combining_codepoints_in_the_base_cell() {
+    let size = TermSize::new(16, 1);
+    let mut terminal = Term::new(Config::default(), &size, Mock);
+    let mut parser: ansi::Processor = ansi::Processor::new();
+
+    parser.advance(
+        &mut terminal,
+        "Aé cafe\u{0301} n\u{0303}\u{0301}".as_bytes(),
+    );
+
+    let grid = terminal.grid();
+    let ascii = &grid[Line(0)][Column(0)];
+    assert_eq!(ascii.c as u32, 0x0041);
+    assert!(ascii.zerowidth().is_none());
+
+    let precomposed = &grid[Line(0)][Column(1)];
+    assert_eq!(precomposed.c as u32, 0x00e9);
+    assert!(precomposed.zerowidth().is_none());
+
+    let decomposed = &grid[Line(0)][Column(6)];
+    assert_eq!(decomposed.c as u32, 0x0065);
+    assert_eq!(
+        decomposed.zerowidth(),
+        Some(&['\u{0301}'][..]),
+        "U+0301 must remain attached to the preceding U+0065 cell"
+    );
+
+    let multiply_combined = &grid[Line(0)][Column(8)];
+    assert_eq!(multiply_combined.c as u32, 0x006e);
+    assert_eq!(
+        multiply_combined.zerowidth(),
+        Some(&['\u{0303}', '\u{0301}'][..]),
+        "combining codepoints must retain their input order"
+    );
+}

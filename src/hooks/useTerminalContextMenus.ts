@@ -1,16 +1,17 @@
 import type { Setter } from "solid-js";
-import { AGENTS, type AgentType } from "../agents";
+import { AGENTS, type AgentRunConfig, type AgentType } from "../agents";
 import type { ContextMenuItem } from "../components/ContextMenu";
 import { invoke } from "../invoke";
 import { getModifierSymbol } from "../platform";
-import { agentConfigsStore } from "../stores/agentConfigs";
+import { agentConfigsForRepo, ensureAgentConfigsForRepo } from "../stores/agentConfigs";
 import { appLogger } from "../stores/appLogger";
 import { contextMenuActionsStore } from "../stores/contextMenuActionsStore";
 import { paneLayoutStore } from "../stores/paneLayout";
 import { repositoriesStore } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
 import { terminalsStore } from "../stores/terminals";
-import { buildAgentLaunchCommand } from "../utils/agentSession";
+import { newTerminalShellFamily, scopedLaunchCommand } from "../utils/agentLaunchCommand";
+import { prepareAgentLaunchCommand } from "../utils/agentSession";
 import { writeClipboard } from "../utils/clipboard";
 import { keyFor } from "../utils/hotkey";
 import { getShellFamily, sendCommand } from "../utils/sendCommand";
@@ -25,6 +26,7 @@ interface TerminalContextMenuOptions {
 	splitPanes: ReturnType<typeof useSplitPanes>;
 	terminalLifecycle: ReturnType<typeof useTerminalLifecycle>;
 	closeActiveTabOrPane: () => void;
+	openPromptInspector: (sessionId: string) => void;
 	setTermRenameDefault: Setter<string>;
 	setTermRenamePromptVisible: Setter<boolean>;
 }
@@ -34,15 +36,15 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 	buildSidebarAgentMenuItems: (repoPath: string, branchName: string) => ContextMenuItem[];
 	getContextMenuItems: () => ContextMenuItem[];
 } {
-	const launchAgentInActiveTerminal = async (agentType: AgentType, command: string) => {
+	const launchAgentInActiveTerminal = async (agentType: AgentType, command: string, env?: AgentRunConfig["env"]) => {
 		const active = terminalsStore.getActive();
 		if (!active?.ref || !active.sessionId) return;
 		const agentSessionId = agentType === "claude" ? null : (active.tuicSession ?? null);
-		const finalCommand = buildAgentLaunchCommand(command, agentSessionId, agentType);
+		const finalCommand = await prepareAgentLaunchCommand(command, agentSessionId, agentType, active.cwd);
 		const shellFamily = await getShellFamily(active.sessionId);
 		await sendCommand(
 			(data) => invoke("write_pty", { sessionId: active.sessionId, data }),
-			finalCommand,
+			scopedLaunchCommand(finalCommand, env, shellFamily),
 			null,
 			shellFamily,
 		);
@@ -53,26 +55,47 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 		});
 	};
 
+	/**
+	 * The run configs of the machine the active terminal runs on.
+	 *
+	 * A menu is built inside the click that opens it, so this reads the cached
+	 * copy and warms it for the next open; a machine that came up has already
+	 * been prefetched by `remoteConnections`.
+	 */
+	const activeTerminalConfigs = () => {
+		const cwd = terminalsStore.getActive()?.cwd ?? null;
+		void ensureAgentConfigsForRepo(cwd);
+		return agentConfigsForRepo(cwd);
+	};
+
 	const buildAgentMenuItems = (): ContextMenuItem[] =>
 		options.agentDetection
 			.getAvailable()
 			.filter((agent) => agent.type !== "git" && agent.type !== "api")
 			.map((agent) => {
 				const config = AGENTS[agent.type];
-				const runConfigs = agentConfigsStore.getRunConfigs(agent.type);
+				const runConfigs = activeTerminalConfigs().getRunConfigs(agent.type);
 				if (runConfigs.length > 1) {
 					return {
 						label: config.name,
 						action: () => {},
 						children: runConfigs.map((runConfig) => ({
 							label: runConfig.name + (runConfig.is_default ? " (Default)" : ""),
-							action: () => launchAgentInActiveTerminal(agent.type, [runConfig.command, ...runConfig.args].join(" ")),
+							action: () =>
+								launchAgentInActiveTerminal(
+									agent.type,
+									[runConfig.command, ...runConfig.args].join(" "),
+									runConfig.env,
+								),
 						})),
 					};
 				}
 				const command =
 					runConfigs.length === 1 ? [runConfigs[0].command, ...runConfigs[0].args].join(" ") : config.binary;
-				return { label: config.name, action: () => launchAgentInActiveTerminal(agent.type, command) };
+				return {
+					label: config.name,
+					action: () => launchAgentInActiveTerminal(agent.type, command, runConfigs[0]?.env),
+				};
 			});
 
 	const buildSidebarAgentMenuItems = (repoPath: string, branchName: string): ContextMenuItem[] => {
@@ -81,18 +104,24 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 			.filter((agent) => agent.type !== "git" && agent.type !== "api" && settingsStore.isAgentEnabled(agent.type));
 		if (enabled.length === 0) return [];
 
+		// The tab will run on the machine that holds this repo, so the run configs
+		// offered here are that machine's, not the ones on this desktop.
+		void ensureAgentConfigsForRepo(repoPath);
+		const machineConfigs = agentConfigsForRepo(repoPath);
+
 		const buildAgentEntry = (agent: (typeof enabled)[0]) => {
 			const config = AGENTS[agent.type];
-			const runConfigs = agentConfigsStore.getRunConfigs(agent.type);
-			const launchAgent = async (command: string) => {
-				const termId = await options.gitOps.handleAddTerminalToBranch(repoPath, branchName);
+			const runConfigs = machineConfigs.getRunConfigs(agent.type);
+			const launchAgent = async (command: string, env?: AgentRunConfig["env"]) => {
+				const termId = await options.gitOps.handleAddTerminalToWorkspace(repoPath, branchName);
 				if (!termId) return;
 				const term = terminalsStore.get(termId);
 				const agentSessionId = agent.type === "claude" ? null : (term?.tuicSession ?? null);
+				const pendingInitCommand = await prepareAgentLaunchCommand(command, agentSessionId, agent.type, repoPath);
 				terminalsStore.update(termId, {
 					name: config.name,
 					nameIsCustom: true,
-					pendingInitCommand: buildAgentLaunchCommand(command, agentSessionId, agent.type),
+					pendingInitCommand: scopedLaunchCommand(pendingInitCommand, env, newTerminalShellFamily()),
 					agentType: agent.type,
 					agentLaunchCommand: command,
 				});
@@ -101,7 +130,7 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 				runConfigs.length > 0
 					? runConfigs.map((runConfig) => ({
 							label: runConfig.name + (runConfig.is_default ? " (Default)" : ""),
-							action: () => launchAgent([runConfig.command, ...runConfig.args].join(" ")),
+							action: () => launchAgent([runConfig.command, ...runConfig.args].join(" "), runConfig.env),
 						}))
 					: [{ label: "(Default)", action: () => launchAgent(config.binary) }];
 			return { config, children };
@@ -140,6 +169,14 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 	};
 
 	const getContextMenuItems = (): ContextMenuItem[] => [
+		{
+			label: "Inspect Launch Instructions…",
+			disabled: !terminalsStore.getActive()?.sessionId,
+			action: () => {
+				const id = terminalsStore.getActive()?.sessionId;
+				if (id) options.openPromptInspector(id);
+			},
+		},
 		...(options.agentDetection.getAvailable().length > 0
 			? [{ label: "Agents", action: () => {}, disabled: activeTerminalBusy(), children: buildAgentMenuItems() }]
 			: []),
@@ -156,18 +193,32 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 				const activeId = terminalsStore.state.activeId;
 				const term = activeId ? terminalsStore.get(activeId) : undefined;
 				const lastBlock = term?.commandBlocks[term.commandBlocks.length - 1];
-				if (!term?.ref || !lastBlock || lastBlock.executionLine == null || lastBlock.endLine == null) return;
+				if (
+					!term?.ref ||
+					!lastBlock ||
+					lastBlock.executionLine == null ||
+					lastBlock.endLine == null ||
+					lastBlock.endLine <= term.historyBase
+				)
+					return;
 				// The menu invokes this without awaiting it, so a rejected buffer read
 				// would surface as an unhandled rejection instead of a failed copy.
 				let lines: string[];
 				try {
-					lines = await term.ref.getBufferLines(lastBlock.executionLine + 1, lastBlock.endLine);
+					lines = await term.ref.getBufferLines(
+						Math.max(0, lastBlock.executionLine + 1 - term.historyBase),
+						lastBlock.endLine - term.historyBase,
+					);
 				} catch (e) {
 					appLogger.warn("terminal", "Copy Block Output failed to read the buffer", { error: String(e) });
 					return;
 				}
 				const text = lines.join("\n").trimEnd();
-				if (text) void writeClipboard(text);
+				if (text) {
+					writeClipboard(text).catch((err) =>
+						appLogger.warn("terminal", "Copy Block Output failed", { error: String(err) }),
+					);
+				}
 			},
 			disabled: (() => {
 				const activeId = terminalsStore.state.activeId;

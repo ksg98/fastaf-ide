@@ -3,6 +3,7 @@
    header with a 13px/500 title and 28px icon buttons on the right, one
    divider under it. */
 .header {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -61,6 +62,7 @@
 }
 
 .search {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   align-items: center;
   padding: 6px 8px;

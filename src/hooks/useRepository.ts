@@ -1,7 +1,9 @@
 import { createSignal } from "solid-js";
 import { invoke } from "../invoke";
 import { appLogger } from "../stores/appLogger";
+import type { WorkspaceLifecycleStatus } from "../stores/workspaceIdentity";
 import type { RepoInfo } from "../types";
+import type { OrphanAssessment } from "./git/createRepositoryRefreshCoordinator";
 
 // ---------------------------------------------------------------------------
 // TCC (macOS permission) error detection — global, shown once per session
@@ -45,6 +47,34 @@ export interface BaseRefOption {
 
 export interface RemoveWorktreeResult {
 	branch_delete_warning?: string | null;
+	/** Branch the removed workspace was on, read off the record before removal. */
+	branch: string;
+	removal_rule: string;
+}
+
+/** One workspace's checkout. Keyed by workspace id; the branch is a field on the
+ *  value because two workspaces may share one. */
+export interface WorkspaceWorktree {
+	branch: string;
+	path: string;
+	kind: "worktree";
+}
+
+/** Detached checkouts are inventory, not selectable branch workspaces. */
+export interface DetachedWorktree {
+	path: string;
+	head: string;
+	short_head: string;
+	directory_name: string;
+	state: "detached";
+}
+
+/** Read-only inventory entries that cannot safely use a branch workspace identity. */
+export interface WorktreeDiagnostic {
+	path: string;
+	branch: string | null;
+	state: "missing" | "duplicate_branch";
+	guidance: string;
 }
 
 /** Repository hook for git operations */
@@ -89,41 +119,81 @@ export function useRepository() {
 		}
 	}
 
-	/** Remove a worktree by branch name */
+	/** Remove one workspace's checkout, addressed by workspace id */
 	async function removeWorktree(
 		repoPath: string,
-		branchName: string,
+		workspaceId: string,
 		deleteBranch: boolean,
 		force?: boolean,
+		overrideLock?: boolean,
+		expectedFingerprint?: string,
+		confirmMissingCheckout?: boolean,
+		permanentDelete?: boolean,
 	): Promise<RemoveWorktreeResult> {
 		return await invoke<RemoveWorktreeResult>("remove_worktree", {
 			repoPath,
-			branchName,
+			workspaceId,
 			deleteBranch,
 			force: force ?? false,
+			...(overrideLock ? { overrideLock: true } : {}),
+			...(expectedFingerprint ? { expectedFingerprint } : {}),
+			...(confirmMissingCheckout ? { confirmMissingCheckout: true } : {}),
+			...(permanentDelete ? { permanentDelete: true } : {}),
 		});
 	}
 
-	/** Create a new worktree with a branch */
+	/** Create a linked worktree and warm its ignored build directories. */
 	async function createWorktree(
 		baseRepo: string,
 		branchName: string,
 		createBranch?: boolean,
 		baseRef?: string,
 	): Promise<{
-		status: "ok" | "pending";
+		status: "ok";
 		name: string;
 		path: string;
+		kind?: "worktree";
+		workspace_id: string;
 		branch: string;
 		base_repo: string;
 	}> {
 		return await invoke("create_worktree", { baseRepo, branchName, createBranch, baseRef });
 	}
 
-	/** Get worktree paths: branch name → worktree directory */
-	async function getWorktreePaths(repoPath: string): Promise<Record<string, string>> {
+	/** Fresh backend preflight used immediately before removal. */
+	async function getWorkspaceLifecycle(repoPath: string, workspaceId: string): Promise<WorkspaceLifecycleStatus> {
+		const status = await invoke<{
+			archive_checklist?: WorkspaceLifecycleStatus["archiveChecklist"];
+			dirty_files: number | null;
+			untracked_files?: number | null;
+			live_sessions?: Array<{ session_id: string; name: string }>;
+			warnings?: string[];
+			missing_checkout: boolean;
+			dirty_fingerprint?: string;
+			submodule_unpushed_commits?: Array<{ path: string; count: number }>;
+			commit_status: WorkspaceLifecycleStatus["commitStatus"];
+			removal_safety: WorkspaceLifecycleStatus["removalSafety"];
+			error?: string;
+		}>("get_workspace_lifecycle", { repoPath, workspaceId });
+		return {
+			archiveChecklist: status.archive_checklist,
+			dirtyFiles: status.dirty_files,
+			untrackedFiles: status.untracked_files,
+			liveSessions: status.live_sessions?.map((session) => ({ sessionId: session.session_id, name: session.name })),
+			warnings: status.warnings,
+			missingCheckout: status.missing_checkout,
+			dirtyFingerprint: status.dirty_fingerprint,
+			submoduleUnpushedCommits: status.submodule_unpushed_commits,
+			commitStatus: status.commit_status,
+			removalSafety: status.removal_safety,
+			error: status.error,
+		};
+	}
+
+	/** Get workspaces: workspace id → its checkout */
+	async function getWorktreePaths(repoPath: string): Promise<Record<string, WorkspaceWorktree>> {
 		try {
-			return await invoke<Record<string, string>>("get_worktree_paths", { repoPath });
+			return await invoke<Record<string, WorkspaceWorktree>>("get_worktree_paths", { repoPath });
 		} catch (err) {
 			appLogger.warn("git", `Failed to get worktree paths for ${repoPath}`, err);
 			return {};
@@ -225,16 +295,20 @@ export function useRepository() {
 	async function mergeAndArchiveWorktree(
 		repoPath: string,
 		branchName: string,
+		workspaceId: string,
 		targetBranch: string,
 		afterMerge: string,
 		force = false,
+		expectedFingerprint?: string,
 	): Promise<MergeArchiveResult> {
 		return await invoke<MergeArchiveResult>("merge_and_archive_worktree", {
 			repoPath,
 			branchName,
+			workspaceId,
 			targetBranch,
 			afterMerge,
 			force,
+			...(expectedFingerprint ? { expectedFingerprint } : {}),
 		});
 	}
 
@@ -244,15 +318,17 @@ export function useRepository() {
 	 *  be clean comes back as `action: "needs_confirmation"` instead of being wiped. */
 	async function finalizeMergedWorktree(
 		repoPath: string,
-		branchName: string,
+		workspaceId: string,
 		action: "archive" | "delete",
 		force = false,
+		expectedFingerprint?: string,
 	): Promise<MergeArchiveResult> {
 		return await invoke<MergeArchiveResult>("finalize_merged_worktree", {
 			repoPath,
-			branchName,
+			workspaceId,
 			action,
 			force,
+			...(expectedFingerprint ? { expectedFingerprint } : {}),
 		});
 	}
 
@@ -276,23 +352,35 @@ export function useRepository() {
 	/** Aggregate repo snapshot: worktree paths + merged branches + per-path diff stats.
 	 *  Replaces 3 separate IPC calls in refreshAllBranchStats with one round-trip. */
 	async function getRepoSummary(repoPath: string): Promise<{
-		worktree_paths: Record<string, string>;
+		worktree_paths: Record<string, WorkspaceWorktree>;
+		detached_worktrees: DetachedWorktree[];
+		worktree_diagnostics?: WorktreeDiagnostic[];
 		merged_branches: string[];
 		diff_stats: Record<string, { additions: number; deletions: number }>;
 		last_commit_ts: Record<string, number | null>;
+		workspace_statuses: Record<string, unknown>;
 	}> {
 		try {
 			return await invoke("get_repo_summary", { repoPath });
 		} catch (err) {
 			appLogger.warn("git", `Failed to get repo summary for ${repoPath}`, err);
-			return { worktree_paths: {}, merged_branches: [], diff_stats: {}, last_commit_ts: {} };
+			return {
+				worktree_paths: {},
+				detached_worktrees: [],
+				merged_branches: [],
+				diff_stats: {},
+				last_commit_ts: {},
+				workspace_statuses: {},
+			};
 		}
 	}
 
 	/** Fast structural snapshot: worktree paths + merged branches only.
 	 *  Used by progressive loading Phase 1 — returns before expensive diff stats. */
 	async function getRepoStructure(repoPath: string): Promise<{
-		worktree_paths: Record<string, string>;
+		worktree_paths: Record<string, WorkspaceWorktree>;
+		detached_worktrees: DetachedWorktree[];
+		worktree_diagnostics?: WorktreeDiagnostic[];
 		merged_branches: string[];
 	}> {
 		try {
@@ -300,7 +388,7 @@ export function useRepository() {
 		} catch (err) {
 			checkTccError(err, repoPath);
 			appLogger.warn("git", `Failed to get repo structure for ${repoPath}`, err);
-			return { worktree_paths: {}, merged_branches: [] };
+			return { worktree_paths: {}, detached_worktrees: [], merged_branches: [] };
 		}
 	}
 
@@ -309,13 +397,22 @@ export function useRepository() {
 	async function getRepoDiffStats(repoPath: string): Promise<{
 		diff_stats: Record<string, { additions: number; deletions: number }>;
 		last_commit_ts: Record<string, number | null>;
+		workspace_statuses: Record<
+			string,
+			{
+				dirty_files: number | null;
+				commit_status: import("../stores/workspaceIdentity").WorkspaceCommitStatus;
+				removal_safety: import("../stores/workspaceIdentity").WorkspaceRemovalSafety;
+				error?: string;
+			}
+		>;
 	}> {
 		try {
 			return await invoke("get_repo_diff_stats", { repoPath });
 		} catch (err) {
 			checkTccError(err, repoPath);
 			appLogger.warn("git", `Failed to get repo diff stats for ${repoPath}`, err);
-			return { diff_stats: {}, last_commit_ts: {} };
+			return { diff_stats: {}, last_commit_ts: {}, workspace_statuses: {} };
 		}
 	}
 
@@ -358,14 +455,40 @@ export function useRepository() {
 		}
 	}
 
+	async function assessOrphanCleanup(repoPath: string): Promise<OrphanAssessment[]> {
+		return await invoke("assess_orphan_cleanup", { repoPath });
+	}
+
+	async function beginOrphanCleanup(repoPath: string, paths: string[]): Promise<void> {
+		await invoke("begin_orphan_cleanup", { repoPath, paths });
+	}
+
+	async function pendingOrphanCleanupAnswer(repoPath: string): Promise<boolean | null> {
+		return await invoke<boolean | null>("pending_orphan_cleanup_answer", { repoPath });
+	}
+
+	async function clearOrphanCleanup(repoPath: string, kept: boolean): Promise<void> {
+		await invoke("clear_orphan_cleanup", { repoPath, kept });
+	}
+
 	/** Remove a detached-HEAD worktree by path (no branch to look up). */
-	async function removeOrphanWorktree(repoPath: string, worktreePath: string): Promise<void> {
-		await invoke("remove_orphan_worktree", { repoPath, worktreePath });
+	async function removeOrphanWorktree(
+		repoPath: string,
+		worktreePath: string,
+		safeOnly = false,
+		confirmedSessions: string[] = [],
+	): Promise<void> {
+		await invoke("remove_orphan_worktree", { repoPath, worktreePath, safeOnly, confirmedSessions });
 	}
 
 	/** Merge a PR via GitHub REST API. merge_method: "merge" | "squash" | "rebase" */
-	async function mergePrViaGithub(repoPath: string, prNumber: number, mergeMethod: string): Promise<string> {
-		return await invoke<string>("merge_pr_via_github", { repoPath, prNumber, mergeMethod });
+	async function mergePrViaGithub(
+		repoPath: string,
+		prNumber: number,
+		mergeMethod: string,
+		expectedHeadSha: string,
+	): Promise<string> {
+		return await invoke<string>("merge_pr_via_github", { repoPath, prNumber, mergeMethod, expectedHeadSha });
 	}
 
 	/** List local branch names for a repository */
@@ -406,6 +529,7 @@ export function useRepository() {
 		createBranch,
 		removeWorktree,
 		createWorktree,
+		getWorkspaceLifecycle,
 		getWorktreePaths,
 		getChangedFiles,
 		getFileDiff,
@@ -415,6 +539,8 @@ export function useRepository() {
 		generateCloneBranchName,
 		listBaseRefOptions,
 		mergeAndArchiveWorktree,
+		sweepArchiveRetention: (repoPath: string) =>
+			invoke<{ deleted: string[]; kept: string[] }>("sweep_archive_retention", { repoPath }),
 		finalizeMergedWorktree,
 		getMergedBranches,
 		getRepoSummary,
@@ -422,6 +548,10 @@ export function useRepository() {
 		getRepoDiffStats,
 		checkoutRemoteBranch,
 		detectOrphanWorktrees,
+		assessOrphanCleanup,
+		beginOrphanCleanup,
+		pendingOrphanCleanupAnswer,
+		clearOrphanCleanup,
 		removeOrphanWorktree,
 		mergePrViaGithub,
 		listLocalBranches,

@@ -4,8 +4,10 @@ import { dashboardRegistry } from "../../plugins/dashboardRegistry";
 import { filePreviewRegistry } from "../../plugins/filePreviewRegistry";
 import { markdownProviderRegistry } from "../../plugins/markdownProviderRegistry";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
+import { createInMemoryWorkItemProvider } from "../../plugins/testing/inMemoryWorkItemProvider";
 import type { PluginHost, TuiPlugin } from "../../plugins/types";
 import { PluginCapabilityError } from "../../plugins/types";
+import { workItemProviderRegistry } from "../../plugins/workItemProviderRegistry";
 import { activityStore } from "../../stores/activityStore";
 import { contextMenuActionsStore } from "../../stores/contextMenuActionsStore";
 import { mdTabsStore } from "../../stores/mdTabs";
@@ -38,6 +40,39 @@ function emitTauri(name: string, payload: unknown): void {
 	for (const handler of listeners.get(name) ?? []) handler({ payload });
 }
 
+// Catches: a host settings request being sent without the plugin's bound identity.
+it("binds settings requests to the plugin and returns owner readback", async () => {
+	let host: PluginHost | undefined;
+	await pluginRegistry.register(
+		makePlugin("settings-owner", (value) => {
+			host = value;
+		}),
+	);
+	const reply = { revision: "r1", values: { "/enabled": { stored: true, effective: true, source: "stored" } } };
+	vi.mocked(invoke).mockResolvedValueOnce(reply);
+	const action = { action: "get" as const, paths: ["/enabled"] };
+	expect(await host?.settings(action)).toEqual(reply);
+	expect(invoke).toHaveBeenLastCalledWith("plugin_settings_action", { pluginId: "settings-owner", action });
+});
+
+// Catches: a delayed old backend unregister revoking a freshly loaded settings owner.
+it("waits for backend unregister before replacing a loaded plugin", async () => {
+	await pluginRegistry.register(makePlugin("settings-reload"), []);
+	let release: (() => void) | undefined;
+	vi.mocked(invoke).mockImplementationOnce(
+		() =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+			}),
+	);
+	const onload = vi.fn();
+	const replacement = pluginRegistry.register(makePlugin("settings-reload", onload), []);
+	expect(onload).not.toHaveBeenCalled();
+	release?.();
+	await replacement;
+	expect(onload).toHaveBeenCalledOnce();
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -57,8 +92,8 @@ function makePlugin(id: string, onload?: (host: PluginHost) => void, onunload?: 
 // Setup
 // ---------------------------------------------------------------------------
 
-beforeEach(() => {
-	pluginRegistry.clear();
+beforeEach(async () => {
+	await pluginRegistry.clear();
 	activityStore.clearAll();
 	contextMenuActionsStore.clear();
 	filePreviewRegistry.clear();
@@ -83,16 +118,6 @@ describe("register / unregister", () => {
 		expect(onload).toHaveBeenCalledOnce();
 	});
 
-	it("passes a PluginHost to onload", () => {
-		let receivedHost: PluginHost | null = null;
-		pluginRegistry.register(
-			makePlugin("p1", (host) => {
-				receivedHost = host;
-			}),
-		);
-		expect(receivedHost).not.toBeNull();
-	});
-
 	it("calls plugin.onunload when unregistered", () => {
 		const onunload = vi.fn();
 		pluginRegistry.register(makePlugin("p1", undefined, onunload));
@@ -104,13 +129,163 @@ describe("register / unregister", () => {
 		expect(() => pluginRegistry.unregister("unknown")).not.toThrow();
 	});
 
-	it("re-registering same id replaces the old plugin", () => {
+	it("re-registering same id replaces the old plugin", async () => {
 		const onunload1 = vi.fn();
 		const onload2 = vi.fn();
 		pluginRegistry.register(makePlugin("p1", undefined, onunload1));
-		pluginRegistry.register(makePlugin("p1", onload2));
+		await pluginRegistry.register(makePlugin("p1", onload2));
 		expect(onunload1).toHaveBeenCalledOnce();
 		expect(onload2).toHaveBeenCalledOnce();
+	});
+});
+
+describe("async startup lifetime", () => {
+	function deferred() {
+		let resolve!: () => void;
+		const promise = new Promise<void>((done) => {
+			resolve = done;
+		});
+		return { promise, resolve };
+	}
+
+	it("does not unload a replacement whose startup never began during a reload storm", async () => {
+		const gate = deferred();
+		const firstUnload = vi.fn();
+		await pluginRegistry.register(makePlugin("storm", undefined, firstUnload));
+		vi.mocked(invoke).mockImplementationOnce(() => gate.promise);
+		const skippedLoad = vi.fn();
+		const skippedUnload = vi.fn();
+		const second = pluginRegistry.register(makePlugin("storm", skippedLoad, skippedUnload));
+		const lastLoad = vi.fn();
+		const lastUnload = vi.fn();
+		const third = pluginRegistry.register(makePlugin("storm", lastLoad, lastUnload));
+		gate.resolve();
+		expect(await second).toBe(false);
+		expect(await third).toBe(true);
+		expect(firstUnload).toHaveBeenCalledOnce();
+		expect(skippedLoad).not.toHaveBeenCalled();
+		expect(skippedUnload).not.toHaveBeenCalled();
+		expect(lastLoad).toHaveBeenCalledOnce();
+		await pluginRegistry.unregister("storm");
+		expect(lastUnload).toHaveBeenCalledOnce();
+	});
+
+	it("preserves the host receiver when reading an active terminal snapshot", async () => {
+		const terminalId = terminalsStore.add({
+			sessionId: "receiver-session",
+			fontSize: 14,
+			name: "Receiver test",
+			cwd: "/receiver",
+			awaitingInput: null,
+		});
+		terminalsStore.setActive(terminalId);
+		try {
+			let host!: PluginHost;
+			await pluginRegistry.register(
+				makePlugin("receiver", (value) => {
+					host = value;
+				}),
+			);
+			expect(host.getTerminalState()).toEqual({
+				sessionId: "receiver-session",
+				shellState: null,
+				agentType: null,
+				agentActive: false,
+				awaitingInput: null,
+				repoPath: null,
+			});
+		} finally {
+			terminalsStore.remove(terminalId);
+		}
+	});
+
+	it("does not report loaded before async onload finishes", async () => {
+		pluginStore.registerPlugin("async", { loaded: false });
+		const gate = deferred();
+		let settled = false;
+		const registration = pluginRegistry.register(makePlugin("async", async () => gate.promise));
+		void registration.then(() => {
+			settled = true;
+		});
+		await flushMicrotasks();
+		expect(settled).toBe(false);
+		expect(pluginStore.getPlugin("async")?.loaded).toBe(false);
+		gate.resolve();
+		await registration;
+		expect(pluginStore.getPlugin("async")?.loaded).toBe(true);
+	});
+
+	it("surfaces async onload failure and removes partial registrations", async () => {
+		pluginStore.registerPlugin("async", { loaded: false });
+		const gate = deferred();
+		const registration = pluginRegistry.register(
+			makePlugin("async", async (host) => {
+				host.registerSection({ id: "partial", label: "partial", priority: 1, canDismissAll: false });
+				await gate.promise;
+				throw new Error("startup failed");
+			}),
+		);
+		gate.resolve();
+		await registration;
+		expect(pluginStore.getPlugin("async")?.error).toBe("startup failed");
+		expect(
+			pluginStore
+				.getLogger("async")
+				.getEntries()
+				.some((entry) => entry.message === "onload failed: startup failed"),
+		).toBe(true);
+		expect(activityStore.getSections().some((s) => s.id === "partial")).toBe(false);
+	});
+
+	it("unload cancels pending startup and prevents late provider registration", async () => {
+		pluginStore.registerPlugin("async", { loaded: false });
+		const gate = deferred();
+		const provider = createInMemoryWorkItemProvider();
+		const onunload = vi.fn();
+		const registration = pluginRegistry.register(
+			makePlugin(
+				"async",
+				async (host) => {
+					await gate.promise;
+					host.registerWorkItemProvider(provider);
+				},
+				onunload,
+			),
+		);
+		await pluginRegistry.unregister("async");
+		await registration;
+		gate.resolve();
+		await flushMicrotasks();
+		expect(workItemProviderRegistry.get(provider.providerId, provider.accountId)).toBeUndefined();
+		expect(onunload).toHaveBeenCalledOnce();
+		expect(pluginStore.getPlugin("async")?.loaded).toBe(false);
+	});
+
+	it("overlapping reloads keep only the newest provider and ignore stale errors", async () => {
+		pluginStore.registerPlugin("async", { loaded: false });
+		const gate = deferred();
+		const provider = createInMemoryWorkItemProvider();
+		const first = pluginRegistry.register(
+			makePlugin("async", async (host) => {
+				await gate.promise;
+				host.registerWorkItemProvider(provider);
+			}),
+		);
+		const skipped = vi.fn();
+		const second = pluginRegistry.register(makePlugin("async", skipped));
+		const third = pluginRegistry.register(
+			makePlugin("async", (host) => {
+				host.registerWorkItemProvider(provider);
+			}),
+		);
+		await Promise.all([first, second, third]);
+		gate.resolve();
+		await flushMicrotasks();
+		expect(skipped).not.toHaveBeenCalled();
+		expect(workItemProviderRegistry.get(provider.providerId, provider.accountId)).toBe(provider);
+		expect(pluginStore.getPlugin("async")?.error).toBeNull();
+		await pluginRegistry.unregister("async");
+		expect(workItemProviderRegistry.get(provider.providerId, provider.accountId)).toBeUndefined();
 	});
 });
 
@@ -348,6 +523,59 @@ describe("PluginHost callback guards", () => {
 	});
 });
 
+describe("PluginHost.openMarkdownFileBackground", () => {
+	it("opens an owned file without changing the active markdown tab and deduplicates it", async () => {
+		const repoPath = "/plugin-background-repo";
+		repositoriesStore.add({ path: repoPath, displayName: "background" });
+		const activeId = mdTabsStore.addVirtual("Existing", "test:existing");
+		let opened = false;
+
+		try {
+			await pluginRegistry.register(
+				makePlugin("background-opener", (host) => {
+					opened = host.openMarkdownFileBackground(`${repoPath}/plans/feature.md`);
+					expect(host.openMarkdownFileBackground(`${repoPath}/plans/feature.md`)).toBe(true);
+				}),
+				["ui:markdown"],
+			);
+
+			expect(opened).toBe(true);
+			expect(mdTabsStore.state.activeId).toBe(activeId);
+			expect(mdTabsStore.getIds()).toHaveLength(2);
+			expect(
+				mdTabsStore.getIds().some((id) => {
+					const tab = mdTabsStore.get(id);
+					return tab?.type === "file" && tab.filePath === "plans/feature.md";
+				}),
+			).toBe(true);
+		} finally {
+			repositoriesStore.remove(repoPath);
+		}
+	});
+
+	it("refuses an absolute path outside every registered repository", async () => {
+		let result = true;
+		await pluginRegistry.register(
+			makePlugin("background-opener", (host) => {
+				result = host.openMarkdownFileBackground("/unowned/plans/feature.md");
+			}),
+			["ui:markdown"],
+		);
+
+		expect(result).toBe(false);
+		expect(mdTabsStore.getIds()).toHaveLength(0);
+	});
+
+	it("requires the ui:markdown capability", async () => {
+		await pluginRegistry.register(
+			makePlugin("background-opener", (host) => {
+				expect(() => host.openMarkdownFileBackground("/repo/plan.md")).toThrow(PluginCapabilityError);
+			}),
+			[],
+		);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // PluginHost — markdown provider delegation
 // ---------------------------------------------------------------------------
@@ -480,7 +708,7 @@ async function lastSync(): Promise<{
 }> {
 	const { invoke } = await import("../../invoke");
 	const calls = vi.mocked(invoke).mock.calls.filter((c) => c[0] === "set_plugin_output_watchers");
-	return calls[calls.length - 1]?.[1] as never;
+	return calls.at(-1)?.[1] as never;
 }
 
 describe("handleWatcherLines", () => {
@@ -922,15 +1150,21 @@ describe("PluginHost — Tier 2 read-only state", () => {
 		expect(result).toBeNull();
 	});
 
-	it("onStateChange returns a disposable", () => {
+	it("a disposed onStateChange listener stops receiving events", () => {
+		// Catches a dispose() that does not unsubscribe: the old test only checked the shape.
+		const listener = vi.fn();
 		let disposable: { dispose: () => void } | null = null;
 		pluginRegistry.register(
 			makePlugin("p1", (host) => {
-				disposable = host.onStateChange(() => {});
+				disposable = host.onStateChange(listener);
 			}),
 		);
-		expect(disposable).not.toBeNull();
-		expect(typeof disposable!.dispose).toBe("function");
+		const event = { type: "agent-started", sessionId: "s", terminalId: "t" } as const;
+		pluginRegistry.notifyStateChange(event);
+		expect(listener).toHaveBeenCalledTimes(1);
+		disposable!.dispose();
+		pluginRegistry.notifyStateChange(event);
+		expect(listener).toHaveBeenCalledTimes(1);
 	});
 
 	it("breaks synchronous reentrancy in notifyStateChange — caller returns without freezing", async () => {
@@ -1042,6 +1276,21 @@ describe("PluginHost — git:read capability gating", () => {
 			["git:read"],
 		);
 		await expect(host!.getGitDiff("/some/repo", "staged")).resolves.toBeDefined();
+	});
+
+	// Catches: getRemotes left outside the git:read consent gate.
+	it("external plugin without git:read throws on getRemotes and never invokes", async () => {
+		const { invoke: mockInvoke } = await import("../../invoke");
+		(mockInvoke as ReturnType<typeof vi.fn>).mockClear();
+		let host: PluginHost | null = null;
+		await pluginRegistry.register(
+			makePlugin("ext", (h) => {
+				host = h;
+			}),
+			[],
+		);
+		await expect(host!.getRemotes("/some/repo")).rejects.toThrow(PluginCapabilityError);
+		expect(mockInvoke).not.toHaveBeenCalledWith("get_git_remotes", expect.anything());
 	});
 
 	it("built-in plugin can call git:read methods without capability", async () => {
@@ -1589,6 +1838,23 @@ describe("PluginHost — Tier 3c httpFetch capability gating", () => {
 		);
 		expect(httpCall?.[1]).not.toHaveProperty("allowedUrls");
 	});
+
+	// Catches: the account option dropped before IPC, so Rust sends the request unauthenticated.
+	it("forwards the account id to the Rust command", async () => {
+		let host: PluginHost | null = null;
+		await pluginRegistry.register(
+			makePlugin("ext", (h) => {
+				host = h;
+			}),
+			["net:http"],
+		);
+		await host!.httpFetch("https://jira.example.test/rest/api/3/myself", { account: "acct-1" });
+		const { invoke } = await import("../../invoke");
+		expect(invoke).toHaveBeenCalledWith(
+			"plugin_http_fetch",
+			expect.objectContaining({ account: "acct-1", pluginId: "ext" }),
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1679,6 +1945,7 @@ describe("PluginHost — fs:write capability gating", () => {
 			[],
 		);
 		await expect(host!.writeFile("/home/user/test.txt", "content")).rejects.toThrow(PluginCapabilityError);
+		await expect(host!.writeFileBase64("/home/user/test.db", "U1FMaXRl")).rejects.toThrow(PluginCapabilityError);
 	});
 
 	it("external plugin with fs:write can call writeFile", async () => {
@@ -1701,10 +1968,17 @@ describe("PluginHost — fs:write capability gating", () => {
 			["fs:write"],
 		);
 		await host!.writeFile("/home/user/test.txt", "hello");
+		await host!.writeFileBase64("/home/user/test.db", "U1FMaXRl", { maxBytes: 2048 });
 		const { invoke } = await import("../../invoke");
 		expect(invoke).toHaveBeenCalledWith("plugin_write_file", {
 			path: "/home/user/test.txt",
 			content: "hello",
+			pluginId: "ext",
+		});
+		expect(invoke).toHaveBeenCalledWith("plugin_write_file_base64", {
+			path: "/home/user/test.db",
+			content: "U1FMaXRl",
+			maxBytes: 2048,
 			pluginId: "ext",
 		});
 	});
@@ -1856,6 +2130,56 @@ describe("PluginHost — watchPath fan-out (613-00e8 F104)", () => {
 });
 
 describe("PluginHost — panel message bridge", () => {
+	it("unloading a plugin closes its panels and bridges", () => {
+		const onMessage = vi.fn();
+		const onClose = vi.fn();
+		const sender = vi.fn();
+		const handles: ReturnType<PluginHost["openPanel"]>[] = [];
+		pluginRegistry.register(
+			makePlugin("owner", (host) => {
+				for (const id of ["one", "two"])
+					handles.push(host.openPanel({ id, title: id, html: "hello", onMessage, onClose }));
+			}),
+		);
+		let other: ReturnType<PluginHost["openPanel"]>;
+		pluginRegistry.register(
+			makePlugin("other", (host) => {
+				other = host.openPanel({ id: "one", title: "Other", html: "hello" });
+			}),
+		);
+		for (const handle of handles) pluginRegistry.registerPanelSendChannel(handle.tabId, sender);
+
+		pluginRegistry.unregister("owner");
+
+		expect(Object.values(mdTabsStore.state.tabs).map((tab) => tab.id)).toEqual([other!.tabId]);
+		for (const handle of handles) {
+			pluginRegistry.handlePanelMessage(handle.tabId, "late");
+			handle.send("late");
+			expect(handle.isVisible()).toBe(false);
+			handle.close();
+		}
+		expect(onMessage).not.toHaveBeenCalled();
+		expect(sender).not.toHaveBeenCalled();
+		expect(onClose).toHaveBeenCalledTimes(2);
+	});
+
+	it("unload tolerates a panel already closed and closes a reopened panel once", () => {
+		let host!: PluginHost;
+		const onClose = vi.fn();
+		pluginRegistry.register(
+			makePlugin("owner", (api) => {
+				host = api;
+			}),
+		);
+		const closed = host.openPanel({ id: "closed", title: "Closed", html: "hello", onClose });
+		closed.close();
+		host.openPanel({ id: "open", title: "Open", html: "hello", onClose });
+		host.openPanel({ id: "open", title: "Open", html: "updated", onClose });
+		pluginRegistry.unregister("owner");
+		expect(Object.values(mdTabsStore.state.tabs)).toHaveLength(0);
+		expect(onClose).toHaveBeenCalledTimes(2);
+	});
+
 	it("onMessage callback receives messages via handlePanelMessage", () => {
 		const onMessage = vi.fn();
 		let handle: ReturnType<PluginHost["openPanel"]> | null = null;
@@ -1921,7 +2245,23 @@ describe("PluginHost — panel message bridge", () => {
 		pluginRegistry.registerPanelSendChannel(handle!.tabId, sender);
 		handle!.send({ type: "response", ok: true });
 		expect(sender).toHaveBeenCalledOnce();
-		expect(sender).toHaveBeenCalledWith({ type: "response", ok: true });
+		expect(sender).toHaveBeenCalledWith({ type: "response", ok: true }, undefined);
+	});
+
+	it("send() forwards transferable ownership to the panel channel", () => {
+		let handle: ReturnType<PluginHost["openPanel"]> | null = null;
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				handle = host.openPanel({ id: "test", title: "Test", html: "<h1>hi</h1>" });
+			}),
+		);
+		const sender = vi.fn();
+		const buffer = new ArrayBuffer(8);
+		pluginRegistry.registerPanelSendChannel(handle!.tabId, sender);
+
+		handle!.send({ type: "database", buffer }, [buffer]);
+
+		expect(sender).toHaveBeenCalledWith({ type: "database", buffer }, [buffer]);
 	});
 
 	it("send() is a no-op when no send channel registered", () => {
@@ -2131,4 +2471,155 @@ describe("PluginHost — getActiveRepoPath", () => {
 		repositoriesStore.setActive(null);
 		repositoriesStore.remove("/my/repo");
 	});
+});
+
+// Catches: plugin unload leaks Tasks providers after their owning plugin is removed.
+it("unregisters work-item providers when their plugin unloads", async () => {
+	await pluginRegistry.register(
+		makePlugin("tasks-provider", (host) => {
+			host.registerWorkItemProvider(createInMemoryWorkItemProvider());
+		}),
+	);
+	expect(workItemProviderRegistry.get("demo", "local")).toBeDefined();
+	pluginRegistry.unregister("tasks-provider");
+	expect(workItemProviderRegistry.get("demo", "local")).toBeUndefined();
+});
+
+// Catches: plugins cannot reach the account-scoped B6/B7 ports and fall back to repo-default auth.
+describe("PluginHost GitHub account bridge", () => {
+	const reference = { providerId: "github", accountId: "selected", id: "owner/repo/pull/12" };
+	it("forwards selected account and reference to both core ports", async () => {
+		let host: PluginHost | undefined;
+		await pluginRegistry.register(
+			makePlugin("github-bridge", (h) => {
+				host = h;
+			}),
+			["net:http"],
+		);
+		await host!.githubReviewThreads("selected", reference, null);
+		expect(invoke).toHaveBeenLastCalledWith("plugin_github_action", {
+			pluginId: "github-bridge",
+			account: "selected",
+			reference,
+			request: { action: "threads", after: null },
+		});
+		await host!.githubPrAction("selected", reference, { action: "state" });
+		expect(invoke).toHaveBeenLastCalledWith("plugin_github_action", {
+			pluginId: "github-bridge",
+			account: "selected",
+			reference,
+			request: { action: "state" },
+		});
+	});
+	// Catches: one account's provider sends another account's item to the bridge.
+	it("rejects cross-account references before invoking", async () => {
+		let host: PluginHost | undefined;
+		await pluginRegistry.register(
+			makePlugin("github-bridge", (h) => {
+				host = h;
+			}),
+			["net:http"],
+		);
+		vi.mocked(invoke).mockClear();
+		await expect(host!.githubReviewThreads("other", reference, null)).rejects.toThrow(/account/);
+		await expect(host!.githubPrAction("other", reference, { action: "state" })).rejects.toThrow(/account/);
+		expect(invoke).not.toHaveBeenCalled();
+	});
+	// Catches: the bridge bypasses the HTTP capability required for account use.
+	it("requires net:http for both ports", async () => {
+		let host: PluginHost | undefined;
+		await pluginRegistry.register(
+			makePlugin("github-bridge", (h) => {
+				host = h;
+			}),
+			[],
+		);
+		await expect(host!.githubReviewThreads("selected", reference, null)).rejects.toThrow(PluginCapabilityError);
+		await expect(host!.githubPrAction("selected", reference, { action: "state" })).rejects.toThrow(
+			PluginCapabilityError,
+		);
+	});
+});
+
+// Catches: a guarded keepalive still uses a stale read followed by destructive split writes.
+it("guarded agent input delegates the draft boundary to one backend transaction", async () => {
+	let host: PluginHost | undefined;
+	await pluginRegistry.register(
+		makePlugin("guarded-keepalive", (value) => {
+			host = value;
+		}),
+	);
+	vi.mocked(invoke).mockClear();
+	vi.mocked(invoke).mockResolvedValueOnce(false);
+	expect(await host!.sendAgentInputIfEmpty("s1", "[noop]")).toBe(false);
+	expect(invoke).toHaveBeenCalledExactlyOnceWith("send_agent_input_if_empty", { sessionId: "s1", text: "[noop]" });
+});
+
+// Catches: AbortSignal is ignored by the shared host and an aborted request reaches Rust.
+it("rejects pre-aborted plugin HTTP without dispatching a fetch", async () => {
+	let host: PluginHost | undefined;
+	await pluginRegistry.register(
+		makePlugin("http-abort", (value) => {
+			host = value;
+		}),
+	);
+	vi.mocked(invoke).mockClear();
+	const controller = new AbortController();
+	controller.abort();
+	await expect(
+		host!.httpFetch("https://example.com", { signal: controller.signal } as Parameters<PluginHost["httpFetch"]>[1]),
+	).rejects.toMatchObject({ name: "AbortError" });
+	expect(invoke).not.toHaveBeenCalled();
+});
+
+// Catches: an in-flight request never forwarding abort, or leaking its listener after settlement.
+it("cancels in-flight plugin HTTP by request identity and removes listeners", async () => {
+	let host: PluginHost | undefined;
+	await pluginRegistry.register(
+		makePlugin("http-flight", (value) => {
+			host = value;
+		}),
+	);
+	let rejectFetch: (error: unknown) => void = () => {};
+	vi.mocked(invoke).mockImplementation((command) =>
+		command === "plugin_http_fetch"
+			? new Promise((_, reject) => {
+					rejectFetch = reject;
+				})
+			: Promise.resolve(),
+	);
+	const controller = new AbortController();
+	const pending = host!.httpFetch("https://example.com", { signal: controller.signal });
+	const args = vi
+		.mocked(invoke)
+		.mock.calls.filter((call) => call[0] === "plugin_http_fetch")
+		.at(-1)?.[1];
+	controller.abort();
+	expect(invoke).toHaveBeenCalledWith("plugin_http_cancel", { pluginId: "http-flight", requestId: args?.requestId });
+	rejectFetch("HTTP request cancelled");
+	await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+	vi.mocked(invoke).mockResolvedValue(undefined);
+});
+
+// Catches: LAN HTTP clients lacking crypto.randomUUID being unable to issue cancellable requests.
+it("plugin HTTP uses UUID fallback on an insecure browser origin", async () => {
+	let host: PluginHost | undefined;
+	await pluginRegistry.register(
+		makePlugin("http-lan", (value) => {
+			host = value;
+		}),
+	);
+	const original = globalThis.crypto;
+	vi.stubGlobal("crypto", {});
+	try {
+		await host!.httpFetch("https://example.com");
+		expect(invoke).toHaveBeenCalledWith(
+			"plugin_http_fetch",
+			expect.objectContaining({
+				requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+			}),
+		);
+	} finally {
+		vi.stubGlobal("crypto", original);
+	}
 });

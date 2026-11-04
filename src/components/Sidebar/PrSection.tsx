@@ -1,4 +1,4 @@
-import { type Component, createSignal, For, Show } from "solid-js";
+import { type Component, createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
@@ -12,11 +12,15 @@ import { toastsStore } from "../../stores/toasts";
 import type { BranchPrStatus } from "../../types";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
+import { writeClipboard } from "../../utils/clipboard";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { canApprovePr, effectiveMergeMethod, mergeWithFallback } from "../../utils/prMerge";
 import { prContextVariables } from "../../utils/promptContext";
+import { canUpdatePrBranch, prAgeMarker, prReference } from "../../utils/prRow";
 import { PrDetailContent } from "../PrDetailPopover/PrDetailContent";
 import { SmartButtonStrip } from "../SmartButtonStrip/SmartButtonStrip";
+import { Button } from "../ui/Button";
+import { ChevronIcon } from "../ui/ChevronIcon";
 import { PrStateBadge } from "./PrStateBadge";
 import { canMergePr } from "./prMergeEligibility";
 import s from "./Sidebar.module.css";
@@ -46,12 +50,76 @@ export interface PrSectionProps {
 	onMerged: (branchName: string, baseBranch: string, hasDirtyFiles: boolean) => void;
 }
 
+/** Text of a failed action; an empty rejection must not render an empty line. */
+const failureMessage = (error: unknown, action: string) =>
+	(error instanceof Error ? error.message : String(error)).trim() || `${action} failed`;
+
+const createPrSet = () => {
+	const [prs, setPrs] = createSignal<ReadonlySet<number>>(new Set());
+	const set = (prNumber: number, on: boolean) =>
+		setPrs((current) => {
+			const next = new Set(current);
+			if (on) next.add(prNumber);
+			else next.delete(prNumber);
+			return next;
+		});
+	return [prs, set] as const;
+};
+
+/** One GitHub poll interval (`BASE_INTERVAL` in github_poller.rs). */
+export const UPDATE_BRANCH_HOLD_MS = 60_000;
+
 export const PrSection: Component<PrSectionProps> = (props) => {
-	const [mergingPr, setMergingPr] = createSignal<number | null>(null);
-	const [mergeError, setMergeError] = createSignal<string | null>(null);
 	const [diffLoadingPr, setDiffLoadingPr] = createSignal<number | null>(null);
-	const [approvingPr, setApprovingPr] = createSignal<number | null>(null);
-	const [approveError, setApproveError] = createSignal<string | null>(null);
+	/** PRs with an action in flight: per PR, so one finishing never re-enables another's buttons. */
+	const [busyPrs, setBusy] = createPrSet();
+	const [mergingPrs, setMerging] = createPrSet();
+	const [approvingPrs, setApproving] = createPrSet();
+	/** Error of a row action, kept per PR so another row never shows it and two failures coexist. */
+	const [rowErrors, setRowErrors] = createSignal<ReadonlyMap<number, string>>(new Map());
+	const setRowError = (prNumber: number, message: string | null) =>
+		setRowErrors((errors) => {
+			const next = new Map(errors);
+			if (message === null) next.delete(prNumber);
+			else next.set(prNumber, message);
+			return next;
+		});
+	/** `prNumber:head` of update-branch requests accepted: GitHub answers 202 and the merge lands
+	 *  later, so the row keeps reading BEHIND until a poll brings a new head. The hold lasts one
+	 *  poll interval: if the async update failed silently the head is unchanged and the button
+	 *  must come back. */
+	const [updateRequestedFor, setUpdateRequestedFor] = createSignal<ReadonlySet<string>>(new Set());
+	const updateHoldKey = (pr: BranchPrStatus) => `${pr.number}:${pr.head_ref_oid}`;
+	const updateHoldTimers = new Set<ReturnType<typeof setTimeout>>();
+	onCleanup(() => {
+		for (const timer of updateHoldTimers) clearTimeout(timer);
+	});
+	const holdUpdateBranch = (pr: BranchPrStatus) => {
+		const key = updateHoldKey(pr);
+		setUpdateRequestedFor((held) => new Set(held).add(key));
+		const timer = setTimeout(() => {
+			updateHoldTimers.delete(timer);
+			setUpdateRequestedFor((held) => {
+				const next = new Set(held);
+				next.delete(key);
+				return next;
+			});
+		}, UPDATE_BRANCH_HOLD_MS);
+		updateHoldTimers.add(timer);
+	};
+	// An error lives until its PR starts its next action or leaves the list; expanding or
+	// collapsing rows never clears it.
+	createEffect(
+		on(
+			() => props.prs.map((pr) => pr.number),
+			(numbers) =>
+				setRowErrors((errors) => {
+					if ([...errors.keys()].every((n) => numbers.includes(n))) return errors;
+					return new Map([...errors].filter(([n]) => numbers.includes(n)));
+				}),
+			{ defer: true },
+		),
+	);
 
 	const visiblePrs = () => props.prs;
 
@@ -65,14 +133,14 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 	};
 
 	const handleMerge = async (pr: BranchPrStatus) => {
-		setMergingPr(pr.number);
-		setMergeError(null);
+		setMerging(pr.number, true);
+		setRowError(pr.number, null);
 		try {
 			const preferred =
 				repoSettingsStore.getEffectiveField(props.repoPath, "prMergeStrategy") ??
 				repoDefaultsStore.state.prMergeStrategy;
 			const startMethod = effectiveMergeMethod(pr, preferred);
-			const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod);
+			const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod, pr.head_ref_oid);
 			if (usedMethod !== preferred) {
 				const repo = repositoriesStore.get(props.repoPath);
 				repoSettingsStore.getOrCreate(props.repoPath, repo?.displayName ?? props.repoPath);
@@ -94,35 +162,84 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 			}
 			props.onMerged(pr.branch, baseBranch, hasDirtyFiles);
 		} catch (e) {
-			const msg = String(e);
-			setMergeError(msg);
+			const msg = failureMessage(e, "Merge");
+			setRowError(pr.number, msg);
 			appLogger.error("github", `Failed to merge PR #${pr.number}`, { error: msg });
 		} finally {
-			setMergingPr(null);
+			setMerging(pr.number, false);
 		}
 	};
 
 	const handleApprove = async (pr: BranchPrStatus) => {
-		setApprovingPr(pr.number);
-		setApproveError(null);
+		setApproving(pr.number, true);
+		setRowError(pr.number, null);
 		try {
 			await invoke("approve_pr", { repoPath: props.repoPath, prNumber: pr.number });
 			appLogger.info("github", `Approved PR #${pr.number}`);
 			githubStore.pollRepo(props.repoPath);
 		} catch (e) {
-			const msg = String(e);
-			setApproveError(msg);
+			const msg = failureMessage(e, "Approve");
+			setRowError(pr.number, msg);
 			appLogger.error("github", `Failed to approve PR #${pr.number}`, { error: msg });
 		} finally {
-			setApprovingPr(null);
+			setApproving(pr.number, false);
+		}
+	};
+
+	const handleCopyReference = (pr: BranchPrStatus) => {
+		const ref = prReference(pr);
+		if (ref) writeClipboard(ref).catch(() => {});
+	};
+
+	const handleUpdateBranch = async (pr: BranchPrStatus) => {
+		setBusy(pr.number, true);
+		setRowError(pr.number, null);
+		try {
+			await invoke("update_pr_branch", {
+				repoPath: props.repoPath,
+				prNumber: pr.number,
+				expectedHeadSha: pr.head_ref_oid,
+			});
+			holdUpdateBranch(pr);
+			appLogger.info("github", `Requested branch update for PR #${pr.number}`);
+			githubStore.pollRepo(props.repoPath);
+		} catch (e) {
+			const msg = failureMessage(e, "Update branch");
+			setRowError(pr.number, msg);
+			appLogger.error("github", `Failed to update branch of PR #${pr.number}`, { error: msg });
+		} finally {
+			setBusy(pr.number, false);
+		}
+	};
+
+	const handleClosePr = async (pr: BranchPrStatus) => {
+		if (
+			!window.confirm(t("sidebar.closePrConfirm", "Close PR #{number} without merging?", { number: String(pr.number) }))
+		)
+			return;
+		setBusy(pr.number, true);
+		setRowError(pr.number, null);
+		try {
+			await invoke("close_pr", { repoPath: props.repoPath, prNumber: pr.number });
+			appLogger.info("github", `Closed PR #${pr.number}`);
+			githubStore.pollRepo(props.repoPath);
+		} catch (e) {
+			const msg = failureMessage(e, "Close PR");
+			setRowError(pr.number, msg);
+			appLogger.error("github", `Failed to close PR #${pr.number}`, { error: msg });
+		} finally {
+			setBusy(pr.number, false);
 		}
 	};
 
 	const handleViewDiff = async (pr: BranchPrStatus) => {
 		setDiffLoadingPr(pr.number);
 		try {
-			const diff = await invoke<string>("get_pr_diff", { repoPath: props.repoPath, prNumber: pr.number });
-			mdTabsStore.addPrDiff(props.repoPath, pr.number, pr.title, diff);
+			const { diff, headSha } = await invoke<{ diff: string; headSha: string }>("get_pr_diff", {
+				repoPath: props.repoPath,
+				prNumber: pr.number,
+			});
+			mdTabsStore.addPrDiff(props.repoPath, pr.number, pr.title, diff, headSha);
 		} catch (e) {
 			const msg = String(e);
 			appLogger.error("github", `Failed to load PR #${pr.number} diff`, { error: msg });
@@ -156,14 +273,18 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 				onClick={() => props.onToggleCollapsed()}
 				onKeyDown={onClickKeyDown(() => props.onToggleCollapsed())}
 			>
-				<span class={cx(s.ghSectionChevron, !props.collapsed && s.ghSectionChevronOpen)}>{"›"}</span>
+				<span class={cx(s.ghSectionChevron, !props.collapsed && s.ghSectionChevronOpen)}>
+					<ChevronIcon />
+				</span>
 				<PrIcon />
 				<span>{props.title}</span>
 				<Show when={visiblePrs().length > 0}>
 					<span class={s.ghSectionCount}>{visiblePrs().length}</span>
 				</Show>
 				<Show when={props.dismissedCount > 0}>
-					<button
+					<Button
+						size="compact"
+						variant="ghost"
 						class={s.ghShowDismissed}
 						onClick={(e) => {
 							e.stopPropagation();
@@ -171,7 +292,7 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 						}}
 					>
 						{t("sidebar.showDismissed", "Show")} {props.dismissedCount}
-					</button>
+					</Button>
 				</Show>
 			</div>
 			<Show when={!props.collapsed}>
@@ -190,6 +311,17 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 									>
 										<span class={s.ghItemNum}>#{pr.number}</span>
 										<span class={s.ghItemTitle}>{pr.title}</span>
+										<Show when={pr.state?.toUpperCase() === "OPEN" ? prAgeMarker(pr.created_at) : null}>
+											{(age) => (
+												<span
+													class={s.ghAgeMarker}
+													data-tooltip={t("sidebar.prAge", "Open for {age} or more", { age: age() })}
+													data-tooltip-pos="bottom"
+												>
+													{age()}
+												</span>
+											)}
+										</Show>
 										<PrStateBadge
 											prNumber={pr.number}
 											state={pr.state}
@@ -199,17 +331,24 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 											reviewDecision={pr.review_decision}
 											ciFailed={pr.checks?.failed}
 											ciPending={pr.checks?.pending}
+											unresolvedThreads={pr.unresolved_threads}
+											unresolvedThreadsTruncated={pr.unresolved_threads_truncated}
 										/>
 									</div>
 									<Show when={props.expandedKey === pr.branch}>
 										<div class={s.ghItemDetail} data-compact>
-											<button
+											<Button
+												size="compact"
+												variant="ghost"
 												class={s.ghItemDismiss}
 												onClick={() => props.onDismiss(pr.number)}
-												title={t("sidebar.dismissPr", "Hide this PR from view")}
+												aria-label={t("sidebar.dismissPr", "Hide this PR from view")}
+												data-tooltip={t("sidebar.dismissPr", "Hide this PR from view")}
+												data-tooltip-pos="bottom"
+												data-tooltip-align="right"
 											>
 												&times;
-											</button>
+											</Button>
 											<PrDetailContent
 												repoPath={props.repoPath}
 												branch={pr.branch}
@@ -217,62 +356,127 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 												onPushBranch={props.onPushBranch}
 											>
 												<div class={s.ghItemActions}>
-													<button
+													<Button
+														size="compact"
+														variant="ghost"
 														class={s.ghActionBtn}
 														onClick={() => props.onCheckout(pr.branch)}
-														title={t("sidebar.checkoutBranch", "Check out this branch locally")}
+														data-tooltip={t("sidebar.checkoutBranch", "Check out this branch locally")}
+														data-tooltip-pos="bottom"
+														data-tooltip-align="right"
 													>
 														{t("sidebar.checkout", "Checkout")}
-													</button>
+													</Button>
 													<Show when={props.onCreateWorktree}>
-														<button
+														<Button
+															size="compact"
+															variant="ghost"
 															class={s.ghActionBtn}
 															onClick={() => props.onCreateWorktree?.(pr.branch)}
-															title={t("sidebar.createWorktreeFromBranch", "Create worktree from this branch")}
+															data-tooltip={t("sidebar.createWorktreeFromBranch", "Create worktree from this branch")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
 															{t("sidebar.worktree", "Worktree")}
-														</button>
+														</Button>
 													</Show>
 													<Show when={canApprovePr(pr, githubStore.state.viewerLogin)}>
-														<button
+														<Button
+															size="compact"
+															variant="primary"
 															class={cx(s.ghActionBtn, s.ghApproveBtn)}
 															onClick={() => handleApprove(pr)}
-															disabled={approvingPr() === pr.number}
-															title={t("sidebar.approvePr", "Approve this pull request")}
+															disabled={approvingPrs().has(pr.number)}
+															data-tooltip={t("sidebar.approvePr", "Approve this pull request")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
-															{approvingPr() === pr.number
+															{approvingPrs().has(pr.number)
 																? t("sidebar.approving", "Approving...")
 																: t("sidebar.approve", "Approve")}
-														</button>
+														</Button>
+													</Show>
+													<Show when={canUpdatePrBranch(pr) && !updateRequestedFor().has(updateHoldKey(pr))}>
+														<Button
+															size="compact"
+															variant="ghost"
+															class={s.ghActionBtn}
+															onClick={() => handleUpdateBranch(pr)}
+															disabled={busyPrs().has(pr.number)}
+															data-tooltip={t("sidebar.updateBranchTitle", "Merge the base branch into this PR branch")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
+														>
+															{t("sidebar.updateBranch", "Update branch")}
+														</Button>
 													</Show>
 													<Show when={canMergePr(pr)}>
-														<button
+														<Button
+															size="compact"
+															variant="ghost"
 															class={cx(s.ghActionBtn, s.ghMergeBtn)}
 															onClick={() => handleMerge(pr)}
-															disabled={mergingPr() === pr.number}
-															title={t("sidebar.mergePr", "Merge this pull request")}
+															disabled={mergingPrs().has(pr.number)}
+															data-tooltip={t("sidebar.mergePr", "Merge this pull request")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
-															{mergingPr() === pr.number ? t("sidebar.merging", "Merging...") : mergeLabel(pr)}
-														</button>
+															{mergingPrs().has(pr.number) ? t("sidebar.merging", "Merging...") : mergeLabel(pr)}
+														</Button>
 													</Show>
-													<button
+													<Button
+														size="compact"
+														variant="ghost"
 														class={s.ghActionBtn}
 														onClick={() => handleViewDiff(pr)}
 														disabled={diffLoadingPr() === pr.number}
-														title={t("sidebar.viewDiff", "View PR diff")}
+														data-tooltip={t("sidebar.viewDiff", "View PR diff")}
+														data-tooltip-pos="bottom"
+														data-tooltip-align="right"
 													>
 														{diffLoadingPr() === pr.number
 															? t("sidebar.loadingDiff", "Loading...")
 															: t("sidebar.diff", "Diff")}
-													</button>
+													</Button>
+													<Show when={prReference(pr)}>
+														<Button
+															size="compact"
+															variant="ghost"
+															class={s.ghActionBtn}
+															onClick={() => handleCopyReference(pr)}
+															data-tooltip={t("sidebar.copyReference", "Copy owner/repo#number")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
+														>
+															{t("sidebar.copyRef", "Copy ref")}
+														</Button>
+													</Show>
+													<Show when={pr.state?.toUpperCase() === "OPEN"}>
+														<Button
+															size="compact"
+															variant="ghost"
+															class={cx(s.ghActionBtn, s.ghCloseBtn)}
+															onClick={() => handleClosePr(pr)}
+															disabled={busyPrs().has(pr.number)}
+															data-tooltip={t("sidebar.closePr", "Close this pull request without merging")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
+														>
+															{t("sidebar.close", "Close")}
+														</Button>
+													</Show>
 													<Show when={pr.url}>
-														<button
+														<Button
+															size="compact"
+															variant="ghost"
 															class={cx(s.ghActionBtn, s.ghLinkBtn)}
 															onClick={() => handleOpenUrl(pr.url)}
-															title={t("prDetail.openOnGithub", "Open on GitHub")}
+															data-tooltip={t("prDetail.openOnGithub", "Open on GitHub")}
+															data-tooltip-pos="bottom"
+															data-tooltip-align="right"
 														>
 															GitHub {"↗"}
-														</button>
+														</Button>
 													</Show>
 													<SmartButtonStrip
 														placement="pr-popover"
@@ -288,11 +492,8 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 														contextVariables={() => prContextVariables(pr)}
 													/>
 												</div>
-												<Show when={approveError()}>
-													<div class={s.ghActionError}>{approveError()}</div>
-												</Show>
-												<Show when={mergeError()}>
-													<div class={s.ghActionError}>{mergeError()}</div>
+												<Show when={rowErrors().get(pr.number)}>
+													{(message) => <div class={s.ghActionError}>{message()}</div>}
 												</Show>
 											</PrDetailContent>
 										</div>

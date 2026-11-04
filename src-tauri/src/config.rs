@@ -1,63 +1,391 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+mod dictation_config {
+    use super::*;
+
+    /// Dictation configuration persisted to <config_dir>/dictation-config.json
+    #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct DictationConfig {
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub enabled: bool,
+        #[serde(default = "default_hotkey")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hotkey for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hotkey: String,
+        #[serde(default = "default_language")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates language for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub language: String,
+        /// Selected whisper model name (e.g. "large-v3-turbo", "small")
+        #[serde(default = "default_model")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates model for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(extend("x-choice-resolver" = "voice_models"))]
+        pub model: String,
+        /// Selected audio input device name. None or empty = system default.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates device for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(extend("x-choice-resolver" = "audio_inputs"))]
+        pub device: Option<String>,
+        /// Long-press threshold in milliseconds for push-to-talk activation.
+        /// A short press (below this duration) passes through as normal input.
+        #[serde(default = "default_long_press_ms")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates long press ms for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub long_press_ms: u32,
+        /// Automatically send (press Enter) after injecting transcribed text.
+        /// On by default; a stored `false` is kept.
+        #[serde(default = "default_auto_send")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto send for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub auto_send: bool,
+        /// Minimum RMS before audio is sent to Whisper. See [`VoiceGates`].
+        #[serde(default = "default_rms_threshold")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates rms threshold for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rms_threshold: f32,
+        /// Maximum `no_speech_probability` accepted for a segment. See [`VoiceGates`].
+        #[serde(default = "default_no_speech_threshold")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates no speech threshold for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(range(min = 0.0, max = 1.0))]
+        pub no_speech_threshold: f32,
+        /// Visible hold-back between a hands-free transcript and its enqueue, in
+        /// milliseconds. Zero would send every utterance the instant it lands, so a
+        /// config written before hands-free existed takes the default instead.
+        #[serde(default = "default_hold_back_ms")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free hold back ms for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_hold_back_ms: u32,
+        /// Optional activation phrase for hands-free dictation. Empty means every
+        /// recognised utterance is a turn. Set, it must open each new turn: the
+        /// match runs locally on the whisper transcript and the phrase is removed
+        /// before anything is submitted, so a model never reads it and unrelated
+        /// speech never leaves the machine.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free activation phrase for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_activation_phrase: String,
+        /// Tell the bound model when hands-free starts and when it stops.
+        ///
+        /// On by default: the `voice` tool is listed whether or not this is set,
+        /// and a model with no reason to speak writes text — so an unset default
+        /// would ship a voice nobody ever hears. Turning it off silences both
+        /// notices and nothing else; disarming still revokes speech, because that
+        /// is a fact about this machine rather than a message to a model.
+        #[serde(default = "default_notify_model")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free notify model for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_notify_model: bool,
+        /// The start notice sent when `hands_free_notify_model` is on. Empty means
+        /// the built-in text, which [`get_hands_free_default_notice`] returns so a
+        /// settings surface can show it and reset to it. Folded to one line before
+        /// it is sent — see [`continuous::entry_hint_text`].
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free start notice for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_start_notice: String,
+        /// Play a short sound on the owning client when a spoken turn reaches the
+        /// agent, and a softer one when the activation phrase drops it. On by
+        /// default. Read by the frontend only; the backend reports the turns
+        /// either way (`HandsFreeStatus::delivered_turns`).
+        #[serde(default = "default_earcons")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free earcons for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_earcons: bool,
+        /// Capture speech hands-free. Off is a replies-only conversation:
+        /// input stays push-to-talk, and the microphone is never opened by the
+        /// conversation. Absent from every config written before this field
+        /// existed, which reads as on — today's behaviour.
+        #[serde(default = "default_true")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free listening for the current owner; applies to the next conversation.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_listening: bool,
+        /// Allow spoken replies for this device's hands-free conversation.
+        #[serde(default = "default_true")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hands free spoken replies for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub hands_free_spoken_replies: bool,
+        /// A speech engine the user supplies, as argv rather than a shell line.
+        /// Used when `speech_engine` is `external`. See
+        /// [`crate::dictation::speech::external`](crate::dictation::speech::external) for the
+        /// markers and for what it means that this runs as the user.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates speech command for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub speech_command: Vec<String>,
+        /// The engine that speaks replies: `pocket` (the bundled Pocket TTS, the
+        /// default — local) or `external` (the command in `speech_command`). Empty
+        /// means "not chosen yet": a read answers it from what the installation
+        /// already holds, see `dictation::commands::legacy_speech_engine`. `edge`
+        /// (Microsoft's online voices) is retired: FastAF never sends reply text
+        /// to Microsoft, a write naming it is refused and a file naming it reads
+        /// as `pocket`.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates speech engine for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(extend("enum" = ["pocket","external"]))]
+        #[schemars(default = "default_speech_engine")]
+        pub speech_engine: String,
+        /// The Edge voice, such as `it-IT-IsabellaNeural`. Unused: the Edge engine
+        /// is retired (see `speech_engine`), so there is no voice list to choose
+        /// from. Kept so files that carry it round-trip.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates speech edge voice for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub speech_edge_voice: String,
+        /// Which of the language's voices to speak with. Empty means the first one
+        /// it ships, which is what a configuration written before this setting
+        /// existed says. Ignored by a user-supplied engine, which names its own
+        /// voices inside its command template. See [`choose_voice`].
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates speech voice for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(extend("x-choice-resolver" = "installed_voices"))]
+        pub speech_voice: String,
+        /// The speech level every reply is brought to, in dBFS (-30..=-12). See
+        /// [`crate::dictation::loudness`](crate::dictation::loudness).
+        #[serde(default = "default_speech_volume_db")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates speech volume db for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(range(min = -30.0, max = -12.0))]
+        pub speech_volume_db: f32,
+        /// How strongly a reply is levelled within itself: 0 is off, 1 is 4:1.
+        #[serde(default = "default_speech_levelling")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates speech levelling for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        #[schemars(range(min = 0.0, max = 1.0))]
+        pub speech_levelling: f32,
+        /// Minutes without any transcription (default 20, Boss 2026-09-30) before the Whisper model is
+        /// released from memory (it holds ~1.5 GiB for large-v3-turbo). The next
+        /// dictation reloads it lazily (~0.5 s). 0 keeps it loaded for the life
+        /// of the process. No UI control.
+        #[serde(default = "default_model_idle_unload_minutes")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates model idle unload minutes for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub model_idle_unload_minutes: u32,
+        /// Post-process the transcript through an LLM before insertion
+        /// (FastAF's dictation rewrite, on its built-in engine).
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates rewrite enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rewrite_enabled: bool,
+        /// Provider-registry provider id used for the rewrite request.
+        /// Empty = follow the Main slot, so one provider setup covers chat + rewrite.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates rewrite provider id for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rewrite_provider_id: String,
+        /// Model name as advertised by that provider's /models endpoint.
+        /// Empty = the Main slot's model (only valid when no provider is picked).
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates rewrite model for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rewrite_model: String,
+        /// Extra JSON object merged into the chat-completions body, so endpoints
+        /// with their own parameters work without a code change. Empty = none.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates rewrite extra body for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rewrite_extra_body: String,
+        /// Reasoning effort to request. None = omit the parameter (model decides).
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates rewrite effort for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rewrite_effort: Option<String>,
+        /// System prompt for the rewrite request.
+        #[serde(default = "default_rewrite_system_prompt")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates rewrite system prompt for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub rewrite_system_prompt: String,
+        /// Speech-to-text provider: "local" (whisper.cpp on-device), "groq", or "openai".
+        #[serde(default = "default_stt_provider")]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates stt provider for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub stt_provider: String,
+        /// Groq transcription model id (user must fetch and pick one — none hardcoded).
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates stt model groq for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub stt_model_groq: String,
+        /// OpenAI transcription model id.
+        #[serde(default)]
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates stt model openai for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+        pub stt_model_openai: String,
+        /// Set only on a read response when malformed fields were replaced by
+        /// defaults. It is cleared before persistence.
+        #[serde(default)]
+        #[schemars(extend("x-not-setting" = "Read-response corruption diagnostic; cleared before persistence."))]
+        pub recovered_from_corruption: bool,
+    }
+
+    fn default_stt_provider() -> String {
+        "local".to_string()
+    }
+
+    pub(crate) fn default_rewrite_system_prompt() -> String {
+        "Rewrite the user's dictated text into a clear, well-structured prompt for an AI coding \
+         assistant. Fix transcription errors, remove filler words and false starts, and preserve \
+         the original intent and all technical details. Output only the rewritten text with no \
+         preamble or explanation."
+            .to_string()
+    }
+
+    /// See [`DictationConfig::model_idle_unload_minutes`].
+    pub(crate) fn default_model_idle_unload_minutes() -> u32 {
+        20
+    }
+
+    pub(crate) fn default_model() -> String {
+        "large-v3-turbo".to_string()
+    }
+
+    fn default_hotkey() -> String {
+        "F5".to_string()
+    }
+
+    fn default_language() -> String {
+        "auto".to_string()
+    }
+
+    pub(crate) fn default_long_press_ms() -> u32 {
+        400
+    }
+
+    pub(crate) fn default_rms_threshold() -> f32 {
+        tuic_core::voice_defaults::DEFAULT_RMS_THRESHOLD
+    }
+
+    pub(crate) fn default_no_speech_threshold() -> f32 {
+        tuic_core::voice_defaults::DEFAULT_NO_SPEECH_THRESHOLD
+    }
+
+    /// Long enough to read a transcript and stop it, short enough not to feel like
+    /// a delay. The number is a setting; this is only where it starts.
+    pub(crate) fn default_hold_back_ms() -> u32 {
+        1_500
+    }
+
+    /// See [`DictationConfig::hands_free_notify_model`].
+    pub(crate) fn default_auto_send() -> bool {
+        true
+    }
+
+    pub(crate) fn default_notify_model() -> bool {
+        true
+    }
+
+    /// See [`DictationConfig::hands_free_earcons`].
+    pub(crate) fn default_earcons() -> bool {
+        true
+    }
+
+    /// See [`DictationConfig::speech_volume_db`].
+    pub(crate) fn default_speech_volume_db() -> f32 {
+        -18.0
+    }
+
+    /// See [`DictationConfig::speech_levelling`].
+    pub(crate) fn default_speech_levelling() -> f32 {
+        0.67
+    }
+
+    #[cfg(feature = "dictation")]
+    impl DictationConfig {
+        /// The speech gates this configuration asks for.
+        pub fn gates(&self) -> crate::dictation::transcribe::VoiceGates {
+            crate::dictation::transcribe::VoiceGates {
+                rms_threshold: self.rms_threshold,
+                no_speech_threshold: self.no_speech_threshold,
+            }
+        }
+
+        /// The level replies are brought to.
+        pub fn loudness(&self) -> crate::dictation::loudness::Loudness {
+            crate::dictation::loudness::Loudness {
+                // A hand-edited config may hold anything: keep the documented range.
+                volume_db: if self.speech_volume_db.is_finite() {
+                    self.speech_volume_db.clamp(-30.0, -12.0)
+                } else {
+                    default_speech_volume_db()
+                },
+                levelling: self.speech_levelling,
+            }
+        }
+    }
+
+    /// Local by default: Pocket TTS runs on this machine (its model is
+    /// downloaded on first use). FastAF never sends reply text to a cloud service.
+    fn default_speech_engine() -> String {
+        "pocket".to_string()
+    }
+
+    impl DictationConfig {
+        /// Effective baseline for a new installation, not a legacy file with no engine choice.
+        pub(crate) fn fresh_defaults() -> Self {
+            Self {
+                speech_engine: default_speech_engine(),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Default for DictationConfig {
+        fn default() -> Self {
+            Self {
+                enabled: false,
+                hotkey: default_hotkey(),
+                language: default_language(),
+                model: default_model(),
+                device: None,
+                long_press_ms: default_long_press_ms(),
+                auto_send: default_auto_send(),
+                rms_threshold: default_rms_threshold(),
+                no_speech_threshold: default_no_speech_threshold(),
+                hands_free_hold_back_ms: default_hold_back_ms(),
+                hands_free_activation_phrase: String::new(),
+                hands_free_notify_model: default_notify_model(),
+                hands_free_start_notice: String::new(),
+                hands_free_earcons: default_earcons(),
+                hands_free_listening: true,
+                hands_free_spoken_replies: true,
+                speech_command: Vec::new(),
+                speech_engine: String::new(),
+                speech_edge_voice: String::new(),
+                speech_voice: String::new(),
+                speech_volume_db: default_speech_volume_db(),
+                speech_levelling: default_speech_levelling(),
+                model_idle_unload_minutes: default_model_idle_unload_minutes(),
+                rewrite_enabled: false,
+                rewrite_provider_id: String::new(),
+                rewrite_model: String::new(),
+                rewrite_extra_body: String::new(),
+                rewrite_effort: None,
+                rewrite_system_prompt: default_rewrite_system_prompt(),
+                stt_provider: default_stt_provider(),
+                stt_model_groq: String::new(),
+                stt_model_openai: String::new(),
+                recovered_from_corruption: false,
+            }
+        }
+    }
+}
+
+pub use dictation_config::DictationConfig;
+#[cfg(feature = "dictation")]
+pub(crate) use dictation_config::default_hold_back_ms;
+#[cfg(feature = "dictation")]
+pub(crate) use dictation_config::default_rewrite_system_prompt;
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Test-only override for the config directory.
-#[cfg(test)]
-static CONFIG_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+#[path = "config_repository_registration.rs"]
+mod repository_registration;
+pub(crate) use repository_registration::register_repository;
 
-/// Global serialization lock for tests that call `set_config_dir_override`.
-/// Held for the lifetime of the returned guard so tests in different modules
-/// do not race on the shared `CONFIG_DIR_OVERRIDE` global.
 #[cfg(test)]
-static CONFIG_DIR_EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use tuic_core::config_dir::{
+    set_override as set_config_dir_override, without_override as without_config_dir_override,
+};
 
-/// Override the config directory for testing. Returns a guard that holds the
-/// global `CONFIG_DIR_EXCLUSIVE` lock and restores the original value on drop.
-/// All callers across all test modules are automatically serialized.
-#[cfg(test)]
-pub(crate) fn set_config_dir_override(dir: PathBuf) -> impl Drop {
-    let lock = CONFIG_DIR_EXCLUSIVE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *CONFIG_DIR_OVERRIDE.lock().unwrap() = Some(dir);
-    struct Guard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            *CONFIG_DIR_OVERRIDE.lock().unwrap() = None;
-        }
-    }
-    Guard { _lock: lock }
-}
-
-/// Get the config directory using platform-appropriate location.
-///
-/// - macOS: `~/Library/Application Support/com.tuic.commander/`
-/// - Linux: `~/.config/com.tuic.commander/` (or `$XDG_CONFIG_HOME`)
-/// - Windows: `%APPDATA%/com.tuic.commander/`
-///
-/// Matches Tauri's `$APPCONFIG` path (derived from the bundle identifier).
-/// Falls back to `~/.tuicommander/` if platform dir is unavailable.
-/// On first call, migrates from legacy locations if the new dir doesn't exist:
-///   1. `{platform_config}/tuicommander/` (previous custom name)
-///   2. `{platform_config}/tui-commander/` (older name)
-///   3. `~/.tuicommander/` (legacy dotdir)
+/// Resolve the config directory for production or the isolated test support feature.
 pub(crate) fn config_dir() -> PathBuf {
     #[cfg(test)]
-    if let Some(dir) = CONFIG_DIR_OVERRIDE.lock().unwrap().clone() {
-        return dir;
+    {
+        tuic_core::config_dir::config_dir()
     }
-    let new_dir = dirs::config_dir()
-        .map(|d| d.join("com.tuic.commander"))
-        .unwrap_or_else(legacy_dotdir);
+    #[cfg(not(test))]
+    {
+        resolve_real_config_dir()
+    }
+}
+
+/// The real, platform-derived config directory and its legacy migration.
+/// Test builds use tuic-core's safe test-support resolver instead.
+#[cfg_attr(test, allow(dead_code))]
+fn resolve_real_config_dir() -> PathBuf {
+    let platform_dir = dirs::config_dir();
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let instance = crate::app_instance::current_app_instance();
+    let new_dir = tuic_core::config_dir::production_path(platform_dir.as_deref(), &home, instance);
 
     // Migrate if our config file is missing (the dir may already exist from Tauri's window-state plugin)
-    if !new_dir.join(APP_CONFIG_FILE).exists() {
+    if instance.is_default() && !new_dir.join(APP_CONFIG_FILE).exists() {
         // Try migrating from legacy dirs (newest first): tuicommander, tui-commander, ~/.tuicommander
-        let platform_dir = dirs::config_dir();
         let candidates = [
             platform_dir.as_ref().map(|d| d.join("tuicommander")),
             platform_dir.as_ref().map(|d| d.join("tui-commander")),
@@ -192,15 +520,101 @@ fn load_json_config_strict_from_path<T: DeserializeOwned + Default>(
     serde_json::from_str(&content).map_err(|e| {
         // Move the bad file aside: the caller refuses to write until a load succeeds, but a
         // later code path (or a second instance) must not be able to clobber it either.
-        let aside = path.with_extension(format!("corrupt-{}", uuid::Uuid::new_v4()));
-        let preserved = std::fs::rename(path, &aside).is_ok();
+        // Renamed BEFORE the log line, never inside it — `tracing` does not evaluate field
+        // expressions when no subscriber wants the event, so preservation would silently
+        // stop happening whenever logging is filtered out.
+        let preserved = preserve_corrupt_config(path).map_or_else(
+            || "<rename failed>".to_string(),
+            |aside| aside.display().to_string(),
+        );
         tracing::error!(
             path = %path.display(),
-            preserved_as = %if preserved { aside.display().to_string() } else { "<rename failed>".to_string() },
+            preserved_as = %preserved,
             "Corrupt config: {e}"
         );
         format!("Corrupt {}: {e}", path.display())
     })
+}
+
+/// Move a config file that could not be parsed aside, so nothing can overwrite it.
+///
+/// The `corrupt-<uuid>` suffix is fresh on every call. A fixed name would let the
+/// second corrupt load erase the document the first one saved — the same data loss,
+/// one indirection further out. Returns the backup path, or `None` when the rename
+/// itself failed (a read-only config dir, say); callers report that, they cannot fix it.
+fn preserve_corrupt_config(path: &std::path::Path) -> Option<PathBuf> {
+    let aside = path.with_extension(format!("corrupt-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(path, &aside).ok().map(|()| {
+        reap_corrupt_backups(&aside);
+        aside
+    })
+}
+
+/// How many `<name>.corrupt-<uuid>` backups to keep per config file.
+///
+/// A count, not an age: the point of the backup is hand recovery, and a user who
+/// comes back a month later would find an age rule had deleted the very file they
+/// came for. Five is enough to survive a corruption that repeats across a few
+/// restarts while still bounding the directory.
+const MAX_CORRUPT_BACKUPS: usize = 5;
+
+/// Drop the oldest backups of the file `keep` was just made from, leaving at most
+/// [`MAX_CORRUPT_BACKUPS`].
+///
+/// Scoped to one config file's own backups, by stem. A storm of
+/// `repositories.corrupt-*` must not evict the single `notes.corrupt-*` a user
+/// needs — that would be this cleanup causing exactly the data loss the rename
+/// exists to prevent.
+///
+/// `keep` is excluded explicitly rather than trusted to sort first: mtime has
+/// coarse resolution on some filesystems, so two backups written in the same
+/// tick can compare equal and the newest is not guaranteed to win a sort.
+///
+/// Every failure here is swallowed after logging. This runs inside a config load
+/// that has already failed; making that load fail differently because a stale
+/// backup could not be unlinked would be strictly worse than keeping the file.
+fn reap_corrupt_backups(keep: &std::path::Path) {
+    let (Some(dir), Some(stem)) = (keep.parent(), keep.file_stem().and_then(|s| s.to_str())) else {
+        return;
+    };
+    let prefix = format!("{stem}.corrupt-");
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), "Could not list corrupt backups: {e}");
+            return;
+        }
+    };
+    let mut backups: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| *p != keep)
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .map(|p| {
+            // An unreadable mtime sorts as oldest, so a backup we cannot date is
+            // reaped before one we can. It is still never `keep`.
+            let modified = p
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (modified, p)
+        })
+        .collect();
+    // Newest first, so the tail is what to drop. `keep` is not in this list and
+    // occupies one of the slots, hence `- 1`.
+    backups.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (_, stale) in backups
+        .into_iter()
+        .skip(MAX_CORRUPT_BACKUPS.saturating_sub(1))
+    {
+        if let Err(e) = std::fs::remove_file(&stale) {
+            tracing::warn!(path = %stale.display(), "Could not reap corrupt backup: {e}");
+        }
+    }
 }
 
 /// Atomically write `data` to `target` via temp+rename with 0600 perms.
@@ -209,6 +623,16 @@ fn load_json_config_strict_from_path<T: DeserializeOwned + Default>(
 /// containing stale or zero-length content on filesystems that reorder data
 /// writes past metadata writes (e.g. ext4 `data=writeback`).
 pub(crate) fn persist_atomic(target: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    persist_atomic_with_mode(target, data, 0o600)
+}
+
+/// Set the Unix mode on the temporary inode before publishing it atomically.
+/// Other platforms retain their normal file permissions.
+pub(crate) fn persist_atomic_with_mode(
+    target: &std::path::Path,
+    data: &[u8],
+    _mode: u32,
+) -> Result<(), String> {
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
@@ -225,7 +649,7 @@ pub(crate) fn persist_atomic(target: &std::path::Path, data: &[u8]) -> Result<()
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
+        let perms = std::fs::Permissions::from_mode(_mode);
         std::fs::set_permissions(&temp, perms).map_err(|e| {
             let _ = std::fs::remove_file(&temp);
             format!("Failed to set permissions: {e}")
@@ -250,7 +674,7 @@ pub(crate) fn persist_atomic(target: &std::path::Path, data: &[u8]) -> Result<()
 // ---------------------------------------------------------------------------
 
 /// Whether split terminal panes get separate tabs or share a unified tab
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SplitTabMode {
     #[default]
@@ -259,7 +683,7 @@ pub(crate) enum SplitTabMode {
 }
 
 /// Tab ordering mode for the tab bar
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum TabOrderingMode {
     #[default]
@@ -269,7 +693,7 @@ pub(crate) enum TabOrderingMode {
 }
 
 /// Where to create worktree directories
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum WorktreeStorage {
     /// `~/dev/myrepo__wt/feat-123` — sibling dir next to repo
@@ -284,7 +708,7 @@ pub(crate) enum WorktreeStorage {
 }
 
 /// How to handle orphan worktrees (branch deleted)
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum OrphanCleanup {
     /// Auto-remove worktree + prune
@@ -297,7 +721,7 @@ pub(crate) enum OrphanCleanup {
 }
 
 /// Git merge strategy for PRs
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MergeStrategy {
     Merge,
@@ -309,7 +733,7 @@ pub(crate) enum MergeStrategy {
 }
 
 /// What to do with a worktree after its branch is merged
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum WorktreeAfterMerge {
     /// Move to __archived/ subdir
@@ -322,7 +746,7 @@ pub(crate) enum WorktreeAfterMerge {
 }
 
 /// Auto-delete local branch when PR is merged/closed
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum AutoDeleteOnPrClose {
     #[default]
@@ -335,14 +759,28 @@ pub(crate) enum AutoDeleteOnPrClose {
 // ServicesConfig — nested config for remote access, auth, relay, push
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ServerConfig {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) enabled: bool,
     #[serde(default = "default_remote_port")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) port: u16,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) ipv6_enabled: bool,
+    /// The address remote access listens on: the interface picked on the Remote
+    /// Access page, so the server is not reachable from every network this
+    /// machine joins. Empty listens on every interface. Loopback is served
+    /// beside it for local use. Fails closed: an address this machine does not
+    /// have (yet) never widens to every interface; remote access pauses with
+    /// only loopback listening and rebinds once the address appears, and an
+    /// unparseable address stays paused until the setting changes (see
+    /// `mcp_http::remote_bind`).
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
+    pub(crate) bind_address: String,
 }
 
 impl Default for ServerConfig {
@@ -351,27 +789,36 @@ impl Default for ServerConfig {
             enabled: false,
             port: default_remote_port(),
             ipv6_enabled: false,
+            bind_address: String::new(),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AuthConfig {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) username: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"derived_secret","apply":"service_restart","effect":"Derived remote-access verifier; replacement must use the password owner service.","operations":["get"],"confirmationClass":"execution_authority"}))]
     pub(crate) password_hash: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"secret","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set_secret","clear_secret"],"confirmationClass":"execution_authority"}))]
     pub(crate) session_token: String,
     #[serde(default, skip_serializing_if = "is_false")]
+    #[schemars(extend("x-not-setting" = "Read-only redaction presence marker, not a persisted setting."))]
     pub(crate) session_token_exists: bool,
     #[serde(default = "default_session_token_duration_secs")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) session_token_duration_secs: u64,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) lan_auth_bypass: bool,
     #[serde(default = "default_auth_rate_limit_max")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) auth_rate_limit_max: u32,
     #[serde(default = "default_auth_rate_limit_window_secs")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) auth_rate_limit_window_secs: u64,
 }
 
@@ -397,13 +844,15 @@ impl Default for AuthConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub(crate) enum TlsConfig {
     #[default]
     Off,
     Manual {
+        #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
         cert_path: String,
+        #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
         key_path: String,
     },
 }
@@ -438,13 +887,16 @@ impl<'de> serde::Deserialize<'de> for TlsConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct RelayConfig {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) enabled: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"secret","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set_secret","clear_secret"],"confirmationClass":"execution_authority"}))]
     pub(crate) token: String,
     // `Option<bool>` (unlike the plain `bool` used by session_token_exists /
     // vapid_private_key_exists) so a partial JSON payload that OMITS this key
@@ -454,22 +906,29 @@ pub(crate) struct RelayConfig {
     // relies on that distinction to avoid silently deleting the stored relay
     // token — see DATA-1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-not-setting" = "Read-only redaction presence marker, not a persisted setting."))]
     pub(crate) token_exists: Option<bool>,
     #[serde(default)]
+    #[schemars(extend("x-not-setting" = "Relay-issued session identity, not a user preference."))]
     pub(crate) session_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct PushConfig {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"secret","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set_secret","clear_secret"],"confirmationClass":"network_exposure"}))]
     pub(crate) vapid_private_key: String,
     #[serde(default, skip_serializing_if = "is_false")]
+    #[schemars(extend("x-not-setting" = "Read-only redaction presence marker, not a persisted setting."))]
     pub(crate) vapid_private_key_exists: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) vapid_public_key: String,
     #[serde(default = "default_vapid_subject")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) vapid_subject: String,
 }
 
@@ -485,205 +944,407 @@ impl Default for PushConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ServicesConfig {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates server for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) server: ServerConfig,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auth for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auth: AuthConfig,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures TLS protection after persistence.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) tls: TlsConfig,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates relay for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) relay: RelayConfig,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates push for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) push: PushConfig,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub(crate) struct ConfigRecovery {
+    pub(crate) fields: Vec<String>,
+    pub(crate) backup_path: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AppConfig {
+    /// Read-only startup diagnostic, delivered through the normal config response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-not-setting" = "Transient config recovery diagnostic, never persisted."))]
+    pub(crate) config_recovery: Option<ConfigRecovery>,
+    /// Old files migrate once; fresh configs and explicit saves already express intent.
+    #[serde(default)]
+    #[schemars(extend("x-not-setting" = "Internal scrollback reflow migration marker"))]
+    pub(crate) scrollback_reflow_migrated: bool,
+    /// Internal one-shot legacy-default migration state; never a user setting.
+    #[serde(default)]
+    #[schemars(extend("x-not-setting" = "Internal legacy session-duration migration marker"))]
+    pub(crate) session_duration_migrated: bool,
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) shell: Option<String>,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) font_family: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates font size for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(range(min = 1))]
     pub(crate) font_size: u16,
     /// Terminal font weight (100–900, e.g. 200 = ExtraLight, 400 = Regular)
     #[serde(default = "default_font_weight")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates font weight for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(range(min = 100, max = 900))]
     pub(crate) font_weight: u16,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates theme for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("x-choice-resolver" = "themes"))]
     pub(crate) theme: String,
     /// Enable MCP HTTP API on localhost for external tool integration
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates mcp server enabled for the current owner.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) mcp_server_enabled: bool,
+    /// Allow MCP agents to comment or transition Tasks items. Reads need no opt-in.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Allows MCP agents to write work items.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
+    pub(crate) mcp_work_item_writes: bool,
+    /// Record and show body-free outcomes of MCP tools/call requests. Default on in debug builds only.
+    #[serde(default = "default_mcp_call_audit_enabled")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Starts or stops recording MCP call outcomes and showing them in Settings.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) mcp_call_audit_enabled: bool,
     /// Fixed port for MCP server (0 = OS-assigned)
     #[serde(default = "default_mcp_port")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates mcp port for the current owner.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) mcp_port: u16,
     /// Whether MCP config has been auto-installed in agent configs
     #[serde(default)]
+    #[schemars(extend("x-not-setting" = "One-time MCP installation migration marker, not a user preference."))]
     pub(crate) mcp_config_installed: bool,
     /// Preferred IDE (e.g. "vscode", "cursor")
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates ide for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("x-choice-resolver" = "installed_ides"))]
     pub(crate) ide: String,
+    /// Absolute path to the one ego executable this host may launch for ACP.
+    ///
+    /// The only place the ACP process authority comes from. No ACP command
+    /// carries it: a caller supplies a working directory and nothing else, so
+    /// no connect request can choose which binary runs. It is configuration —
+    /// edited in Settings and written through `save_config` like every other
+    /// field here. Empty means ACP is not configured on this host and every
+    /// connect is refused.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Selects the trusted executable for new ACP connections.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
+    pub(crate) ego_executable: String,
+    /// Optional user-config profile passed to ego at ACP launch.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ego_profile: String,
+    /// Additive instructions snapshotted when an AI Chat conversation is created.
+    #[serde(default, deserialize_with = "deserialize_ai_chat_master_prompt")]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Adds instructions to new AI Chat runs; existing conversations retain their launch instructions.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ai_chat_master_prompt: String,
+    /// Directory every AI Chat conversation runs in. Empty means the user's home
+    /// directory. Must be absolute; a missing directory is created at connect.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ai_chat_workspace: String,
+    /// Shared active ego conversation for each AI Chat workspace root.
+    #[serde(default)]
+    #[schemars(extend("x-not-setting" = "Conversation selection history; not launch configuration."))]
+    pub(crate) ai_chat_sessions: HashMap<String, String>,
+    /// Host-issued peer UUID for the AI Chat conversation at each root.
+    #[serde(default)]
+    #[schemars(extend("x-not-setting" = "Host-issued durable conversation identity; never caller-editable."))]
+    pub(crate) ai_chat_peer_ids: HashMap<String, String>,
+    /// Launch options and durable peer identity for individually configured chats.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates ai chat launches for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ai_chat_launches: HashMap<String, crate::acp_chat::ChatLaunch>,
     /// Default font size for new terminals
     #[serde(default = "default_font_size")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(range(min = 1))]
     pub(crate) default_font_size: u16,
+    /// Maximum binary attachment upload, in bytes (must be positive).
+    #[serde(default = "default_attachment_max_bytes")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates attachment max bytes for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(range(min = 1))]
+    pub(crate) attachment_max_bytes: u64,
+    /// Legacy stored value; uploads now have session lifetime regardless of this value.
+    #[serde(default = "default_attachment_retention_days")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates attachment retention days for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) attachment_retention_days: u32,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates services for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) services: ServicesConfig,
     /// Show confirmation dialog when quitting with active terminals
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates confirm before quit for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) confirm_before_quit: bool,
+    /// Main window close policy: ask, background (hide), or quit.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Selects whether main window close asks, hides or quits.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) close_behavior: crate::background_mode::CloseBehavior,
+    #[serde(default)]
+    pub(crate) background: crate::background_mode::BackgroundConfig,
     /// Show confirmation dialog when closing a terminal tab
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates confirm before closing tab for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) confirm_before_closing_tab: bool,
     /// Maximum characters for tab names before truncation
     #[serde(default = "default_max_tab_name_length")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates max tab name length for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) max_tab_name_length: u32,
     /// Split tab mode: separate (each pane gets a tab) or unified (one shared tab)
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates split tab mode for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) split_tab_mode: SplitTabMode,
     /// Tab ordering mode: grouped-by-type, terminals-first, or free
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates tab ordering mode for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) tab_ordering_mode: TabOrderingMode,
     /// Cycle through all tab types (terminals + diff/md/editor) with prev/next, not just terminals
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates tab cycling all types for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) tab_cycling_all_types: bool,
     /// Show a branch's open terminals as a nested list under its sidebar row
-    /// (only when a branch has more than one terminal). Opt-in, off by default.
+    /// Opt-in, off by default; available whenever a branch has an open terminal.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates tab tree enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) tab_tree_enabled: bool,
+    /// Draw Chat assistant text that a tool call follows in the same turn smaller and dimmer
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates chat mute intermediate text for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) chat_mute_intermediate_text: bool,
     /// Auto-show PR detail popover when a branch has PR data
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto show pr popover for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_show_pr_popover: bool,
+    /// Hide draft pull requests by default; repositories may override this.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates draft PR visibility.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_hide_drafts: bool,
+    /// Hide conflicting pull requests by default; repositories may override this.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates conflicting PR visibility.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_hide_conflicting: bool,
+    /// Hide CI-failing pull requests by default; repositories may override this.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates CI-failing PR visibility.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_hide_ci_failing: bool,
     /// Prevent system sleep while any terminal session is busy
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates prevent sleep when busy for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) prevent_sleep_when_busy: bool,
     /// Automatically check for app updates on startup
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto update enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_update_enabled: bool,
     /// Automatically check for plugin updates on startup
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto update plugins enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_update_plugins_enabled: bool,
+    /// Hold the app restart after an update install until no session is busy or awaiting input
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates defer update relaunch for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) defer_update_relaunch: bool,
+    /// After an update restart, resume every agent tab whose session the agent confirmed, not only the selected branch
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates eager resume after update for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) eager_resume_after_update: bool,
     /// UI language code (e.g. "en", "it", "de")
     #[serde(default = "default_language")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates language for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) language: String,
     /// Plugin IDs that the user has disabled (not loaded on startup)
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates disabled plugin ids for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) disabled_plugin_ids: Vec<String>,
-    /// Update channel: "stable" or "nightly"
+    /// Update channel: "stable" or "nightly". FastAF publishes no beta feed
+    /// (`updater.rs`); a saved "beta" loads as "nightly", see
+    /// `migrate_retired_beta_channel`.
     #[serde(default = "default_update_channel")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates update channel for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["stable","nightly"]))]
     pub(crate) update_channel: String,
     /// Agent types disabled by the user (won't appear in sidebar "Add Agent" menu)
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates disabled agents for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) disabled_agents: Vec<String>,
     /// Agent types whose MCP bridge config is disabled (ensure_mcp_configs skips these)
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates disabled mcp agents for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) disabled_mcp_agents: Vec<String>,
-    /// Native MCP tool names disabled by the user (excluded from tools/list response)
+    /// MCP capability policy; the old field is accepted only for one-time migration.
+    #[serde(default, alias = "disabled_native_tools")]
+    pub(crate) mcp_capabilities: crate::mcp_capabilities::McpCapabilities,
+    /// Host-only opt-in; legacy config enablement never grants settings authority.
     #[serde(default)]
-    pub(crate) disabled_native_tools: Vec<String>,
+    #[schemars(extend("x-not-setting" = "Host-issued MCP settings access policy; only trusted UI can enable it."))]
+    pub(crate) settings_mcp_enabled: bool,
     /// Collapse all MCP tools into 3 meta-tools (search_tools, get_tool_schema, call_tool).
     /// Reduces AI context from ~35k to ~500 tokens. Default: false (individual tools exposed).
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates collapse tools for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) collapse_tools: bool,
     /// Show agent intent as tab title (from `intent: text (title)` tokens)
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates intent tab title for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) intent_tab_title: bool,
     /// Show suggested follow-up actions from agents (from `suggest: A | B | C` tokens)
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates suggest followups for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) suggest_followups: bool,
     /// Render the window opaque instead of with macOS vibrancy. The window
     /// itself stays transparent (a build-time property); the frontend gates the
     /// translucent tokens on this, so flipping it needs no restart.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates reduce transparency for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) reduce_transparency: bool,
+    /// Collect the Progress journal: the `progress` tool, its `initialize`
+    /// obligation, and `intent:` capture. One flag governs all of them, which
+    /// is why pause/resume of collection does not exist.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates progress tracking for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) progress_tracking: bool,
     /// Auto-copy terminal selection to clipboard
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy on select for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_on_select: bool,
     /// Honor OSC 52 clipboard-write sequences from terminal output. Disable to
     /// ignore clipboard writes emitted by displayed files/logs. Frontend-gated
     /// (the OSC 52 write executes in the renderer); stored here for persistence.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates osc52 clipboard for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) osc52_clipboard: bool,
     /// Show last prompt overlay bar at the top of the terminal
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates show last prompt for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) show_last_prompt: bool,
     /// Terminal bell style: "none", "visual", "sound", or "both"
     #[serde(default = "default_bell_style")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates bell style for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["none","visual","sound","both"]))]
     pub(crate) bell_style: String,
     /// Global OS-level hotkey combo to toggle window visibility (e.g. "CommandOrControl+Shift+T")
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates global hotkey for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) global_hotkey: Option<String>,
     /// Default issue filter mode: "assigned", "created", "mentioned", "all", or "disabled"
     #[serde(default = "default_issue_filter")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates issue filter for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["assigned","created","mentioned","all","disabled"]))]
     pub(crate) issue_filter: String,
-    /// Master toggle for experimental features
+    /// Master toggle for experimental features. Its three AI sub-flags went with
+    /// the embedded engine (#784-0aec); what it still gates is the SSH Tunnels
+    /// panel.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates experimental features enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) experimental_features_enabled: bool,
-    /// Sub-flag: AI Chat panel, shortcuts, and palette entry
+    /// Sub-flag (FastAF): AI Chat panel, shortcuts and palette entry, on
+    /// FastAF's built-in engine. Upstream dropped it with its engine; FastAF
+    /// keeps it. Effective only together with `experimental_features_enabled`.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates ai chat enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) ai_chat_enabled: bool,
-    /// Sub-flag: AI Triage (diff classification)
-    #[serde(default)]
-    pub(crate) ai_triage_enabled: bool,
-    /// Sub-flag: AI Watchers (terminal event watchers)
-    #[serde(default)]
-    pub(crate) ai_watchers_enabled: bool,
     /// Sub-flag: reflow scrollback history on column resize. Keeps scrollback
     /// readable when side panels temporarily narrow the terminal, without
     /// affecting cursor-addressed TUIs on the visible screen.
-    #[serde(default)]
+    ///
+    /// Defaults to true, including for a config.json written before the key
+    /// existed: the grid reflowed unconditionally until this flag gained a
+    /// consumer, so anything else would silently change behaviour on upgrade.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates scrollback reflow for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) scrollback_reflow: bool,
     /// Terminal cursor style: "bar" (default), "block", "underline"
     #[serde(default = "default_cursor_style")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates cursor style for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["bar","block","underline"]))]
     pub(crate) cursor_style: String,
     /// Terminal renderer: "webgl" (default, GPU-accelerated) or "canvas" (CPU, no atlas bugs)
     #[serde(default = "default_terminal_renderer")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates terminal renderer for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["webgl","canvas","native"]))]
     pub(crate) terminal_renderer: String,
-    /// Expose `ai_terminal_*` tools to external MCP. Default off: they need a
-    /// per-session filesystem sandbox only the internal agent loop creates.
-    ///
-    /// Read at three sites (`merged_tool_definitions`, `searchable_tool_definitions`,
-    /// `handle_mcp_tool_call` dispatch). This flag has NO live-reload semantics:
-    /// a client may see a tools-list snapshot before a toggle and a dispatch-time
-    /// rejection after. Coordinate those call sites if live reload is ever added.
-    #[serde(default)]
-    pub(crate) ai_terminal_mcp_enabled: bool,
-    /// Content index pre-warm strategy: "active_and_switch" (default), "active_only", "all_sequential"
+    /// Label each command block with its elapsed time while Ctrl+Cmd is held.
+    /// Frontend-gated (the label is painted in the renderer); stored here so the
+    /// choice persists — a field absent from this struct is dropped by serde on
+    /// every `save_config`, which is exactly what happened to these three
+    /// before they had a Settings toggle.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates show block timestamps for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) show_block_timestamps: bool,
+    /// Draw command-block marks on the terminal scrollbar. Frontend-gated.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates show scrollbar marks for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) show_scrollbar_marks: bool,
+    /// Let the block-fold shortcut collapse a command block's output.
+    /// Frontend-gated.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates block folding enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) block_folding_enabled: bool,
+    /// Content index pre-warm strategy; "disabled" suppresses background rebuilds.
     #[serde(default = "default_index_strategy")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates index strategy for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["active_and_switch","active_only","all_sequential","disabled"]))]
     pub(crate) index_strategy: String,
+    /// Total heap the BM25 content indices may hold, in MB, before the least
+    /// recently used are dropped (`content_index::enforce_memory_budget`).
+    ///
+    /// Configurable rather than a constant because the Rust backend does not
+    /// hot-reload: retuning a constant would cost the user every live PTY
+    /// session, while this is read from the in-memory config on every build.
+    #[serde(default = "default_index_memory_budget_mb")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates index memory budget mb for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) index_memory_budget_mb: usize,
     /// Minutes of idle + unfocused before SIGSTOP on process group. 0 = disabled.
     #[serde(default = "default_standby_timeout")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates standby timeout minutes for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) standby_timeout_minutes: u16,
     /// User-defined launchers shown in the "Open in" menu alongside built-ins.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates custom launchers for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}, "x-collection-key" = "id"))]
     pub(crate) custom_launchers: Vec<CustomLauncher>,
     /// Show GitLens-style inline git blame on the active line in the code editor.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates inline blame enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) inline_blame_enabled: bool,
     /// Tint file browser icons by file type (VSCode-style pastel palette).
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates file tree colors enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) file_tree_colors_enabled: bool,
     /// Open files from the file browser in a split pane beside the active
     /// terminal instead of replacing the view (VSCode "open to the side").
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates open files to side for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) open_files_to_side: bool,
     /// Hide file tabs from the main tab bar while they are docked in a split
     /// pane (each pane has its own tab strip). Terminal tabs always stay.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates hide docked file tabs for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) hide_docked_file_tabs: bool,
     /// Multiview: toggleable grid showing every live terminal across all
     /// repos and branches at once (Cmd+Alt+M).
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates multiview enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) multiview_enabled: bool,
     /// Drag on a mouse-reporting TUI (vim, htop) selects text; a plain click
     /// is still forwarded to the app on release. Off = forward immediately.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates terminal drag selects for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) terminal_drag_selects: bool,
     /// Show "Import from Claude Code / Codex / Cursor / superset.sh" in the
     /// Add Repository menu.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates import tools enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) import_tools_enabled: bool,
     /// Terminal wheel-scroll sensitivity in percent (100 = raw device delta).
     #[serde(default = "default_scroll_sensitivity")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates terminal scroll sensitivity for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) terminal_scroll_sensitivity: u16,
     /// App-wide zoom factor applied to the webview (1.0 = 100%).
     #[serde(default = "default_app_zoom")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates app zoom for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) app_zoom: f64,
 }
 
@@ -699,17 +1360,24 @@ fn default_app_zoom() -> f64 {
 /// with `args`, each of which may contain `{path}`/`{file}`/`{line}`/`{column}`
 /// placeholders (expanded in `agent::open_in_custom`). No icon field — custom
 /// launchers share a single generic icon in the UI.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub(crate) struct CustomLauncher {
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates id for the current owner.","operations":["get"],"confirmationClass":"ordinary"}))]
     pub(crate) id: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates name for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) name: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) executable: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) args: Vec<String>,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) enabled: bool,
     /// Optional platform filter: "macos" | "windows" | "linux". None = all.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates platform for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["macos","windows","linux",null]))]
     pub(crate) platform: Option<String>,
 }
 
@@ -717,24 +1385,63 @@ fn default_language() -> String {
     "en".to_string()
 }
 
+/// The VAPID `sub` claim: the contact the push services (Apple, Google,
+/// Mozilla) are told belongs to the sender. RFC 8292 section 2.1 accepts a
+/// `mailto:` or an `https:` URI; FastAF names its own repository.
+const DEFAULT_VAPID_SUBJECT: &str = "https://github.com/ksg98/fastaf-ide";
+
+/// Upstream TUICommander's default. Configs saved before FastAF changed it still
+/// carry it, because serde writes the default back on every save. It names a
+/// contact FastAF does not own, so it is never sent.
+const LEGACY_VAPID_SUBJECT: &str = "mailto:noreply@tuicommander.com";
+
 fn default_vapid_subject() -> String {
-    "mailto:noreply@tuicommander.com".to_string()
+    DEFAULT_VAPID_SUBJECT.to_string()
+}
+
+impl PushConfig {
+    /// The subject to sign push requests with: the user's own value, or
+    /// FastAF's default when it is blank or still upstream's.
+    pub(crate) fn effective_vapid_subject(&self) -> &str {
+        let subject = self.vapid_subject.trim();
+        if subject.is_empty() || subject == LEGACY_VAPID_SUBJECT {
+            DEFAULT_VAPID_SUBJECT
+        } else {
+            subject
+        }
+    }
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Every build starts on stable, prereleases included: FastAF has no beta feed.
 fn default_update_channel() -> String {
     "stable".to_string()
 }
 
+/// 30 days. The cookie slides on every authenticated request, so this is the
+/// longest a device may sit unused before it must log in again.
 fn default_session_token_duration_secs() -> u64 {
-    86400
+    2_592_000
 }
+
+/// The default before it became 30 days. A config still holding exactly this value
+/// was written by the old default and is moved to the new one on load.
+const LEGACY_SESSION_TOKEN_DURATION_SECS: u64 = 86_400;
 
 fn default_index_strategy() -> String {
     "active_and_switch".to_string()
+}
+
+/// 1 GB. Measured on this workload: an ordinary repo indexes to 60-100 MB, so
+/// this holds 10-15 of them resident and only starts evicting for an outlier —
+/// a 645 MB working tree indexed to 1.9 GB on its own. Set low enough to bound
+/// the process well under the 4 GB memory tripwire in `cpu_watchdog`, high
+/// enough that a normal day of switching repos never pays for a rebuild.
+fn default_index_memory_budget_mb() -> usize {
+    1024
 }
 
 fn default_standby_timeout() -> u16 {
@@ -757,12 +1464,31 @@ fn default_terminal_renderer() -> String {
     "webgl".to_string()
 }
 
+/// The audit records every MCP call: off in release builds, on while developing.
+pub(crate) const RELEASE_MCP_CALL_AUDIT_ENABLED: bool = false;
+
+fn default_mcp_call_audit_enabled() -> bool {
+    if cfg!(debug_assertions) {
+        true
+    } else {
+        RELEASE_MCP_CALL_AUDIT_ENABLED
+    }
+}
+
 fn default_mcp_port() -> u16 {
     3845
 }
 
 fn default_font_size() -> u16 {
     13
+}
+
+fn default_attachment_max_bytes() -> u64 {
+    25 * 1024 * 1024
+}
+
+fn default_attachment_retention_days() -> u32 {
+    7
 }
 
 fn default_font_weight() -> u16 {
@@ -780,37 +1506,61 @@ fn default_remote_port() -> u16 {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            config_recovery: None,
+            scrollback_reflow_migrated: true,
+            session_duration_migrated: true,
             shell: None,
             font_family: "JetBrains Mono".to_string(),
             font_size: 14,
             font_weight: default_font_weight(),
             theme: "codex-dark".to_string(),
             mcp_server_enabled: true,
+            mcp_work_item_writes: false,
+            mcp_call_audit_enabled: default_mcp_call_audit_enabled(),
             mcp_port: default_mcp_port(),
             mcp_config_installed: false,
             ide: String::new(),
+            ego_executable: String::new(),
+            ego_profile: String::new(),
+            ai_chat_master_prompt: String::new(),
+            ai_chat_workspace: String::new(),
+            ai_chat_sessions: HashMap::new(),
+            ai_chat_peer_ids: HashMap::new(),
+            ai_chat_launches: HashMap::new(),
             default_font_size: 13,
+            attachment_max_bytes: default_attachment_max_bytes(),
+            attachment_retention_days: default_attachment_retention_days(),
             services: ServicesConfig::default(),
             confirm_before_quit: true,
+            close_behavior: Default::default(),
+            background: Default::default(),
             confirm_before_closing_tab: true,
             max_tab_name_length: default_max_tab_name_length(),
             split_tab_mode: SplitTabMode::default(),
             tab_ordering_mode: TabOrderingMode::default(),
             tab_cycling_all_types: false,
             tab_tree_enabled: false,
+            chat_mute_intermediate_text: true,
             auto_show_pr_popover: true,
+            pr_hide_drafts: false,
+            pr_hide_conflicting: false,
+            pr_hide_ci_failing: false,
             prevent_sleep_when_busy: false,
             auto_update_enabled: true,
             auto_update_plugins_enabled: true,
+            defer_update_relaunch: true,
+            eager_resume_after_update: true,
             language: default_language(),
             disabled_plugin_ids: Vec::new(),
             update_channel: default_update_channel(),
             disabled_agents: Vec::new(),
             disabled_mcp_agents: Vec::new(),
-            disabled_native_tools: vec!["config".to_string(), "debug".to_string()],
+            mcp_capabilities: Default::default(),
+            settings_mcp_enabled: false,
             intent_tab_title: true,
             suggest_followups: true,
             reduce_transparency: false,
+            progress_tracking: true,
             copy_on_select: true,
             osc52_clipboard: true,
             show_last_prompt: true,
@@ -820,13 +1570,14 @@ impl Default for AppConfig {
             issue_filter: default_issue_filter(),
             experimental_features_enabled: false,
             ai_chat_enabled: false,
-            ai_triage_enabled: false,
-            ai_watchers_enabled: false,
-            scrollback_reflow: false,
+            scrollback_reflow: true,
             cursor_style: default_cursor_style(),
             terminal_renderer: default_terminal_renderer(),
-            ai_terminal_mcp_enabled: false,
+            show_block_timestamps: true,
+            show_scrollbar_marks: true,
+            block_folding_enabled: true,
             index_strategy: default_index_strategy(),
+            index_memory_budget_mb: default_index_memory_budget_mb(),
             standby_timeout_minutes: default_standby_timeout(),
             custom_launchers: Vec::new(),
             inline_blame_enabled: true,
@@ -842,31 +1593,30 @@ impl Default for AppConfig {
     }
 }
 
-impl AppConfig {
-    #[allow(dead_code)]
-    pub(crate) fn is_experimental_enabled(&self, sub_flag: bool) -> bool {
-        self.experimental_features_enabled && sub_flag
-    }
-}
-
 // ---------------------------------------------------------------------------
 // NotificationConfig
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct NotificationSounds {
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates question for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) question: bool,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates error for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) error: bool,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates completion for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) completion: bool,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates warning for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) warning: bool,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates info for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) info: bool,
     /// Buzzer an agent can raise over MCP when it needs the user back.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates attention for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) attention: bool,
 }
 
@@ -883,27 +1633,39 @@ impl Default for NotificationSounds {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct NotificationConfig {
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates enabled for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) enabled: bool,
     #[serde(default = "default_volume")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Sets notification playback volume between zero and one.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub(crate) volume: f64,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates sounds for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) sounds: NotificationSounds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates audio device for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("x-choice-resolver" = "audio_outputs"))]
     pub(crate) audio_device: Option<String>,
-    /// Drop the completion chime for sessions created over MCP/HTTP (`session
-    /// create`, `agent spawn`). An orchestration of many agents otherwise turns
-    /// every finished worker into a beep. Visual signals (activity item, badge,
-    /// OS notification) are unaffected.
+    /// Mute sounds and native notices for parented sessions; retain the legacy
+    /// completion-chime mute for unparented MCP/HTTP-created sessions. Activity,
+    /// bell entries and urgent cards are unaffected.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates silence remote completions for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) silence_remote_completions: bool,
     /// Mirror every toast into the toolbar bell, so a message that auto-dismissed
     /// while the user looked elsewhere is still readable afterwards. Off means
     /// toasts stay transient — they appear, they fade, they leave no trace.
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates toasts in bell for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) toasts_in_bell: bool,
+    /// OS notification when a PR becomes ready, fails CI, gets changes requested
+    /// or is merged. The bell alone is invisible while another app has focus.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates pr native notifications for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_native_notifications: bool,
 }
 
 fn default_true() -> bool {
@@ -923,6 +1685,7 @@ impl Default for NotificationConfig {
             audio_device: None,
             silence_remote_completions: true,
             toasts_in_bell: true,
+            pr_native_notifications: true,
         }
     }
 }
@@ -931,49 +1694,115 @@ impl Default for NotificationConfig {
 // UIPrefsConfig — sidebar, panel sizes, settings nav width
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct UIPrefsConfig {
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates sidebar visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) sidebar_visible: bool,
     #[serde(default = "default_sidebar_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates sidebar width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) sidebar_width: u32,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates diff panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) diff_panel_visible: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates markdown panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) markdown_panel_visible: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates notes panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) notes_panel_visible: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates file browser panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) file_browser_panel_visible: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates plan panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) plan_panel_visible: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates git panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) git_panel_visible: bool,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates outline panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) outline_panel_visible: bool,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates references panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) references_panel_visible: bool,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates ai chat panel visible for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ai_chat_panel_visible: bool,
+    /// File browser listing: "flat" or "tree".
+    #[serde(default = "default_file_browser_view_mode")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates file browser view mode for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["flat","tree"]))]
+    pub(crate) file_browser_view_mode: String,
+    /// Sidebar layout: "auto" (rich for a short list or a finger), "compact" or "rich".
+    #[serde(default = "default_sidebar_density")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates sidebar density for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["auto","compact","rich"]))]
+    pub(crate) sidebar_density: String,
+    /// Appearance used by the mobile PWA; independent of the desktop terminal theme.
+    #[serde(default = "default_mobile_theme")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates mobile theme for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) mobile_theme: String,
     #[serde(default = "default_panel_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates diff panel width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) diff_panel_width: u32,
     #[serde(default = "default_panel_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates markdown panel width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) markdown_panel_width: u32,
     #[serde(default = "default_notes_panel_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates notes panel width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) notes_panel_width: u32,
     #[serde(default = "default_plan_panel_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates plan panel width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) plan_panel_width: u32,
     #[serde(default = "default_git_panel_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates git panel width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) git_panel_width: u32,
     #[serde(default = "default_settings_nav_width")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates settings nav width for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) settings_nav_width: u32,
+    /// Settings "expert mode": when on, every control is visible regardless of
+    /// its default/modified state. Off by default — a control at its default
+    /// value stays hidden until switched on or until the value changes.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates settings expert mode for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) settings_expert_mode: bool,
     /// Diff viewer mode: "split" (side-by-side) or "unified" (inline).
     #[serde(default = "default_diff_view_mode")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates diff view mode for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("enum" = ["split","unified"]))]
     pub(crate) diff_view_mode: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates detached panels for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) detached_panels: std::collections::HashMap<String, String>,
     /// Collapsed state of the GitHub panel sections, keyed by section id
     /// (`my-prs`, `prs`, `issues`). Absent key = the section's own default.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates github section collapsed for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) github_section_collapsed: std::collections::HashMap<String, bool>,
+    /// JSON-encoded Tasks view intent keyed by repository/provider/account; no result pages.
+    /// String leaves keep provider-specific query values compatible with the settings catalogue.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Remembers Tasks source, view and query per repository and account.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) tasks_view_preferences: std::collections::HashMap<String, String>,
 }
 
 fn default_diff_view_mode() -> String {
     "split".to_string()
+}
+
+fn default_file_browser_view_mode() -> String {
+    "tree".to_string()
+}
+
+/// Compact by default (FastAF): `auto` switches a short repo list to the rich
+/// layout, which is not FastAF's Codex-style sidebar. Still user-selectable.
+fn default_sidebar_density() -> String {
+    "compact".to_string()
+}
+
+fn default_mobile_theme() -> String {
+    "commander".to_string()
 }
 
 impl Default for UIPrefsConfig {
@@ -987,21 +1816,29 @@ impl Default for UIPrefsConfig {
             file_browser_panel_visible: false,
             plan_panel_visible: false,
             git_panel_visible: false,
+            outline_panel_visible: false,
+            references_panel_visible: false,
+            ai_chat_panel_visible: false,
+            file_browser_view_mode: default_file_browser_view_mode(),
+            sidebar_density: default_sidebar_density(),
+            mobile_theme: default_mobile_theme(),
             diff_panel_width: default_panel_width(),
             markdown_panel_width: default_panel_width(),
             notes_panel_width: default_notes_panel_width(),
             plan_panel_width: default_plan_panel_width(),
             git_panel_width: default_git_panel_width(),
             settings_nav_width: default_settings_nav_width(),
+            settings_expert_mode: false,
             diff_view_mode: default_diff_view_mode(),
             detached_panels: std::collections::HashMap::new(),
             github_section_collapsed: std::collections::HashMap::new(),
+            tasks_view_preferences: std::collections::HashMap::new(),
         }
     }
 }
 
 fn default_sidebar_width() -> u32 {
-    260
+    300
 }
 fn default_panel_width() -> u32 {
     400
@@ -1016,7 +1853,16 @@ fn default_git_panel_width() -> u32 {
     380
 }
 fn default_settings_nav_width() -> u32 {
-    180
+    232
+}
+
+pub(crate) fn deserialize_ai_chat_master_prompt<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    crate::acp::validate_master_prompt(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,33 +1872,52 @@ fn default_settings_nav_width() -> u32 {
 /// Settings loaded from `.tuic.json` at the repository root.
 /// These are team-shareable (committed to the repo) and override global defaults
 /// but are overridden by per-repo app settings.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct RepoLocalConfig {
+    /// Selected by the repository, bounded by the machine ego profile over ACP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ego_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates base branch for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) base_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy ignored files for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_ignored_files: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy untracked files for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_untracked_files: Option<bool>,
     // Script fields (setup_script, run_script, archive_script) intentionally
     // omitted — executing repo-committed scripts without TOFU prompt is unsafe.
     // Re-add when trust-on-first-use confirmation is implemented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates worktree storage for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) worktree_storage: Option<WorktreeStorage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates delete branch on remove for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) delete_branch_on_remove: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto archive merged for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_archive_merged: Option<bool>,
+    /// Days in the archive before cleanup; 0 disables deletion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Deletes eligible archived worktrees on repository refresh; 0 is Off.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) archive_retention_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates orphan cleanup for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) orphan_cleanup: Option<OrphanCleanup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates pr merge strategy for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) pr_merge_strategy: Option<MergeStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates after merge for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) after_merge: Option<WorktreeAfterMerge>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto delete on pr close for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_delete_on_pr_close: Option<AutoDeleteOnPrClose>,
     /// Allowlist of upstream MCP server names relevant to this repo (None = all)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates mcp upstreams for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) mcp_upstreams: Option<Vec<String>>,
 }
 
@@ -1080,63 +1945,104 @@ pub(crate) fn load_repo_local_config_from_path(
 // RepoSettingsMap — per-repo settings keyed by repo path
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct RepoSettingsEntry {
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates path for the current owner.","operations":["get"],"confirmationClass":"ordinary"}))]
     pub(crate) path: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates display name for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) display_name: String,
     /// null = inherit from global repo defaults
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates base branch for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) base_branch: Option<String>,
     /// null = inherit from global repo defaults
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy ignored files for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_ignored_files: Option<bool>,
     /// null = inherit from global repo defaults
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy untracked files for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_untracked_files: Option<bool>,
     /// null = inherit from global repo defaults
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates setup script for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) setup_script: Option<String>,
     /// null = inherit from global repo defaults
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates run script for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) run_script: Option<String>,
     /// null = inherit from global repo defaults
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates archive script for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) archive_script: Option<String>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates color for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) color: String,
     // -- Worktree settings (null = inherit from global) --
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates worktree storage for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) worktree_storage: Option<WorktreeStorage>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates prompt on create for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) prompt_on_create: Option<bool>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates delete branch on remove for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) delete_branch_on_remove: Option<bool>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto archive merged for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_archive_merged: Option<bool>,
+    /// Days in the archive before cleanup; 0 disables deletion.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Deletes eligible archived worktrees on repository refresh; 0 is Off.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) archive_retention_days: Option<u32>,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates orphan cleanup for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) orphan_cleanup: Option<OrphanCleanup>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates pr merge strategy for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) pr_merge_strategy: Option<MergeStrategy>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates after merge for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) after_merge: Option<WorktreeAfterMerge>,
     /// Auto-fetch interval in minutes (0 or None = disabled)
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto fetch interval minutes for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_fetch_interval_minutes: Option<u32>,
     /// Auto-delete local branch when PR is merged/closed
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto delete on pr close for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_delete_on_pr_close: Option<AutoDeleteOnPrClose>,
     /// Allowlist of upstream MCP server names relevant to this repo (None = all)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates mcp upstreams for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) mcp_upstreams: Option<Vec<String>>,
+    /// None inherits global draft PR visibility; false explicitly shows them.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates repository draft PR visibility.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_hide_drafts: Option<bool>,
+    /// None inherits global conflicting PR visibility; false explicitly shows them.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates repository conflicting PR visibility.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_hide_conflicting: Option<bool>,
+    /// None inherits global CI-failing PR visibility; false explicitly shows them.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates repository CI-failing PR visibility.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) pr_hide_ci_failing: Option<bool>,
     /// Human-readable labels for branches/worktrees, keyed by branch name
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates branch labels for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) branch_labels: HashMap<String, String>,
     /// Gather every worktree of this repo into one consolidated screen (#e767).
     /// Repo-specific, not inheritable: it describes how you want to look at THIS
     /// repo, and a global default would consolidate repos you never asked about.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto consolidate worktrees for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_consolidate_worktrees: bool,
+    /// Repo-specific browser URL for Design Mode; never exported to .tuic.json.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates dev server url for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) dev_server_url: Option<String>,
 }
 
 impl RepoSettingsEntry {
@@ -1153,52 +2059,79 @@ impl RepoSettingsEntry {
             || self.prompt_on_create.is_some()
             || self.delete_branch_on_remove.is_some()
             || self.auto_archive_merged.is_some()
+            || self.archive_retention_days.is_some()
             || self.orphan_cleanup.is_some()
             || self.pr_merge_strategy.is_some()
             || self.after_merge.is_some()
             || self.auto_fetch_interval_minutes.is_some()
             || self.auto_delete_on_pr_close.is_some()
+            || self.pr_hide_drafts.is_some()
+            || self.pr_hide_conflicting.is_some()
+            || self.pr_hide_ci_failing.is_some()
             || self.mcp_upstreams.is_some()
             || !self.branch_labels.is_empty()
             || self.auto_consolidate_worktrees
+            || self.dev_server_url.is_some()
     }
 }
 
 /// Global defaults applied to all repos unless overridden per-repo
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct RepoDefaultsConfig {
     #[serde(default = "default_base_branch")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates base branch for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) base_branch: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy ignored files for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_ignored_files: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates copy untracked files for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) copy_untracked_files: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates setup script for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) setup_script: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates run script for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) run_script: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates archive script for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) archive_script: String,
     // -- Worktree settings --
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates worktree storage for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) worktree_storage: WorktreeStorage,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates prompt on create for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) prompt_on_create: bool,
     #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates delete branch on remove for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) delete_branch_on_remove: bool,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto archive merged for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_archive_merged: bool,
+    /// Days in the archive before cleanup; 0 disables deletion.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Deletes eligible archived worktrees on repository refresh; 0 is Off.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) archive_retention_days: u32,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates orphan cleanup for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) orphan_cleanup: OrphanCleanup,
+    #[serde(default = "default_orphan_cleanup_countdown_seconds")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates orphan cleanup countdown seconds for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) orphan_cleanup_countdown_seconds: u32,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates pr merge strategy for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) pr_merge_strategy: MergeStrategy,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates after merge for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) after_merge: WorktreeAfterMerge,
     /// Auto-fetch interval in minutes (0 = disabled)
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto fetch interval minutes for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_fetch_interval_minutes: u32,
     /// Auto-delete local branch when PR is merged/closed
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto delete on pr close for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_delete_on_pr_close: AutoDeleteOnPrClose,
 }
 
@@ -1215,7 +2148,9 @@ impl Default for RepoDefaultsConfig {
             prompt_on_create: true,
             delete_branch_on_remove: true,
             auto_archive_merged: false,
+            archive_retention_days: 0,
             orphan_cleanup: OrphanCleanup::default(),
+            orphan_cleanup_countdown_seconds: default_orphan_cleanup_countdown_seconds(),
             pr_merge_strategy: MergeStrategy::default(),
             after_merge: WorktreeAfterMerge::default(),
             auto_fetch_interval_minutes: 0,
@@ -1224,14 +2159,19 @@ impl Default for RepoDefaultsConfig {
     }
 }
 
+fn default_orphan_cleanup_countdown_seconds() -> u32 {
+    10
+}
+
 fn default_base_branch() -> String {
     "automatic".to_string()
 }
 
 /// Map of repo path -> settings
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct RepoSettingsMap {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates repos for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) repos: HashMap<String, RepoSettingsEntry>,
 }
 
@@ -1239,85 +2179,348 @@ pub(crate) struct RepoSettingsMap {
 // PromptLibraryConfig
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct PromptEntry {
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates id for the current owner.","operations":["get"],"confirmationClass":"ordinary"}))]
     pub(crate) id: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates label for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) label: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates text for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) text: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates pinned for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) pinned: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct PromptLibraryConfig {
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates prompts for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}, "x-collection-key" = "id"))]
     pub(crate) prompts: Vec<PromptEntry>,
-}
-
-// ---------------------------------------------------------------------------
-// AiPromptsConfig — customizable system prompts for internal AI services
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-pub(crate) struct AiPromptsConfig {
-    #[serde(default)]
-    pub(crate) diff_triage_system_prompt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
 // AgentsConfig — per-agent run configurations
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentRunConfig {
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates name for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) name: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) command: String,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    #[schemars(extend("x-choice-resolver" = "agent_models"))]
+    pub(crate) model: Option<String>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"secret","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set_secret","clear_secret"],"confirmationClass":"ordinary"}))]
     pub(crate) env: HashMap<String, String>,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates is default for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) is_default: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+pub(crate) const DEFAULT_IDLE_CLOSE_MINUTES: u32 = 15;
+
+fn default_idle_close_minutes() -> u32 {
+    DEFAULT_IDLE_CLOSE_MINUTES
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EgoPermissionMode {
+    Plan,
+    Default,
+    Edits,
+    Auto,
+    Yolo,
+}
+
+impl EgoPermissionMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Default => "default",
+            Self::Edits => "edits",
+            Self::Auto => "auto",
+            Self::Yolo => "yolo",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EgoSandbox {
+    Ro,
+    Workspace,
+}
+
+impl EgoSandbox {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ro => "ro",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+/// Unknown saved ego choices leave that option to ego without resetting other settings.
+fn deserialize_ego_choice<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentSettings {
+    /// One-time migration marker: a removed bypass must stay removed.
     #[serde(default)]
+    #[schemars(extend("x-not-setting" = "One-time bypass migration marker; cannot be edited to rerun migration."))]
+    pub(crate) codex_bypass_migrated: bool,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates run configs for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}, "x-collection-key" = "name"))]
     pub(crate) run_configs: Vec<AgentRunConfig>,
+    /// Minutes a finished managed child stays available for follow-up. Zero disables cleanup.
+    #[serde(default = "default_idle_close_minutes")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates idle close minutes for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) idle_close_minutes: u32,
     /// Automatically retry on server errors (5xx) by injecting "continue" into the session.
     /// Retries up to 3 times with exponential backoff (5s, 15s, 30s).
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto retry on error for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) auto_retry_on_error: bool,
     /// Shell command template for headless (one-shot) prompt execution.
     /// Placeholders like `{prompt}` are replaced before invocation.
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) headless_template: Option<String>,
     /// Environment feature flags — key→value pairs injected into every spawn of this agent.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"secret","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set_secret","clear_secret"],"confirmationClass":"ordinary"}))]
     pub(crate) env_flags: HashMap<String, String>,
     /// Per-agent override for intent tab title. None = use agent-aware default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates intent tab title for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) intent_tab_title: Option<bool>,
     /// Per-agent override for suggested follow-ups. None = use global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates suggest followups for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) suggest_followups: Option<bool>,
+    /// Per-agent override for the Progress journal. None = use global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates progress tracking for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) progress_tracking: Option<bool>,
     /// Opt-in: drive busy/idle/awaiting from the agent's native hooks instead of
     /// output heuristics. Enabling installs hooks into the agent's settings file;
     /// disabling removes only TUIC's entries. None/false = heuristics (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) hook_instrumentation: Option<bool>,
+    /// Launch-scoped native status signals. Missing means enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) native_status_signals: Option<bool>,
+    /// Prefer native terminal scrollback for supported agent CLIs. Missing means enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) prevent_alt_screen: Option<bool>,
+    /// Accept the agent's workspace trust dialog on MCP-managed spawns only.
+    /// Missing means enabled; user-opened terminals retain the CLI's behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) skip_trust_dialog: Option<bool>,
+    /// Launch-only ego permission overrides. Missing leaves ego configuration in control.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_ego_choice",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ego_mode: Option<EgoPermissionMode>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_ego_choice",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) ego_sandbox: Option<EgoSandbox>,
+    /// User additions appended after generated modules and global additions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) launch_instructions: Option<String>,
+    /// Disabled modules; missing entries inherit enabled defaults.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Selects generated launch modules for new sessions.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) launch_modules: HashMap<String, bool>,
+    /// Explicitly disable the entire launch playbook, including additions.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Disables all launch instructions for new sessions.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) launch_instructions_disabled: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            run_configs: Vec::new(),
+            codex_bypass_migrated: false,
+            idle_close_minutes: DEFAULT_IDLE_CLOSE_MINUTES,
+            auto_retry_on_error: false,
+            headless_template: None,
+            env_flags: HashMap::new(),
+            intent_tab_title: None,
+            suggest_followups: None,
+            progress_tracking: None,
+            hook_instrumentation: None,
+            native_status_signals: None,
+            prevent_alt_screen: None,
+            skip_trust_dialog: None,
+            ego_mode: None,
+            ego_sandbox: None,
+            launch_instructions: None,
+            launch_modules: HashMap::new(),
+            launch_instructions_disabled: false,
+        }
+    }
+}
+
+fn default_hibernate_minutes() -> u32 {
+    60
+}
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HibernateScope {
+    #[default]
+    BackgroundOnly,
+    Always,
+}
+
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentsConfig {
+    /// Old replacement prompts have been converted to additions.
     #[serde(default)]
+    #[schemars(extend("x-not-setting" = "One-time launch additions migration marker."))]
+    pub(crate) launch_additions_migrated: bool,
+    #[serde(default = "default_hibernate_minutes")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Hibernates unattended resumable agents after awake idle minutes; zero disables.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) hibernate_idle_minutes: u32,
+    /// Zero disables automatic closure; abandoned markers still appear after one hour.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Closes verified abandoned shells after idle hours; zero disables.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) abandoned_shell_hours: u16,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Selects whether idle agents hibernate only in background or always.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) hibernate_scope: HibernateScope,
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates agents for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) agents: HashMap<String, AgentSettings>,
     /// Which agent CLI to use for headless (one-shot) prompt execution when no
     /// agent is running in the active terminal. Chosen by the user in Settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates headless agent for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) headless_agent: Option<String>,
+    /// User additions appended after generated modules for every agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) launch_instructions: Option<String>,
+    /// Disabled modules; missing entries inherit enabled defaults.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Selects generated launch modules for new sessions.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) launch_modules: HashMap<String, bool>,
+    /// Explicitly disable the entire launch playbook, including additions.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Disables all launch instructions for new sessions.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) launch_instructions_disabled: bool,
+}
+
+impl AgentsConfig {
+    /// Saved profile identity, without the literal-agent fallback used by interactive spawn.
+    pub(crate) fn named_run_config(&self, name: &str) -> Option<(&str, &AgentRunConfig)> {
+        self.agents.iter().find_map(|(agent, settings)| {
+            if !crate::agent::is_known_agent_type(agent) {
+                return None;
+            }
+            settings
+                .run_configs
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(name))
+                .map(|profile| (agent.as_str(), profile))
+        })
+    }
+
+    /// Every saved run configuration with its agent, sorted by name.
+    pub(crate) fn saved_run_configs(&self) -> Vec<(&str, &AgentRunConfig)> {
+        let mut saved: Vec<(&str, &AgentRunConfig)> = self
+            .agents
+            .iter()
+            .filter(|(agent, _)| crate::agent::is_known_agent_type(agent))
+            .flat_map(|(agent, settings)| {
+                settings
+                    .run_configs
+                    .iter()
+                    .map(move |profile| (agent.as_str(), profile))
+            })
+            .collect();
+        saved.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        saved
+    }
+
+    pub(crate) fn require_named_run_config(
+        &self,
+        name: &str,
+    ) -> Result<(&str, &AgentRunConfig), String> {
+        self.named_run_config(name).ok_or_else(|| {
+            let mut names: Vec<&str> = self
+                .agents
+                .iter()
+                .filter(|(agent, _)| crate::agent::is_known_agent_type(agent))
+                .flat_map(|(_, settings)| {
+                    settings
+                        .run_configs
+                        .iter()
+                        .map(|profile| profile.name.as_str())
+                })
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            let hint = if names.is_empty() {
+                "Save a run configuration in Settings > Agents first".into()
+            } else {
+                format!("Choose a saved run configuration: {}", names.join(", "))
+            };
+            format!("Automation run configuration '{name}' not found. {hint}")
+        })
+    }
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            launch_additions_migrated: false,
+            agents: HashMap::new(),
+            headless_agent: None,
+            launch_instructions: None,
+            launch_modules: HashMap::new(),
+            launch_instructions_disabled: false,
+            hibernate_idle_minutes: default_hibernate_minutes(),
+            abandoned_shell_hours: 0,
+            hibernate_scope: HibernateScope::default(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ConfigSaveRequest<T> {
+    pub(crate) base: T,
+    pub(crate) config: T,
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,18 +2528,26 @@ pub(crate) struct AgentsConfig {
 // ---------------------------------------------------------------------------
 
 const APP_CONFIG_FILE: &str = "config.json";
+
+// Internal foundation; transport registration is deliberately deferred to cutover.
+#[path = "settings/app.rs"]
+#[allow(
+    dead_code,
+    reason = "owner seam is consumed by the later settings cutover"
+)]
+pub(crate) mod settings_app;
+
 const NOTIFICATION_CONFIG_FILE: &str = "notifications.json";
 const UI_PREFS_FILE: &str = "ui-prefs.json";
-const REPO_SETTINGS_FILE: &str = "repo-settings.json";
+pub(crate) const REPO_SETTINGS_FILE: &str = "repo-settings.json";
 const REPO_DEFAULTS_FILE: &str = "repo-defaults.json";
 const PROMPT_LIBRARY_FILE: &str = "prompt-library.json";
 const REPOSITORIES_FILE: &str = "repositories.json";
 const NOTES_FILE: &str = "notes.json";
 const KEYBINDINGS_FILE: &str = "keybindings.json";
 const PANE_LAYOUT_FILE: &str = "pane-layout.json";
-const AGENTS_CONFIG_FILE: &str = "agents.json";
+pub(crate) const AGENTS_CONFIG_FILE: &str = "agents.json";
 const ACTIVITY_FILE: &str = "activity.json";
-const AI_PROMPTS_FILE: &str = "ai-prompts.json";
 
 // App config
 
@@ -1502,7 +2713,7 @@ fn hydrate_one_secret(
 /// Hydrate every vault-backed secret. Returns `true` when plaintext was migrated out of
 /// config.json and the file must be rewritten.
 #[must_use]
-fn hydrate_app_config_secrets(config: &mut AppConfig) -> bool {
+pub(crate) fn hydrate_app_config_secrets(config: &mut AppConfig) -> bool {
     let session = hydrate_one_secret(
         crate::credentials::Credential::RemoteSessionToken,
         &mut config.services.auth.session_token,
@@ -1607,6 +2818,10 @@ impl AppSecretSnapshot {
 }
 
 fn config_for_disk(mut config: AppConfig) -> Result<AppConfig, String> {
+    // All writes express current intent, including callers omitting this internal field.
+    config.session_duration_migrated = true;
+    config.scrollback_reflow_migrated = true;
+    config.config_recovery = None;
     config.services.auth.session_token_exists = persist_secret(
         crate::credentials::Credential::RemoteSessionToken,
         &config.services.auth.session_token,
@@ -1673,6 +2888,7 @@ pub(crate) fn preserve_redacted_app_config_secrets(config: &mut AppConfig, curre
 /// Objects merge key by key; arrays and scalars replace wholesale, so a caller
 /// can still clear a list by sending an empty one or blank a string by sending
 /// `""`.
+#[cfg(test)]
 pub(crate) fn merge_partial_app_config(
     current: &AppConfig,
     incoming: serde_json::Value,
@@ -1734,6 +2950,37 @@ pub(crate) fn json_merge_delta(
     }
 }
 
+fn apply_json_merge_delta(target: &mut serde_json::Value, delta: &serde_json::Value) {
+    let serde_json::Value::Object(changes) = delta else {
+        *target = delta.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let object = target.as_object_mut().expect("object initialized above");
+    for (key, change) in changes {
+        if change.is_null() {
+            object.remove(key);
+        } else {
+            apply_json_merge_delta(
+                object.entry(key.clone()).or_insert(serde_json::Value::Null),
+                change,
+            );
+        }
+    }
+}
+
+pub(crate) fn apply_typed_json_merge_delta<T: Serialize + DeserializeOwned>(
+    latest: &mut T,
+    delta: &serde_json::Value,
+) -> Result<(), String> {
+    let mut merged = serde_json::to_value(&*latest).map_err(|e| e.to_string())?;
+    apply_json_merge_delta(&mut merged, delta);
+    *latest = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn app_config_delta(base: &AppConfig, desired: &AppConfig) -> Result<serde_json::Value, String> {
     let base =
         serde_json::to_value(base).map_err(|e| format!("Could not serialize base config: {e}"))?;
@@ -1746,12 +2993,58 @@ fn app_config_delta(base: &AppConfig, desired: &AppConfig) -> Result<serde_json:
 /// The remote-access settings whose change requires an HTTP server restart.
 /// Shared by every config writer (IPC `save_config`, `PUT /config`, MCP
 /// `config` save) so the transports cannot drift on when to rebind.
+/// Auth username/password changes are live: middleware and login read the current
+/// config per request, and the credential digest invalidates cached failures.
+/// True when a save turns remote access from off to on.
+fn remote_access_switched_on(old: &AppConfig, new: &AppConfig) -> bool {
+    !old.services.server.enabled && new.services.server.enabled
+}
+
+fn new_session_token() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Switching remote access on issues a fresh session token. The token rides in
+/// every pairing QR code as `?token=`, and over plain HTTP on a LAN that URL and
+/// the cookie it sets cross the network in the clear; without this a token
+/// captured once stays valid for as long as the user never presses Regenerate.
+/// Off->on is the moment no paired device can be using the old one. Restarts and
+/// other saves keep it, so paired phones survive them.
+///
+/// Every writer of `services.server.enabled` calls this before persisting:
+/// `commit_config_change_locked` (IPC `save_config`, `PUT /config`, MCP config)
+/// and the settings transaction (`settings_app`, behind All Settings,
+/// `POST /settings/action` and the MCP settings tool). Pass the token to
+/// [`publish_rotated_session_token`] once the write has succeeded.
+fn rotate_session_token_if_switched_on(
+    previous: &AppConfig,
+    next: &mut AppConfig,
+) -> Option<String> {
+    let token = remote_access_switched_on(previous, next).then(new_session_token)?;
+    next.services.auth.session_token = token.clone();
+    next.services.auth.session_token_exists = true;
+    Some(token)
+}
+
+/// Only once persisted, like `rotate_session_token`: a token that could not be
+/// stored must not start authenticating requests it would lose at restart. Call
+/// before publishing the new config, so a reader that sees remote access on also
+/// sees the new token.
+fn publish_rotated_session_token(state: &crate::AppState, token: Option<String>) {
+    if let Some(token) = token {
+        *state.session_token.write() = token;
+        tracing::info!(
+            source = "auth",
+            "Remote access enabled; issued a new session token"
+        );
+    }
+}
+
 pub(crate) fn server_settings_changed(old: &AppConfig, new: &AppConfig) -> bool {
     old.services.server.enabled != new.services.server.enabled
         || old.services.server.port != new.services.server.port
         || old.services.server.ipv6_enabled != new.services.server.ipv6_enabled
-        || old.services.auth.username != new.services.auth.username
-        || old.services.auth.password_hash != new.services.auth.password_hash
+        || old.services.server.bind_address != new.services.server.bind_address
 }
 
 /// Serializes every read-modify-write-persist of the app config.
@@ -1806,6 +3099,8 @@ fn test_load_app_config_delay() {
 /// for explicit whole-document writes that already hold `CONFIG_WRITE_LOCK`.
 pub(crate) struct ConfigFile<T> {
     path: PathBuf,
+    /// Defaults to `<path>.lock`; set when the file lives in a directory the app must not litter.
+    lock: Option<PathBuf>,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -1821,11 +3116,23 @@ where
     pub(crate) fn at_path(path: PathBuf) -> Self {
         Self {
             path,
+            lock: None,
             _marker: std::marker::PhantomData,
         }
     }
 
+    /// Like `at_path`, with the advisory lock kept at `lock` instead of beside the file.
+    pub(crate) fn at_path_locked_at(path: PathBuf, lock: PathBuf) -> Self {
+        Self {
+            lock: Some(lock),
+            ..Self::at_path(path)
+        }
+    }
+
     fn lock_path(&self) -> PathBuf {
+        if let Some(lock) = &self.lock {
+            return lock.clone();
+        }
         let mut name = self.path.clone().into_os_string();
         name.push(".lock");
         PathBuf::from(name)
@@ -1835,6 +3142,9 @@ where
     /// lock. The returned handle releases the lock on drop.
     fn acquire_file_lock(&self) -> Result<std::fs::File, String> {
         if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create directory: {e}"))?;
+        }
+        if let Some(dir) = self.lock.as_deref().and_then(std::path::Path::parent) {
             std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create directory: {e}"))?;
         }
         let file = std::fs::OpenOptions::new()
@@ -1901,6 +3211,85 @@ where
         Ok(result)
     }
 
+    /// Strict transaction for externally edited documents. An invalid read aborts
+    /// without moving the file an editor may still have open for an in-place save.
+    pub(crate) fn update_preserving_invalid<R, F>(&self, mutate: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut T) -> Result<(R, bool), String>,
+    {
+        let _guard = CONFIG_WRITE_LOCK.lock();
+        let _file_lock = self.acquire_file_lock()?;
+        let mut value = self.load_preserving_invalid()?;
+        let (result, changed) = mutate(&mut value)?;
+        if changed {
+            self.write_atomic(&value)?;
+        }
+        Ok(result)
+    }
+
+    /// Read authoritative safety state without quarantining malformed input. Repeated
+    /// ownership checks must not turn the first read error into an empty default.
+    pub(crate) fn read_preserving_invalid(&self) -> Result<T, String> {
+        let _guard = CONFIG_WRITE_LOCK.lock();
+        let _file_lock = self.acquire_file_lock()?;
+        self.load_preserving_invalid()
+    }
+
+    /// Call only while holding both configuration locks.
+    fn load_preserving_invalid(&self) -> Result<T, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => serde_json::from_str(&content)
+                .map_err(|error| format!("Invalid {}: {error}", self.path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+            Err(error) => Err(format!("Could not read {}: {error}", self.path.display())),
+        }
+    }
+
+    /// Apply only the fields changed by this caller to the latest locked file.
+    /// Arrays are replaced as values; a null delta removes an object key.
+    pub(crate) fn save_delta(&self, base: &T, desired: &T) -> Result<(), String> {
+        let base = serde_json::to_value(base).map_err(|e| e.to_string())?;
+        let desired = serde_json::to_value(desired).map_err(|e| e.to_string())?;
+        let Some(delta) = json_merge_delta(&base, &desired) else {
+            return Ok(());
+        };
+        self.update_with(move |latest: &mut T| {
+            apply_typed_json_merge_delta(latest, &delta)?;
+            Ok(((), true))
+        })
+    }
+
+    /// Apply a caller delta to the domain-normalized latest document, under
+    /// both locks. Derived defaults must not disappear when unchanged in a form.
+    #[cfg(any(feature = "dictation", test))]
+    pub(crate) fn save_delta_normalized(
+        &self,
+        base: &T,
+        desired: &T,
+        recover_invalid: bool,
+        normalize: impl FnOnce(T) -> T,
+    ) -> Result<(), String> {
+        let base_json = serde_json::to_value(base).map_err(|e| e.to_string())?;
+        let desired_json = serde_json::to_value(desired).map_err(|e| e.to_string())?;
+        let delta = json_merge_delta(&base_json, &desired_json);
+        let _guard = CONFIG_WRITE_LOCK.lock();
+        let _file_lock = self.acquire_file_lock()?;
+        let latest = match load_json_config_strict_from_path::<T>(&self.path) {
+            Ok(latest) => latest,
+            Err(_) if recover_invalid => return self.write_atomic(desired),
+            Err(error) => return Err(error),
+        };
+        let before = serde_json::to_value(&latest).map_err(|e| e.to_string())?;
+        let mut latest = normalize(latest);
+        if let Some(delta) = delta {
+            apply_typed_json_merge_delta(&mut latest, &delta)?;
+        }
+        if serde_json::to_value(&latest).map_err(|e| e.to_string())? != before {
+            self.write_atomic(&latest)?;
+        }
+        Ok(())
+    }
+
     /// Write `value` unconditionally, taking only the cross-process file lock — no
     /// stamp check. Takes only the file lock itself, not `CONFIG_WRITE_LOCK`: the
     /// `&ConfigWriteGuard` parameter proves the caller already holds it, which is what
@@ -1914,6 +3303,7 @@ where
 
     /// Write `value` unconditionally under both locks — the "plain locked write" for
     /// callers replacing a whole document, as opposed to `update()`'s read-modify-write.
+    #[cfg(test)]
     pub(crate) fn save(&self, value: &T) -> Result<(), String> {
         let guard = config_write_lock();
         self.write_holding_lock(&guard, value)
@@ -1948,12 +3338,33 @@ pub(crate) fn commit_config_change<F>(
 where
     F: FnOnce(&AppConfig) -> Result<AppConfig, String>,
 {
-    let _guard = config_write_lock();
-
+    let guard = config_write_lock();
     let cached = state.config.read().clone();
-    let mut requested = mutate(&cached)?;
+    let requested = mutate(&cached)?;
+    commit_config_change_locked(state, &guard, cached.clone(), cached, requested)
+}
+
+/// Save an interactive client's edit relative to the snapshot it loaded.
+pub(crate) fn commit_config_save(
+    state: &crate::AppState,
+    base: AppConfig,
+    requested: AppConfig,
+) -> Result<ConfigSaveEffects, String> {
+    let guard = config_write_lock();
+    let cached = state.config.read().clone();
+    commit_config_change_locked(state, &guard, cached, base, requested)
+}
+
+fn commit_config_change_locked(
+    state: &crate::AppState,
+    _guard: &ConfigWriteGuard,
+    cached: AppConfig,
+    mut base: AppConfig,
+    mut requested: AppConfig,
+) -> Result<ConfigSaveEffects, String> {
+    preserve_redacted_app_config_secrets(&mut base, &cached);
     preserve_redacted_app_config_secrets(&mut requested, &cached);
-    let delta = app_config_delta(&cached, &requested)?;
+    let delta = app_config_delta(&base, &requested)?;
 
     let file = ConfigFile::<AppConfig>::new(APP_CONFIG_FILE);
     let _file_lock = file.acquire_file_lock()?;
@@ -1963,10 +3374,21 @@ where
     // There is no competing persisted document in that case, so use the cache as
     // the base rather than dropping those values back to AppConfig::default().
     let latest = if file_exists { latest } else { cached.clone() };
-    let next = merge_partial_app_config(&latest, delta)?;
+    let previous_json = serde_json::to_value(&latest)
+        .map_err(|e| format!("Could not serialize current config: {e}"))?;
+    let mut next_json = previous_json.clone();
+    apply_json_merge_delta(&mut next_json, &delta);
+    let settings_changed = next_json != previous_json;
+    let mut next: AppConfig =
+        serde_json::from_value(next_json).map_err(|e| format!("Invalid config: {e}"))?;
+    // A client older than FastAF's removal of "beta" may still send it.
+    migrate_retired_beta_channel(&mut next);
+
+    let rotated_session_token = rotate_session_token_if_switched_on(&cached, &mut next);
 
     let effects = ConfigSaveEffects {
-        tools_changed: cached.disabled_native_tools != next.disabled_native_tools
+        tools_changed: cached.settings_mcp_enabled != next.settings_mcp_enabled
+            || cached.mcp_capabilities != next.mcp_capabilities
             || cached.collapse_tools != next.collapse_tools,
         server_changed: server_settings_changed(&cached, &next),
     };
@@ -1974,8 +3396,121 @@ where
     // The file lock is already held from the authoritative read above. Acquiring it
     // again through save_app_config_locked would self-deadlock.
     save_app_config_with(next.clone(), |disk_config| file.write_atomic(disk_config))?;
+    publish_rotated_session_token(state, rotated_session_token);
+    let reflow_changed = cached.scrollback_reflow != next.scrollback_reflow;
+    let reflow = next.scrollback_reflow;
+    let chat_selection_changed = cached.ai_chat_sessions != next.ai_chat_sessions
+        || cached.ai_chat_workspace != next.ai_chat_workspace;
     *state.config.write() = next;
+    if chat_selection_changed {
+        crate::ai_chat_selection::publish(state);
+    }
+    // `new_vt_log_buffer` only reads the config when a grid is built, so live
+    // sessions would keep the old behaviour until they are recreated.
+    if reflow_changed {
+        state.apply_reflow_history(reflow);
+    }
+    // Long-lived tasks that own a service's lifecycle watch this instead of
+    // being restarted: see `relay_client::supervise`. It goes here, not in each
+    // caller, because `ConfigSaveEffects` is only actioned by the callers that
+    // remember to — and the relay toggle silently needing an app restart is
+    // exactly what that costs.
+    crate::relay_client::notify_config_changed(state);
+    if settings_changed {
+        crate::settings::api::publish_change(state, "app", !effects.server_changed);
+    }
+    #[cfg(feature = "desktop")]
+    if let Some(app) = state.app_handle.read().as_ref() {
+        crate::background_mode::tray::desktop::schedule_sync(app);
+    }
     Ok(effects)
+}
+
+/// Set `value` at a dotted `path` inside `doc`, requiring every segment to already
+/// exist.
+///
+/// Missing keys are an error rather than being created: `AppConfig` does not
+/// `deny_unknown_fields`, so a misspelled path would be dropped by serde on the way
+/// back and the patch would report success while changing nothing. A created key and a
+/// typo are indistinguishable here, so neither is allowed.
+fn set_json_path(
+    doc: &mut serde_json::Value,
+    path: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Config patch path must not be empty".to_string());
+    }
+    let mut segments: Vec<&str> = path.split('.').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(format!("Config patch path `{path}` has an empty segment"));
+    }
+    let leaf = segments
+        .pop()
+        .expect("split on a non-empty string yields at least one segment");
+
+    let mut cursor = doc;
+    for segment in segments {
+        let map = cursor.as_object_mut().ok_or_else(|| {
+            format!("Config patch path `{path}` descends into a non-object at `{segment}`")
+        })?;
+        cursor = map
+            .get_mut(segment)
+            .ok_or_else(|| format!("Unknown config patch path `{path}`: no field `{segment}`"))?;
+    }
+
+    let map = cursor.as_object_mut().ok_or_else(|| {
+        format!("Config patch path `{path}` descends into a non-object at `{leaf}`")
+    })?;
+    if !map.contains_key(leaf) {
+        return Err(format!(
+            "Unknown config patch path `{path}`: no field `{leaf}`"
+        ));
+    }
+    map.insert(leaf.to_string(), value);
+    Ok(())
+}
+
+/// Apply a single value at a dotted `path` (`"font_size"`, `"services.server.port"`).
+///
+/// Deliberately delegates to `commit_config_change` instead of touching the file
+/// itself: that keeps the patch on the SAME `CONFIG_WRITE_LOCK`, the SAME advisory file
+/// lock and the SAME delta merge as every whole-object save. A second write path would
+/// have to re-derive all three correctly, and the whole point of a per-key patch is to
+/// narrow the delta, not to bypass the locking. Because the mutation touches exactly
+/// one path, the delta `commit_config_change` computes IS that one key — so a
+/// concurrent whole-object save in another process keeps its own fields.
+///
+/// DEFERRED (2026-09-06) — no transport exposes this yet, which is why it is
+/// `#[allow(dead_code)]`: the only callers so far are its tests. Wiring it needs four
+/// registrations, every one of them in a file held by another session at the time this
+/// landed, so none could be added without clobbering peer work:
+///
+/// 1. `src-tauri/src/lib.rs` — a `#[tauri::command] config_patch` wrapper in the
+///    `invoke_handler`. That wrapper MUST action the returned `ConfigSaveEffects`
+///    exactly as `save_config` does (`state.mcp.tools_changed.send(())` on
+///    `tools_changed`, `restart_server(...)` on `server_changed`); dropping them would
+///    make patching `services.server.port` persist without rebinding the listener.
+/// 2. `src-tauri/src/mcp_http/mod.rs` — the matching axum route (IPC/HTTP parity).
+/// 3. `src/transport.ts` — the `COMMAND_TABLE` entry.
+/// 4. `src/__tests__/transport.test.ts` — the mapping assertion.
+///
+/// Until 2-4 exist, a frontend caller would throw `No HTTP mapping for command` in
+/// browser/PWA/remote mode (`transport.ts` `mapCommandToHttp`), so `settings.ts` is
+/// deliberately NOT switched over to it — doing so would trade a working whole-object
+/// save for a per-key path that is broken on every non-desktop transport.
+#[allow(dead_code)]
+pub(crate) fn apply_config_patch(
+    state: &crate::AppState,
+    path: &str,
+    value: serde_json::Value,
+) -> Result<ConfigSaveEffects, String> {
+    commit_config_change(state, |current| {
+        let mut doc = serde_json::to_value(current)
+            .map_err(|e| format!("Could not serialize config: {e}"))?;
+        set_json_path(&mut doc, path, value.clone())?;
+        serde_json::from_value(doc).map_err(|e| format!("Invalid value for `{path}`: {e}"))
+    })
 }
 
 /// Issue a fresh remote-access session token and persist it.
@@ -1990,7 +3525,7 @@ where
 /// `state.session_token` is updated only after the write succeeds: a token that could not
 /// be persisted must not start authenticating requests it would lose at restart.
 pub(crate) fn rotate_session_token(state: &crate::AppState) -> Result<String, String> {
-    let new_token = uuid::Uuid::new_v4().to_string();
+    let new_token = new_session_token();
 
     commit_config_change(state, |current| {
         let mut next = current.clone();
@@ -2003,14 +3538,32 @@ pub(crate) fn rotate_session_token(state: &crate::AppState) -> Result<String, St
     Ok(new_token)
 }
 
+/// Store a session token generated at startup, so the next start reuses it.
+///
+/// `tuic-remote` used to keep its generated token in memory only: every restart
+/// changed it and logged out every paired phone. The change goes through a fresh
+/// load, not the caller's in-memory config, because that one carries runtime
+/// overrides (forced port, forced `lan_auth_bypass = false`) that must not reach
+/// the file. Best effort for the caller: a host without a usable vault keeps the
+/// old in-memory behaviour.
+#[cfg(any(test, not(feature = "desktop")))]
+pub(crate) fn persist_session_token(token: &str) -> Result<(), String> {
+    let mut stored = load_app_config();
+    stored.services.auth.session_token = token.to_string();
+    stored.services.auth.session_token_exists = true;
+    save_app_config(stored)
+}
+
 /// Read and hydrate `config.json` without taking either config lock.
 ///
 /// The caller decides the locking span because both `load_app_config` and the
 /// delta commit path must keep the cross-process lock from this read through a
 /// possible rewrite. The boolean reports that plaintext credentials were moved
-/// to the vault and the redacted document must be persisted before releasing
-/// that lock.
-fn read_app_config_unlocked(path: &std::path::Path) -> Result<(AppConfig, bool), String> {
+/// to the vault, or a legacy default was migrated, and the document
+/// must be persisted before releasing that lock.
+fn read_app_config_unlocked(
+    path: &std::path::Path,
+) -> Result<(AppConfig, bool), AppConfigReadError> {
     if !path.exists() {
         return Ok((AppConfig::default(), false));
     }
@@ -2018,7 +3571,10 @@ fn read_app_config_unlocked(path: &std::path::Path) -> Result<(AppConfig, bool),
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(path = %path.display(), "Could not read config: {e}");
-            return Err(format!("Could not read {}: {e}", path.display()));
+            return Err(AppConfigReadError::Unreadable(format!(
+                "Could not read {}: {e}",
+                path.display()
+            )));
         }
     };
     #[cfg(test)]
@@ -2026,22 +3582,195 @@ fn read_app_config_unlocked(path: &std::path::Path) -> Result<(AppConfig, bool),
     let mut val: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!(path = %path.display(), "Corrupt config: {e}. Using defaults.");
-            return Err(format!("Corrupt {}: {e}", path.display()));
+            tracing::error!(path = %path.display(), "Corrupt config: {e}");
+            return Err(AppConfigReadError::Corrupt(format!(
+                "Corrupt {}: {e}",
+                path.display()
+            )));
         }
     };
     migrate_flat_services(&mut val);
-    match serde_json::from_value(val) {
-        Ok(mut config) => {
-            let migrated_secret = hydrate_app_config_secrets(&mut config);
-            Ok((config, migrated_secret))
-        }
-        Err(e) => {
-            tracing::error!(path = %path.display(), "Config deserialization failed after migration: {e}. Using defaults.");
-            Err(format!(
-                "Config deserialization failed for {}: {e}",
+    let migrated_capabilities = val.get("disabled_native_tools").is_some();
+    let (mut config, fields) = recover_app_config_fields(val).map_err(|e| {
+        AppConfigReadError::Corrupt(format!("Invalid config {}: {e}", path.display()))
+    })?;
+    config.config_recovery = None;
+    let recovered = !fields.is_empty();
+    if recovered {
+        // Preserve the exact original BEFORE hydration or any migration can rewrite it.
+        let aside = preserve_corrupt_config(path).ok_or_else(|| {
+            // DEFERRED (2026-10-31) — a failed backup rename returns defaults instead
+            // of recovered siblings. Recovery currently assumes rename succeeds;
+            // do not rewrite the original when its backup cannot be preserved.
+            AppConfigReadError::Unreadable(format!(
+                "Could not preserve damaged config {}",
                 path.display()
             ))
+        })?;
+        tracing::warn!(source = "config", fields = ?fields, backup = %aside.display(), "Recovered invalid config fields");
+        config.config_recovery = Some(ConfigRecovery {
+            fields,
+            backup_path: aside.display().to_string(),
+        });
+    }
+    let migrated_secret = hydrate_app_config_secrets(&mut config);
+    let migrated_duration = migrate_legacy_session_token_duration(&mut config);
+    let migrated_channel = migrate_retired_beta_channel(&mut config);
+    let migrated_reflow = migrate_legacy_scrollback_reflow(&mut config);
+    Ok((
+        config,
+        recovered
+            || migrated_secret
+            || migrated_duration
+            || migrated_channel
+            || migrated_reflow
+            || migrated_capabilities,
+    ))
+}
+
+/// Use serde itself as the type oracle, not a second schema that can drift.
+/// Valid documents take one parse. Only damaged documents probe saved fields against
+/// a valid baseline; objects recurse so a bad service leaf cannot reset its siblings.
+fn recover_app_config_fields(
+    mut value: serde_json::Value,
+) -> Result<(AppConfig, Vec<String>), String> {
+    let defaults = serde_json::to_value(AppConfig::default()).map_err(|e| e.to_string())?;
+    let object = value
+        .as_object_mut()
+        .ok_or("config must be a JSON object")?;
+    let mut fields = Vec::new();
+    for key in ["font_family", "font_size", "theme"] {
+        if !object.contains_key(key) {
+            object.insert(key.to_string(), defaults[key].clone());
+            fields.push(key.to_string());
+        }
+    }
+    if let Ok(config) = serde_json::from_value(value.clone()) {
+        return Ok((config, fields));
+    }
+    // Retain serde's intentional missing-key semantics (notably the legacy
+    // migration markers and MCP opt-in), rather than filling the whole document
+    // with fresh-install defaults.
+    let baseline: AppConfig = serde_json::from_value(serde_json::json!({
+        "font_family": defaults["font_family"],
+        "font_size": defaults["font_size"],
+        "theme": defaults["theme"],
+    }))
+    .map_err(|e| e.to_string())?;
+    let mut repaired = serde_json::to_value(baseline).map_err(|e| e.to_string())?;
+    for (key, saved) in value.as_object().ok_or("config must be a JSON object")? {
+        let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
+        recover_app_config_field(&mut repaired, &defaults, &pointer, saved, &mut fields);
+    }
+    let config = serde_json::from_value(repaired).map_err(|e| e.to_string())?;
+    fields.sort();
+    fields.dedup();
+    Ok((config, fields))
+}
+
+fn recover_app_config_field(
+    repaired: &mut serde_json::Value,
+    defaults: &serde_json::Value,
+    pointer: &str,
+    saved: &serde_json::Value,
+    fields: &mut Vec<String>,
+) {
+    // Serialized defaults omit some known fields (notably empty secrets).
+    // Insert before probing so serde, not pointer presence, validates the key.
+    // Unknown keys still pass the probe and are ignored by the final typed load.
+    let (parent_pointer, key) = pointer.rsplit_once('/').expect("field pointer");
+    let key = key.replace("~1", "/").replace("~0", "~");
+    let parent = repaired
+        .pointer_mut(parent_pointer)
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("field parent object");
+    let previous = parent.insert(key.clone(), saved.clone());
+    if serde_json::from_value::<AppConfig>(repaired.clone()).is_ok() {
+        return;
+    }
+    let parent = repaired
+        .pointer_mut(parent_pointer)
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("field parent object");
+    if let Some(previous) = previous {
+        parent.insert(key, previous);
+    } else {
+        parent.remove(&key);
+    }
+    if let (Some(saved), Some(default)) = (
+        saved.as_object(),
+        defaults
+            .pointer(pointer)
+            .and_then(|v| v.as_object())
+            .filter(|object| !object.is_empty()),
+    ) {
+        *repaired.pointer_mut(pointer).expect("existing field") =
+            serde_json::Value::Object(default.clone());
+        for (key, child) in saved {
+            let child_pointer = format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1"));
+            recover_app_config_field(repaired, defaults, &child_pointer, child, fields);
+        }
+    } else {
+        if let Some(default) = defaults.pointer(pointer) {
+            *repaired.pointer_mut(pointer).expect("existing field") = default.clone();
+        }
+        fields.push(pointer.trim_start_matches('/').replace('/', "."));
+    }
+}
+
+/// Apply the approved changed default once, never overriding a later explicit false.
+fn migrate_legacy_scrollback_reflow(config: &mut AppConfig) -> bool {
+    if config.scrollback_reflow_migrated {
+        return false;
+    }
+    config.scrollback_reflow = true;
+    config.scrollback_reflow_migrated = true;
+    true
+}
+
+/// FastAF publishes no beta feed, so a saved "beta" (upstream's prerelease
+/// channel, or an install its one-shot enrollment moved there) made every update
+/// check fail with "Unknown update channel". Load it as nightly, the nearest feed
+/// FastAF has, and persist that so it happens once.
+fn migrate_retired_beta_channel(config: &mut AppConfig) -> bool {
+    if config.update_channel != "beta" {
+        return false;
+    }
+    config.update_channel = "nightly".to_string();
+    true
+}
+
+/// Migrate legacy files once, persisting completion even for non-legacy durations.
+/// Later explicit 24h choices must survive every reader and writer.
+fn migrate_legacy_session_token_duration(config: &mut AppConfig) -> bool {
+    if config.session_duration_migrated {
+        return false;
+    }
+    if config.services.auth.session_token_duration_secs == LEGACY_SESSION_TOKEN_DURATION_SECS {
+        config.services.auth.session_token_duration_secs = default_session_token_duration_secs();
+    }
+    config.session_duration_migrated = true;
+    true
+}
+
+/// Why `read_app_config_unlocked` could not produce a config.
+///
+/// The split is not cosmetic. `Corrupt` means the bytes on disk are not a usable config
+/// document, so the caller that falls back to defaults must move the file aside before
+/// anything writes over it. `Unreadable` means the document may be perfectly intact and
+/// only the I/O failed — moving THAT aside would turn a transient permission error into
+/// exactly the data loss the preservation exists to prevent.
+enum AppConfigReadError {
+    Unreadable(String),
+    Corrupt(String),
+}
+
+impl From<AppConfigReadError> for String {
+    fn from(error: AppConfigReadError) -> Self {
+        match error {
+            AppConfigReadError::Unreadable(message) | AppConfigReadError::Corrupt(message) => {
+                message
+            }
         }
     }
 }
@@ -2073,10 +3802,37 @@ pub(crate) fn load_app_config() -> AppConfig {
     };
 
     let path = config_dir().join(APP_CONFIG_FILE);
-    let (config, migrated_secret) =
-        read_app_config_unlocked(&path).unwrap_or_else(|_| (AppConfig::default(), false));
-    if migrated_secret {
-        // A plaintext secret was just moved into the vault. Rewrite immediately —
+    let (config, migrated) = match read_app_config_unlocked(&path) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            // Defaults are the only value that can be returned here, and the very next
+            // thing done with them is a WRITE: lib.rs's first-run branch sees an empty
+            // session token and empty VAPID keys, fills them in and saves the whole
+            // document. Unless the unparseable file is moved aside first, that save
+            // destroys a config the user could still have repaired by hand.
+            //
+            // Only for `Corrupt`. An `Unreadable` file may be intact — renaming on a
+            // transient I/O error would be the data loss this branch exists to avoid.
+            if matches!(error, AppConfigReadError::Corrupt(_)) {
+                match preserve_corrupt_config(&path) {
+                    Some(aside) => tracing::error!(
+                        source = "config",
+                        preserved_as = %aside.display(),
+                        "Unparseable config.json moved aside; starting from defaults"
+                    ),
+                    None => tracing::error!(
+                        source = "config",
+                        path = %path.display(),
+                        "Unparseable config.json could NOT be moved aside; the next save will overwrite it"
+                    ),
+                }
+            }
+            (AppConfig::default(), false)
+        }
+    };
+    if migrated {
+        // A plaintext secret was moved into the vault, or a legacy default
+        // was migrated. Rewrite immediately —
         // config_for_disk strips the cleartext — otherwise it stays readable in
         // config.json until some unrelated setting happens to be saved.
         //
@@ -2089,7 +3845,7 @@ pub(crate) fn load_app_config() -> AppConfig {
         {
             tracing::warn!(
                 source = "config",
-                "Migrated a secret to the vault but could not rewrite config.json: {e}"
+                "Applied a config migration but could not rewrite config.json: {e}"
             );
         }
     }
@@ -2101,7 +3857,6 @@ pub(crate) fn load_app_config() -> AppConfig {
 /// This is reserved for bootstrap and explicit replacement paths. Interactive config
 /// mutation goes through `commit_config_change`, which applies a delta to the latest
 /// locked disk value instead of replacing it with a stale snapshot.
-#[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn save_app_config(config: AppConfig) -> Result<(), String> {
     let _guard = config_write_lock();
     save_app_config_locked(config, &_guard)
@@ -2135,13 +3890,20 @@ where
 // Notification config
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_notification_config() -> NotificationConfig {
-    load_json_config(NOTIFICATION_CONFIG_FILE)
+    load_notification_config_in(&config_dir())
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_notification_config(config: NotificationConfig) -> Result<(), String> {
+/// Read the notification owner document in this AppState's config directory.
+pub(crate) fn load_notification_config_in(dir: &std::path::Path) -> NotificationConfig {
+    load_json_config_from_path(&dir.join(NOTIFICATION_CONFIG_FILE))
+}
+
+pub(crate) fn save_notification_config(
+    base: NotificationConfig,
+    config: NotificationConfig,
+) -> Result<(), String> {
     let file: ConfigFile<NotificationConfig> = ConfigFile::new(NOTIFICATION_CONFIG_FILE);
-    file.save(&config)
+    file.save_delta(&base, &config)
 }
 
 // UI prefs
@@ -2150,10 +3912,9 @@ pub(crate) fn load_ui_prefs() -> UIPrefsConfig {
     load_json_config(UI_PREFS_FILE)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_ui_prefs(config: UIPrefsConfig) -> Result<(), String> {
+pub(crate) fn save_ui_prefs(base: UIPrefsConfig, config: UIPrefsConfig) -> Result<(), String> {
     let file: ConfigFile<UIPrefsConfig> = ConfigFile::new(UI_PREFS_FILE);
-    file.save(&config)
+    file.save_delta(&base, &config)
 }
 
 // Repo settings
@@ -2162,10 +3923,12 @@ pub(crate) fn load_repo_settings() -> RepoSettingsMap {
     load_json_config(REPO_SETTINGS_FILE)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_repo_settings(config: RepoSettingsMap) -> Result<(), String> {
+pub(crate) fn save_repo_settings(
+    base: RepoSettingsMap,
+    config: RepoSettingsMap,
+) -> Result<(), String> {
     let file: ConfigFile<RepoSettingsMap> = ConfigFile::new(REPO_SETTINGS_FILE);
-    file.save(&config)
+    file.save_delta(&base, &config)
 }
 
 /// Set or clear a human-readable label for a branch/worktree within a repo.
@@ -2191,6 +3954,27 @@ pub(crate) fn set_branch_label(
                 entry.branch_labels.remove(&branch_name);
             }
         }
+        true
+    })
+}
+
+/// Follow a branch rename: move the label from `old_name` to `new_name`.
+/// No-op when the repo or the label is unknown; an existing label on `new_name`
+/// is replaced, because the renamed branch is the one the user labelled.
+pub(crate) fn move_branch_label(
+    repo_path: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    let file: ConfigFile<RepoSettingsMap> = ConfigFile::new(REPO_SETTINGS_FILE);
+    file.update(|settings| {
+        let Some(entry) = settings.repos.get_mut(repo_path) else {
+            return false;
+        };
+        let Some(label) = entry.branch_labels.remove(old_name) else {
+            return false;
+        };
+        entry.branch_labels.insert(new_name.to_string(), label);
         true
     })
 }
@@ -2256,6 +4040,9 @@ fn fill_repo_local_defaults(
     if base.delete_branch_on_remove.is_none() {
         base.delete_branch_on_remove = Some(defaults.delete_branch_on_remove);
     }
+    if base.archive_retention_days.is_none() {
+        base.archive_retention_days = Some(defaults.archive_retention_days);
+    }
     if base.auto_archive_merged.is_none() {
         base.auto_archive_merged = Some(defaults.auto_archive_merged);
     }
@@ -2293,6 +4080,9 @@ fn overlay_repo_local_config(
     if entry.delete_branch_on_remove.is_some() {
         base.delete_branch_on_remove = entry.delete_branch_on_remove;
     }
+    if entry.archive_retention_days.is_some() {
+        base.archive_retention_days = entry.archive_retention_days;
+    }
     if entry.auto_archive_merged.is_some() {
         base.auto_archive_merged = entry.auto_archive_merged;
     }
@@ -2314,6 +4104,26 @@ fn overlay_repo_local_config(
     base
 }
 
+/// The `.tuic.json` of a repository, locked from the app config dir so no lock file appears in the
+/// user's repository. Export and the settings adapter share this lock through the same key.
+pub(crate) fn repo_local_file<T>(
+    config_dir: &std::path::Path,
+    root: &std::path::Path,
+) -> ConfigFile<T>
+where
+    T: Serialize + DeserializeOwned + Default,
+{
+    use sha2::{Digest, Sha256};
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let key = hex::encode(Sha256::digest(canonical.to_string_lossy().as_bytes()));
+    ConfigFile::at_path_locked_at(
+        root.join(REPO_LOCAL_CONFIG_FILE),
+        config_dir
+            .join("repo-local-locks")
+            .join(format!("{key}.lock")),
+    )
+}
+
 /// Write the repo's per-repo UI settings into `.tuic.json` at its root so they
 /// can be committed and shared with the team. Preserves any existing `.tuic.json`
 /// values for fields left as inherit-from-global.
@@ -2321,21 +4131,17 @@ fn overlay_repo_local_config(
 pub(crate) fn save_repo_local_config(repo_path: String) -> Result<(), String> {
     let dir = std::path::Path::new(&repo_path);
     let entry = load_repo_settings().repos.remove(&repo_path);
-    // Start from the existing .tuic.json so manually-set fields (e.g. mcp_upstreams) survive.
-    let base = load_repo_local_config_from_path(dir).unwrap_or_default();
-    // Fill worktree/branch fields with global defaults so the export captures the
-    // user's effective settings, not just the (usually empty) per-repo overrides —
-    // otherwise a user who relies on global defaults exports an empty {} file.
-    let base = fill_repo_local_defaults(base, &load_repo_defaults());
-    // Per-repo overrides win over both .tuic.json and global defaults.
-    let merged = match entry.as_ref() {
-        Some(e) => overlay_repo_local_config(base, e),
-        None => base,
-    };
-    let json = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
-    let file = dir.join(REPO_LOCAL_CONFIG_FILE);
-    persist_atomic(&file, json.as_bytes())
-        .map_err(|e| format!("Failed to write {}: {e}", file.display()))?;
+    let defaults = load_repo_defaults();
+    // Share the local settings adapter's lock so export cannot overwrite a concurrent patch.
+    let file = repo_local_file::<RepoLocalConfig>(&config_dir(), dir);
+    file.update_with_strict(|config| {
+        let base = fill_repo_local_defaults(config.clone(), &defaults);
+        *config = match entry.as_ref() {
+            Some(entry) => overlay_repo_local_config(base, entry),
+            None => base,
+        };
+        Ok(((), true))
+    })?;
     Ok(())
 }
 
@@ -2345,10 +4151,12 @@ pub(crate) fn load_repo_defaults() -> RepoDefaultsConfig {
     load_json_config(REPO_DEFAULTS_FILE)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_repo_defaults(config: RepoDefaultsConfig) -> Result<(), String> {
+pub(crate) fn save_repo_defaults(
+    base: RepoDefaultsConfig,
+    config: RepoDefaultsConfig,
+) -> Result<(), String> {
     let file: ConfigFile<RepoDefaultsConfig> = ConfigFile::new(REPO_DEFAULTS_FILE);
-    file.save(&config)
+    file.save_delta(&base, &config)
 }
 
 /// Resolve the effective setup script for a repo using the three-tier hierarchy:
@@ -2487,22 +4295,35 @@ fn validate_keyed_value(
 /// every save into a conflict. Measured 2026-08-31: `ego` went 331 -> 357
 /// additions in 70 seconds while 29 consecutive saves were rejected, wedging
 /// unrelated intent — registering a repository — behind a number nobody edited.
-const DERIVED_BRANCH_FIELDS: [&str; 5] = [
+const DERIVED_BRANCH_FIELDS: [&str; 6] = [
     "additions",
     "deletions",
     "isMerged",
     "lastActiveTerminal",
     "lastCommitTs",
+    "lifecycleStatus",
 ];
 
+/// Both keys a repository record can hold its entries under.
+///
+/// `workspaces` is what every client writes once the identity migration has run;
+/// `branches` is what a document written before workspaces existed still holds,
+/// and it survives on disk until that repo's first save. Both are stripped, so
+/// the comparison behaves identically on either side of the migration — a
+/// document is only ever under one of them, so this is one path, not two.
+const REPOSITORY_ENTRY_KEYS: [&str; 2] = ["workspaces", "branches"];
+
 /// A repository record with `DERIVED_BRANCH_FIELDS` removed, for the conflict
-/// comparison only. Records without branches come back unchanged, so this is
+/// comparison only. Records without entries come back unchanged, so this is
 /// safe to apply to any repo record shape.
 fn repository_intent_view(value: &Option<serde_json::Value>) -> Option<serde_json::Value> {
     let mut record = value.clone()?;
-    if let Some(branches) = record.get_mut("branches").and_then(|b| b.as_object_mut()) {
-        for branch in branches.values_mut() {
-            if let Some(fields) = branch.as_object_mut() {
+    for key in REPOSITORY_ENTRY_KEYS {
+        let Some(entries) = record.get_mut(key).and_then(|b| b.as_object_mut()) else {
+            continue;
+        };
+        for entry in entries.values_mut() {
+            if let Some(fields) = entry.as_object_mut() {
                 for name in DERIVED_BRANCH_FIELDS {
                     fields.remove(name);
                 }
@@ -2803,6 +4624,16 @@ fn repository_file() -> PathBuf {
     config_dir().join(REPOSITORIES_FILE)
 }
 
+/// Paths of the registered repositories: the keys of the `repos` map (the single
+/// owner of that shape is `repositories.json`, see `src/stores/repositories.ts`).
+pub(crate) fn registered_repo_paths() -> Vec<String> {
+    load_repositories()
+        .get("repos")
+        .and_then(|r| r.as_object())
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_repositories() -> serde_json::Value {
     load_json_config_from_path(&repository_file())
@@ -2839,6 +4670,49 @@ pub(crate) fn save_repositories_request(
     }
 }
 
+/// Retract durable restore records before publishing workspace removal.
+/// The locked update preserves unrelated clients' repository edits.
+pub(crate) fn retract_removed_workspace(
+    repo_path: &str,
+    workspace_id: &str,
+) -> Result<bool, String> {
+    ConfigFile::<serde_json::Value>::at_path(repository_file()).update_with_strict(|doc| {
+        let Some(repo) = doc["repos"][repo_path].as_object_mut() else {
+            return Ok((false, false));
+        };
+        // Deleting a branch in the main checkout does not remove that checkout.
+        if ["workspaces", "branches"].iter().any(|key| {
+            repo.get(*key)
+                .and_then(|rows| rows[workspace_id]["worktreePath"].as_str())
+                == Some(repo_path)
+        }) {
+            return Ok((false, false));
+        }
+        let mut changed = false;
+        for key in ["workspaces", "branches"] {
+            if let Some(workspaces) = repo.get_mut(key).and_then(serde_json::Value::as_object_mut) {
+                changed |= workspaces.remove(workspace_id).is_some();
+            }
+        }
+        if let Some(placements) = repo
+            .get_mut("declaredWorktrees")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let before = placements.len();
+            placements
+                .retain(|_, placement| placement["workspaceId"].as_str() != Some(workspace_id));
+            changed |= before != placements.len();
+        }
+        for key in ["activeWorkspaceId", "activeBranch"] {
+            if repo.get(key).and_then(serde_json::Value::as_str) == Some(workspace_id) {
+                repo.insert(key.into(), serde_json::Value::Null);
+                changed = true;
+            }
+        }
+        Ok((changed, changed))
+    })
+}
+
 /// Desktop IPC twin of `PUT /config/repositories`.
 ///
 /// Takes `AppState` only to announce the write: one backend serves the desktop
@@ -2854,6 +4728,7 @@ pub(crate) fn save_repositories(
     let changed = save_repositories_request(config).map_err(|error| error.to_string())?;
     if changed {
         state.notify_repositories_changed();
+        crate::settings::api::publish_change(&state, "repositories_registration", true);
     }
     Ok(())
 }
@@ -2863,16 +4738,339 @@ pub(crate) fn replace_repositories_for_test(config: serde_json::Value) -> Result
     ConfigFile::<serde_json::Value>::at_path(repository_file()).save(&config)
 }
 
-// Pane layout (schema owned by frontend)
+/// Roots this project's own tooling and agent worktrees have been observed
+/// writing throwaway shell-repo rows under — story 763-d219's live evidence:
+/// 15 ghost rows under macOS temp roots and `$HOME/Gits/.tmp`. Deliberately a
+/// fixed, narrow allowlist: a path outside these roots never qualifies as a
+/// stale-temp candidate no matter how empty the rest of its record looks,
+/// because a legitimate repository that is merely offline, unmounted, or on a
+/// different drive must survive the classifier unchanged.
+fn recognized_temp_roots() -> Vec<PathBuf> {
+    tuic_core::temp_paths::recognized_temp_roots()
+}
+
+/// `Path::starts_with` compares path COMPONENTS, so it does not collapse a
+/// `..` the way the filesystem would: `/tmp/../legit`'s components are
+/// `[RootDir, "tmp", ParentDir, "legit"]`, and that sequence still literally
+/// starts with `[RootDir, "tmp"]` even though the path it names is `/legit`,
+/// entirely outside any temp root. The candidate path never exists on disk
+/// (that is the first classifier check), so it cannot be `canonicalize`d to
+/// resolve the traversal honestly — refusing to classify any path containing
+/// a `..` component is the only safe answer, not a false negative to worry
+/// about: a legitimate repository's registered path is never written with a
+/// literal `..` in it in the first place.
+fn is_under_recognized_temp_root(path: &str) -> bool {
+    let candidate = PathBuf::from(path);
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    recognized_temp_roots()
+        .iter()
+        .any(|root| !root.as_os_str().is_empty() && candidate.starts_with(root))
+}
+
+/// One candidate the classifier found — enough for the frontend to preview
+/// and name the exact scope before the user confirms a repair (see
+/// `repair_stale_temp_repositories_request`, which re-validates every path
+/// named here against the document on disk before touching anything).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StaleTempCandidate {
+    pub(crate) path: String,
+    #[serde(rename = "displayName")]
+    pub(crate) display_name: String,
+}
+
+fn json_is_absent_or_empty_array(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Array(a)) => a.is_empty(),
+        Some(_) => false,
+    }
+}
+
+fn json_is_present_non_null(value: Option<&serde_json::Value>) -> bool {
+    !matches!(value, None | Some(serde_json::Value::Null))
+}
+
+fn metadata_error_proves_missing(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
+/// A repository record classifies as a "stale-temp" ghost only when ALL of the
+/// following hold — this mirrors the live-evidence shape of the 15 ghost rows
+/// exactly, and is intentionally an ALL-of test rather than a heuristic score:
+/// a record failing even one check is left alone, so a legitimate repository
+/// entry (offline, unmounted, or simply not yet reconnected) always survives.
+///
+/// 1. The local path does not exist.
+/// 2. The path falls under a [`recognized_temp_roots`] root.
+/// 3. `isGitRepo` is explicitly `false` (never merely absent/true).
+/// 4. There is exactly one workspace, and it is shell-only: no live or saved
+///    terminals, no last-active terminal, no diffstat/commit/merge state, no
+///    parent, no run command, no CI auto-heal.
+/// 5. The repository carries no user metadata: default UI booleans
+///    (`collapsed`/`parked` false), and no `connectionId`/`initials`.
+fn classify_stale_temp_repo(path: &str, repo: &serde_json::Value) -> Option<StaleTempCandidate> {
+    let obj = repo.as_object()?;
+
+    match std::fs::metadata(path) {
+        Ok(_) => return None, // local path exists — never a candidate.
+        Err(error) if metadata_error_proves_missing(&error) => {}
+        Err(_) => return None, // permission/I/O uncertainty is not proof of absence.
+    }
+    if !is_under_recognized_temp_root(path) {
+        return None;
+    }
+    if obj.get("isGitRepo").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+
+    let workspaces = obj.get("workspaces")?.as_object()?;
+    if workspaces.len() != 1 {
+        return None;
+    }
+    let (_, workspace) = workspaces.iter().next()?;
+    let ws = workspace.as_object()?;
+
+    // Require the workspace to say EXPLICITLY that it is shell-only — absent
+    // or `false` both survive. `isShell` is the one positive signal the
+    // classifier has that a workspace was never a real checkout; every other
+    // check here is a negative absence test, so this one stays strict on
+    // purpose rather than defaulting an unmarked record into "probably fine".
+    if ws.get("isShell").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    if !json_is_absent_or_empty_array(ws.get("terminals")) {
+        return None;
+    }
+    if !json_is_absent_or_empty_array(ws.get("savedTerminals")) {
+        return None;
+    }
+    if json_is_present_non_null(ws.get("lastActiveTerminal")) {
+        return None;
+    }
+    if json_is_present_non_null(ws.get("parentRepoPath")) {
+        return None;
+    }
+    if json_is_present_non_null(ws.get("runCommand")) {
+        return None;
+    }
+    if json_is_present_non_null(ws.get("ciAutoHeal")) {
+        return None;
+    }
+    if json_is_present_non_null(ws.get("lastCommitTs")) {
+        return None;
+    }
+    let additions = ws.get("additions").and_then(|v| v.as_i64()).unwrap_or(0);
+    let deletions = ws.get("deletions").and_then(|v| v.as_i64()).unwrap_or(0);
+    if additions != 0 || deletions != 0 {
+        return None;
+    }
+    if ws.get("isMerged").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+
+    if obj.get("collapsed").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    if obj.get("parked").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    if json_is_present_non_null(obj.get("connectionId")) {
+        return None;
+    }
+    if obj
+        .get("initials")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        return None;
+    }
+
+    let display_name = obj
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string();
+    Some(StaleTempCandidate {
+        path: path.to_string(),
+        display_name,
+    })
+}
+
+fn classify_all_stale_temp_repos(document: &serde_json::Value) -> Vec<StaleTempCandidate> {
+    let Some(repos) = document.get("repos").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<StaleTempCandidate> = repos
+        .iter()
+        .filter_map(|(path, repo)| classify_stale_temp_repo(path, repo))
+        .collect();
+    candidates.sort_by(|a, b| a.path.cmp(&b.path));
+    candidates
+}
+
+/// Preview the exact scope a repair would touch, without mutating anything.
+/// Reads `repositories.json` fresh from disk so the preview always reflects
+/// the current document, whichever client last wrote it.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn list_stale_temp_repository_candidates() -> Vec<StaleTempCandidate> {
+    classify_all_stale_temp_repos(&load_repositories())
+}
+
+/// What a repair actually did — named exactly, so a caller (and its tests)
+/// can assert on the scope rather than trust a bare success flag.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StaleTempRepairSummary {
+    pub(crate) removed: Vec<String>,
+    #[serde(rename = "backupPath")]
+    pub(crate) backup_path: String,
+}
+
+/// User-explicit repair: remove exactly the rows named in `paths`, and only
+/// those rows, from `repositories.json` — never an implicit/global sweep of
+/// every non-existent path.
+///
+/// Re-validates EVERY requested path against the classifier using the
+/// document as it stands on disk *right now*, inside the same file lock as
+/// the write. A path that no longer classifies (reconnected, edited, or never
+/// stale to begin with — a stale preview, a race with another client, or a
+/// caller that skipped the preview) fails the WHOLE request before anything
+/// is written: this is one versioned transactional delta, not a best-effort
+/// sweep, so a partially-stale request must not silently repair the rest.
+///
+/// An exact backup of the pre-repair document is written to
+/// `repositories.repair-backup-<UTC timestamp>.json` in the config directory
+/// before the mutation. That backup is deliberately a human recovery artifact
+/// for *after* a successful repair the user wants to undo — it is not what
+/// makes a *failed* write safe. `ConfigFile::write_atomic` (temp file +
+/// fsync + rename) already guarantees a failed write never partially
+/// overwrites the live document, so there is nothing to "restore" in that
+/// case: the original file was never touched. Recorded as a deliberate design
+/// trade-off in story 763-d219's worklog rather than layering a second,
+/// redundant restore-on-failure path on top of an already-atomic write.
+pub(crate) fn repair_stale_temp_repositories_request(
+    paths: Vec<String>,
+) -> Result<StaleTempRepairSummary, String> {
+    if paths.is_empty() {
+        return Err("repair_stale_temp_repositories: no paths named".to_string());
+    }
+    // Dedupe up front, preserving first-occurrence order: a caller repeating a
+    // path (a double-click, a retried request) must not echo it twice in
+    // `summary.removed`, and downstream this is the single list every other
+    // step iterates — no second place that could disagree on how many rows
+    // this request actually names.
+    let mut seen = std::collections::HashSet::with_capacity(paths.len());
+    let paths: Vec<String> = paths
+        .into_iter()
+        .filter(|p| seen.insert(p.clone()))
+        .collect();
+    let requested: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
+
+    let file: ConfigFile<serde_json::Value> = ConfigFile::at_path(repository_file());
+    file.update_with_strict(|doc| {
+        if doc.is_null() {
+            *doc = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let root = doc
+            .as_object_mut()
+            .ok_or_else(|| "repositories.json root must be an object".to_string())?;
+        let repos = root
+            .get("repos")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut invalid = Vec::new();
+        for path in &paths {
+            let matches_now = repos
+                .get(path.as_str())
+                .is_some_and(|repo| classify_stale_temp_repo(path, repo).is_some());
+            if !matches_now {
+                invalid.push(path.clone());
+            }
+        }
+        if !invalid.is_empty() {
+            return Err(format!(
+                "repair refused — no longer a stale-temp candidate on disk (reload and retry): {}",
+                invalid.join(", ")
+            ));
+        }
+
+        // Backup taken from the exact document this repair is about to mutate,
+        // written before any mutation, inside the same file lock — no window
+        // where a concurrent writer could land between backup and mutation.
+        let backup_json = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let backup_path = config_dir().join(format!("repositories.repair-backup-{timestamp}.json"));
+        persist_atomic(&backup_path, backup_json.as_bytes())?;
+
+        let root = doc.as_object_mut().expect("validated as an object above");
+        if let Some(repos) = root.get_mut("repos").and_then(|v| v.as_object_mut()) {
+            for path in &paths {
+                repos.remove(path);
+            }
+        }
+        if let Some(order) = root.get_mut("repoOrder").and_then(|v| v.as_array_mut()) {
+            order.retain(|v| v.as_str().is_none_or(|p| !requested.contains(p)));
+        }
+        if let Some(groups) = root.get_mut("groups").and_then(|v| v.as_object_mut()) {
+            for group in groups.values_mut() {
+                if let Some(order) = group
+                    .as_object_mut()
+                    .and_then(|g| g.get_mut("repoOrder"))
+                    .and_then(|v| v.as_array_mut())
+                {
+                    order.retain(|v| v.as_str().is_none_or(|p| !requested.contains(p)));
+                }
+            }
+        }
+        if let Some(active) = root.get("activeRepoPath").and_then(|v| v.as_str())
+            && requested.contains(active)
+        {
+            root.insert("activeRepoPath".to_string(), serde_json::Value::Null);
+        }
+
+        Ok((
+            StaleTempRepairSummary {
+                removed: paths.clone(),
+                backup_path: backup_path.to_string_lossy().to_string(),
+            },
+            true,
+        ))
+    })
+}
+
+/// Desktop IPC twin of `POST /config/repositories/stale-temp` — see
+/// `save_repositories` above for why the state param exists: a successful
+/// repair is a document change every other open window must re-read.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) fn repair_stale_temp_repositories(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    paths: Vec<String>,
+) -> Result<StaleTempRepairSummary, String> {
+    let summary = repair_stale_temp_repositories_request(paths)?;
+    state.notify_repositories_changed();
+    Ok(summary)
+}
+
+// Pane layout (typed geometry validated by the shared Rust owner)
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_pane_layout() -> serde_json::Value {
     load_json_config(PANE_LAYOUT_FILE)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_pane_layout(layout: serde_json::Value) -> Result<(), String> {
-    let file: ConfigFile<serde_json::Value> = ConfigFile::new(PANE_LAYOUT_FILE);
-    file.save(&layout)
+pub(crate) fn save_pane_layout(
+    base: serde_json::Value,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    crate::settings::ui_owners::save_delta(PANE_LAYOUT_FILE, base, layout, false)
 }
 
 // Prompt library
@@ -2881,26 +5079,29 @@ pub(crate) fn load_prompt_library() -> PromptLibraryConfig {
     load_json_config(PROMPT_LIBRARY_FILE)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_prompt_library(config: PromptLibraryConfig) -> Result<(), String> {
+pub(crate) fn save_prompt_library(
+    base: PromptLibraryConfig,
+    config: PromptLibraryConfig,
+) -> Result<(), String> {
     let file: ConfigFile<PromptLibraryConfig> = ConfigFile::new(PROMPT_LIBRARY_FILE);
-    file.save(&config)
+    file.save_delta(&base, &config)
 }
 
-// Notes (opaque JSON — schema owned by frontend)
+mod ideas;
+pub(crate) use ideas::{add_idea, list_ideas, update_idea};
+
+// Notes (opaque JSON with backend-owned keyed mutations)
 //
 // Unlike every other config this one FAILS instead of defaulting: the frontend refuses to
 // persist until a load succeeds, so an unreadable notes.json can no longer be silently
 // replaced by an empty array on the next mutation (GH #107).
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_notes() -> Result<serde_json::Value, String> {
-    load_json_config_strict(NOTES_FILE)
+    ideas::load_notes()
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_notes(config: serde_json::Value) -> Result<(), String> {
-    let file: ConfigFile<serde_json::Value> = ConfigFile::new(NOTES_FILE);
-    file.save(&config)
+pub(crate) fn save_notes(base: serde_json::Value, config: serde_json::Value) -> Result<(), String> {
+    ideas::save_notes(base, config)
 }
 
 // Activity center (opaque JSON — schema owned by frontend)
@@ -2910,45 +5111,177 @@ pub(crate) fn load_activity() -> serde_json::Value {
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_activity(items: serde_json::Value) -> Result<(), String> {
+pub(crate) fn save_activity(
+    base: serde_json::Value,
+    items: serde_json::Value,
+) -> Result<(), String> {
     let file: ConfigFile<serde_json::Value> = ConfigFile::new(ACTIVITY_FILE);
-    file.save(&items)
+    file.save_delta(&base, &items)
 }
 
-// Keybindings (opaque JSON — schema owned by frontend)
+// Keybindings (typed action/key records validated by the shared Rust owner)
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_keybindings() -> serde_json::Value {
     load_json_config(KEYBINDINGS_FILE)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_keybindings(config: serde_json::Value) -> Result<(), String> {
-    let file: ConfigFile<serde_json::Value> = ConfigFile::new(KEYBINDINGS_FILE);
-    file.save(&config)
+pub(crate) fn save_keybindings(
+    base: serde_json::Value,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    crate::settings::ui_owners::save_delta(KEYBINDINGS_FILE, base, config, true)
 }
 
 // Agents config
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_agents_config() -> AgentsConfig {
-    load_json_config(AGENTS_CONFIG_FILE)
-}
-
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_agents_config(config: AgentsConfig) -> Result<(), String> {
     let file: ConfigFile<AgentsConfig> = ConfigFile::new(AGENTS_CONFIG_FILE);
-    file.save(&config)
+    match file.update_with_strict(|config| {
+        let launch_changed = crate::launch_instructions::migrate_additions(config);
+        // Older typed agents.json writers discard unknown fields. Keep the
+        // durable migration bit outside their document, under the existing lock.
+        let stamp = config_dir().join("codex-bypass-migrated");
+        if stamp.try_exists().map_err(|error| error.to_string())? {
+            let settings = config.agents.entry("codex".into()).or_default();
+            let changed = !settings.codex_bypass_migrated;
+            settings.codex_bypass_migrated = true;
+            return Ok((config.clone(), changed || launch_changed));
+        }
+        let changed = migrate_codex_bypass(config) || launch_changed;
+        persist_atomic(&stamp, b"1")?;
+        Ok((config.clone(), changed))
+    }) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(source = "config", "Codex args migration failed: {error}");
+            load_json_config(AGENTS_CONFIG_FILE)
+        }
+    }
 }
 
-// AI prompts
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn load_ai_prompts() -> AiPromptsConfig {
-    load_json_config(AI_PROMPTS_FILE)
+pub(crate) const CODEX_BYPASS_ARG: &str = "--dangerously-bypass-approvals-and-sandbox";
+
+fn migrate_codex_bypass(config: &mut AgentsConfig) -> bool {
+    let settings = config.agents.entry("codex".into()).or_default();
+    if settings.codex_bypass_migrated {
+        return false;
+    }
+    if settings.run_configs.is_empty() {
+        settings.run_configs.push(AgentRunConfig {
+            name: "Codex Default".into(),
+            command: "codex".into(),
+            args: vec![CODEX_BYPASS_ARG.into()],
+            model: None,
+            env: HashMap::new(),
+            is_default: true,
+        });
+    } else {
+        let index = settings
+            .run_configs
+            .iter()
+            .position(|rc| rc.is_default)
+            .unwrap_or(0);
+        let rc = &mut settings.run_configs[index];
+        let name = rc.command.rsplit(['/', '\\']).next().unwrap_or(&rc.command);
+        let direct = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("codex"));
+        if direct
+            && !rc
+                .args
+                .iter()
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| arg == CODEX_BYPASS_ARG)
+        {
+            rc.args.insert(0, CODEX_BYPASS_ARG.into());
+        }
+    }
+    settings.codex_bypass_migrated = true;
+    true
+}
+
+pub(crate) fn save_agents_config(base: AgentsConfig, config: AgentsConfig) -> Result<(), String> {
+    let file: ConfigFile<AgentsConfig> = ConfigFile::new(AGENTS_CONFIG_FILE);
+    file.save_delta(&base, &config)?;
+    refresh_launch_instructions();
+    Ok(())
+}
+
+/// The instruction files are what launches read; refresh them with the edit.
+/// The save itself succeeded, and every launch rewrites them again.
+pub(crate) fn refresh_launch_instructions() {
+    if let Err(error) = crate::launch_instructions::write_files(&config_dir()) {
+        tracing::error!(
+            source = "agent_hooks",
+            "Failed to write launch instructions: {error}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config defaults — read-only, cross-domain, for Settings "expert mode"
+// ---------------------------------------------------------------------------
+
+/// The default value of every config domain a Settings page edits. An expert
+/// control compares its live value against the matching field here to decide
+/// whether it is "at default" (hidden in basic mode) or "modified" (always
+/// shown). Fields use each domain's defaults and its startup migrations — the same
+/// value deserialization falls back to when a config file is missing or a
+/// field is absent (see `load_json_config`) — never a hand-copied literal.
+#[derive(Serialize)]
+pub(crate) struct ConfigDefaults {
+    pub(crate) app: AppConfig,
+    pub(crate) notifications: NotificationConfig,
+    /// Default for one entry of `AgentsConfig::agents` — there is no single
+    /// "default" for the map itself, only for an unconfigured agent's settings.
+    pub(crate) agent_settings: AgentSettings,
+    pub(crate) repo_defaults: RepoDefaultsConfig,
+    /// `AgentsConfig`-level fields such as `headless_agent`. `None` fields are
+    /// omitted by `skip_serializing_if`; a missing key means `null`.
+    pub(crate) agents: AgentsConfig,
+    /// Additional GitHub accounts (`github_accounts.json`); the default is no
+    /// account. Settings hides the "Add another GitHub account" entry point
+    /// while the registry is at this default.
+    pub(crate) github_accounts: crate::github_account::GitHubAccountRegistry,
+    /// Absent (not merely empty) outside desktop builds: `mod dictation` does
+    /// not exist under `--no-default-features` (e.g. `tuic-remote`), and this
+    /// route is never registered there either (see `build_remote_router`).
+    #[cfg(feature = "dictation")]
+    pub(crate) dictation: DictationConfig,
+    /// The resolved launch-instruction previews and the marker
+    /// tokens the Settings editor warns about when an edit drops one.
+    pub(crate) launch_instructions: LaunchInstructionsDefaults,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LaunchInstructionsDefaults {
+    pub(crate) default_text: String,
+    pub(crate) required_markers: Vec<&'static str>,
+    pub(crate) effective_text: std::collections::HashMap<String, String>,
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_ai_prompts(config: AiPromptsConfig) -> Result<(), String> {
-    let file: ConfigFile<AiPromptsConfig> = ConfigFile::new(AI_PROMPTS_FILE);
-    file.save(&config)
+pub(crate) fn get_config_defaults(
+    preview: Option<crate::settings::agents::LaunchPreview>,
+) -> ConfigDefaults {
+    let mut agents = AgentsConfig::default();
+    migrate_codex_bypass(&mut agents);
+    crate::launch_instructions::migrate_additions(&mut agents);
+    ConfigDefaults {
+        app: AppConfig::default(),
+        notifications: NotificationConfig::default(),
+        agent_settings: AgentSettings::default(),
+        repo_defaults: RepoDefaultsConfig::default(),
+        agents,
+        github_accounts: crate::github_account::GitHubAccountRegistry::default(),
+        // `speech_engine` is empty in the struct so a file without it can be
+        // told apart from a choice (`dictation::commands`); a brand-new install
+        // loads it as "pocket" (local), and the settings panel compares against that.
+        #[cfg(feature = "dictation")]
+        dictation: DictationConfig::fresh_defaults(),
+        launch_instructions: crate::settings::agents::launch_instruction_defaults(preview),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3072,6 +5405,34 @@ pub(crate) fn get_note_images_dir() -> String {
 
 #[cfg(test)]
 mod tests {
+    // Catches: the durable migration stamp overrides a user's later bypass opt-in.
+    #[test]
+    fn critic_migration_does_not_undo_deliberate_bypass_reenable() {
+        let root = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(root.path().to_path_buf());
+        let initial = load_agents_config();
+        let mut removed = initial.clone();
+        removed.agents.get_mut("codex").unwrap().run_configs[0]
+            .args
+            .clear();
+        save_agents_config(initial, removed).unwrap();
+        let disabled = load_agents_config();
+        assert_eq!(
+            disabled.agents["codex"].run_configs[0].args,
+            [] as [std::string::String; 0]
+        );
+        let mut enabled = disabled.clone();
+        enabled.agents.get_mut("codex").unwrap().run_configs[0].args =
+            vec!["--dangerously-bypass-approvals-and-sandbox".into()];
+        save_agents_config(disabled, enabled).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                load_agents_config().agents["codex"].run_configs[0].args,
+                vec!["--dangerously-bypass-approvals-and-sandbox"]
+            );
+        }
+    }
+
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -3085,6 +5446,85 @@ mod tests {
         save_repositories_request(config)
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// #763-d219 — between 2026-09-11 and 2026-09-13, fifteen `tempfile` roots
+    /// (`/private/var/folders/…/T/.tmpXXXXXX` and `~/Gits/.tmp/.tmpXXXXXX`)
+    /// appeared as repositories in Boss's real `repositories.json`. They got
+    /// there because `config_dir` used to fall back to the *user's* directory
+    /// whenever a test forgot `set_config_dir_override`: the leak was silent,
+    /// so every such test wrote its disposable fixture into production state.
+    ///
+    /// A test build must never be able to name that directory, with or
+    /// without an explicit override. A first attempt made the no-override
+    /// branch panic instead, which is loud but reintroduced a worse failure
+    /// mode: a `#[should_panic]` test exercising exactly this panic poisoned
+    /// `CONFIG_DIR_OVERRIDE` on unwind (a temporary `MutexGuard` was still
+    /// alive through the panicking expression) and a subsequent
+    /// `.lock().unwrap()` on it during `Drop` aborted the whole process
+    /// (SIGABRT), and — independently — any test that set its own override
+    /// via an `isolated_config()`-style helper and THEN called a shared
+    /// helper that also tried to set one self-deadlocked on
+    /// `CONFIG_DIR_EXCLUSIVE`, which is not reentrant. `test_fallback_config_dir`
+    /// is the fix: a safe, process-scoped, non-production fallback rather
+    /// than a panic — see its own doc comment for why silent-but-safe beats
+    /// loud-but-fragile here.
+    #[test]
+    fn config_dir_in_a_test_never_names_the_real_user_directory() {
+        let _exclusive = without_config_dir_override();
+        let resolved = config_dir();
+        assert!(
+            resolved.starts_with(crate::test_support::test_temp_root()),
+            "with no override in scope, config_dir() must resolve under the checkout's test temp \
+             directory, never the platform config directory: got {}",
+            resolved.display()
+        );
+    }
+
+    /// Root's audit requirement for #763-d219: prove the fallback and the real
+    /// platform directory can never coincide, not just assume it from where
+    /// the fallback happens to be constructed. `dirs::config_dir()` is a pure
+    /// lookup (no side effects, no directory creation) — safe to call directly
+    /// here without going through the guarded `config_dir()` wrapper.
+    #[test]
+    fn fallback_config_dir_is_never_the_real_directory() {
+        let _exclusive = without_config_dir_override();
+        let fallback = config_dir();
+        if let Some(real_platform_dir) = dirs::config_dir() {
+            assert_ne!(
+                fallback,
+                real_platform_dir.join("com.tuic.commander"),
+                "the test fallback must never equal the real platform config directory"
+            );
+        }
+        if let Some(home) = dirs::home_dir() {
+            assert_ne!(
+                fallback,
+                home.join(".tuicommander"),
+                "the test fallback must never equal the legacy dotdir fallback either"
+            );
+        }
+    }
+
+    /// The fallback is a `OnceLock` — the same value every time within one
+    /// process, which is exactly the "no override, but consistent within this
+    /// test" behavior a test relying on repeated `config_dir()` calls needs.
+    #[test]
+    fn fallback_config_dir_is_stable_across_calls_in_the_same_process() {
+        let _exclusive = without_config_dir_override();
+        assert_eq!(config_dir(), config_dir());
+    }
+
+    /// The guard the test above uses must actually restore the override, or it
+    /// would poison every test that runs after it in the same process.
+    #[test]
+    fn clearing_the_override_does_not_outlive_its_guard() {
+        let dir = TempDir::new().expect("temp dir");
+        {
+            let _cleared = without_config_dir_override();
+        }
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        assert_eq!(config_dir(), dir.path());
     }
 
     /// Helper: run load/save with a temp directory to avoid touching real config.
@@ -3133,6 +5573,123 @@ mod tests {
         );
     }
 
+    /// Corrupt the same file `n` times, returning the content written on each
+    /// pass so a test can identify which backup holds what.
+    fn corrupt_n_times(path: &std::path::Path, n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                let content = format!("{{ corrupt pass {i}");
+                fs::write(path, &content).unwrap();
+                let loaded = load_json_config_strict_from_path::<serde_json::Value>(path);
+                assert!(loaded.is_err(), "pass {i} must not load");
+                content
+            })
+            .collect()
+    }
+
+    #[test]
+    fn corrupt_backups_are_capped_and_the_newest_always_survives() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("notes.json");
+
+        let written = corrupt_n_times(&path, MAX_CORRUPT_BACKUPS + 3);
+
+        let kept = corrupt_backups(dir.path());
+        assert_eq!(
+            kept.len(),
+            MAX_CORRUPT_BACKUPS,
+            "{} corruptions must leave exactly {MAX_CORRUPT_BACKUPS} backups, found {kept:?}",
+            written.len()
+        );
+
+        // Criterion 3, stated as the property that matters rather than as a count:
+        // the file a user would reach for is the LAST one, and no retention rule
+        // may delete it. Identified by content, not by name — the uuid is random.
+        let contents: Vec<String> = kept
+            .iter()
+            .map(|p| fs::read_to_string(p).unwrap())
+            .collect();
+        let newest = written.last().unwrap();
+        assert!(
+            contents.contains(newest),
+            "the most recent backup ({newest:?}) was reaped; kept {contents:?}"
+        );
+    }
+
+    #[test]
+    fn reaping_is_scoped_to_one_config_file() {
+        // A storm of corruptions in one file must not evict another file's only
+        // backup: that would make the cleanup cause the data loss the rename
+        // exists to prevent.
+        let dir = TempDir::new().expect("temp dir");
+        let notes = dir.path().join("notes.json");
+        let repos = dir.path().join("repositories.json");
+
+        corrupt_n_times(&repos, 1);
+        corrupt_n_times(&notes, MAX_CORRUPT_BACKUPS + 3);
+
+        let surviving: Vec<String> = corrupt_backups(dir.path())
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            surviving
+                .iter()
+                .filter(|n| n.starts_with("repositories.corrupt-"))
+                .count(),
+            1,
+            "repositories' only backup was evicted by notes' churn: {surviving:?}"
+        );
+        assert_eq!(
+            surviving
+                .iter()
+                .filter(|n| n.starts_with("notes.corrupt-"))
+                .count(),
+            MAX_CORRUPT_BACKUPS
+        );
+    }
+
+    #[test]
+    fn a_failed_reap_does_not_fail_the_load() {
+        // The reaper runs inside a load that has ALREADY failed. Whatever it
+        // cannot delete, the caller must still get its parse error and its
+        // preserved file — never a different error because cleanup tripped.
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("notes.json");
+
+        // A directory where a backup file is expected: `remove_file` refuses it,
+        // which is the failure branch, without permission games that behave
+        // differently as root or on CI. Created FIRST so it is the oldest and
+        // therefore actually reaches the reap loop — created last it would sort
+        // into the keep window and the test would pass without exercising
+        // anything.
+        let undeletable = dir.path().join("notes.corrupt-0000");
+        fs::create_dir(&undeletable).unwrap();
+        corrupt_n_times(&path, MAX_CORRUPT_BACKUPS + 1);
+
+        fs::write(&path, "{ still broken").unwrap();
+        let err = load_json_config_strict_from_path::<serde_json::Value>(&path)
+            .expect_err("the parse error must survive a failed reap");
+        assert!(err.starts_with("Corrupt "), "unexpected error: {err}");
+        assert!(!path.exists(), "the bad file is still moved aside");
+        assert!(
+            undeletable.is_dir(),
+            "the undeletable entry is left alone, not partially removed"
+        );
+        // The real backups are still capped: one slot is wasted on the entry that
+        // cannot be removed, and the reaper does not compensate by deleting an
+        // extra file. Stated as an upper bound because that waste is the honest
+        // cost of not failing the load.
+        let files = corrupt_backups(dir.path())
+            .into_iter()
+            .filter(|p| p.is_file())
+            .count();
+        assert!(
+            files <= MAX_CORRUPT_BACKUPS,
+            "{files} real backups left, expected at most {MAX_CORRUPT_BACKUPS}"
+        );
+    }
+
     #[test]
     fn strict_load_reads_a_valid_file() {
         let dir = TempDir::new().expect("temp dir");
@@ -3145,25 +5702,577 @@ mod tests {
         assert!(path.exists(), "a valid file is left where it is");
     }
 
+    /// Every `<name>.corrupt-<uuid>` file kept aside in `dir`.
+    fn corrupt_backups(dir: &std::path::Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(".corrupt-"))
+            })
+            .collect()
+    }
+
+    // Catches: one wrong type/enum or missing required field discards saved siblings.
+    #[test]
+    #[serial_test::serial]
+    fn damaged_app_fields_keep_saved_siblings() {
+        crate::credentials::reset_test_faults();
+        let mut failures = Vec::new();
+        for (field, bad) in [
+            ("font_size", Some(serde_json::json!("large"))),
+            ("close_behavior", Some(serde_json::json!("invalid"))),
+            ("font_family", None),
+            ("font_size", None),
+            ("theme", None),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let _guard = set_config_dir_override(dir.path().to_path_buf());
+            let path = dir.path().join(APP_CONFIG_FILE);
+            let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+            doc["ide"] = serde_json::json!("saved-ide");
+            doc["shell"] = serde_json::json!("saved-shell");
+            doc["mcp_port"] = serde_json::json!(4567);
+            if let Some(bad) = bad {
+                doc[field] = bad;
+            } else {
+                doc.as_object_mut().unwrap().remove(field);
+            }
+            let original = doc.to_string();
+            fs::write(&path, &original).unwrap();
+            let loaded = load_app_config();
+            let recovery = loaded
+                .config_recovery
+                .as_ref()
+                .expect("visible recovery diagnostic");
+            assert_eq!(recovery.fields, [field]);
+            assert_eq!(fs::read_to_string(&recovery.backup_path).unwrap(), original);
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert!(
+                persisted.get("config_recovery").is_none(),
+                "diagnostic must not persist"
+            );
+            if loaded.ide != "saved-ide"
+                || loaded.shell.as_deref() != Some("saved-shell")
+                || loaded.mcp_port != 4567
+            {
+                failures.push(format!("{field}: saved siblings were reset"));
+            }
+            let backups = corrupt_backups(dir.path());
+            assert_eq!(backups.len(), 1, "{field}: preserve original");
+            assert_eq!(fs::read_to_string(&backups[0]).unwrap(), original);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+    }
+
+    // Catches: healthy saved false values or ignored keys trigger destructive recovery.
+    #[test]
+    #[serial_test::serial]
+    fn healthy_app_config_does_not_create_recovery_backups() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+        doc["scrollback_reflow"] = serde_json::json!(false);
+        doc["unknown_future_field"] = serde_json::json!({"x": 1});
+        let saved = doc.to_string();
+        fs::write(&path, &saved).unwrap();
+        let loaded = load_app_config();
+        assert!(!loaded.scrollback_reflow);
+        assert!(loaded.config_recovery.is_none());
+        assert_eq!(corrupt_backups(dir.path()), [] as [PathBuf; 0]);
+        assert_eq!(fs::read_to_string(path).unwrap(), saved);
+    }
+
+    // Catches: recovery resets an entire services object or loses another bad field.
+    #[test]
+    #[serial_test::serial]
+    fn damaged_nested_app_fields_keep_valid_service_siblings() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+        doc["services"]["server"]["port"] = serde_json::json!("broken");
+        doc["services"]["server"]["ipv6_enabled"] = serde_json::json!(true);
+        doc["font_weight"] = serde_json::json!(false);
+        doc["ide"] = serde_json::json!("saved-ide");
+        fs::write(&path, doc.to_string()).unwrap();
+        let loaded = load_app_config();
+        assert_eq!(loaded.ide, "saved-ide");
+        assert!(loaded.services.server.ipv6_enabled);
+        assert_eq!(loaded.font_weight, 400);
+        assert_eq!(loaded.services.server.port, 9876);
+        assert_eq!(
+            loaded.config_recovery.unwrap().fields,
+            ["font_weight", "services.server.port"]
+        );
+    }
+
+    // Catches: recursive repair drops secrets omitted from serialized defaults.
+    #[test]
+    #[serial_test::serial]
+    fn damaged_service_siblings_keep_legacy_secrets_in_vault_and_reload() {
+        use crate::credentials::{Credential, get};
+        crate::credentials::reset_test_faults();
+        let mut failures = Vec::new();
+        for (service, secret_field, bad_field, credential) in [
+            (
+                "auth",
+                "session_token",
+                "session_token_duration_secs",
+                Credential::RemoteSessionToken,
+            ),
+            ("relay", "token", "enabled", Credential::RelayToken),
+            (
+                "push",
+                "vapid_private_key",
+                "enabled",
+                Credential::PushVapidPrivateKey,
+            ),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let _guard = set_config_dir_override(dir.path().to_path_buf());
+            crate::credentials::delete(credential.clone()).unwrap();
+            let path = dir.path().join(APP_CONFIG_FILE);
+            let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+            doc["services"][service][secret_field] = serde_json::json!("legacy-secret");
+            doc["services"][service][bad_field] = serde_json::json!("broken");
+            doc["services"][service]["unknown_future_field"] = serde_json::json!({"ignored": true});
+            fs::write(&path, doc.to_string()).unwrap();
+            let loaded = load_app_config();
+            assert_eq!(
+                loaded.config_recovery.unwrap().fields,
+                [format!("services.{service}.{bad_field}")]
+            );
+            let reloaded = load_app_config();
+            let value = serde_json::to_value(&reloaded).unwrap();
+            if value["services"][service][secret_field] != "legacy-secret"
+                || get(credential).unwrap().as_deref() != Some("legacy-secret")
+            {
+                failures.push(format!(
+                    "{service}: valid secret lost during recovery/migration/reload"
+                ));
+            }
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert!(
+                persisted["services"][service].get(secret_field).is_none(),
+                "plaintext must migrate to vault"
+            );
+            assert!(
+                persisted["services"][service]
+                    .get("unknown_future_field")
+                    .is_none()
+            );
+            assert!(reloaded.config_recovery.is_none(), "repair must not recur");
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+    }
+
+    // Catches: malformed fields omitted from default JSON bypass validation/diagnostics.
+    #[test]
+    fn damaged_omitted_service_fields_are_reported() {
+        let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+        doc["services"]["auth"]["session_token"] = serde_json::json!(42);
+        doc["services"]["relay"]["token_exists"] = serde_json::json!("broken");
+        doc["services"]["push"]["vapid_private_key_exists"] = serde_json::json!("broken");
+        let (loaded, fields) = recover_app_config_fields(doc).unwrap();
+        assert_eq!(
+            fields,
+            [
+                "services.auth.session_token",
+                "services.push.vapid_private_key_exists",
+                "services.relay.token_exists"
+            ]
+        );
+        assert_eq!(loaded.services.auth.session_token, "");
+        assert!(!loaded.services.push.vapid_private_key_exists);
+        assert_eq!(loaded.services.relay.token_exists, None);
+    }
+
+    // Catches: malformed dynamic-map entries disappear without a backup or warning.
+    #[test]
+    #[serial_test::serial]
+    fn damaged_app_dynamic_map_reports_the_field() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+        doc["ai_chat_sessions"] = serde_json::json!({"workspace": false});
+        doc["ide"] = serde_json::json!("saved-ide");
+        fs::write(&path, doc.to_string()).unwrap();
+        let loaded = load_app_config();
+        assert_eq!(loaded.ide, "saved-ide");
+        assert_eq!(loaded.config_recovery.unwrap().fields, ["ai_chat_sessions"]);
+        assert_eq!(corrupt_backups(dir.path()).len(), 1);
+    }
+
+    // Catches: inherited false never migrates, or a later explicit false is overridden.
+    #[test]
+    #[serial_test::serial]
+    fn legacy_reflow_migrates_once_and_preserves_later_false() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        let mut doc = serde_json::to_value(AppConfig::default()).unwrap();
+        doc.as_object_mut()
+            .unwrap()
+            .remove("scrollback_reflow_migrated");
+        doc["scrollback_reflow"] = serde_json::json!(false);
+        fs::write(&path, doc.to_string()).unwrap();
+        let mut loaded = load_app_config();
+        assert!(loaded.scrollback_reflow, "legacy false must migrate");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["scrollback_reflow_migrated"], true);
+        loaded.scrollback_reflow = false;
+        save_app_config(loaded).unwrap();
+        let saved = fs::read(&path).unwrap();
+        assert!(!load_app_config().scrollback_reflow);
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+
+    // Catches: an existing marker or an explicit first save still enrolls reflow.
+    #[test]
+    #[serial_test::serial]
+    fn marked_or_explicit_reflow_false_is_not_migrated() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        for marked in [true, false] {
+            let config = AppConfig {
+                scrollback_reflow: false,
+                scrollback_reflow_migrated: marked,
+                ..AppConfig::default()
+            };
+            if marked {
+                fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+            } else {
+                save_app_config(config).unwrap();
+            }
+            assert!(!load_app_config().scrollback_reflow);
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(persisted["scrollback_reflow_migrated"], true);
+        }
+        fs::remove_file(&path).unwrap();
+        assert!(load_app_config().scrollback_reflow);
+    }
+
+    /// `config.json` is the one config file whose load does NOT go through
+    /// `load_json_config_strict_from_path`: `load_app_config` turns every
+    /// `read_app_config_unlocked` error into `AppConfig::default()`. The defaults it
+    /// hands back have an empty session token, so `lib.rs`'s first-run branch generates
+    /// one and calls `save_app_config` — a whole-document write with no read. The
+    /// user's broken-but-hand-recoverable file is therefore destroyed on the FIRST
+    /// restart after the corruption, not by some later hypothetical save.
+    #[test]
+    #[serial_test::serial]
+    fn corrupt_app_config_survives_the_first_run_save_that_follows_it() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        // Truncated mid-document, the shape a crash or a hand-edit leaves behind.
+        let original = r#"{"font_size": 18, "services": {"server": {"port": 9"#;
+        fs::write(&path, original).unwrap();
+
+        let loaded = load_app_config();
+        assert_eq!(
+            loaded.font_size,
+            AppConfig::default().font_size,
+            "an unparseable file cannot be read, so defaults are the only answer"
+        );
+
+        // Exactly what lib.rs:1228 does on first run.
+        let mut first_run = loaded;
+        first_run.services.auth.session_token = uuid::Uuid::new_v4().to_string();
+        save_app_config(first_run).expect("first-run save");
+
+        let preserved = corrupt_backups(dir.path());
+        assert_eq!(
+            preserved.len(),
+            1,
+            "the corrupt config must be kept aside before defaults are written over it"
+        );
+        assert_eq!(
+            fs::read_to_string(&preserved[0]).unwrap(),
+            original,
+            "the backup must hold the user's bytes, byte for byte"
+        );
+    }
+
+    /// The preservation must not be the loss it replaces: a fixed backup name would let
+    /// the second corrupt load erase the first user's document, which is the same data
+    /// loss one indirection further out.
+    #[test]
+    #[serial_test::serial]
+    fn two_corrupt_app_config_loads_keep_two_distinct_backups() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+
+        fs::write(&path, "first corrupt document").unwrap();
+        load_app_config();
+        fs::write(&path, "second corrupt document").unwrap();
+        load_app_config();
+
+        let backups = corrupt_backups(dir.path());
+        assert_eq!(backups.len(), 2, "one backup per corrupt load");
+        let mut contents: Vec<String> = backups
+            .iter()
+            .map(|p| fs::read_to_string(p).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(
+            contents,
+            vec![
+                "first corrupt document".to_string(),
+                "second corrupt document".to_string(),
+            ],
+            "the second backup overwrote the first"
+        );
+    }
+
+    /// A `tuic-remote` restart used to change the generated session token and log
+    /// out every paired phone. The token written at startup must come back from
+    /// the next `load_app_config`, and the stored port must stay untouched.
+    #[test]
+    #[serial_test::serial]
+    fn persisted_session_token_is_loaded_by_the_next_start() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        fs::write(
+            dir.path().join(APP_CONFIG_FILE),
+            r#"{"shell": null, "font_family": "Menlo", "font_size": 14, "theme": "dark",
+                "services": {"server": {"port": 4321}}}"#,
+        )
+        .unwrap();
+
+        persist_session_token("tok-restart").unwrap();
+
+        let loaded = load_app_config();
+        assert_eq!(loaded.services.auth.session_token, "tok-restart");
+        assert!(loaded.services.auth.session_token_exists);
+        assert_eq!(loaded.services.server.port, 4321);
+    }
+
+    /// Deleting the embedded AI engine (#784-0aec) removed `ai_chat_enabled`,
+    /// `ai_triage_enabled` and `ai_watchers_enabled` from `AppConfig` upstream
+    /// (FastAF keeps `ai_chat_enabled`, so only the other two are dropped). Every
+    /// `config.json` written before that upgrade still carries them, so the
+    /// load path has to ignore them rather than fail — `AppConfig` has no
+    /// `deny_unknown_fields`, and this test is what holds that open. Note the
+    /// failure mode it guards: a rejected parse does not surface as an error,
+    /// it silently moves the user's file aside and writes defaults over it.
+    ///
+    /// The document below carries `shell`, `font_family`, `font_size` and
+    /// `theme` because those four fields carry no `#[serde(default)]` and are
+    /// therefore mandatory. That is a separate defect — a config.json missing
+    /// any of them is discarded the same silent way — and this test deliberately
+    /// does not exercise it, so a failure here can only mean the removed keys
+    /// were rejected.
+    #[test]
+    #[serial_test::serial]
+    fn a_config_written_before_the_ai_engine_was_deleted_still_loads() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(APP_CONFIG_FILE);
+        fs::write(
+            &path,
+            r#"{
+                "shell": null,
+                "font_family": "Menlo",
+                "font_size": 17,
+                "theme": "dark",
+                "experimental_features_enabled": true,
+                "ai_chat_enabled": true,
+                "ai_triage_enabled": true,
+                "ai_watchers_enabled": true
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_app_config();
+
+        assert_eq!(loaded.font_size, 17, "the surviving keys must be read");
+        assert!(
+            loaded.experimental_features_enabled,
+            "experimental_features_enabled outlived its three AI sub-flags"
+        );
+        assert!(
+            corrupt_backups(dir.path()).is_empty(),
+            "the removed keys must be ignored, not treated as a corrupt document"
+        );
+    }
+
+    /// Write a config whose `services.auth` carries `duration` (or no key at all).
+    fn write_config_with_duration(dir: &std::path::Path, duration: Option<u64>) -> PathBuf {
+        let path = dir.join(APP_CONFIG_FILE);
+        let auth = match duration {
+            Some(d) => serde_json::json!({ "session_token_duration_secs": d }),
+            None => serde_json::json!({}),
+        };
+        let doc = serde_json::json!({
+            "shell": null,
+            "font_family": "Menlo",
+            "font_size": 17,
+            "theme": "dark",
+            "services": { "auth": auth },
+        });
+        fs::write(&path, doc.to_string()).unwrap();
+        path
+    }
+
+    fn duration_on_disk(path: &std::path::Path) -> serde_json::Value {
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        doc["services"]["auth"]["session_token_duration_secs"].clone()
+    }
+
+    /// Catches: configs written by the old 24h default keep logging devices out daily
+    /// because the new default only applies to a missing key.
+    #[test]
+    #[serial_test::serial]
+    fn legacy_86400_session_duration_migrates_to_30_days_and_persists() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = write_config_with_duration(dir.path(), Some(86_400));
+
+        assert_eq!(
+            load_app_config().services.auth.session_token_duration_secs,
+            2_592_000
+        );
+        assert_eq!(
+            duration_on_disk(&path),
+            serde_json::json!(2_592_000),
+            "the migration must be written back, not only applied in memory"
+        );
+    }
+
+    /// Catches: the migration rewriting every deliberate non-default value
+    /// (a range check or a "less than new default" test would clobber these).
+    #[test]
+    #[serial_test::serial]
+    fn non_legacy_session_durations_are_left_untouched() {
+        crate::credentials::reset_test_faults();
+        for value in [3_600u64, 604_800] {
+            let dir = TempDir::new().expect("temp dir");
+            let _guard = set_config_dir_override(dir.path().to_path_buf());
+            let path = write_config_with_duration(dir.path(), Some(value));
+
+            assert_eq!(
+                load_app_config().services.auth.session_token_duration_secs,
+                value
+            );
+            assert_eq!(duration_on_disk(&path), serde_json::json!(value));
+        }
+    }
+
+    /// Catches: the migration treating an absent key (deserialized to the new default)
+    /// as a legacy value, or the default regressing to the old 24h.
+    #[test]
+    #[serial_test::serial]
+    fn missing_session_duration_gets_the_new_default() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        write_config_with_duration(dir.path(), None);
+
+        assert_eq!(
+            load_app_config().services.auth.session_token_duration_secs,
+            2_592_000
+        );
+    }
+
+    /// Catches: the migration re-running or re-writing the file on every load
+    /// (the second load must see 2592000 and leave the file byte-identical).
+    #[test]
+    #[serial_test::serial]
+    fn session_duration_migration_is_idempotent() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = write_config_with_duration(dir.path(), Some(86_400));
+
+        load_app_config();
+        let after_first = fs::read_to_string(&path).unwrap();
+        let second = load_app_config();
+
+        assert_eq!(second.services.auth.session_token_duration_secs, 2_592_000);
+        assert_eq!(fs::read_to_string(&path).unwrap(), after_first);
+        let mut explicit = second;
+        explicit.services.auth.session_token_duration_secs = 86_400;
+        save_app_config(explicit).unwrap();
+        assert_eq!(
+            load_app_config().services.auth.session_token_duration_secs,
+            86_400
+        );
+    }
+
     #[test]
     fn app_config_round_trip() {
         let dir = TempDir::new().unwrap();
         let cfg = AppConfig {
+            config_recovery: None,
+            scrollback_reflow_migrated: true,
+            session_duration_migrated: true,
             shell: Some("/bin/zsh".to_string()),
+            progress_tracking: false,
             font_family: "Fira Code".to_string(),
             font_size: 16,
             font_weight: 200,
             theme: "dark".to_string(),
             mcp_server_enabled: true,
+            mcp_work_item_writes: false,
+            mcp_call_audit_enabled: false,
             mcp_port: 4000,
             mcp_config_installed: false,
             ide: "cursor".to_string(),
+            ego_executable: "/opt/ego/bin/ego".to_string(),
+            ego_profile: "coordinator".to_string(),
+            ai_chat_master_prompt: "Delegate investigations".to_string(),
+            ai_chat_workspace: "/srv/chat".to_string(),
+            ai_chat_sessions: HashMap::from([(
+                "/repo/project".to_string(),
+                "session-42".to_string(),
+            )]),
+            ai_chat_peer_ids: HashMap::from([(
+                "/repo/project".to_string(),
+                "550e8400-e29b-41d4-a716-446655440a01".to_string(),
+            )]),
+            ai_chat_launches: HashMap::from([(
+                "observer-session".to_string(),
+                crate::acp_chat::ChatLaunch {
+                    executable: "/opt/observer/ego".to_string(),
+                    profile: "coordinator".to_string(),
+                    master_prompt: String::new(),
+                    workspace: PathBuf::from("/srv/observer"),
+                    peer_id: "550e8400-e29b-41d4-a716-446655440a02".to_string(),
+                },
+            )]),
             default_font_size: 18,
+            attachment_max_bytes: default_attachment_max_bytes(),
+            attachment_retention_days: default_attachment_retention_days(),
             services: ServicesConfig {
                 server: ServerConfig {
                     enabled: true,
                     port: 8080,
                     ipv6_enabled: true,
+                    bind_address: "192.168.1.20".to_string(),
                 },
                 auth: AuthConfig {
                     username: "admin".to_string(),
@@ -3181,13 +6290,19 @@ mod tests {
                 },
             },
             confirm_before_quit: false,
+            close_behavior: Default::default(),
+            background: Default::default(),
             confirm_before_closing_tab: true,
             max_tab_name_length: 40,
             split_tab_mode: SplitTabMode::Unified,
             tab_ordering_mode: TabOrderingMode::TerminalsFirst,
             tab_cycling_all_types: true,
             tab_tree_enabled: true,
+            chat_mute_intermediate_text: false,
             auto_show_pr_popover: true,
+            pr_hide_drafts: false,
+            pr_hide_conflicting: false,
+            pr_hide_ci_failing: false,
             prevent_sleep_when_busy: true,
             auto_update_enabled: false,
             language: "it".to_string(),
@@ -3195,7 +6310,10 @@ mod tests {
             update_channel: "nightly".to_string(),
             disabled_agents: vec!["codex".to_string()],
             disabled_mcp_agents: vec!["windsurf".to_string()],
-            disabled_native_tools: vec!["plugin_dev_guide".to_string()],
+            mcp_capabilities: crate::mcp_capabilities::McpCapabilities::from_legacy(&[
+                "plugin_dev_guide".into(),
+            ]),
+            settings_mcp_enabled: false,
             intent_tab_title: false,
             suggest_followups: false,
             global_hotkey: Some("CommandOrControl+Shift+T".to_string()),
@@ -3208,14 +6326,19 @@ mod tests {
             issue_filter: "assigned".to_string(),
             experimental_features_enabled: false,
             ai_chat_enabled: false,
-            ai_triage_enabled: false,
-            ai_watchers_enabled: false,
-            scrollback_reflow: false,
-            ai_terminal_mcp_enabled: false,
+            scrollback_reflow: true,
             index_strategy: "active_and_switch".to_string(),
+            index_memory_budget_mb: default_index_memory_budget_mb(),
             cursor_style: "bar".to_string(),
             terminal_renderer: "webgl".to_string(),
+            // All three default to true, so `false` is the only value that can
+            // tell a real round trip from serde handing back the default.
+            show_block_timestamps: false,
+            show_scrollbar_marks: false,
+            block_folding_enabled: false,
             auto_update_plugins_enabled: false,
+            defer_update_relaunch: false,
+            eager_resume_after_update: false,
             standby_timeout_minutes: 5,
             custom_launchers: Vec::new(),
             inline_blame_enabled: true,
@@ -3232,6 +6355,20 @@ mod tests {
         assert_eq!(loaded.shell.as_deref(), Some("/bin/zsh"));
         assert_eq!(loaded.font_size, 16);
         assert_eq!(loaded.ide, "cursor");
+        assert_eq!(loaded.ego_executable, "/opt/ego/bin/ego");
+        assert_eq!(loaded.ego_profile, "coordinator");
+        assert_eq!(loaded.ai_chat_master_prompt, "Delegate investigations");
+        assert_eq!(loaded.ai_chat_workspace, "/srv/chat");
+        assert_eq!(
+            loaded.ai_chat_sessions.get("/repo/project"),
+            Some(&"session-42".to_string())
+        );
+        assert_eq!(
+            loaded.ai_chat_peer_ids.get("/repo/project"),
+            Some(&"550e8400-e29b-41d4-a716-446655440a01".to_string())
+        );
+        // Catches: conversation launch authority disappears in config serialization.
+        assert_eq!(loaded.ai_chat_launches, cfg.ai_chat_launches);
         assert_eq!(loaded.default_font_size, 18);
         assert!(loaded.mcp_server_enabled);
         assert_eq!(loaded.mcp_port, 4000);
@@ -3245,6 +6382,9 @@ mod tests {
         assert_eq!(loaded.split_tab_mode, SplitTabMode::Unified);
         assert!(loaded.prevent_sleep_when_busy);
         assert!(!loaded.auto_update_enabled);
+        // The default is true, so false is the only value that proves a real round trip.
+        assert!(!loaded.defer_update_relaunch);
+        assert!(!loaded.eager_resume_after_update);
         assert_eq!(loaded.language, "it");
         assert_eq!(
             loaded.disabled_plugin_ids,
@@ -3255,8 +6395,8 @@ mod tests {
         assert!(loaded.services.server.ipv6_enabled);
         assert!(loaded.services.auth.lan_auth_bypass);
         assert_eq!(
-            loaded.disabled_native_tools,
-            vec!["plugin_dev_guide".to_string()]
+            loaded.mcp_capabilities.denied,
+            vec!["plugin_reference".to_string()]
         );
         assert!(!loaded.intent_tab_title);
         assert!(!loaded.suggest_followups);
@@ -3268,6 +6408,153 @@ mod tests {
         assert!(!loaded.import_tools_enabled);
         assert_eq!(loaded.terminal_scroll_sensitivity, 40);
         assert!((loaded.app_zoom - 1.25).abs() < f64::EPSILON);
+        // These three round-trip through the frontend's `updateAppConfig`
+        // load-modify-save. Before they existed on this struct, serde dropped
+        // them from every `save_config` payload and the UI silently snapped
+        // back to the default on the next load.
+        assert!(!loaded.show_block_timestamps);
+        assert!(!loaded.show_scrollbar_marks);
+        assert!(!loaded.block_folding_enabled);
+    }
+
+    #[test]
+    fn old_config_without_disabled_native_tools_keeps_settings_and_debug_disabled() {
+        // A config.json written before the field existed must not expose the
+        // `config` and `debug` MCP tools that a fresh install keeps disabled.
+        let loaded: AppConfig = serde_json::from_str(
+            r#"{"shell":null,"font_family":"JetBrains Mono","font_size":14,"theme":"tokyo-night","worktree_dir":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.mcp_capabilities.denied,
+            vec![
+                "settings".to_string(),
+                "diagnostics".to_string(),
+                "automations".to_string()
+            ]
+        );
+    }
+
+    // Catches: startup accepts legacy denials but fails to persist the one-time migration.
+    #[test]
+    #[serial_test::serial]
+    fn mcp_capability_migration_persists_once_and_keeps_unknown_denials() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = write_config_with_duration(dir.path(), None);
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("mcp_capabilities");
+        doc["disabled_native_tools"] =
+            serde_json::json!(["task", "workflow_report", "unrecognized_tool"]);
+        fs::write(&path, doc.to_string()).unwrap();
+        let config = load_app_config();
+        assert_eq!(
+            config.mcp_capabilities.denied,
+            ["automations", "agent_tasks", "workflow.reports"]
+        );
+        assert_eq!(
+            config.mcp_capabilities.migration_unknown_tools,
+            ["unrecognized_tool"]
+        );
+        let saved = fs::read(&path).unwrap();
+        let migrated: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert!(migrated.get("disabled_native_tools").is_none());
+        assert_eq!(
+            migrated["mcp_capabilities"]["denied"],
+            serde_json::json!(["automations", "agent_tasks", "workflow.reports"])
+        );
+        assert_eq!(load_app_config().mcp_capabilities, config.mcp_capabilities);
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+
+    // Catches: a prerelease build defaulting to a beta feed FastAF does not publish.
+    #[test]
+    fn every_build_defaults_to_stable() {
+        assert_eq!(default_update_channel(), "stable");
+        assert_eq!(AppConfig::default().update_channel, "stable");
+    }
+
+    // Catches: a saved "beta" (upstream's channel) failing every update check
+    // with "Unknown update channel" instead of following a feed FastAF has.
+    #[test]
+    #[serial_test::serial]
+    fn a_saved_beta_channel_loads_as_nightly_once() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = write_config_with_duration(dir.path(), None);
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        doc["update_channel"] = serde_json::json!("beta");
+        // Upstream's enrollment marker, still in files it wrote.
+        doc["beta_channel_migrated"] = serde_json::json!(true);
+        fs::write(&path, doc.to_string()).unwrap();
+
+        assert_eq!(load_app_config().update_channel, "nightly");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted["update_channel"], "nightly");
+        let saved = fs::read(&path).unwrap();
+        assert_eq!(load_app_config().update_channel, "nightly");
+        assert_eq!(fs::read(&path).unwrap(), saved, "the migration runs once");
+    }
+
+    // Catches: an old client's save writing "beta" back after the load migrated it.
+    #[test]
+    fn a_save_naming_beta_stores_nightly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        commit_config_change(&state, |current| {
+            let mut next = current.clone();
+            next.update_channel = "beta".to_string();
+            Ok(next)
+        })
+        .expect("save");
+        assert_eq!(state.config.read().update_channel, "nightly");
+        assert_eq!(load_app_config().update_channel, "nightly");
+    }
+
+    // Catches: the beta migration touching a channel FastAF does publish.
+    #[test]
+    #[serial_test::serial]
+    fn stable_and_nightly_load_unchanged() {
+        crate::credentials::reset_test_faults();
+        for channel in ["stable", "nightly"] {
+            let dir = TempDir::new().expect("temp dir");
+            let _guard = set_config_dir_override(dir.path().to_path_buf());
+            let path = write_config_with_duration(dir.path(), None);
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            doc["session_duration_migrated"] = serde_json::json!(true);
+            // Isolate channel policy from the independent one-shot reflow migration.
+            doc["scrollback_reflow_migrated"] = serde_json::json!(true);
+            doc["update_channel"] = serde_json::json!(channel);
+            fs::write(&path, doc.to_string()).unwrap();
+            let before = fs::read(&path).unwrap();
+            assert_eq!(load_app_config().update_channel, channel);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                before,
+                "{channel}: load rewrote config"
+            );
+        }
+    }
+
+    // Catches: loading settings loses a saved channel choice.
+    #[test]
+    fn saved_update_channel_survives_config_roundtrip() {
+        for channel in ["stable", "nightly"] {
+            let config = AppConfig {
+                update_channel: channel.to_string(),
+                ..Default::default()
+            };
+            let loaded: AppConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert_eq!(loaded.update_channel, channel);
+        }
     }
 
     #[test]
@@ -3293,8 +6580,7 @@ mod tests {
         assert!(!loaded.prevent_sleep_when_busy);
         assert!(loaded.auto_update_enabled);
         assert_eq!(loaded.language, "en");
-        assert_eq!(loaded.update_channel, "stable");
-        assert_eq!(loaded.services.auth.session_token_duration_secs, 86400);
+        assert_eq!(loaded.update_channel, AppConfig::default().update_channel);
         assert!(!loaded.services.server.ipv6_enabled);
         assert!(!loaded.services.auth.lan_auth_bypass);
         assert!(loaded.intent_tab_title); // defaults to true
@@ -3308,6 +6594,12 @@ mod tests {
         assert!(loaded.import_tools_enabled); // defaults to true
         assert_eq!(loaded.terminal_scroll_sensitivity, 70); // default percent
         assert!((loaded.app_zoom - 1.0).abs() < f64::EPSILON); // default zoom
+        // Every config.json written before these fields existed omits them, and
+        // the frontend store hydrates each with `?? true` — the two sides must
+        // agree or the Settings toggles read one value and the terminal another.
+        assert!(loaded.show_block_timestamps);
+        assert!(loaded.show_scrollbar_marks);
+        assert!(loaded.block_folding_enabled);
     }
 
     #[test]
@@ -3355,6 +6647,45 @@ mod tests {
         assert_eq!(cfg.services.push.vapid_subject, "mailto:test@example.com");
         // Flat fields should be removed after migration
         assert_eq!(cfg.font_family, "JetBrains Mono");
+    }
+
+    #[test]
+    fn vapid_subject_defaults_to_fastaf_and_never_sends_upstreams() {
+        // Catches: push services being told the sender is noreply@tuicommander.com.
+        let fresh = PushConfig::default();
+        assert_eq!(fresh.vapid_subject, "https://github.com/ksg98/fastaf-ide");
+        assert_eq!(
+            fresh.effective_vapid_subject(),
+            "https://github.com/ksg98/fastaf-ide"
+        );
+
+        let omitted: PushConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.vapid_subject, "https://github.com/ksg98/fastaf-ide");
+
+        // A config saved by an earlier build wrote upstream's default to disk.
+        let saved: PushConfig = serde_json::from_value(
+            serde_json::json!({"vapid_subject": "mailto:noreply@tuicommander.com"}),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.effective_vapid_subject(),
+            "https://github.com/ksg98/fastaf-ide"
+        );
+
+        let blank = PushConfig {
+            vapid_subject: "  ".to_string(),
+            ..PushConfig::default()
+        };
+        assert_eq!(
+            blank.effective_vapid_subject(),
+            "https://github.com/ksg98/fastaf-ide"
+        );
+
+        let own = PushConfig {
+            vapid_subject: "mailto:me@example.com".to_string(),
+            ..PushConfig::default()
+        };
+        assert_eq!(own.effective_vapid_subject(), "mailto:me@example.com");
     }
 
     #[test]
@@ -3440,8 +6771,7 @@ mod tests {
             (|c: &mut AppConfig| c.services.server.enabled = true) as fn(&mut AppConfig),
             |c: &mut AppConfig| c.services.server.port = 1234,
             |c: &mut AppConfig| c.services.server.ipv6_enabled = true,
-            |c: &mut AppConfig| c.services.auth.username = "admin".to_string(),
-            |c: &mut AppConfig| c.services.auth.password_hash = "hash".to_string(),
+            |c: &mut AppConfig| c.services.server.bind_address = "100.64.0.7".into(),
         ] {
             let mut changed = base.clone();
             mutate(&mut changed);
@@ -3449,6 +6779,26 @@ mod tests {
                 server_settings_changed(&base, &changed),
                 "every listener-affecting field must trigger a rebind"
             );
+        }
+    }
+
+    // Catches: live credential edits are misclassified as unsupported headless rebinds.
+    #[test]
+    fn live_auth_changes_do_not_require_listener_rebind() {
+        let base = AppConfig::default();
+        for mutate in [
+            (|c: &mut AppConfig| c.services.auth.username = "admin".into()) as fn(&mut AppConfig),
+            |c: &mut AppConfig| c.services.auth.password_hash = "hash".into(),
+            |c: &mut AppConfig| {
+                c.services.auth.username = "admin".into();
+                c.services.auth.password_hash = "hash".into();
+            },
+        ] {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert!(!server_settings_changed(&base, &changed));
+            changed.services.server.port = 1234;
+            assert!(server_settings_changed(&base, &changed));
         }
     }
 
@@ -3550,7 +6900,7 @@ mod tests {
         // for a JSON object that omits both keys.
         let mut incoming = AppConfig::default();
         assert_eq!(incoming.services.relay.token_exists, None);
-        assert!(incoming.services.relay.token.is_empty());
+        assert_eq!(incoming.services.relay.token, "");
 
         preserve_redacted_app_config_secrets(&mut incoming, &current);
 
@@ -3571,11 +6921,11 @@ mod tests {
 
         let mut incoming = AppConfig::default();
         incoming.services.relay.token_exists = Some(false);
-        assert!(incoming.services.relay.token.is_empty());
+        assert_eq!(incoming.services.relay.token, "");
 
         preserve_redacted_app_config_secrets(&mut incoming, &current);
 
-        assert!(incoming.services.relay.token.is_empty());
+        assert_eq!(incoming.services.relay.token, "");
         assert_eq!(incoming.services.relay.token_exists, Some(false));
     }
 
@@ -3632,6 +6982,7 @@ mod tests {
             audio_device: Some("Test Speaker".to_string()),
             silence_remote_completions: true,
             toasts_in_bell: false,
+            pr_native_notifications: false,
         };
         let loaded: NotificationConfig = round_trip_in_dir(dir.path(), "notifications.json", &cfg);
         assert!(!loaded.enabled);
@@ -3642,6 +6993,15 @@ mod tests {
         assert_eq!(loaded.audio_device.as_deref(), Some("Test Speaker"));
         assert!(loaded.silence_remote_completions);
         assert!(!loaded.toasts_in_bell);
+        assert!(!loaded.pr_native_notifications);
+    }
+
+    /// A config written before the setting existed keeps PR notifications on.
+    #[test]
+    fn pr_native_notifications_defaults_on() {
+        let legacy: NotificationConfig =
+            serde_json::from_str(r#"{"enabled":true,"volume":0.5}"#).unwrap();
+        assert!(legacy.pr_native_notifications);
     }
 
     /// A user who never saw the setting keeps the mirroring, so nothing a toast
@@ -3672,6 +7032,26 @@ mod tests {
         assert!(!opted_out.silence_remote_completions);
     }
 
+    /// Catches: serde silently drops Tasks preferences, so a restart loses view intent.
+    #[test]
+    fn ui_prefs_keep_tasks_preferences_and_default_empty() {
+        let saved = serde_json::json!({
+            "tasks_view_preferences": {
+                "[\"/repo-a\",\"demo\",\"work\"]": serde_json::json!({"view": "board", "query": {"sort": {"fieldId": "updatedAt", "descending": true}, "savedFilterId": null, "groupBy": null}}).to_string(),
+                "[\"/repo-b\",\"demo\",\"work\"]": serde_json::json!({"view": "list"}).to_string()
+            }
+        });
+        let prefs: UIPrefsConfig = serde_json::from_value(saved.clone()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let loaded: UIPrefsConfig = round_trip_in_dir(dir.path(), "ui-prefs.json", &prefs);
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap()["tasks_view_preferences"],
+            saved["tasks_view_preferences"]
+        );
+        let old: UIPrefsConfig = serde_json::from_str("{}").unwrap();
+        assert!(old.tasks_view_preferences.is_empty());
+    }
+
     #[test]
     fn ui_prefs_round_trip() {
         let dir = TempDir::new().unwrap();
@@ -3684,12 +7064,19 @@ mod tests {
             file_browser_panel_visible: true,
             plan_panel_visible: false,
             git_panel_visible: false,
+            outline_panel_visible: true,
+            references_panel_visible: false,
+            ai_chat_panel_visible: false,
+            file_browser_view_mode: "tree".to_string(),
+            sidebar_density: "rich".to_string(),
+            mobile_theme: "vscode-light".to_string(),
             diff_panel_width: 500,
             markdown_panel_width: 450,
             notes_panel_width: 320,
             plan_panel_width: 350,
             git_panel_width: 380,
             settings_nav_width: 200,
+            settings_expert_mode: true,
             diff_view_mode: "split".to_string(),
             detached_panels: std::collections::HashMap::from([(
                 "activity".to_string(),
@@ -3699,10 +7086,13 @@ mod tests {
                 ("issues".to_string(), true),
                 ("prs".to_string(), false),
             ]),
+            tasks_view_preferences: std::collections::HashMap::new(),
         };
         let loaded: UIPrefsConfig = round_trip_in_dir(dir.path(), "ui-prefs.json", &cfg);
         assert!(!loaded.sidebar_visible);
         assert_eq!(loaded.sidebar_width, 300);
+        assert_eq!(loaded.sidebar_density, "rich");
+        assert_eq!(loaded.mobile_theme, "vscode-light");
         assert_eq!(loaded.diff_panel_width, 500);
         assert_eq!(loaded.markdown_panel_width, 450);
         assert_eq!(
@@ -3711,9 +7101,14 @@ mod tests {
         );
         assert_eq!(loaded.notes_panel_width, 320);
         assert_eq!(loaded.settings_nav_width, 200);
+        assert!(loaded.settings_expert_mode);
         assert_eq!(loaded.diff_view_mode, "split");
         assert_eq!(loaded.github_section_collapsed.get("issues"), Some(&true));
         assert_eq!(loaded.github_section_collapsed.get("prs"), Some(&false));
+        assert!(loaded.outline_panel_visible);
+        assert!(!loaded.references_panel_visible);
+        assert!(!loaded.ai_chat_panel_visible);
+        assert_eq!(loaded.file_browser_view_mode, "tree");
     }
 
     /// A prefs file written before the field existed must still load, with the
@@ -3722,6 +7117,89 @@ mod tests {
     fn ui_prefs_without_github_section_collapsed_defaults_to_empty() {
         let loaded: UIPrefsConfig = serde_json::from_str(r#"{"sidebar_visible":true}"#).unwrap();
         assert!(loaded.github_section_collapsed.is_empty());
+    }
+
+    /// A prefs file written before expert mode existed must default it to off,
+    /// matching `settings_expert_mode`'s `#[serde(default)]`.
+    #[test]
+    fn ui_prefs_without_settings_expert_mode_defaults_to_off() {
+        let loaded: UIPrefsConfig = serde_json::from_str(r#"{"sidebar_visible":true}"#).unwrap();
+        assert!(!loaded.settings_expert_mode);
+    }
+
+    /// Every key the frontend puts in the `save_ui_prefs` payload must come
+    /// back out of `load_ui_prefs`. Serde drops unknown keys silently, so a
+    /// field the frontend sends and the struct does not declare is discarded
+    /// without an error anywhere: the panel simply never survives a restart.
+    /// These were in exactly that state.
+    #[test]
+    fn ui_prefs_keeps_every_panel_field_the_frontend_sends() {
+        let sent = r#"{
+            "outline_panel_visible": true,
+            "references_panel_visible": true,
+            "ai_chat_panel_visible": true,
+            "file_browser_view_mode": "tree"
+        }"#;
+        let cfg: UIPrefsConfig = serde_json::from_str(sent).unwrap();
+        let written = serde_json::to_value(&cfg).unwrap();
+
+        for key in [
+            "outline_panel_visible",
+            "references_panel_visible",
+            "ai_chat_panel_visible",
+        ] {
+            assert_eq!(
+                written.get(key),
+                Some(&serde_json::json!(true)),
+                "{key} was dropped on the way through UIPrefsConfig"
+            );
+        }
+        assert_eq!(
+            written.get("file_browser_view_mode"),
+            Some(&serde_json::json!("tree")),
+            "file_browser_view_mode was dropped on the way through UIPrefsConfig"
+        );
+    }
+
+    #[test]
+    fn ui_prefs_preserve_mobile_theme_across_json_round_trip() {
+        let saved: UIPrefsConfig =
+            serde_json::from_str(r#"{"mobile_theme":"vscode-light"}"#).unwrap();
+        let reloaded = serde_json::to_value(saved).unwrap();
+        assert_eq!(reloaded["mobile_theme"], "vscode-light");
+    }
+
+    /// A prefs file written before these fields existed must still load, with
+    /// each panel closed and the file browser in tree view.
+    #[test]
+    fn ui_prefs_panel_fields_default_when_absent() {
+        let loaded: UIPrefsConfig = serde_json::from_str(r#"{"sidebar_visible":true}"#).unwrap();
+        assert!(!loaded.outline_panel_visible);
+        assert!(!loaded.references_panel_visible);
+        assert!(!loaded.ai_chat_panel_visible);
+        assert_eq!(loaded.file_browser_view_mode, "tree");
+        assert_eq!(UIPrefsConfig::default().file_browser_view_mode, "tree");
+    }
+
+    /// Serde drops unknown keys silently: the density choice must survive the
+    /// round trip, and a prefs file from before it existed must load as FastAF's
+    /// "compact" default.
+    #[test]
+    fn ui_prefs_keep_sidebar_density_and_default_to_compact() {
+        let saved: UIPrefsConfig = serde_json::from_str(r#"{"sidebar_density":"rich"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["sidebar_density"],
+            "rich"
+        );
+        let old: UIPrefsConfig = serde_json::from_str(r#"{"sidebar_visible":true}"#).unwrap();
+        assert_eq!(old.sidebar_density, "compact");
+    }
+
+    #[test]
+    fn ui_prefs_respects_saved_flat_view() {
+        let loaded: UIPrefsConfig =
+            serde_json::from_str(r#"{"file_browser_view_mode":"flat"}"#).unwrap();
+        assert_eq!(loaded.file_browser_view_mode, "flat");
     }
 
     #[test]
@@ -3734,6 +7212,7 @@ mod tests {
                 path: "/my/repo".to_string(),
                 display_name: "my-repo".to_string(),
                 auto_consolidate_worktrees: true,
+                dev_server_url: None,
                 base_branch: Some("main".to_string()),
                 copy_ignored_files: Some(true),
                 copy_untracked_files: None,
@@ -3745,12 +7224,16 @@ mod tests {
                 prompt_on_create: None,
                 delete_branch_on_remove: None,
                 auto_archive_merged: None,
+                archive_retention_days: None,
                 orphan_cleanup: None,
                 pr_merge_strategy: None,
                 after_merge: None,
                 auto_fetch_interval_minutes: None,
                 auto_delete_on_pr_close: None,
                 mcp_upstreams: None,
+                pr_hide_drafts: None,
+                pr_hide_conflicting: None,
+                pr_hide_ci_failing: None,
                 branch_labels: HashMap::new(),
             },
         );
@@ -3783,28 +7266,6 @@ mod tests {
         assert_eq!(loaded.prompts.len(), 1);
         assert_eq!(loaded.prompts[0].id, "abc");
         assert!(loaded.prompts[0].pinned);
-    }
-
-    #[test]
-    fn ai_prompts_round_trip() {
-        let dir = TempDir::new().unwrap();
-        let cfg = AiPromptsConfig {
-            diff_triage_system_prompt: Some("Custom triage prompt".to_string()),
-        };
-        let loaded: AiPromptsConfig = round_trip_in_dir(dir.path(), "ai-prompts.json", &cfg);
-        assert_eq!(
-            loaded.diff_triage_system_prompt.as_deref(),
-            Some("Custom triage prompt")
-        );
-    }
-
-    #[test]
-    fn ai_prompts_empty_file_returns_default() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("ai-prompts.json"), "{}").unwrap();
-        let loaded: AiPromptsConfig =
-            round_trip_in_dir(dir.path(), "ai-prompts.json", &AiPromptsConfig::default());
-        assert!(loaded.diff_triage_system_prompt.is_none());
     }
 
     #[test]
@@ -4055,6 +7516,107 @@ mod tests {
         assert_eq!(loaded.tab_ordering_mode, TabOrderingMode::Free);
     }
 
+    // Catches: a pre-migration backend save discards the marker and re-enables a removed bypass.
+    #[test]
+    #[serial_test::serial]
+    fn codex_removed_bypass_survives_legacy_backend_save() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _override = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_agents_config();
+        let mut desired = base.clone();
+        desired.agents.get_mut("codex").unwrap().run_configs[0]
+            .args
+            .clear();
+        save_agents_config(base, desired).unwrap();
+
+        // Baseline 33faf1183 AgentSettings has no codex_bypass_migrated field.
+        // Its typed ConfigFile read-modify-write omits that unknown field even
+        // when the user only changes idle-close. Record that on-disk result.
+        let path = dir.path().join(AGENTS_CONFIG_FILE);
+        let mut legacy_saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        legacy_saved["agents"]["codex"]
+            .as_object_mut()
+            .unwrap()
+            .remove("codex_bypass_migrated");
+        legacy_saved["agents"]["codex"]["idle_close_minutes"] = serde_json::json!(30);
+        persist_atomic(&path, &serde_json::to_vec(&legacy_saved).unwrap()).unwrap();
+
+        let reloaded = load_agents_config();
+        assert!(
+            reloaded.agents["codex"].run_configs[0].args.is_empty(),
+            "an unrelated save by an older backend must not reactivate sandbox bypass"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_bypass_migration_does_not_restore_a_removed_flag() {
+        // Catches: every load silently re-enabling bypass after Settings removes it.
+        let dir = TempDir::new().unwrap();
+        assert!(
+            dir.path()
+                .starts_with(crate::test_support::test_temp_root())
+        );
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_agents_config();
+        assert_eq!(
+            base.agents["codex"].run_configs[0].args,
+            vec!["--dangerously-bypass-approvals-and-sandbox"]
+        );
+        let mut desired = base.clone();
+        desired.agents.get_mut("codex").unwrap().run_configs[0]
+            .args
+            .clear();
+        save_agents_config(base, desired).unwrap();
+        assert_eq!(
+            load_agents_config().agents["codex"].run_configs[0].args,
+            [] as [std::string::String; 0]
+        );
+        let disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join("agents.json")).unwrap()).unwrap();
+        assert_eq!(
+            disk["agents"]["codex"]["run_configs"][0]["args"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_bypass_migration_preserves_wrappers_and_custom_configs() {
+        // Catches: migration putting direct CLI flags before a wrapper subcommand,
+        // or enabling bypass for a non-default authored config.
+        for (command, expected) in [("codex", true), ("/opt/company/codex-wrapper", false)] {
+            let dir = TempDir::new().unwrap();
+            assert!(
+                dir.path()
+                    .starts_with(crate::test_support::test_temp_root())
+            );
+            let _guard = set_config_dir_override(dir.path().to_path_buf());
+            fs::write(dir.path().join("agents.json"), serde_json::to_vec(&serde_json::json!({
+                "agents": {"codex": {"run_configs": [
+                    {"name":"Custom", "command":"codex", "args":["--search"]},
+                    {"name":"Default", "command":command, "args":["--search"], "is_default":true}
+                ]}}
+            })).unwrap()).unwrap();
+            let loaded = load_agents_config();
+            let configs = &loaded.agents["codex"].run_configs;
+            assert_eq!(configs[0].args, vec!["--search"]);
+            assert_eq!(
+                configs[1]
+                    .args
+                    .iter()
+                    .any(|s| s == "--dangerously-bypass-approvals-and-sandbox"),
+                expected,
+                "{command}"
+            );
+            assert_eq!(
+                load_agents_config().agents["codex"].run_configs[1].args,
+                configs[1].args
+            );
+        }
+    }
+
     #[test]
     fn agents_config_round_trip() {
         let dir = TempDir::new().unwrap();
@@ -4064,11 +7626,15 @@ mod tests {
         agents.agents.insert(
             "claude".to_string(),
             AgentSettings {
+                launch_instructions: None,
+                launch_modules: HashMap::new(),
+                launch_instructions_disabled: false,
                 run_configs: vec![
                     AgentRunConfig {
                         name: "Default".to_string(),
                         command: "claude".to_string(),
                         args: vec![],
+                        model: None,
                         env: HashMap::new(),
                         is_default: true,
                     },
@@ -4080,21 +7646,31 @@ mod tests {
                             "sonnet".to_string(),
                             "--print".to_string(),
                         ],
+                        model: None,
                         env,
                         is_default: false,
                     },
                 ],
+                idle_close_minutes: DEFAULT_IDLE_CLOSE_MINUTES,
+                codex_bypass_migrated: false,
                 auto_retry_on_error: false,
                 headless_template: None,
                 env_flags: HashMap::new(),
                 intent_tab_title: Some(false),
                 suggest_followups: None,
                 hook_instrumentation: None,
+                native_status_signals: None,
+                prevent_alt_screen: None,
+                skip_trust_dialog: Some(false),
+                ego_mode: None,
+                ego_sandbox: None,
+                progress_tracking: Some(false),
             },
         );
         let loaded: AgentsConfig = round_trip_in_dir(dir.path(), "agents.json", &agents);
         assert_eq!(loaded.agents.len(), 1);
         let claude = loaded.agents.get("claude").unwrap();
+        assert_eq!(claude.skip_trust_dialog, Some(false));
         assert_eq!(claude.run_configs.len(), 2);
         assert_eq!(claude.run_configs[0].name, "Default");
         assert!(claude.run_configs[0].is_default);
@@ -4110,6 +7686,22 @@ mod tests {
         assert!(!claude.run_configs[1].is_default);
         assert_eq!(claude.intent_tab_title, Some(false));
         assert_eq!(claude.suggest_followups, None);
+        assert_eq!(claude.progress_tracking, Some(false));
+    }
+
+    #[test]
+    fn run_config_model_survives_config_round_trip_without_rewriting_legacy_args() {
+        let original = serde_json::json!({
+            "agents": {"claude": {"run_configs": [
+                {"name": "Structured", "command": "claude", "args": [], "model": "sonnet"},
+                {"name": "Legacy", "command": "claude", "args": ["--model", "opus"]}
+            ]}}
+        });
+        let parsed: AgentsConfig = serde_json::from_value(original).unwrap();
+        let saved = serde_json::to_value(parsed).unwrap();
+        let configs = &saved["agents"]["claude"]["run_configs"];
+        assert_eq!(configs[0]["model"], "sonnet");
+        assert_eq!(configs[1]["args"], serde_json::json!(["--model", "opus"]));
     }
 
     #[test]
@@ -4224,6 +7816,7 @@ mod tests {
             prompt_on_create: false,
             delete_branch_on_remove: false,
             auto_archive_merged: true,
+            archive_retention_days: 0,
             orphan_cleanup: OrphanCleanup::On,
             pr_merge_strategy: MergeStrategy::Squash,
             after_merge: WorktreeAfterMerge::Delete,
@@ -4258,6 +7851,20 @@ mod tests {
     }
 
     #[test]
+    fn orphan_cleanup_countdown_setting_round_trips_and_defaults_to_ten_seconds() {
+        let configured: RepoDefaultsConfig = serde_json::from_value(serde_json::json!({
+            "orphan_cleanup_countdown_seconds": 20
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(configured).unwrap();
+        assert_eq!(serialized["orphan_cleanup_countdown_seconds"], 20);
+
+        let defaults: RepoDefaultsConfig = serde_json::from_str("{}").unwrap();
+        let serialized_defaults = serde_json::to_value(defaults).unwrap();
+        assert_eq!(serialized_defaults["orphan_cleanup_countdown_seconds"], 10);
+    }
+
+    #[test]
     fn repo_settings_entry_worktree_fields_round_trip() {
         let dir = TempDir::new().unwrap();
         let mut map = RepoSettingsMap::default();
@@ -4269,6 +7876,7 @@ mod tests {
                 prompt_on_create: Some(false),
                 delete_branch_on_remove: Some(false),
                 auto_archive_merged: Some(true),
+                archive_retention_days: Some(7),
                 orphan_cleanup: Some(OrphanCleanup::Off),
                 pr_merge_strategy: Some(MergeStrategy::Rebase),
                 after_merge: Some(WorktreeAfterMerge::Ask),
@@ -4303,6 +7911,25 @@ mod tests {
     }
 
     #[test]
+    fn dev_server_url_round_trips_without_changing_older_repo_settings() {
+        let old: RepoSettingsEntry = serde_json::from_str(r#"{"path":"/my/repo"}"#).unwrap();
+        assert_eq!(old.dev_server_url, None);
+        assert!(!old.has_custom_settings());
+        let configured = RepoSettingsEntry {
+            path: "/my/repo".into(),
+            dev_server_url: Some("http://localhost:5173".into()),
+            ..Default::default()
+        };
+        assert!(configured.has_custom_settings());
+        let json = serde_json::to_string(&configured).unwrap();
+        let loaded: RepoSettingsEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            loaded.dev_server_url.as_deref(),
+            Some("http://localhost:5173")
+        );
+    }
+
+    #[test]
     fn has_custom_settings_true_when_worktree_storage_set() {
         let entry = RepoSettingsEntry {
             worktree_storage: Some(WorktreeStorage::InsideRepo),
@@ -4318,6 +7945,87 @@ mod tests {
             ..RepoSettingsEntry::default()
         };
         assert!(entry.has_custom_settings());
+    }
+
+    // Catches: recycling with no connected frontend leaves a persisted checkout and peer declaration restorable at the obsolete path.
+    #[test]
+    #[serial_test::serial]
+    fn removed_worktree_retracts_persisted_workspace_and_declarations() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let document = serde_json::json!({"repos": {"/repo": {
+            "workspaces": {
+                "old": {"worktreePath": "/repo__wt/old", "savedTerminals": [{"cwd": "/repo__wt/old"}]},
+                "other": {"worktreePath": "/repo__wt/other"}
+            },
+            "activeWorkspaceId": "old",
+            "declaredWorktrees": {
+                "peer": {"workspaceId": "old", "worktreePath": "/repo__wt/old"},
+                "sibling": {"workspaceId": "other", "worktreePath": "/repo__wt/other"}
+            }
+        }}});
+        ConfigFile::<serde_json::Value>::at_path(repository_file())
+            .save(&document)
+            .unwrap();
+        let state = crate::state::tests_support::make_test_app_state();
+        state.notify_worktree_removed(crate::state::WorktreeRemovedPayload {
+            repo_path: "/repo".into(),
+            workspace_id: "old".into(),
+            branch: "old".into(),
+        });
+        let saved = load_repositories();
+        assert!(saved["repos"]["/repo"]["workspaces"].get("old").is_none());
+        assert!(
+            saved["repos"]["/repo"]["declaredWorktrees"]
+                .get("peer")
+                .is_none()
+        );
+        assert_eq!(
+            saved["repos"]["/repo"]["declaredWorktrees"]["sibling"]["worktreePath"],
+            "/repo__wt/other"
+        );
+        assert_ne!(saved["repos"]["/repo"]["activeWorkspaceId"], "old");
+        state.notify_worktree_removed(crate::state::WorktreeRemovedPayload {
+            repo_path: "/repo".into(),
+            workspace_id: "old".into(),
+            branch: "old".into(),
+        });
+        assert_eq!(load_repositories(), saved);
+    }
+
+    // Catches: a branch-only deletion retracts the main checkout restore row.
+    #[test]
+    #[serial_test::serial]
+    fn removed_worktree_keeps_main_checkout_restore_records() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let document = serde_json::json!({"repos": {"/repo": {
+            "branches": {"main": {"worktreePath": "/repo"}}, "activeBranch": "main"
+        }}});
+        replace_repositories_for_test(document.clone()).unwrap();
+        assert!(!retract_removed_workspace("/repo", "main").unwrap());
+        assert_eq!(load_repositories(), document);
+    }
+
+    // Catches: legacy branch restore records survive the same lifecycle event.
+    #[test]
+    #[serial_test::serial]
+    fn removed_worktree_retracts_legacy_branch_restore_records() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        replace_repositories_for_test(serde_json::json!({"repos": {"/repo": {
+            "branches": {"old": {"worktreePath": "/old"}, "other": {"worktreePath": "/other"}},
+            "activeBranch": "old"
+        }}}))
+        .unwrap();
+        assert!(retract_removed_workspace("/repo", "old").unwrap());
+        let saved = load_repositories();
+        assert!(saved["repos"]["/repo"]["branches"].get("old").is_none());
+        assert_eq!(
+            saved["repos"]["/repo"]["branches"]["other"]["worktreePath"],
+            "/other"
+        );
+        assert!(saved["repos"]["/repo"]["activeBranch"].is_null());
     }
 
     // -- Note image tests --
@@ -4397,7 +8105,10 @@ mod tests {
 
         let path = std::path::PathBuf::from(result.unwrap());
         assert!(path.exists(), "Image file should exist on disk");
-        assert!(path.to_string_lossy().contains("note-images/test-note-1/"));
+        assert!(
+            crate::test_support::slashed(&path.to_string_lossy())
+                .contains("note-images/test-note-1/")
+        );
         assert!(path.to_string_lossy().ends_with(".png"));
 
         // Verify content matches
@@ -4848,17 +8559,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_experimental_enabled_gates_on_parent() {
-        let mut cfg = AppConfig::default();
-        assert!(!cfg.is_experimental_enabled(true));
-        assert!(!cfg.is_experimental_enabled(false));
-
-        cfg.experimental_features_enabled = true;
-        assert!(cfg.is_experimental_enabled(true));
-        assert!(!cfg.is_experimental_enabled(false));
-    }
-
     // --- Vault-backed secrets: failure must never look like absence (#488-5576) ---
 
     /// Restore the read-fault flag even if the test panics, so one failure cannot
@@ -5023,6 +8723,109 @@ mod tests {
             "the unrelated save must not resurrect the pre-rotation token"
         );
         assert_eq!(state.config.read().font_size, 18);
+    }
+
+    /// The pairing QR carries the session token as `?token=`, and on a LAN it
+    /// travels over plain HTTP. Switching remote access on must therefore issue a
+    /// new token, through every writer (they all reach `commit_config_change_locked`),
+    /// so one captured while it was last on does not stay valid indefinitely.
+    #[test]
+    #[serial_test::serial]
+    fn enabling_remote_access_issues_a_new_session_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        crate::credentials::reset_test_faults();
+        let state = crate::state::tests_support::make_test_app_state();
+        {
+            let mut cfg = state.config.write();
+            cfg.services.server.enabled = false;
+            cfg.services.auth.session_token = "captured-token".to_string();
+            cfg.services.auth.session_token_exists = true;
+        }
+        *state.session_token.write() = "captured-token".to_string();
+
+        let effects = commit_config_change(&state, |current| {
+            merge_partial_app_config(
+                current,
+                serde_json::json!({ "services": { "server": { "enabled": true } } }),
+            )
+        })
+        .expect("enable remote access");
+
+        assert!(effects.server_changed, "enabling must still rebind");
+        let issued = state.session_token.read().clone();
+        assert_ne!(issued, "captured-token", "the old token must stop working");
+        assert!(uuid::Uuid::parse_str(&issued).is_ok(), "{issued}");
+        assert_eq!(state.config.read().services.auth.session_token, issued);
+        assert_eq!(
+            crate::credentials::get(crate::credentials::Credential::RemoteSessionToken)
+                .expect("vault readable"),
+            Some(issued.clone()),
+            "the new token must survive a restart"
+        );
+        assert!(load_app_config().services.server.enabled);
+
+        // A save while it stays on keeps the token: paired phones must survive
+        // ordinary settings changes.
+        commit_config_change(&state, |current| {
+            merge_partial_app_config(
+                current,
+                serde_json::json!({ "services": { "server": { "port": 9999 } } }),
+            )
+        })
+        .expect("port change");
+        assert_eq!(*state.session_token.read(), issued);
+
+        // Off keeps it too; only the next off->on replaces it.
+        commit_config_change(&state, |current| {
+            merge_partial_app_config(
+                current,
+                serde_json::json!({ "services": { "server": { "enabled": false } } }),
+            )
+        })
+        .expect("disable");
+        assert_eq!(*state.session_token.read(), issued);
+        commit_config_change(&state, |current| {
+            merge_partial_app_config(
+                current,
+                serde_json::json!({ "services": { "server": { "enabled": true } } }),
+            )
+        })
+        .expect("re-enable");
+        assert_ne!(*state.session_token.read(), issued);
+    }
+
+    /// A token that could not be persisted must not start authenticating.
+    #[test]
+    #[serial_test::serial]
+    fn failed_enable_keeps_the_old_session_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let invalid_config_dir = dir.path().join("not-a-directory");
+        std::fs::write(&invalid_config_dir, b"file blocks create_dir_all").unwrap();
+        let _guard = set_config_dir_override(invalid_config_dir);
+        crate::credentials::reset_test_faults();
+        crate::credentials::set(
+            crate::credentials::Credential::RemoteSessionToken,
+            "old-token",
+        )
+        .unwrap();
+        let state = crate::state::tests_support::make_test_app_state();
+        state.config.write().services.auth.session_token = "old-token".to_string();
+        *state.session_token.write() = "old-token".to_string();
+
+        commit_config_change(&state, |current| {
+            let mut next = current.clone();
+            next.services.server.enabled = true;
+            Ok(next)
+        })
+        .expect_err("disk persistence must fail");
+
+        assert_eq!(*state.session_token.read(), "old-token");
+        assert!(!state.config.read().services.server.enabled);
+        assert_eq!(
+            crate::credentials::get(crate::credentials::Credential::RemoteSessionToken).unwrap(),
+            Some("old-token".to_string())
+        );
     }
 
     /// Lost update: two writers used to read the same snapshot and the second one's
@@ -5447,13 +9250,27 @@ mod tests {
     /// a builder for "the same record with these fields overridden" — the shape
     /// every derived-field test needs on both sides of a mutation.
     fn seed_repo_with_diffstat(additions: i64, display_name: &str) -> serde_json::Value {
+        seed_repo_with_diffstat_keyed("branches", additions, display_name)
+    }
+
+    /// The same record under either entry key. `branches` is what a document
+    /// written before workspaces existed holds; `workspaces` is what every client
+    /// writes after the identity migration. Both must be stripped of their derived
+    /// fields, or the drift storm this whole mechanism exists to prevent comes back
+    /// the moment a user's config is migrated.
+    fn seed_repo_with_diffstat_keyed(
+        entries_key: &str,
+        additions: i64,
+        display_name: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "path": "/ego",
             "displayName": display_name,
             "activeBranch": "master",
-            "branches": {
+            entries_key: {
                 "master": {
-                    "name": "master",
+                    "workspaceId": "master",
+                    "branchName": "master",
                     "additions": additions,
                     "deletions": 2787,
                     "isMerged": false,
@@ -5463,6 +9280,89 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_drifted_diffstat_under_the_workspaces_key_does_not_block_an_intent_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        replace_repositories_for_test(serde_json::json!({
+            "repos": {"/ego": seed_repo_with_diffstat_keyed("workspaces", 357, "ego")},
+            "repoOrder": ["/ego"], "groups": {}, "groupOrder": []
+        }))
+        .expect("seed repositories");
+
+        save_repositories(serde_json::json!({
+            "mutationVersion": 1,
+            "repos": [{
+                "id": "/ego",
+                "before": seed_repo_with_diffstat_keyed("workspaces", 331, "ego"),
+                "after": seed_repo_with_diffstat_keyed("workspaces", 331, "Ego renamed")
+            }],
+            "groups": []
+        }))
+        .expect("a stale diffstat must not reject a rename under the workspaces key");
+
+        assert_eq!(
+            load_repositories()["repos"]["/ego"]["displayName"],
+            "Ego renamed"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_competing_edit_under_the_workspaces_key_still_conflicts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        replace_repositories_for_test(serde_json::json!({
+            "repos": {"/ego": seed_repo_with_diffstat_keyed("workspaces", 331, "Renamed elsewhere")},
+            "repoOrder": ["/ego"], "groups": {}, "groupOrder": []
+        }))
+        .expect("seed repositories");
+
+        let error = save_repositories(serde_json::json!({
+            "mutationVersion": 1,
+            "repos": [{
+                "id": "/ego",
+                "before": seed_repo_with_diffstat_keyed("workspaces", 331, "ego"),
+                "after": seed_repo_with_diffstat_keyed("workspaces", 331, "Renamed here")
+            }],
+            "groups": []
+        }))
+        .expect_err("stripping derived fields must not swallow a real competing edit");
+        assert!(error.contains("repository '/ego'"), "{error}");
+    }
+
+    /// The one save that crosses the migration: disk still holds `branches`, the
+    /// client's baseline is the document it read from disk, and the record it
+    /// writes back is workspace-keyed. Reject this and a user who upgrades can
+    /// never save again.
+    #[test]
+    #[serial_test::serial]
+    fn the_save_that_migrates_branches_to_workspaces_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        replace_repositories_for_test(serde_json::json!({
+            "repos": {"/ego": seed_repo_with_diffstat_keyed("branches", 331, "ego")},
+            "repoOrder": ["/ego"], "groups": {}, "groupOrder": []
+        }))
+        .expect("seed repositories");
+
+        save_repositories(serde_json::json!({
+            "mutationVersion": 1,
+            "repos": [{
+                "id": "/ego",
+                "before": seed_repo_with_diffstat_keyed("branches", 331, "ego"),
+                "after": seed_repo_with_diffstat_keyed("workspaces", 331, "ego")
+            }],
+            "groups": []
+        }))
+        .expect("the migrating save must be accepted");
+
+        let saved = load_repositories();
+        assert!(saved["repos"]["/ego"]["workspaces"].is_object(), "{saved}");
+        assert!(saved["repos"]["/ego"]["branches"].is_null(), "{saved}");
     }
 
     #[test]
@@ -5549,6 +9449,340 @@ mod tests {
         );
     }
 
+    // ── Stale-temp repository classifier / repair (#763-d219) ─────────────
+
+    /// A nonexistent path guaranteed to fall under a recognized temp root on
+    /// any machine running this test — `std::env::temp_dir()` itself, not a
+    /// hardcoded `/tmp`, so it matches whatever this OS/CI actually resolves.
+    fn stale_temp_candidate_path() -> String {
+        std::env::temp_dir()
+            .join("tuic-763-d219-stale-repo-does-not-exist")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn shell_workspace_json() -> serde_json::Value {
+        serde_json::json!({
+            "workspaceId": "main",
+            "branchName": "main",
+            "kind": "main",
+            "isMain": false,
+            "isShell": true,
+            "parentRepoPath": null,
+            "worktreePath": null,
+            "terminals": [],
+            "savedTerminals": [],
+            "hadTerminals": false,
+            "lastActiveTerminal": null,
+            "additions": 0,
+            "deletions": 0,
+            "isMerged": false,
+            "lastCommitTs": null,
+        })
+    }
+
+    /// A repository record matching every criterion of the classifier —
+    /// mutate a clone of this in each "survives" test to flip exactly one
+    /// criterion and prove it alone is enough to spare the row.
+    fn stale_temp_repo_json(path: &str) -> serde_json::Value {
+        serde_json::json!({
+            "path": path,
+            "displayName": "stale-repo",
+            "initials": "",
+            "isGitRepo": false,
+            "expanded": true,
+            "collapsed": false,
+            "parked": false,
+            "workspaces": { "main": shell_workspace_json() },
+            "activeWorkspaceId": "main",
+        })
+    }
+
+    #[test]
+    fn classifies_a_ghost_matching_every_criterion() {
+        let path = stale_temp_candidate_path();
+        let repo = stale_temp_repo_json(&path);
+        let candidate =
+            classify_stale_temp_repo(&path, &repo).expect("must classify as stale-temp");
+        assert_eq!(candidate.path, path);
+        assert_eq!(candidate.display_name, "stale-repo");
+    }
+
+    #[test]
+    fn survives_when_the_local_path_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+        let repo = stale_temp_repo_json(&path);
+        assert!(
+            classify_stale_temp_repo(&path, &repo).is_none(),
+            "a path that still exists on disk must never be swept up"
+        );
+    }
+
+    #[test]
+    fn only_not_found_metadata_errors_prove_the_path_is_missing() {
+        assert!(metadata_error_proves_missing(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !metadata_error_proves_missing(&std::io::Error::from(kind)),
+                "{kind:?} must preserve the repository row"
+            );
+        }
+    }
+
+    #[test]
+    fn survives_outside_a_recognized_temp_root() {
+        // Nonexistent, non-git, empty-shell — everything a real ghost looks
+        // like — except it is not under a temp root. A legitimate repository
+        // on an unmounted drive or a machine the user is away from looks
+        // exactly like this, and must survive.
+        let path = "/Users/boss/Gits/offline-project-not-mounted-right-now".to_string();
+        let repo = stale_temp_repo_json(&path);
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+    }
+
+    #[test]
+    fn survives_when_is_git_repo_is_not_explicitly_false() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo.as_object_mut().unwrap().remove("isGitRepo");
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+    }
+
+    #[test]
+    fn survives_a_repo_with_more_than_one_workspace() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["workspaces"]["feature"] = shell_workspace_json();
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+    }
+
+    #[test]
+    fn survives_a_workspace_with_a_live_terminal() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["workspaces"]["main"]["terminals"] = serde_json::json!(["term-1"]);
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+    }
+
+    #[test]
+    fn survives_a_workspace_with_saved_terminals() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["workspaces"]["main"]["savedTerminals"] = serde_json::json!([{"agentType": null}]);
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+    }
+
+    #[test]
+    fn survives_a_workspace_with_diffstat_or_commit_state() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["workspaces"]["main"]["additions"] = serde_json::json!(3);
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+
+        let mut repo2 = stale_temp_repo_json(&path);
+        repo2["workspaces"]["main"]["lastCommitTs"] = serde_json::json!(1_726_000_000);
+        assert!(classify_stale_temp_repo(&path, &repo2).is_none());
+    }
+
+    #[test]
+    fn survives_a_repo_with_a_connection_id_or_initials() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["connectionId"] = serde_json::json!("remote-1");
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+
+        let mut repo2 = stale_temp_repo_json(&path);
+        repo2["initials"] = serde_json::json!("MP");
+        assert!(classify_stale_temp_repo(&path, &repo2).is_none());
+    }
+
+    #[test]
+    fn survives_a_parked_repo() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["parked"] = serde_json::json!(true);
+        assert!(
+            classify_stale_temp_repo(&path, &repo).is_none(),
+            "a repo the user deliberately parked is never a ghost"
+        );
+    }
+
+    #[test]
+    fn survives_when_is_shell_is_missing() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["workspaces"]["main"]
+            .as_object_mut()
+            .unwrap()
+            .remove("isShell");
+        assert!(
+            classify_stale_temp_repo(&path, &repo).is_none(),
+            "isShell must be explicitly true, never merely absent"
+        );
+    }
+
+    #[test]
+    fn survives_when_is_shell_is_false() {
+        let path = stale_temp_candidate_path();
+        let mut repo = stale_temp_repo_json(&path);
+        repo["workspaces"]["main"]["isShell"] = serde_json::json!(false);
+        assert!(classify_stale_temp_repo(&path, &repo).is_none());
+    }
+
+    #[test]
+    fn survives_a_path_traversal_out_of_the_temp_root() {
+        // Lexically starts with the temp root by component prefix, but a `..`
+        // component means it does not actually resolve under it.
+        let escaped = std::env::temp_dir()
+            .join("..")
+            .join("legit-project")
+            .to_string_lossy()
+            .to_string();
+        let repo = stale_temp_repo_json(&escaped);
+        assert!(
+            classify_stale_temp_repo(&escaped, &repo).is_none(),
+            "a path containing `..` must never be treated as living under a temp root"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repair_removes_only_the_named_stale_temp_rows_and_writes_a_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let ghost_path = stale_temp_candidate_path();
+        replace_repositories_for_test(serde_json::json!({
+            "repos": {
+                "/keep": seed_repo_with_diffstat(12, "keep-me"),
+                (ghost_path.clone()): stale_temp_repo_json(&ghost_path),
+            },
+            "repoOrder": ["/keep", ghost_path.clone()],
+            "activeRepoPath": ghost_path.clone(),
+            "groups": {
+                "g1": { "id": "g1", "name": "Group", "color": "", "collapsed": false, "repoOrder": [ghost_path.clone()] }
+            },
+            "groupOrder": ["g1"],
+        }))
+        .expect("seed repositories");
+
+        let summary = repair_stale_temp_repositories_request(vec![ghost_path.clone()])
+            .expect("repair must succeed for a genuinely stale row");
+        assert_eq!(summary.removed, vec![ghost_path.clone()]);
+        assert!(
+            std::path::Path::new(&summary.backup_path).is_file(),
+            "backup file must exist at the returned path"
+        );
+
+        let saved = load_repositories();
+        assert!(saved["repos"].get(ghost_path.as_str()).is_none());
+        assert!(saved["repos"].get("/keep").is_some());
+        assert!(
+            !saved["repoOrder"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == &serde_json::json!(ghost_path)),
+            "removed row must leave repoOrder"
+        );
+        assert_eq!(saved["activeRepoPath"], serde_json::Value::Null);
+        assert!(
+            !saved["groups"]["g1"]["repoOrder"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == &serde_json::json!(ghost_path)),
+            "removed row must leave every group's repoOrder too"
+        );
+
+        let backup: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary.backup_path).unwrap()).unwrap();
+        assert!(
+            backup["repos"].get(ghost_path.as_str()).is_some(),
+            "backup must hold the exact pre-repair document"
+        );
+        assert!(backup["repos"].get("/keep").is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repair_refuses_the_whole_batch_when_one_path_no_longer_classifies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let ghost_a = stale_temp_candidate_path();
+        let ghost_b = format!("{ghost_a}-b");
+        let mut repo_b = stale_temp_repo_json(&ghost_b);
+        repo_b["isGitRepo"] = serde_json::json!(true); // reconnected since the preview
+        replace_repositories_for_test(serde_json::json!({
+            "repos": { (ghost_a.clone()): stale_temp_repo_json(&ghost_a), (ghost_b.clone()): repo_b },
+            "repoOrder": [ghost_a.clone(), ghost_b.clone()], "groups": {}, "groupOrder": [],
+        }))
+        .expect("seed repositories");
+
+        let error = repair_stale_temp_repositories_request(vec![ghost_a.clone(), ghost_b.clone()])
+            .expect_err("a request naming even one non-stale row must be refused entirely");
+        assert!(error.contains(ghost_b.as_str()), "{error}");
+
+        let saved = load_repositories();
+        assert!(
+            saved["repos"].get(ghost_a.as_str()).is_some(),
+            "the still-stale row must survive an all-or-nothing refusal, not be removed alone"
+        );
+        assert!(saved["repos"].get(ghost_b.as_str()).is_some());
+    }
+
+    #[test]
+    fn repair_rejects_an_empty_request() {
+        repair_stale_temp_repositories_request(vec![])
+            .expect_err("must refuse an empty repair request rather than no-op silently");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repair_dedupes_a_repeated_path_in_the_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let ghost = stale_temp_candidate_path();
+        replace_repositories_for_test(serde_json::json!({
+            "repos": { (ghost.clone()): stale_temp_repo_json(&ghost) },
+            "repoOrder": [ghost.clone()], "groups": {}, "groupOrder": [],
+        }))
+        .expect("seed repositories");
+
+        let summary = repair_stale_temp_repositories_request(vec![ghost.clone(), ghost.clone()])
+            .expect("repair must succeed");
+
+        assert_eq!(
+            summary.removed,
+            vec![ghost],
+            "a path repeated in the request must be echoed exactly once, not once per occurrence"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repair_refuses_a_row_that_was_never_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        replace_repositories_for_test(serde_json::json!({
+            "repos": {"/legit": seed_repo_with_diffstat(1, "legit")},
+            "repoOrder": ["/legit"], "groups": {}, "groupOrder": [],
+        }))
+        .expect("seed repositories");
+
+        repair_stale_temp_repositories_request(vec!["/legit".to_string()])
+            .expect_err("a legitimate repository must never be repaired away");
+
+        let saved = load_repositories();
+        assert!(saved["repos"].get("/legit").is_some());
+    }
+
     /// Two-process harness entry point for
     /// `load_app_config_migration_survives_concurrent_cross_process_write` below. Under
     /// a normal test run (`TUIC_CONFIG_TEST_ROLE` unset) this is a no-op — its job is to
@@ -5601,6 +9835,39 @@ mod tests {
                     Ok(next)
                 })
                 .expect("commit child config delta");
+            }
+            // One child patches a single key, the other saves a whole document — the
+            // exact pairing `save_config` and a future `config_patch` produce in the
+            // field when a debug and a release build share one config directory.
+            "patch-font" | "whole-save-collapse" => {
+                let cached = load_app_config();
+                let state = crate::state::tests_support::make_test_app_state();
+                *state.config.write() = cached;
+
+                std::fs::write(config_dir().join(format!("{role}.ready")), b"ready")
+                    .expect("write child ready marker");
+                let release = config_dir().join("patch.release");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !release.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for patch test release"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                if role == "patch-font" {
+                    apply_config_patch(&state, "font_size", serde_json::json!(18))
+                        .expect("child config patch");
+                } else {
+                    // Byte-for-byte what `save_config` does with a whole AppConfig.
+                    commit_config_change(&state, |current| {
+                        let mut next = current.clone();
+                        next.collapse_tools = true;
+                        Ok(next)
+                    })
+                    .expect("child whole-object save");
+                }
             }
             "repo-delta-a" | "repo-delta-b" => {
                 let path = if role == "repo-delta-a" { "/a" } else { "/b" };
@@ -5756,6 +10023,168 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn stale_app_config_saves_in_one_process_preserve_independent_changes() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        let base = state.config.read().clone();
+        let mut first = base.clone();
+        first.font_size = 21;
+        let mut second = base.clone();
+        second.collapse_tools = true;
+        commit_config_save(&state, base.clone(), first).unwrap();
+        commit_config_save(&state, base, second).unwrap();
+        let saved = load_app_config();
+        assert_eq!(saved.font_size, 21);
+        assert!(saved.collapse_tools);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_patch_applies_only_the_named_key() {
+        crate::credentials::reset_test_faults();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        let before = state.config.read().clone();
+
+        apply_config_patch(&state, "font_size", serde_json::json!(21)).expect("patch font_size");
+
+        assert_eq!(state.config.read().font_size, 21);
+        let on_disk: AppConfig = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(APP_CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on_disk.font_size, 21);
+        assert_eq!(
+            on_disk.theme, before.theme,
+            "a per-key patch must not disturb unrelated fields"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_patch_applies_a_nested_key() {
+        crate::credentials::reset_test_faults();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+
+        apply_config_patch(&state, "services.server.port", serde_json::json!(9911))
+            .expect("patch nested key");
+
+        assert_eq!(state.config.read().services.server.port, 9911);
+    }
+
+    /// `AppConfig` has no `deny_unknown_fields`, so serde silently DROPS a misspelled
+    /// key: without this check a typo would report success and change nothing.
+    #[test]
+    #[serial_test::serial]
+    fn config_patch_rejects_an_unknown_path() {
+        crate::credentials::reset_test_faults();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+
+        let err = apply_config_patch(&state, "font_sizee", serde_json::json!(21))
+            .expect_err("an unknown path must be rejected, not silently dropped");
+        assert!(err.contains("font_sizee"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_patch_rejects_a_type_mismatch() {
+        crate::credentials::reset_test_faults();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+
+        apply_config_patch(&state, "font_size", serde_json::json!("enormous"))
+            .expect_err("a string is not a valid font_size");
+        assert_eq!(
+            state.config.read().font_size,
+            AppConfig::default().font_size,
+            "a rejected patch must leave the cached config untouched"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_patch_rejects_a_malformed_path() {
+        crate::credentials::reset_test_faults();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+
+        apply_config_patch(&state, "", serde_json::json!(1)).expect_err("empty path");
+        apply_config_patch(&state, "services..port", serde_json::json!(1))
+            .expect_err("empty segment");
+        apply_config_patch(&state, "font_size.nested", serde_json::json!(1))
+            .expect_err("cannot descend into a scalar");
+    }
+
+    /// The story's core claim: a per-key patch and a whole-object save running in two
+    /// SEPARATE OS PROCESSES must both survive. Two threads would prove nothing — they
+    /// share `CONFIG_WRITE_LOCK`, so the second always sees the first's write. Only a
+    /// real second process contends for the advisory file lock, which is tied to the
+    /// open file description rather than the process.
+    #[test]
+    #[serial_test::serial]
+    fn config_patch_and_whole_object_save_compose_across_two_processes() {
+        crate::credentials::reset_test_faults();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let seed = AppConfig::default();
+        std::fs::write(
+            dir.path().join(APP_CONFIG_FILE),
+            serde_json::to_string_pretty(&seed).unwrap(),
+        )
+        .unwrap();
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut children = ["patch-font", "whole-save-collapse"].map(|role| {
+            std::process::Command::new(&exe)
+                .arg("two_process_child")
+                .env("TUIC_CONFIG_TEST_ROLE", role)
+                .env("TUIC_CONFIG_TEST_DIR", dir.path())
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawn {role} child: {e}"))
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        for role in ["patch-font", "whole-save-collapse"] {
+            let ready = dir.path().join(format!("{role}.ready"));
+            while !ready.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {role} child"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        // Both children now hold the SAME stale cache. Releasing them together is what
+        // makes the two writes overlap.
+        std::fs::write(dir.path().join("patch.release"), b"release").unwrap();
+
+        for child in &mut children {
+            let status = child.wait().expect("wait for patch child");
+            assert!(status.success(), "patch child failed: {status:?}");
+        }
+
+        let on_disk: AppConfig = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(APP_CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on_disk.font_size, 18, "the per-key patch was lost");
+        assert!(
+            on_disk.collapse_tools,
+            "the whole-object save was lost by the concurrent patch"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn repository_deltas_compose_across_two_processes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = set_config_dir_override(dir.path().to_path_buf());
@@ -5896,6 +10325,27 @@ mod tests {
         );
     }
 
+    /// The listener binds `bind_address` only at start, so a save that moves it
+    /// to another interface must rebind, or the old interface stays exposed.
+    #[test]
+    fn a_save_that_changes_the_bind_address_asks_for_a_rebind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        state.config.write().services.server.enabled = true;
+
+        let effects = commit_config_change(&state, |current| {
+            merge_partial_app_config(
+                current,
+                serde_json::json!({ "services": { "server": { "bind_address": "100.64.0.7" } } }),
+            )
+        })
+        .expect("bind address change");
+
+        assert!(effects.server_changed);
+        assert_eq!(load_app_config().services.server.bind_address, "100.64.0.7");
+    }
+
     /// A failing mutation must leave both memory and disk untouched.
     #[test]
     fn a_rejected_mutation_changes_nothing() {
@@ -6034,7 +10484,7 @@ mod tests {
             crate::credentials::get(crate::credentials::Credential::PushVapidPrivateKey).unwrap(),
             Some("old-vapid".to_string())
         );
-        assert!(state.config.read().services.auth.session_token.is_empty());
+        assert_eq!(state.config.read().services.auth.session_token, "");
     }
 
     #[test]
@@ -6067,6 +10517,261 @@ mod tests {
     // -----------------------------------------------------------------
     // ConfigFile<T> — cross-process-safe update/save
     // -----------------------------------------------------------------
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_agents_saves_preserve_independent_changes() {
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_agents_config();
+
+        let mut first = base.clone();
+        first.headless_agent = Some("claude".to_string());
+        let mut second = base.clone();
+        second
+            .agents
+            .entry("claude".to_string())
+            .or_default()
+            .progress_tracking = Some(true);
+
+        save_agents_config(base.clone(), first).expect("first client save");
+        save_agents_config(base, second).expect("second client save");
+
+        let persisted = load_agents_config();
+        assert_eq!(persisted.headless_agent.as_deref(), Some("claude"));
+        assert_eq!(persisted.agents["claude"].progress_tracking, Some(true));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_notification_saves_preserve_independent_changes() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_notification_config();
+        let mut first = base.clone();
+        first.enabled = false;
+        let mut second = base.clone();
+        second.volume = 0.2;
+        save_notification_config(base.clone(), first).unwrap();
+        save_notification_config(base, second).unwrap();
+        let saved = load_notification_config();
+        assert!(!saved.enabled);
+        assert_eq!(saved.volume.to_bits(), 0.2_f64.to_bits());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_ui_prefs_saves_preserve_independent_changes() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_ui_prefs();
+        let mut first = base.clone();
+        first.sidebar_visible = false;
+        first.tasks_view_preferences.insert(
+            "repo-a".into(),
+            serde_json::json!({"view": "board"}).to_string(),
+        );
+        let mut second = base.clone();
+        second.settings_expert_mode = true;
+        second.tasks_view_preferences.insert(
+            "repo-b".into(),
+            serde_json::json!({"view": "list"}).to_string(),
+        );
+        save_ui_prefs(base.clone(), first).unwrap();
+        save_ui_prefs(base, second).unwrap();
+        let saved = load_ui_prefs();
+        assert!(!saved.sidebar_visible);
+        assert!(saved.settings_expert_mode);
+        assert_eq!(
+            saved.tasks_view_preferences["repo-a"],
+            r#"{"view":"board"}"#
+        );
+        assert_eq!(saved.tasks_view_preferences["repo-b"], r#"{"view":"list"}"#);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_repo_defaults_saves_preserve_independent_changes() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_repo_defaults();
+        let mut first = base.clone();
+        first.base_branch = "main".to_string();
+        let mut second = base.clone();
+        second.auto_fetch_interval_minutes = 15;
+        save_repo_defaults(base.clone(), first).unwrap();
+        save_repo_defaults(base, second).unwrap();
+        let saved = load_repo_defaults();
+        assert_eq!(saved.base_branch, "main");
+        assert_eq!(saved.auto_fetch_interval_minutes, 15);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_repo_settings_saves_preserve_distinct_repositories() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = load_repo_settings();
+        let mut first = base.clone();
+        first.repos.insert(
+            "/alpha".into(),
+            RepoSettingsEntry {
+                path: "/alpha".into(),
+                ..Default::default()
+            },
+        );
+        let mut second = base.clone();
+        second.repos.insert(
+            "/beta".into(),
+            RepoSettingsEntry {
+                path: "/beta".into(),
+                ..Default::default()
+            },
+        );
+        save_repo_settings(base.clone(), first).unwrap();
+        save_repo_settings(base, second).unwrap();
+        let saved = load_repo_settings();
+        assert!(saved.repos.contains_key("/alpha"));
+        assert!(saved.repos.contains_key("/beta"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_pane_layout_saves_preserve_independent_object_keys() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = serde_json::json!({
+            "root":{"type":"leaf","id":"g1"},
+            "groups":{"g1":{"id":"g1","tabs":[{"id":"t1","type":"terminal"},{"id":"t2","type":"terminal"}],"activeTabId":"t1"}},
+            "activeGroupId":"g1"
+        });
+        save_pane_layout(serde_json::Value::Null, base.clone()).unwrap();
+        let mut desired = base.clone();
+        desired["groups"]["g1"]["activeTabId"] = serde_json::json!("t2");
+        save_pane_layout(base.clone(), desired.clone()).unwrap();
+        let mut other = base.clone();
+        other["activeGroupId"] = serde_json::Value::Null;
+        save_pane_layout(base, other).unwrap();
+        desired.as_object_mut().unwrap().remove("activeGroupId");
+        assert_eq!(load_pane_layout(), desired);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn notes_delta_replaces_known_ids_while_unrelated_object_key_survives() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = serde_json::json!({"notes": [{"id": "old"}], "meta": "initial"});
+        ConfigFile::<serde_json::Value>::new(NOTES_FILE)
+            .save(&base)
+            .unwrap();
+        save_notes(
+            base.clone(),
+            serde_json::json!({"notes": [{"id": "old"}], "meta": "new"}),
+        )
+        .unwrap();
+        save_notes(
+            base,
+            serde_json::json!({"notes": [{"id": "new"}], "meta": "initial"}),
+        )
+        .unwrap();
+        assert_eq!(
+            load_notes().unwrap(),
+            serde_json::json!({"notes": [{"id": "new"}], "meta": "new"})
+        );
+    }
+
+    /// Catches: a stale frontend snapshot replacing the array over an agent-added idea.
+    #[test]
+    #[serial_test::serial]
+    fn notes_stale_panel_save_preserves_agent_addition() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().into());
+        let base = serde_json::json!({"notes":[{"id":"existing","text":"Keep","usedAt":null}]});
+        save_notes(serde_json::json!({}), base.clone()).unwrap();
+        let mut agent = base.clone();
+        agent["notes"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, serde_json::json!({"id":"agent","text":"New"}));
+        save_notes(base.clone(), agent).unwrap();
+        let mut stale_panel = base.clone();
+        stale_panel["notes"][0]["usedAt"] = 42.into();
+        save_notes(base, stale_panel).unwrap();
+        assert_eq!(
+            load_notes().unwrap()["notes"],
+            serde_json::json!([
+                {"id":"agent","text":"New"}, {"id":"existing","text":"Keep","usedAt":42}
+            ])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn notes_delta_removes_deleted_key_without_erasing_another_edit() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = serde_json::json!({"notes": [], "obsolete": "remove", "other": "old"});
+        ConfigFile::<serde_json::Value>::new(NOTES_FILE)
+            .save(&base)
+            .unwrap();
+        save_notes(
+            base.clone(),
+            serde_json::json!({"notes": [], "obsolete": "remove", "other": "new"}),
+        )
+        .unwrap();
+        save_notes(base, serde_json::json!({"notes": [], "other": "old"})).unwrap();
+        assert_eq!(
+            load_notes().unwrap(),
+            serde_json::json!({"notes": [], "other": "new"})
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn notes_null_inside_new_object_is_a_delete_marker() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let base = serde_json::json!({});
+        save_notes(
+            base,
+            serde_json::json!({"metadata": {"unset": null, "kept": "value"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            load_notes().unwrap(),
+            serde_json::json!({"metadata": {"kept": "value"}})
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn notes_delta_refuses_to_replace_corrupt_file() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let path = dir.path().join(NOTES_FILE);
+        fs::write(&path, b"{incomplete").unwrap();
+        assert!(
+            save_notes(
+                serde_json::json!({"notes": []}),
+                serde_json::json!({"notes": [{"id": "new"}]})
+            )
+            .is_err()
+        );
+        assert!(!path.exists(), "the invalid document must not be replaced");
+        let backups: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("notes.corrupt-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(backups[0].path()).unwrap(), b"{incomplete");
+    }
 
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
     struct CounterDoc {
@@ -6139,12 +10844,16 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let _guard = set_config_dir_override(dir.path().to_path_buf());
 
-        save_activity(serde_json::json!([{ "id": 1 }])).expect("seed write");
+        ConfigFile::<serde_json::Value>::new(ACTIVITY_FILE)
+            .save(&serde_json::json!([{ "id": 1 }]))
+            .expect("seed write");
         ConfigFile::<serde_json::Value>::new(ACTIVITY_FILE)
             .save(&serde_json::json!([{ "id": 2 }]))
             .expect("interloper write");
 
-        save_activity(serde_json::json!([{ "id": 3 }])).expect("must not be refused");
+        ConfigFile::<serde_json::Value>::new(ACTIVITY_FILE)
+            .save(&serde_json::json!([{ "id": 3 }]))
+            .expect("must not be refused");
         assert_eq!(load_activity(), serde_json::json!([{ "id": 3 }]));
     }
 
@@ -6198,5 +10907,399 @@ mod tests {
 
         drop(held);
         handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // Config defaults (Settings "expert mode") — story 863-03c1
+    // -----------------------------------------------------------------
+
+    /// Removing any one field that carries a serde default from a struct's own
+    /// full JSON, then re-deserializing, must reproduce that exact default
+    /// again. Catches drift between a `#[serde(default = ...)]` attribute and
+    /// a hand-written `Default` impl going out of sync — e.g. a field default
+    /// function changing without the `impl Default` literal following it, or
+    /// vice versa. Fields with no serde default at all (required fields) fail
+    /// to parse when removed, which is expected and treated as nothing to
+    /// check for that field.
+    fn assert_no_field_default_drift<T>(default: &T)
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        assert_no_field_default_drift_except(default, &[]);
+    }
+
+    /// `allowed_exceptions` lists fields that are *deliberately* asymmetric: a
+    /// brand-new config (no file at all) gets the struct's `Default`, while an
+    /// existing config file that predates the field gets its `#[serde(default
+    /// = ...)]` instead — e.g. `mcp_server_enabled`, where an upgrade must not
+    /// silently switch on a network-facing server for a user who never opted
+    /// in (see `app_config_serde_default_for_new_fields`). Everything else is
+    /// held to the stricter rule: no exception without a name and a reason.
+    fn assert_no_field_default_drift_except<T>(default: &T, allowed_exceptions: &[&str])
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let full = serde_json::to_value(default).expect("struct must serialize");
+        let obj = full
+            .as_object()
+            .expect("struct must serialize to a JSON object")
+            .clone();
+        let mut drifted = Vec::new();
+        for key in obj.keys() {
+            let mut partial = obj.clone();
+            partial.remove(key);
+            if let Ok(parsed) = serde_json::from_value::<T>(serde_json::Value::Object(partial))
+                && serde_json::to_value(&parsed).unwrap() != full
+            {
+                drifted.push(key.clone());
+            }
+        }
+        let unexpected: Vec<&String> = drifted
+            .iter()
+            .filter(|key| !allowed_exceptions.contains(&key.as_str()))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "field(s) {unexpected:?}'s serde default drifted from the struct's Default impl \
+             (unexpectedly — add to allowed_exceptions only with a documented reason)"
+        );
+        let unused_exceptions: Vec<&&str> = allowed_exceptions
+            .iter()
+            .filter(|allowed| !drifted.contains(&(**allowed).to_string()))
+            .collect();
+        assert!(
+            unused_exceptions.is_empty(),
+            "allowed_exceptions {unused_exceptions:?} no longer drift — remove the stale exception"
+        );
+    }
+
+    #[test]
+    fn app_config_field_defaults_match_default_impl() {
+        assert_no_field_default_drift_except(
+            &AppConfig::default(),
+            &[
+                // Deliberately asymmetric — see the doc comment on
+                // `assert_no_field_default_drift_except` and
+                // `app_config_serde_default_for_new_fields`.
+                "mcp_server_enabled",
+                // A missing marker means a legacy file that still needs the
+                // one-shot duration migration; a fresh config has nothing to migrate.
+                "session_duration_migrated",
+                "scrollback_reflow_migrated",
+            ],
+        );
+    }
+
+    // Catches: the debug default not applied (empty view for developers) or release defaulting on.
+    #[test]
+    fn mcp_call_audit_defaults_on_only_in_debug_builds() {
+        assert_eq!(
+            AppConfig::default().mcp_call_audit_enabled,
+            cfg!(debug_assertions)
+        );
+        let mut file = serde_json::to_value(AppConfig::default()).unwrap();
+        file.as_object_mut()
+            .unwrap()
+            .remove("mcp_call_audit_enabled");
+        let legacy: AppConfig = serde_json::from_value(file.clone()).unwrap();
+        assert_eq!(legacy.mcp_call_audit_enabled, cfg!(debug_assertions));
+        file["mcp_call_audit_enabled"] = serde_json::json!(false);
+        let off: AppConfig = serde_json::from_value(file).unwrap();
+        assert!(!off.mcp_call_audit_enabled);
+    }
+
+    #[test]
+    fn notification_config_field_defaults_match_default_impl() {
+        assert_no_field_default_drift(&NotificationConfig::default());
+    }
+
+    #[test]
+    fn agent_settings_field_defaults_match_default_impl() {
+        assert_no_field_default_drift(&AgentSettings::default());
+    }
+
+    #[test]
+    fn agent_settings_round_trip_native_scrollback_opt_out() {
+        let settings: AgentSettings =
+            serde_json::from_value(serde_json::json!({"prevent_alt_screen": false})).unwrap();
+        let saved = serde_json::to_value(settings).unwrap();
+        assert_eq!(saved["prevent_alt_screen"], false);
+        assert!(
+            serde_json::to_value(AgentSettings::default()).unwrap()["prevent_alt_screen"].is_null()
+        );
+    }
+
+    #[test]
+    fn repo_defaults_config_field_defaults_match_default_impl() {
+        assert_no_field_default_drift(&RepoDefaultsConfig::default());
+    }
+
+    #[test]
+    fn agents_config_field_defaults_match_default_impl() {
+        assert_no_field_default_drift(&AgentsConfig::default());
+    }
+
+    #[cfg(feature = "dictation")]
+    #[test]
+    fn dictation_config_field_defaults_match_default_impl() {
+        assert_no_field_default_drift(&crate::dictation::commands::DictationConfig::default());
+    }
+
+    /// The command must hand back each domain's own `Default::default()` —
+    /// never a second, hand-copied list of literal values that could drift
+    /// out of sync with it silently.
+    #[test]
+    fn get_config_defaults_returns_each_domains_own_default() {
+        let defaults = get_config_defaults(None);
+        assert_eq!(
+            serde_json::to_value(&defaults.app).unwrap(),
+            serde_json::to_value(AppConfig::default()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.notifications).unwrap(),
+            serde_json::to_value(NotificationConfig::default()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.agent_settings).unwrap(),
+            serde_json::to_value(AgentSettings::default()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.repo_defaults).unwrap(),
+            serde_json::to_value(RepoDefaultsConfig::default()).unwrap()
+        );
+        let mut expected = serde_json::to_value(AgentsConfig::default()).unwrap();
+        expected["launch_additions_migrated"] = serde_json::json!(true);
+        expected["agents"]["codex"] = serde_json::to_value(AgentSettings::default()).unwrap();
+        expected["agents"]["codex"]["codex_bypass_migrated"] = serde_json::json!(true);
+        expected["agents"]["codex"]["run_configs"] = serde_json::json!([{
+            "name": "Codex Default",
+            "command": "codex",
+            "args": ["--dangerously-bypass-approvals-and-sandbox"],
+            "env": {},
+            "is_default": true
+        }]);
+        assert_eq!(
+            serde_json::to_value(&defaults.agents).unwrap(),
+            expected,
+            "the settings baseline includes the persisted Codex bypass and launch additions migrations"
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.github_accounts).unwrap(),
+            serde_json::to_value(crate::github_account::GitHubAccountRegistry::default()).unwrap()
+        );
+        #[cfg(feature = "dictation")]
+        assert_eq!(
+            serde_json::to_value(&defaults.dictation).unwrap(),
+            // The one deliberate difference: a fresh install resolves the engine
+            // to Pocket (local), and the settings panel compares against that.
+            serde_json::to_value(crate::dictation::commands::DictationConfig {
+                speech_engine: "pocket".to_string(),
+                ..Default::default()
+            })
+            .unwrap()
+        );
+    }
+
+    /// Settings hides the "Add another GitHub account" entry point while
+    /// `github_accounts.accounts` equals its default. The key must be in the
+    /// payload, empty, and spelled as the registry file spells it; a missing
+    /// key would keep the entry point visible for everyone.
+    #[test]
+    fn get_config_defaults_carries_no_additional_github_accounts() {
+        let payload = serde_json::to_value(get_config_defaults(None)).unwrap();
+        assert_eq!(
+            payload["github_accounts"]["accounts"],
+            serde_json::json!([])
+        );
+    }
+
+    /// Pins the defaults command to the value a brand-new install actually
+    /// loads — not merely to a second, independently-derived
+    /// `Default::default()` call, which is what the test above checks.
+    /// `load_app_config`/`load_notification_config`/`get_dictation_config`
+    /// all fall back to `T::default()` when their file does not exist
+    /// (`read_app_config_unlocked`, `load_json_config`) — that fallback,
+    /// exercised here against a config dir with no files in it, is the
+    /// "fresh install" source of truth this command must mirror. If a
+    /// loader's missing-file fallback ever stopped being `T::default()`,
+    /// this test would catch the divergence where the one above could not.
+    ///
+    /// `agent_settings` has no whole-file loader to pin against here: the
+    /// on-disk domain is `AgentsConfig` (a map of agent name -> settings),
+    /// and there is no single default for the map itself — see the field's
+    /// doc comment on `ConfigDefaults`. Intentionally left out of this test.
+    #[test]
+    #[serial_test::serial]
+    fn get_config_defaults_matches_what_a_brand_new_install_loads() {
+        crate::credentials::reset_test_faults();
+        let dir = TempDir::new().expect("temp dir");
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+
+        let defaults = get_config_defaults(None);
+
+        assert_eq!(
+            serde_json::to_value(&defaults.app).unwrap(),
+            serde_json::to_value(load_app_config()).unwrap(),
+            "must match what a fresh config.json-less install loads"
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.notifications).unwrap(),
+            serde_json::to_value(load_notification_config()).unwrap(),
+            "must match what a fresh notifications.json-less install loads"
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.repo_defaults).unwrap(),
+            serde_json::to_value(load_repo_defaults()).unwrap(),
+            "must match what a fresh repo-defaults.json-less install loads"
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.agents).unwrap(),
+            serde_json::to_value(load_agents_config()).unwrap(),
+            "must match what a fresh agents.json-less install loads"
+        );
+        assert_eq!(
+            serde_json::to_value(&defaults.github_accounts).unwrap(),
+            serde_json::to_value(crate::github_account::GitHubAccountRegistry::load()).unwrap(),
+            "must match what a fresh github_accounts.json-less install loads"
+        );
+        #[cfg(feature = "dictation")]
+        assert_eq!(
+            serde_json::to_value(&defaults.dictation).unwrap(),
+            serde_json::to_value(crate::dictation::commands::get_dictation_config()).unwrap(),
+            "must match what a fresh dictation.json-less install loads"
+        );
+    }
+    // Catches: arithmetic or sentinel defaults silently change new-install attachment limits.
+    #[test]
+    fn new_install_attachment_defaults_preserve_upload_and_retention_contract() {
+        let defaults = AppConfig::default();
+        assert_eq!(defaults.attachment_max_bytes, 26_214_400);
+        assert_eq!(defaults.attachment_retention_days, 7);
+        let mut old_document = serde_json::to_value(defaults).unwrap();
+        old_document
+            .as_object_mut()
+            .unwrap()
+            .remove("attachment_max_bytes");
+        old_document
+            .as_object_mut()
+            .unwrap()
+            .remove("attachment_retention_days");
+        let migrated: AppConfig = serde_json::from_value(old_document).unwrap();
+        assert_eq!(migrated.attachment_max_bytes, 26_214_400);
+        assert_eq!(migrated.attachment_retention_days, 7);
+    }
+
+    // Catches: missing mobile-theme keys deserialize to an empty or invalid theme.
+    #[test]
+    fn missing_mobile_theme_preserves_the_new_install_commander_theme() {
+        assert_eq!(UIPrefsConfig::default().mobile_theme, "commander");
+        let mut old_document = serde_json::to_value(UIPrefsConfig::default()).unwrap();
+        old_document.as_object_mut().unwrap().remove("mobile_theme");
+        let migrated: UIPrefsConfig = serde_json::from_value(old_document).unwrap();
+        assert_eq!(migrated.mobile_theme, "commander");
+    }
+
+    // Catches: a recovering save reports success while leaving the corrupt document unrepaired.
+    #[test]
+    fn recovering_delta_persists_desired_document_after_a_corrupt_load() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("recovery.json");
+        fs::write(&path, b"{broken").unwrap();
+        let file = ConfigFile::<serde_json::Value>::at_path(path.clone());
+        let desired = serde_json::json!({"setting": "chosen"});
+        file.save_delta_normalized(
+            &serde_json::json!({}),
+            &desired,
+            true,
+            std::convert::identity,
+        )
+        .unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(stored, desired);
+        assert_eq!(corrupt_backups(dir.path()).len(), 1);
+    }
+
+    // Catches: repairing an earlier load discards another writer's valid document.
+    #[test]
+    fn recovering_delta_preserves_a_document_repaired_by_another_writer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("recovery.json");
+        fs::write(&path, br#"{"other":"new"}"#).unwrap();
+        let file = ConfigFile::<serde_json::Value>::at_path(path.clone());
+        file.save_delta_normalized(
+            &serde_json::json!({}),
+            &serde_json::json!({"setting": "chosen"}),
+            true,
+            std::convert::identity,
+        )
+        .unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"other": "new", "setting": "chosen"})
+        );
+    }
+
+    // Catches: the activity IPC save reports success without persisting the new entries.
+    #[test]
+    #[serial_test::serial]
+    fn activity_save_persists_entries_for_the_next_load() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let desired = serde_json::json!([{"id": "new", "message": "finished"}]);
+        save_activity(serde_json::Value::Null, desired.clone()).unwrap();
+        assert_eq!(load_activity(), desired);
+        assert!(dir.path().join(ACTIVITY_FILE).is_file());
+    }
+
+    // Catches: the keybindings IPC save drops a changed binding while reporting success.
+    #[test]
+    #[serial_test::serial]
+    fn keybindings_save_persists_custom_bindings_for_the_next_load() {
+        let dir = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let desired = serde_json::json!([{"action":"command-palette", "key":"Ctrl+Shift+P"}]);
+        save_keybindings(serde_json::Value::Null, desired.clone()).unwrap();
+        assert_eq!(load_keybindings(), desired);
+        assert!(dir.path().join(KEYBINDINGS_FILE).is_file());
+    }
+}
+
+#[cfg(test)]
+mod refresh_review_tests {
+    use super::*;
+
+    // Catches: a no-op config commit publishing an app generation and causing needless peer reloads.
+    #[test]
+    fn unchanged_app_commit_does_not_publish_settings_change() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        let base = state.config.read().clone();
+        save_app_config(base.clone()).unwrap();
+        let mut events = state.event_bus.subscribe();
+        commit_config_save(&state, base.clone(), base).unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "no-op commit published a generation"
+        );
+    }
+    // Catches: suppressing app publications entirely while filtering out no-op saves.
+    #[test]
+    fn changed_app_commit_publishes_after_persistence() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        let base = state.config.read().clone();
+        let mut desired = base.clone();
+        desired.theme = "light".into();
+        let mut events = state.event_bus.subscribe();
+        commit_config_save(&state, base, desired).unwrap();
+        assert_eq!(load_app_config().theme, "light");
+        let event = events.try_recv().expect("changed app save must publish");
+        assert!(
+            matches!(event, crate::state::AppEvent::SettingsChanged(ref change) if change.section == "app" && change.persisted && change.applied)
+        );
+        assert!(events.try_recv().is_err());
     }
 }

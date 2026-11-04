@@ -1,0 +1,62 @@
+{
+  "source": "Read-only terminal_styled_rows IPC from live ego session a5d65871-8633-4d95-a9db-039d083c3a5f on 2026-10-19; screenshot not saved. Tool rows between intent and answer omitted. Trailing blank cells removed.",
+  "cols": 235,
+  "rows": [
+    {
+      "text": "intent: Isolando il problema sulla tastiera esterna e sul suo collegamento (Tastiera esterna)La tastiera integrata veloce cambia la diagnosi: il rallentamento generale è meno probabile come causa principale. Controllo come macOS vede l",
+      "isWrapped": false
+    },
+    {
+      "text": "a tastiera esterna, senza registrare ciò che digiti.",
+      "isWrapped": true
+    },
+    {
+      "text": "",
+      "isWrapped": false
+    },
+    {
+      "text": "💬  Questo dato cambia la diagnosi: la tastiera integrata è veloce, mentre quella esterna è una Logitech MX KEYS S collegata via Bluetooth LE. macOS la indica con batteria al 100%. Il carico CPU osservato prima non spiega bene un",
+      "isWrapped": false
+    },
+    {
+      "text": "   problema limitato a una sola tastiera.",
+      "isWrapped": false
+    },
+    {
+      "text": "",
+      "isWrapped": false
+    },
+    {
+      "text": "💬  Prova prima a spegnere e riaccendere la MX KEYS S e ad avvicinarla al Mac. Se hai il ricevitore Logi Bolt, provarlo al posto del Bluetooth distinguerebbe un problema del collegamento BLE da uno della tastiera. Non ho cambiato",
+      "isWrapped": false
+    },
+    {
+      "text": "   impostazioni né disconnesso dispositivi.",
+      "isWrapped": false
+    },
+    {
+      "text": "",
+      "isWrapped": false
+    },
+    {
+      "text": "💬  Anche il mouse Bluetooth è lento, oppure soltanto la tastiera? Questo aiuta a distinguere un problema radio generale da uno specifico della MX KEYS S.",
+      "isWrapped": false
+    },
+    {
+      "text": "",
+      "isWrapped": false
+    },
+    {
+      "text": "suggest: [ Anche il mouse è lento | Solo la tastiera è lenta | Provo il ricevitore Bolt ]",
+      "isWrapped": false
+    },
+    {
+      "text": "",
+      "isWrapped": false
+    },
+    {
+      "text": "εgo: Turn elapsed 2m37s · done 4:38 PM",
+      "isWrapped": false
+    }
+  ]
+}

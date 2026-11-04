@@ -29,7 +29,8 @@ fn tty_resolve() -> &'static str {
 }
 
 /// Generate the guarded, self-contained shell command that emits
-/// `OSC 7770;state=<state>` to the controlling tty. Inert outside TUIC, always
+/// `OSC 7770;state=<state>` to the controlling tty. `prompt` is busy plus the
+/// "user submitted a prompt here" mark; only the submit-prompt hooks use it. Inert outside TUIC, always
 /// exits 0, ends with the ownership sentinel.
 pub(crate) fn hook_command(state: &str) -> String {
     format!(
@@ -52,7 +53,7 @@ pub(crate) fn hook_command(state: &str) -> String {
 /// awaiting is sticky, so a set with no clear latches the badge forever.
 pub(crate) fn claude_hook_map() -> Vec<HookEntry> {
     vec![
-        ("UserPromptSubmit", "", hook_command("busy")),
+        ("UserPromptSubmit", "", hook_command("prompt")),
         ("PreToolUse", "", hook_command("busy")),
         (
             "PreToolUse",
@@ -74,7 +75,7 @@ pub(crate) fn claude_hook_map() -> Vec<HookEntry> {
 /// Gemini hooks (same shell-hook shape, different event names; v0.26+).
 pub(crate) fn gemini_hook_map() -> Vec<HookEntry> {
     vec![
-        ("BeforeAgent", "", hook_command("busy")),
+        ("BeforeAgent", "", hook_command("prompt")),
         ("BeforeTool", "", hook_command("busy")),
         ("AfterAgent", "", hook_command("idle")),
         ("Notification", "", hook_command("awaiting")),
@@ -91,22 +92,27 @@ pub(crate) fn gemini_hook_map() -> Vec<HookEntry> {
 /// suppressed under instrumentation.
 pub(crate) fn grok_hook_map() -> Vec<HookEntry> {
     vec![
-        ("UserPromptSubmit", "", hook_command("busy")),
+        ("UserPromptSubmit", "", hook_command("prompt")),
         ("PreToolUse", "", hook_command("busy")),
         ("Stop", "", hook_command("idle")),
         ("SessionEnd", "", hook_command("idle")),
     ]
 }
 
-/// Codex hooks (Claude-compatible JSON schema, merged into `~/.codex/hooks.json`,
-/// gated by a `[features] hooks = true` flag in `config.toml`). Turn-level only:
-/// Codex doesn't expose PreToolUse/PostToolUse usefully (Bash-only) and has no
-/// SessionEnd — the badge clears via the idle/Stop event. SessionStart fires on
-/// the first turn (not session open), so busy appears once the user submits.
+/// Codex native SessionStart/UserPromptSubmit stdin carries the exact thread id,
+/// rollout path and cwd (recorded with 0.162.1). Reuse the guarded OSC channel;
+/// older/untrusted hooks simply leave Chat unavailable.
+fn codex_identity_command(state: &str) -> String {
+    format!(
+        r#"[ -n "${{TUIC_SESSION:-}}" ] && {{ {tty}; __p=$(base64 | tr -d '\r\n'); printf '\033]7770;codex-session=%s:%s\033\\\033]7770;state={state}\033\\' "$TUIC_SESSION" "$__p" > "$__t"; }} >/dev/null 2>&1 || true {SENTINEL}"#,
+        tty = tty_resolve(),
+    )
+}
+
 pub(crate) fn codex_hook_map() -> Vec<HookEntry> {
     vec![
-        ("SessionStart", "", hook_command("busy")),
-        ("UserPromptSubmit", "", hook_command("busy")),
+        ("SessionStart", "", codex_identity_command("busy")),
+        ("UserPromptSubmit", "", codex_identity_command("prompt")),
         ("Stop", "", hook_command("idle")),
     ]
 }
@@ -177,6 +183,21 @@ mod tests {
         );
     }
 
+    /// Catches #1388: if UserPromptSubmit shared PreToolUse's `state=busy`, the
+    /// scrollbar could not tell a prompt from a tool call and ticked both.
+    #[test]
+    fn submit_prompt_hooks_emit_prompt_not_busy() {
+        for (map, event) in [
+            (claude_hook_map(), "UserPromptSubmit"),
+            (gemini_hook_map(), "BeforeAgent"),
+            (grok_hook_map(), "UserPromptSubmit"),
+            (codex_hook_map(), "UserPromptSubmit"),
+        ] {
+            let (_, _, cmd) = map.iter().find(|(e, _, _)| *e == event).unwrap();
+            assert!(cmd.contains("state=prompt"), "{event}: {cmd}");
+        }
+    }
+
     /// MCP elicitation blocks the agent on the user but is not a tool call, so
     /// the awaiting signal can only come from the dedicated `Elicitation` event —
     /// and it must be retracted by `ElicitationResult`, or the badge latches.
@@ -211,3 +232,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "agent_hook_codex_tests.rs"]
+mod codex_tests;

@@ -11,6 +11,9 @@ export interface DirEntry {
 	git_status: string;
 	/** Whether the file is listed in .gitignore */
 	is_ignored: boolean;
+	/** Link text and target metadata; absent for ordinary directory entries. */
+	symlink_target?: string;
+	symlink_target_kind?: "directory" | "file" | "unavailable";
 }
 
 /** What `paste_paths` did with each pasted file. Names, not paths: each is the
@@ -55,6 +58,7 @@ export interface ContentSearchResult {
 	files_skipped: number;
 	truncated: boolean;
 	repos_pending: number;
+	repos_indexing: number;
 	repos_searched: number;
 }
 
@@ -68,8 +72,13 @@ export interface ContentSearchBatch {
 	files_searched: number;
 	files_skipped: number;
 	truncated: boolean;
-	/** Cross-repo search: registered repos still building their index (0 for single-repo). */
+	/** Cross-repo search: registered repos that could not be searched (0 for single-repo).
+	 *  NOT the same as "indexing" — most are waiting on a scheduling event that
+	 *  may never come. See `repos_indexing`. */
 	repos_pending: number;
+	/** Subset of `repos_pending` with a build in flight right now. The only count
+	 *  that justifies telling the user a retry will help. */
+	repos_indexing: number;
 	/** Cross-repo search: registered repos actually searched (0 for single-repo). */
 	repos_searched: number;
 }

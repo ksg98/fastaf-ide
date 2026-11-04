@@ -4,14 +4,18 @@ import {
 	remoteStatusColor,
 	remoteStatusLabel,
 	transportSummary,
-} from "../../../components/SettingsPanel/tabs/ServicesTab";
+} from "../../../components/SettingsPanel/tabs/services/RemoteMachinesPanel";
 
 describe("ServicesTab remote machine presentation", () => {
 	it.each([
-		["connected", "Connected", "var(--accent-green, #22c55e)"],
-		["connecting", "Connecting...", "var(--fg-warning, #e5a100)"],
-		["error", "Error", "var(--accent-red, #ef4444)"],
+		["connected", "Connected", "var(--success)"],
+		["connecting", "Connecting...", "var(--activity)"],
+		["deploying", "Deploying: preparing", "var(--activity)"],
+		["error", "Error", "var(--error)"],
 		["disconnected", "Disconnected", "var(--fg-muted)"],
+		// Reachable but rejected. Not green (a lie) and not red (the network is
+		// fine) — the fix is a password, and the label has to say which.
+		["unauthenticated", "Not authenticated", "var(--warning)"],
 	])("maps %s status without changing its label or color", (status, label, color) => {
 		expect(remoteStatusLabel(status)).toBe(label);
 		expect(remoteStatusColor(status)).toBe(color);
@@ -42,6 +46,14 @@ describe("ServicesTab remote machine presentation", () => {
 			remoteDaemonPort: 9876,
 			directUrl: "",
 			authUsername: "",
+			// Blank on a new machine and blank again on every edit: the vault never
+			// hands the password back, so the field can only ever mean "set this".
+			authPassword: "",
+			// Same rule as the password: the pairing bundle is write-only.
+			relayBundle: "",
+			deploy: "never",
+			surviveMinutes: 30,
+			autoUpdate: false,
 		});
 	});
 });

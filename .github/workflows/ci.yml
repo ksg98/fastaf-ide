@@ -13,21 +13,22 @@ concurrency:
 # Keep the sccache server alive across a compile longer than its 600s idle timer —
 # see the note in release.yml.
 #
-# RUST_VERSION pins the compiler. `dtolnay/rust-toolchain@stable` floats: a new
+# RUST_VERSION pins the compiler. The `stable` toolchain floats: a new
 # stable turns fresh clippy lints and rustfmt reflows into a red main for whoever
 # pushes next, which has now happened three times (7db734f9, 20e58629, and the
 # 1.98 lints cleared on 2026-08-31 while CI was still green on an older stable).
-# To bump: raise the version HERE and in release.yml, nightly.yml and audit.yml in
-# one commit, after `cargo clippy --all-targets -- -D warnings` and
+# To bump: raise the version HERE and in release.yml, nightly.yml, remote-daemon.yml
+# and audit.yml in one commit, after `cargo clippy --all-targets -- -D warnings` and
 # `cargo fmt --check` pass locally on that toolchain. CI then runs on the new
 # compiler as part of that commit, so a breakage lands on its author.
 # See docs/guides/ci.md.
 env:
   SCCACHE_IDLE_TIMEOUT: "0"
-  RUST_VERSION: "1.98.0"
+  RUST_VERSION: "1.99.1"
 
 jobs:
   socket:
+    timeout-minutes: 15
     name: Socket Security
     runs-on: ubuntu-22.04
     if: github.event_name == 'pull_request'
@@ -38,7 +39,7 @@ jobs:
     # scan running + reporting without gating merges on Socket availability.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       # Socket Firewall (free): blocks known-malicious npm/cargo packages at
       # install time. The legacy socket-security-action manifest scanner was
@@ -49,10 +50,10 @@ jobs:
         with:
           mode: firewall-free
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           cache: pnpm
@@ -60,28 +61,28 @@ jobs:
       - name: Scan pnpm install through Socket Firewall
         run: sfw pnpm install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Scan cargo fetch through Socket Firewall
         run: cd src-tauri && sfw cargo fetch
 
-  frontend:
-    name: Frontend (typecheck + tests)
+  frontend-checks:
+    timeout-minutes: 20
+    name: Frontend checks
     runs-on: ubuntu-22.04
     steps:
-      # The plugins submodule carries the built-in plugin sources that
-      # src/__tests__/plugins/*.test.ts import directly; without it vitest
-      # cannot resolve them and the suite fails to collect.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          # A no-op for FastAF, which has no `plugins` submodule. Left on so a
+          # future submodule is checked out.
           submodules: recursive
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           cache: pnpm
@@ -89,14 +90,87 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Release body size workflow contracts
+        run: python3 .github/workflows/tests/test-release-body-limit.py
+
+      - name: Remote daemon release workflow contracts
+        run: python3 .github/workflows/tests/test-remote-daemon-release.py
+
+      - name: Frontend shard workflow contracts
+        run: python3 .github/workflows/tests/test-frontend-shards.py
+
+      - name: Supply-chain workflow contracts
+        run: python3 .github/workflows/tests/test-supply-chain.py
+
+      - name: Shell tests
+        run: make test-shell
+
       - name: Typecheck
         run: pnpm exec tsc --noEmit
 
+      # A `scripts/*` gitignore rule once hid a script that CI and package.json call.
+      - name: Referenced scripts are tracked
+        run: grep -ohE 'scripts/[A-Za-z0-9_./-]+\.(mjs|sh|js|py)' package.json .github/workflows/*.yml | sort -u | xargs git ls-files --error-unmatch
+
+      - name: Third-party notices (JavaScript)
+        run: |
+          node scripts/third-party-notices.mjs --self-test
+          node scripts/third-party-notices.mjs --check --only js
+
+  # The isolated suite took 1134-1141s on hosted Linux, versus 327s locally,
+  # and later exceeded 20 minutes while still progressing. Partition the full
+  # suite across runners, not extra workers competing on the same four vCPUs.
+  frontend-tests:
+    timeout-minutes: 20
+    name: Frontend tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Runner resources
+        run: |
+          node -e 'const os = require("node:os"); console.log({node: process.version, cpus: os.cpus().length, parallelism: os.availableParallelism(), memoryGiB: os.totalmem() / 2 ** 30})'
+
+      # File-level timings stay visible without a line per passing test.
+      # Keep isolation, async-leak detection and the config's four-worker cap.
       - name: Tests
-        run: pnpm exec vitest run --reporter=verbose
+        run: bash scripts/with-test-tmp.sh pnpm exec vitest run --reporter=default --shard=${{ matrix.shard }}/4
+
+  # Preserve the existing required check name. A failed/cancelled/skipped shard
+  # must fail this gate, not cause it to be skipped and accepted as successful.
+  frontend:
+    timeout-minutes: 5
+    name: Frontend (typecheck + tests)
+    runs-on: ubuntu-22.04
+    needs: [frontend-checks, frontend-tests]
+    if: always()
+    steps:
+      - name: Require checks and every test shard
+        env:
+          CHECKS_RESULT: ${{ needs.frontend-checks.result }}
+          TESTS_RESULT: ${{ needs.frontend-tests.result }}
+        run: test "$CHECKS_RESULT" = success && test "$TESTS_RESULT" = success
 
   # Always runs: clippy + tests on Linux (fastest, catches most issues)
   rust:
+    timeout-minutes: 60
     name: Rust (Linux-x64)
     # 24.04: the default feature set is `desktop`, which links ONNX Runtime via
     # `ort` — its prebuilt needs glibc 2.38+/libstdc++ 13+, and 22.04 has
@@ -104,9 +178,12 @@ jobs:
     # daemon still builds against the older toolchain.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+          # A no-op for FastAF, which has no `plugins` submodule. Left on so a
+          # future submodule is checked out.
+          submodules: recursive
 
       - name: Install Linux dependencies
         run: |
@@ -114,31 +191,63 @@ jobs:
           # libayatana-appindicator3-dev: libappindicator3-dev is gone in 24.04.
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev mold
 
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # webrtc-audio-processing builds the bundled APM (dictation echo
+      # cancellation) with meson and ninja, which no runner image ships. pip
+      # rather than apt so every leg gets the same version: Ubuntu 22.04
+      # packages meson 0.61, which is older than the abseil wrap expects.
+      - name: Install meson and ninja
+        run: python -m pip install meson==1.11.2 ninja==1.13.2
+
+      # shell_integration.rs launches the claude/codex wrappers in bash, zsh
+      # AND fish. fish is on none of the runner images, and the tests used to
+      # drop it silently when absent — so its half of the matrix reported as
+      # passed without ever running. The script installs all three and fails
+      # if any cannot be launched rc-free (fish needs >= 3.3 for --no-config).
+      - name: Install launch-matrix shells
+        run: scripts/install-launch-shells.sh
+
       - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: './src-tauri -> target'
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: nextest
 
       - name: Create dist stub for include_dir
-        run: mkdir -p dist && echo '<html></html>' > dist/index.html
+        # Both shells, because the SPA fallback serves mobile.html for /mobile/*
+        # and index.html for everything else. A stub carrying index.html alone
+        # 404s every mobile deep link, which fails a test a real `vite build`
+        # passes — the stub has to have the shape the build produces.
+        run: mkdir -p dist && for f in index mobile; do echo '<html></html>' > "dist/$f.html"; done
 
       - name: Create sidecar stub for Tauri build.rs
         run: |
           target=$(rustc --print host-tuple)
           touch "src-tauri/binaries/tuic-bridge-${target}"
           touch "src-tauri/binaries/fastaf-cli-${target}"
+
+      - name: Third-party notices (Rust)
+        run: node scripts/third-party-notices.mjs --check --only rust
+
+      - name: Desktop frontend embedding
+        shell: bash
+        run: bash scripts/check-desktop-embedding.sh
 
       - name: Clippy
         working-directory: src-tauri
@@ -151,7 +260,8 @@ jobs:
           CMAKE_C_FLAGS: '-fPIC'
           CMAKE_CXX_FLAGS: '-fPIC'
           RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
-        run: cargo clippy -- -D warnings
+        # bm25 is a vendored third-party patch (patches/bm25): not ours to lint.
+        run: cargo clippy --workspace --exclude bm25 --all-targets --features dictation -- -D warnings
 
       - name: Tests
         working-directory: src-tauri
@@ -164,7 +274,17 @@ jobs:
           CMAKE_C_FLAGS: '-fPIC'
           CMAKE_CXX_FLAGS: '-fPIC'
           RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
-        run: cargo nextest run --workspace --profile ci
+          TUIC_FIXTURE_FEATURES: dictation
+        run: bash ../scripts/with-test-tmp.sh cargo nextest run --workspace --features dictation --profile ci
+
+
+      # This check invokes nextest and compiled Rust tests. Keep it out of the
+      # frontend shell-test discovery, whose job installs neither prerequisite.
+      - name: Nextest fixture setup scope
+        run: |
+          bash scripts/with-test-tmp.sh bash scripts/check-fixture-build-profile.sh
+          bash scripts/with-test-tmp.sh python3 scripts/check-fixture-build-graph.py
+          bash scripts/with-test-tmp.sh bash scripts/check-nextest-fixture-scope.sh
 
       # nextest does not run doctests — run them separately so doc examples stay
       # covered. Linux-only: doctests are platform-independent logic.
@@ -179,32 +299,52 @@ jobs:
           CMAKE_C_FLAGS: '-fPIC'
           CMAKE_CXX_FLAGS: '-fPIC'
           RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
-        run: cargo test --doc
+        run: bash ../scripts/with-test-tmp.sh cargo test --doc --workspace --features dictation
 
-  # Verify tuic-remote compiles without the desktop feature (catches missing cfg gates)
+  # Verify tuic-remote compiles without the desktop feature (catches missing cfg
+  # gates) AND run the headless test suite. The `#[cfg(not(feature = "desktop"))]`
+  # tests — headless router refusals and the named-instance CLI contract — exist
+  # only in this configuration, so nothing else in CI ever executes them.
   check-remote:
+    timeout-minutes: 45
     name: Remote daemon (no-default-features)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # See the rust job: a no-op for FastAF, which has no submodule.
+          submodules: recursive
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
 
+      - name: Install launch-matrix shells
+        run: scripts/install-launch-shells.sh
+
+      # The Ego settings fixture replay imports tomllib (Python 3.11+); 22.04 ships 3.10.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
       - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: './src-tauri -> target'
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: nextest
 
       - name: Check tuic-remote
         working-directory: src-tauri
@@ -219,6 +359,21 @@ jobs:
           RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
         run: cargo check --no-default-features --bin tuic-remote
 
+      # --workspace selects desktop-only members independently of feature gates.
+      # Dictation remains covered by the desktop workspace jobs.
+      - name: Headless tests
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: '-fPIC'
+          CMAKE_CXX_FLAGS: '-fPIC'
+          RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
+        run: bash ../scripts/with-test-tmp.sh cargo nextest run --no-default-features --workspace --exclude tuic-dictation --profile ci
+
   # Push to main only: verify build on macOS and Windows.
   # GPU notes:
   # - macOS: whisper-rs compiled with Metal (target-specific dep) — always GPU.
@@ -226,8 +381,10 @@ jobs:
   #   sub-build is chronically broken on the runner, so dictation runs on CPU.
   #   CUDA support is optional (add Jimver/cuda-toolkit + --features cuda if needed).
   rust-cross:
+    timeout-minutes: 90
     name: Rust (${{ matrix.label }})
-    if: github.event_name == 'push'
+    # Runs on pull_request too, not just push. Gating it on push meant macOS and
+    # Windows breakage was only ever discovered after a merge to main.
     strategy:
       fail-fast: false
       matrix:
@@ -239,40 +396,76 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v6
+      # Git for Windows defaults to core.autocrlf=true, which rewrites every
+      # checked-out file to CRLF. The suite compares file bytes it wrote itself
+      # against bytes git handed back, so that default made the Windows leg
+      # assert on different content than the other two. Global and before the
+      # checkout, because the test fixtures create their own repositories in
+      # temp directories, which no .gitattributes of ours would reach.
+      - name: Keep line endings verbatim (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+          # See the rust job: a no-op for FastAF, which has no submodule.
+          submodules: recursive
 
       # Keep the Windows build/target dir short (C:/t): whisper.cpp's nested
       # CMake TryCompile paths can exceed the 260-char MAX_PATH that MSBuild's
-      # FileTracker enforces (it ignores LongPathsEnabled).
+      # FileTracker enforces (it ignores LongPathsEnabled). The bundled WebRTC
+      # APM needs the same thing for the same reason — abseil's
+      # hashtablez_sampler_force_weak_definition.cc resolves one character past
+      # 260 from the meson build dir under a normal target path.
       - name: Short CARGO_TARGET_DIR (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: echo "CARGO_TARGET_DIR=C:/t" >> $GITHUB_ENV
 
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # webrtc-audio-processing builds the bundled APM (dictation echo
+      # cancellation) with meson and ninja, which no runner image ships. pip
+      # rather than apt/brew/choco so every leg gets the same version: Ubuntu
+      # 22.04 packages meson 0.61, which is older than the abseil wrap expects.
+      - name: Install meson and ninja
+        shell: bash
+        run: python -m pip install meson==1.11.2 ninja==1.13.2
+
+      # The launch matrix is #[cfg(unix)], so only the macOS leg needs it.
+      - name: Install launch-matrix shells
+        if: matrix.platform == 'macos-latest'
+        run: scripts/install-launch-shells.sh
+
       - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: './src-tauri -> target'
           # On Windows the real target dir is CARGO_TARGET_DIR=C:/t (MAX_PATH workaround).
           # rust-cache's `workspaces` input joins target with root, so it can't point at
           # an absolute path — use `cache-directories` instead.
           cache-directories: ${{ matrix.platform == 'windows-latest' && 'C:/t' || '' }}
+          # A failed/cancelled test run must not discard an hour of compilation.
+          # sccache cannot cache linked test/binary targets; retain C:/t too.
+          cache-on-failure: ${{ matrix.platform == 'windows-latest' }}
 
-      # Only macOS runs the test suite below (Windows tests are skipped).
       - name: Install nextest
-        if: matrix.platform != 'windows-latest'
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: nextest
 
       # A restored Windows build cache (C:/t) may hold a CMakeCache.txt from an
       # older VS generator (e.g. VS 17 2022). When the runner image moves to a
@@ -292,7 +485,11 @@ jobs:
 
       - name: Create dist stub for include_dir
         shell: bash
-        run: mkdir -p dist && echo '<html></html>' > dist/index.html
+        # Both shells, because the SPA fallback serves mobile.html for /mobile/*
+        # and index.html for everything else. A stub carrying index.html alone
+        # 404s every mobile deep link, which fails a test a real `vite build`
+        # passes — the stub has to have the shape the build produces.
+        run: mkdir -p dist && for f in index mobile; do echo '<html></html>' > "dist/$f.html"; done
 
       - name: Create sidecar stub for Tauri build.rs
         shell: bash
@@ -306,6 +503,10 @@ jobs:
             touch "src-tauri/binaries/fastaf-cli-${target}.exe"
           fi
 
+      - name: Desktop frontend embedding
+        shell: bash
+        run: bash scripts/check-desktop-embedding.sh
+
       - name: Clippy
         working-directory: src-tauri
         env:
@@ -314,19 +515,29 @@ jobs:
           CARGO_INCREMENTAL: "0"
           CMAKE_C_COMPILER_LAUNCHER: "sccache"
           CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
-          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
-          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
-        run: cargo clippy -- -D warnings
+          # Use -Z7: Git Bash converts /Z7 into a Windows path before native Cargo.
+          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
+          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
+        # bm25 is a vendored third-party patch (patches/bm25): not ours to lint.
+        run: cargo clippy --workspace --exclude bm25 --all-targets --features dictation -- -D warnings
 
+      # Windows runs the suite too. It used to be skipped, which is why Windows
+      # regressions only ever surfaced in a user's build.
       - name: Tests
-        if: matrix.platform != 'windows-latest'
         working-directory: src-tauri
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
           CARGO_INCREMENTAL: "0"
+          # Windows d27aa1739 spent 45m36s compiling tests before the fixture
+          # setup rebuilt dev for 18m15s. As on macOS, skip optimizing workspace
+          # harnesses; Cargo.toml keeps dependencies and tuic-terminal at O1.
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+          # The setup build must share nextest's profile and feature graph.
+          TUIC_FIXTURE_FEATURES: dictation
           CMAKE_C_COMPILER_LAUNCHER: "sccache"
           CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
-          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || '' }}
-          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || '' }}
-        run: cargo nextest run --workspace --profile ci
+          # Use -Z7: Git Bash converts /Z7 into a Windows path before native Cargo.
+          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
+          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
+        run: bash ../scripts/with-test-tmp.sh cargo nextest run --workspace --features dictation --profile ci

@@ -1,0 +1,8 @@
+// The agent closes stdout and keeps running. A client that settled on the child
+// exiting would still be waiting here, because the child has not exited: the
+// pipe ending is the whole signal, and it is the only one ego gives when its
+// own writer goes away.
+{"step":"expect","method":"initialize","capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"close_stdout"}
+{"step":"await_stdin_eof"}

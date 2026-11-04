@@ -1,12 +1,25 @@
-import { type Component, createEffect, createSignal, lazy, on, onCleanup, onMount, Show, Suspense } from "solid-js";
-import { detectAgentForTerminal } from "../../hooks/useAgentPolling";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	lazy,
+	on,
+	onCleanup,
+	onMount,
+	Show,
+	Suspense,
+	untrack,
+} from "solid-js";
+import { applySessionStateEvent, detectAgentForTerminal } from "../../hooks/useAgentPolling";
 import { browserCreatedSessions } from "../../hooks/useAppInit";
 import { usePty } from "../../hooks/usePty";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
-import { agentConfigsStore } from "../../stores/agentConfigs";
+import { agentConfigsForRepo, ensureAgentConfigsForRepo } from "../../stores/agentConfigs";
 import { appLogger } from "../../stores/appLogger";
+import { chatViewStore } from "../../stores/chatView";
 import { multiviewStore } from "../../stores/multiview";
 import { notificationsStore } from "../../stores/notifications";
 import { paneLayoutStore } from "../../stores/paneLayout";
@@ -14,24 +27,42 @@ import { rateLimitStore } from "../../stores/ratelimit";
 import { settingsStore } from "../../stores/settings";
 import { type AwaitingInputType, isShellState, terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
-import { isTauri, subscribePty, type Unsubscribe } from "../../transport";
+import { HttpRpcError, isTauri, subscribePty, type Unsubscribe } from "../../transport";
+import { getSessionConnection } from "../../transportRuntime";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
 import { isPerfDebug } from "../../utils/perfDebug";
 import { safeUnlisten } from "../../utils/safeUnlisten";
+import { isSuspendingOrSuspended, resumeTerminal } from "../../utils/suspendTerminal";
+import type { TranscriptSearchRef } from "../AIChatPanel/Transcript";
+import { composeDockBridge } from "../ComposeDock/dockBridge";
 import { createSearchVisibility } from "../shared/SearchBar";
+import { ContextualTip } from "../TipOfTheDay/ContextualTip";
+import { LongRunTip } from "../TipOfTheDay/LongRunTip";
+import { Button } from "../ui";
 import { handleAgentExitCompletion } from "./agentExitCompletion";
 import { getAwaitingInputSound } from "./awaitingInputSound";
 import CanvasTerminal, { type CanvasTerminalRef } from "./CanvasTerminal";
+import { ComposeToggle } from "./ComposeToggle";
 import { gridDimsForBox, snapLineHeight } from "./canvasTerminalUtils";
+import { submitCompose } from "./composeSubmit";
 import { focusIsInsideOwnInput } from "./focusGuards";
 import { getSharedMetrics } from "./glyphCache";
-import { handleIntentEvent } from "./intentTitle";
+import { handleIntentEvent, shouldApplyOscTitle } from "./intentTitle";
 import { LastPromptBar } from "./LastPromptBar";
+import { trackQuestionReminder } from "./questionReminder";
 import s from "./Terminal.module.css";
+import { ChatViewFallbackBanner, TerminalChatView, ViewModeToggle } from "./TerminalChatView";
 import { TerminalSearch } from "./TerminalSearch";
 import { isTerminalVisible } from "./terminalVisibility";
+import {
+	REATTACH_PHASE_INITIAL,
+	type ReattachPhase,
+	retryUntilSized,
+	SIZE_RETRY_MAX_FRAMES,
+	stepReattachPhase,
+} from "./visibilityLifecycle";
 
 const ComposePanel = lazy(() =>
 	import("../ComposePanel/ComposePanel").then((module) => ({ default: module.ComposePanel })),
@@ -73,15 +104,6 @@ type ParsedEvent =
 	| { type: "shell-state"; state: "busy" | "idle" }
 	| { type: "agent-session-conflict"; matched_text: string; kind: "in-use" | "not-found" }
 	| { type: "agent-block"; action: "start" | "end"; line: number; exit_code?: number };
-
-type BackendSessionState = {
-	shell_state?: "busy" | "idle";
-	agent_state?: "starting" | "working" | "awaiting_input" | "idle" | "completed";
-	awaiting_input?: boolean;
-	question_confident?: boolean;
-	background_work?: boolean;
-	queued_commands?: number;
-};
 
 export interface TerminalProps {
 	id: string;
@@ -154,10 +176,27 @@ export function cleanOscTitle(title: string): string {
 	return cleaned;
 }
 
+/** The box the canvas grid fills: CanvasTerminal's own container once it is
+ *  mounted, otherwise the content box of the pane, because its padding holds no
+ *  cells. Measuring the padded pane gave the PTY one more row and column than the
+ *  canvas draws; when that resize landed after the canvas's own, Claude kept the
+ *  larger size with its last row and column off screen (story 2128-153a). */
+function gridBox(container: HTMLElement): { width: number; height: number } {
+	const canvasBox = container.querySelector<HTMLElement>("[data-terminal-container]");
+	if (canvasBox) return canvasBox.getBoundingClientRect();
+	const rect = container.getBoundingClientRect();
+	const style = getComputedStyle(container);
+	const px = (value: string) => Number.parseFloat(value) || 0;
+	return {
+		width: rect.width - px(style.paddingLeft) - px(style.paddingRight),
+		height: rect.height - px(style.paddingTop) - px(style.paddingBottom),
+	};
+}
+
 /** Get initial terminal dimensions from container size + font metrics.
  *
- *  Mirrors CanvasTerminal's remeasure EXACTLY — shared `gridDimsForBox` formula
- *  (gutter + scrollbar subtracted) and the per-terminal font-size override — so
+ *  Mirrors CanvasTerminal's remeasure EXACTLY — the same box (`gridBox`), the
+ *  shared `gridDimsForBox` formula and the per-terminal font-size override — so
  *  the reconnect-path resize lands on the same dims the canvas will compute and
  *  the backend no-ops it instead of firing a spurious SIGWINCH (each SIGWINCH
  *  makes Ink TUIs clear+reprint their full frame into scrollback). */
@@ -167,8 +206,8 @@ function calcGridSize(container: HTMLElement, terminalId: string): { rows: numbe
 	const fontWeight = settingsStore.state.fontWeight;
 	const dpr = window.devicePixelRatio || 1;
 	const m = getSharedMetrics(fontSize, fontFamily, dpr, snapLineHeight(fontSize), fontWeight);
-	const rect = container.getBoundingClientRect();
-	const d = gridDimsForBox(rect.width, rect.height, m.cellWidth, m.cellHeight);
+	const box = gridBox(container);
+	const d = gridDimsForBox(box.width, box.height, m.cellWidth, m.cellHeight);
 	return { rows: Math.max(2, d.rows), cols: Math.max(2, d.cols) };
 }
 
@@ -176,9 +215,13 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	let containerRef: HTMLDivElement | undefined;
 	let sessionId: string | null = null;
 	const [_currentSessionId, setCurrentSessionId] = createSignal<string | null>(null);
+	// Without a session there is nothing to read, so the grid (and its exit notice) stays on screen.
+	const chatActive = () => terminalsStore.get(props.id)?.viewMode === "chat" && _currentSessionId() !== null;
+	const [spawnError, setSpawnError] = createSignal<string | null>(null);
 
 	const [canvasTerminalRef, setCanvasTerminalRef] = createSignal<CanvasTerminalRef | undefined>();
 	let pendingCanvasFocus = false;
+	let chatSearchRef: TranscriptSearchRef | undefined;
 
 	const {
 		visible: searchVisible,
@@ -188,6 +231,60 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	} = createSearchVisibility();
 	const [composeOpen, setComposeOpen] = createSignal(false);
 	const [pendingComposeText, setPendingComposeText] = createSignal("");
+	// Per tab, session-only: a pinned composer replaces the agent's own input box
+	// for this terminal, so send and Esc leave it open.
+	const [composePinned, setComposePinned] = createSignal(false);
+	const [composeFocusRequest, setComposeFocusRequest] = createSignal(0);
+	const [composeTextRequest, setComposeTextRequest] = createSignal(0);
+	let insertComposeText: ((text: string) => boolean) | undefined;
+	let wrapperRef: HTMLDivElement | undefined;
+	// FastAF: the compose dock under the terminal column is the one input for the
+	// active terminal, and it already sends to this agent. Chat brings upstream's
+	// own composer back only where there is no dock (a detached terminal window),
+	// so an agent never gets a second text box.
+	const dockOwnsChat = () => chatActive() && composeDockBridge.present();
+	// Chat owns its input slot without changing this tab's CLI Compose preferences.
+	const composeVisible = () => (chatActive() ? !composeDockBridge.present() : composeOpen());
+	const composeDocked = () => chatActive() || composePinned();
+	/** With the dock, keyboard focus rests on the transcript (scroll, select, copy); typing there opens the dock. */
+	const focusChatTranscript = () =>
+		wrapperRef?.querySelector<HTMLElement>("[data-terminal-chat]")?.focus({ preventScroll: true });
+	/** Put the caret where Chat takes input: the transcript in front of the dock, else Chat's own composer. */
+	const focusChatInput = () => {
+		if (dockOwnsChat()) focusChatTranscript();
+		else setComposeFocusRequest((n) => n + 1);
+	};
+	createEffect(
+		on(chatActive, (active, wasActive) => {
+			closeSearchBar();
+			chatSearchRef?.close();
+			if (active) {
+				if (!dockOwnsChat()) setComposeFocusRequest((n) => n + 1);
+				// Off the switch and onto the transcript, unless the user is typing somewhere else.
+				else if (isVisible() && terminalsStore.state.activeId === props.id) {
+					const focused = document.activeElement;
+					if (!focused?.matches("input, textarea, [contenteditable='true']") || wrapperRef?.contains(focused))
+						focusChatTranscript();
+				}
+			}
+			// One return path for the switch, native answers and unavailable Chat.
+			else if (wasActive && isVisible() && terminalsStore.state.activeId === props.id) {
+				const focused = document.activeElement;
+				// An asynchronous fallback must not redirect another editor's typing to the PTY.
+				if (focused?.matches("input, textarea, [contenteditable='true']") && !containerRef?.contains(focused)) return;
+				canvasTerminalRef()?.focus();
+			}
+		}),
+	);
+	/** After a send, an unpinned composer is done; a pinned one keeps the caret. */
+	const finishCompose = (remainingDraft: string) => {
+		setPendingComposeText(remainingDraft);
+		// A different Compose instance may already be showing the same draft.
+		setComposeTextRequest((n) => n + 1);
+		if (composeDocked()) return;
+		setComposeOpen(false);
+		canvasTerminalRef()?.focus();
+	};
 	const [reconnecting, setReconnecting] = createSignal<{ attempt: number; max: number } | null>(null);
 	let sessionInitialized = false;
 	let disposed = false;
@@ -198,16 +295,49 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	// synchronous try/catch that cannot see the rejection.
 	let unlistenParsed: (() => unknown) | undefined;
 	let unlistenKitty: (() => unknown) | undefined;
-	let unlistenTitle: (() => unknown) | undefined;
 	let unlistenClipboardStore: (() => unknown) | undefined;
 
 	let kittyFlags = 0;
 
+	/** Stop listening to the current session; the three teardowns (reconnect failure,
+	 *  suspend, unmount) share it. */
+	const detachSessionListeners = () => {
+		safeUnlisten(unsubscribePty);
+		unsubscribePty = undefined;
+		safeUnlisten(unlistenParsed);
+		unlistenParsed = undefined;
+		safeUnlisten(unlistenKitty);
+		unlistenKitty = undefined;
+		safeUnlisten(unlistenClipboardStore);
+		unlistenClipboardStore = undefined;
+	};
+
 	const RETRY_DELAYS = [5_000, 15_000, 30_000];
 	let retryCount = 0;
 	let retryTimer: ReturnType<typeof setTimeout> | undefined;
+	const [retryHint, setRetryHint] = createSignal(false);
+	let retryWorkObserved = false;
+	createEffect(() => {
+		if (terminalsStore.get(props.id)?.awaitingInput !== "error") setRetryHint(false);
+	});
+	// Reset only after a recovered turn reaches idle. A late pre-error idle
+	// snapshot can briefly have no last_error; it must not cancel the retry.
+	createEffect(() => {
+		const terminal = terminalsStore.get(props.id);
+		if (!terminal || terminal.awaitingInput !== null) return;
+		if (terminal.shellState === "busy") {
+			retryWorkObserved = true;
+		} else if (terminal.shellState === "idle" && retryWorkObserved) {
+			retryCount = 0;
+			retryWorkObserved = false;
+			clearTimeout(retryTimer);
+			retryTimer = undefined;
+		}
+	});
 	let agentDetectTimer: ReturnType<typeof setTimeout> | undefined;
 	let rafHandle = 0;
+	/** Disposer for the bounded zero-size retry, so it cannot outlive the effect run. */
+	let cancelSizeRetry: (() => void) | null = null;
 
 	let activityFlagged = false;
 	const mountedAt = performance.now();
@@ -259,10 +389,27 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		}
 	});
 
+	trackQuestionReminder(props.id);
+
 	// Original tab name before any OSC title overwrote it
 	let originalName: string | null = null;
 
 	const pty = usePty();
+
+	// Launch readiness can arrive before or after command preparation. State
+	// snapshots also carry idle when the first prompt predates subscription.
+	createEffect(() => {
+		const terminal = terminalsStore.get(props.id);
+		const targetSessionId = terminal?.sessionId;
+		const command = terminal?.pendingInitCommand;
+		if (disposed || !targetSessionId || !command || terminal.shellState !== "idle") return;
+		untrack(() => {
+			terminalsStore.update(props.id, { pendingInitCommand: null });
+			pty
+				.sendCommand(targetSessionId, command, null)
+				.catch((error) => appLogger.error("terminal", "Failed to write init command", { error: String(error) }));
+		});
+	});
 
 	/** Track PTY activity for the activity dashboard. CanvasTerminal handles
 	 *  rendering and plugin dispatch; this callback only updates store metadata.
@@ -288,6 +435,32 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		}
 	};
 
+	const handlePtyTitle = (title: string) => {
+		if (disposed) return;
+		const term = terminalsStore.get(props.id);
+		if (
+			!term ||
+			!shouldApplyOscTitle({
+				nameIsCustom: term.nameIsCustom,
+				nameFromSpawn: term.nameFromSpawn,
+				agentIntent: term.agentIntent,
+				intentTabTitle: settingsStore.state.intentTabTitle,
+			})
+		)
+			return;
+		if (!title) {
+			if (originalName) terminalsStore.update(props.id, { name: originalName });
+		} else {
+			const cleaned = cleanOscTitle(title);
+			if (cleaned) {
+				if (!originalName) originalName = terminalsStore.get(props.id)?.name || null;
+				terminalsStore.update(props.id, { name: cleaned });
+			} else if (originalName) {
+				terminalsStore.update(props.id, { name: originalName });
+			}
+		}
+	};
+
 	/** Set up event listeners for a known session ID */
 	const attachSessionListeners = async (targetSessionId: string) => {
 		// Shared handler for structured events from Rust OutputParser.
@@ -304,7 +477,9 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					break;
 				}
 				case "status-line": {
-					retryCount = 0;
+					// Working evidence cancels a parked injection, not the retry budget.
+					clearTimeout(retryTimer);
+					retryTimer = undefined;
 					terminalsStore.update(props.id, {
 						currentTask: parsed.task_name,
 					});
@@ -344,7 +519,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 							"terminal",
 							`[Notify] ${props.id} warning — rate-limit pattern=${parsed.pattern_name} matched="${parsed.matched_text}"`,
 						);
-						notificationsStore.playWarning();
+						notificationsStore.play("warning", { originSessionId: props.id });
 					}
 					break;
 				}
@@ -367,6 +542,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					break;
 				}
 				case "usage-exhausted": {
+					setRetryHint(false);
 					appLogger.warn("terminal", `[UsageExhausted] ${props.id} reset_time=${parsed.reset_time ?? "unknown"}`);
 					terminalsStore.setAwaitingInput(props.id, "error");
 					break;
@@ -375,7 +551,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					if (terminalsStore.state.activeId !== props.id && !planFileNotified) {
 						planFileNotified = true;
 						appLogger.info("terminal", `[Notify] ${props.id} info — plan-file path="${parsed.path}" (background tab)`);
-						notificationsStore.playInfo();
+						notificationsStore.play("info", { originSessionId: props.id });
 					}
 					break;
 				case "user-input":
@@ -383,12 +559,14 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					// Record the prompt row for the green scrollbar marker. line < 0 (the
 					// keystroke-reconstructed path) is ignored by the store.
 					terminalsStore.addUserPromptLine(props.id, parsed.line);
-					// Clear suggest bar, pending buffer, and mark dismissed
-					terminalsStore.update(props.id, { suggestDismissed: true, suggestedActions: null, activeSubTasks: 0 });
-					// User resumed typing — clear any stale error/question badge. See comment
-					// in stores/terminals.ts handleShellStateChange: error state should be
-					// cleared on explicit agent activity, user-input, or process exit.
-					terminalsStore.clearAwaitingInput(props.id);
+					// A submitted prompt starts a new turn. Clear old choices and allow
+					// new ones even when busy was emitted before this input echo.
+					terminalsStore.update(props.id, { suggestDismissed: false, suggestedActions: null, activeSubTasks: 0 });
+					// Input answers a question, but does not prove API recovery. In
+					// particular auto-retry can submit continue without starting work.
+					if (terminalsStore.get(props.id)?.awaitingInput === "question") {
+						terminalsStore.clearAwaitingInput(props.id);
+					}
 					invoke<string | null>("get_last_prompt", { sessionId: targetSessionId })
 						.then((prompt) => {
 							if (prompt !== null) terminalsStore.setLastPrompt(props.id, prompt);
@@ -408,10 +586,16 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					const kindLabel = kind === "server" ? "server error" : kind === "auth" ? "auth failure" : "API error";
 					appLogger.error("terminal", `${label}: ${kindLabel} (${patternName})`);
 
+					// Keep failure visible until the backend observes real recovery. An
+					// injected continue that stays idle is not a successful turn.
+					retryWorkObserved = false;
+					terminalsStore.setAwaitingInput(props.id, "error");
+					setRetryHint(kind === "server");
+
 					const willAutoRetry =
 						kind === "server" &&
 						agent &&
-						agentConfigsStore.isAutoRetryEnabled(agent) &&
+						agentConfigsForRepo(props.cwd).isAutoRetryEnabled(agent) &&
 						!retryTimer &&
 						retryCount < RETRY_DELAYS.length;
 
@@ -440,7 +624,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 						if (
 							kind === "server" &&
 							agent &&
-							agentConfigsStore.isAutoRetryEnabled(agent) &&
+							agentConfigsForRepo(props.cwd).isAutoRetryEnabled(agent) &&
 							retryCount >= RETRY_DELAYS.length
 						) {
 							appLogger.warn(
@@ -452,6 +636,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					break;
 				}
 				case "tool-error":
+					setRetryHint(false);
 					terminalsStore.setAwaitingInput(props.id, "error");
 					break;
 				case "agent-session-conflict": {
@@ -465,10 +650,11 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					break;
 				}
 				case "intent": {
-					retryCount = 0;
 					const term = terminalsStore.get(props.id);
 					const agentType = term?.agentType;
-					const perAgentEnabled = agentType ? (agentConfigsStore.getIntentTabTitle(agentType) ?? true) : true;
+					const perAgentEnabled = agentType
+						? (agentConfigsForRepo(props.cwd).getIntentTabTitle(agentType) ?? true)
+						: true;
 					handleIntentEvent({
 						terminalId: props.id,
 						text: parsed.text,
@@ -480,10 +666,9 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					break;
 				}
 				case "suggest":
-					// Backend guarantees `suggest` events only arrive once the shell has
-					// transitioned to IDLE (see `drain_pending_suggest` in pty.rs, gated
-					// on `SHELL_IDLE`). No frontend buffering needed: if the user hasn't
-					// dismissed the previous cycle's chips, show the new set directly.
+					// The backend publishes choices once the agent is ready, even
+					// while background descendants keep the shell busy. Completion
+					// remains separately gated; show this turn's choices directly.
 					if (settingsStore.state.suggestFollowups && parsed.items?.length) {
 						const t = terminalsStore.get(props.id);
 						if (t && !t.suggestDismissed) {
@@ -507,17 +692,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					if (parsed.state === "idle") {
 						// Idle arrives first; any parked `suggest:` items follow on a later
 						// silence-timer tick (backend-gated). No promotion logic needed here.
-						const pendingT = terminalsStore.get(props.id);
-						const initCmd = pendingT?.pendingInitCommand;
-						terminalsStore.update(props.id, {
-							shellState: parsed.state,
-							...(initCmd ? { pendingInitCommand: null } : {}),
-						});
-						if (initCmd && targetSessionId) {
-							pty
-								.sendCommand(targetSessionId, initCmd, null)
-								.catch((e) => appLogger.error("terminal", "Failed to write init command", { error: String(e) }));
-						}
+						terminalsStore.update(props.id, { shellState: parsed.state });
 						// Idle: detect agent immediately — only idle can clear a detected agent
 						detectAgentForTerminal(props.id, "idle").catch((err) =>
 							appLogger.warn("terminal", "[AgentDetect] unexpected error", { error: String(err), termId: props.id }),
@@ -544,7 +719,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 						`[ChoicePrompt] ${props.id} title="${parsed.title}" options=${parsed.options.length}${isActive ? "" : " (background)"}`,
 					);
 					if (!isActive) {
-						notificationsStore.playWarning();
+						notificationsStore.play("warning", { originSessionId: props.id });
 					}
 					break;
 				}
@@ -574,6 +749,8 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			() => {},
 			() => {
 				if (disposed) return;
+				// Suspend closes the PTY on purpose and keeps the tab as it is.
+				if (isSuspendingOrSuspended(props.id)) return;
 				// Guard: terminal may have been removed from the store already
 				// (e.g. pane closed). Updating a removed entry would recreate it as a ghost.
 				const stillExists = terminalsStore.get(props.id);
@@ -637,6 +814,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			},
 			{
 				onActivity: handlePtyActivity,
+				onTitle: handlePtyTitle,
 				onReconnecting: (attempt, max) => setReconnecting({ attempt, max }),
 				onReconnected: () => setReconnecting(null),
 				// Browser mode: receive parsed events via WebSocket JSON frames
@@ -646,30 +824,14 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					}
 				},
 				onStateChange: (snapshot) => {
-					const state = snapshot as BackendSessionState;
-					const wasAwaiting = terminalsStore.get(props.id)?.awaitingInput === "question";
-					const isAwaiting = state.awaiting_input === true;
-					terminalsStore.update(props.id, {
-						agentState: state.agent_state ?? null,
-						backgroundWork: state.background_work === true,
-						queuedCommands: state.queued_commands ?? 0,
-						awaitingInput: state.awaiting_input === true ? "question" : null,
-						awaitingInputConfident: state.question_confident === true,
-						...(state.shell_state ? { shellState: state.shell_state } : {}),
-					});
-					if (wasAwaiting !== isAwaiting) {
-						pluginRegistry.dispatchStructuredEvent(
-							"awaiting",
-							{ awaiting: isAwaiting, confident: state.question_confident === true },
-							targetSessionId,
-						);
-					}
+					if (disposed) return;
+					applySessionStateEvent({ session_id: targetSessionId, state: snapshot });
 				},
 			},
 		);
 
 		// Tauri-only listeners (kitty keyboard, shell state sync)
-		if (isTauri()) {
+		if (isTauri() && !getSessionConnection(targetSessionId)) {
 			const { listen } = await import("@tauri-apps/api/event");
 			unlistenParsed = await listen<ParsedEvent>(`pty-parsed-${targetSessionId}`, (event) => {
 				handleParsedEvent(event.payload);
@@ -697,33 +859,6 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			// delivery had just installed, inventing one empty command block per
 			// prompt. `agent-block` above still feeds the same sink, but that is a
 			// different source for agents with no shell integration, not a copy.
-
-			// Listen for OSC 0/2 title changes from Rust (native renderer)
-			unlistenTitle = await listen<string>(`pty-title-${targetSessionId}`, (event) => {
-				if (disposed) return;
-				const title = event.payload;
-				const term = terminalsStore.get(props.id);
-				if (term?.nameIsCustom || (term?.agentIntent && settingsStore.state.intentTabTitle)) return;
-				if (!title) {
-					if (originalName) terminalsStore.update(props.id, { name: originalName });
-				} else {
-					const cleaned = cleanOscTitle(title);
-					if (cleaned) {
-						if (!originalName) originalName = terminalsStore.get(props.id)?.name || null;
-						terminalsStore.update(props.id, { name: cleaned });
-					} else if (originalName) {
-						terminalsStore.update(props.id, { name: originalName });
-					}
-				}
-			});
-			// Unmounting during the await above leaves this listener attached:
-			// onCleanup already ran and saw `unlistenTitle` still undefined. Every
-			// sibling listener has this guard; this one was missing it.
-			if (disposed) {
-				safeUnlisten(unlistenTitle);
-				unlistenTitle = undefined;
-				return;
-			}
 
 			// Listen for OSC 52 clipboard store from Rust (native renderer).
 			// OSC 52 is honored from anywhere in the byte stream, so a displayed file/log
@@ -772,19 +907,26 @@ export const Terminal: Component<TerminalProps> = (props) => {
 
 	// Eagerly attach listeners for existing sessions (before terminal.open())
 	// This prevents data loss when PTY output arrives while terminal is on a background tab
+	let sessionListenersReady: Promise<boolean> = Promise.resolve(false);
 	const existingSessionId = terminalsStore.get(props.id)?.sessionId;
 	if (existingSessionId) {
 		sessionId = existingSessionId;
 		setCurrentSessionId(existingSessionId);
 		// attachSessionListeners syncs shell state from Rust via get_shell_state
-		attachSessionListeners(existingSessionId).catch((err) =>
-			appLogger.error("terminal", "Failed to attach session listeners", err),
+		sessionListenersReady = attachSessionListeners(existingSessionId).then(
+			() => true,
+			(err) => {
+				appLogger.error("terminal", "Failed to attach session listeners", err);
+				return false;
+			},
 		);
 	}
 
 	/** Initialize PTY session and event listeners */
 	const initSession = async () => {
 		if (sessionInitialized || !containerRef) return;
+		// A suspended tab has no PTY on purpose; resuming clears the flag and re-runs this.
+		if (terminalsStore.get(props.id)?.suspended) return;
 		sessionInitialized = true;
 		if (isPerfDebug()) {
 			const spawnMs = Math.round(performance.now() - mountedAt);
@@ -800,7 +942,25 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			let reconnected = false;
 			if (sessionId) {
 				try {
+					if (isPerfDebug()) {
+						const box = gridBox(containerRef);
+						appLogger.diag.info("terminal", `resize_pty request reconnect ${grid.rows}x${grid.cols}`, {
+							sessionId,
+							caller: "reconnect",
+							viewer: isTauri() ? "desktop" : "browser",
+							rows: grid.rows,
+							cols: grid.cols,
+							boxWidth: box.width,
+							boxHeight: box.height,
+						});
+					}
 					await pty.resize(sessionId, grid.rows, grid.cols);
+					// Reuse the eager/resume attachment, but recover an initial handshake failure.
+					if (!(await sessionListenersReady)) {
+						if (disposed) return;
+						detachSessionListeners();
+						await attachSessionListeners(sessionId);
+					}
 					reconnected = true;
 					appLogger.info("terminal", `initSession(${props.id}) — reconnected to ${sessionId}`);
 					detectAgentForTerminal(props.id, "idle").catch(() => {});
@@ -815,28 +975,23 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					);
 					sessionId = null;
 					setCurrentSessionId(null);
-					safeUnlisten(unsubscribePty);
-					unsubscribePty = undefined;
-					safeUnlisten(unlistenParsed);
-					unlistenParsed = undefined;
-					safeUnlisten(unlistenKitty);
-					unlistenKitty = undefined;
-					safeUnlisten(unlistenTitle);
-					unlistenTitle = undefined;
-					safeUnlisten(unlistenClipboardStore);
-					unlistenClipboardStore = undefined;
+					detachSessionListeners();
 				}
 			}
 			if (!reconnected) {
 				appLogger.debug("terminal", `initSession(${props.id}) — creating FRESH PTY session (no prior sessionId)`);
 				const termData = terminalsStore.get(props.id);
+				// The env flags describe the agent binary on the machine that will run
+				// it. Local resolves without a round trip — it is loaded at boot.
+				const machineConfigs = await ensureAgentConfigsForRepo(props.cwd);
 				sessionId = await pty.createSession({
 					rows: grid.rows,
 					cols: grid.cols,
 					shell: settingsStore.state.shell ?? null,
 					cwd: props.cwd || null,
 					tuic_session: termData?.tuicSession ?? null,
-					env: agentConfigsStore.getEnvFlags("claude"),
+					alias: termData?.alias ?? null,
+					env: machineConfigs.getEnvFlags("claude"),
 					agent_type: termData?.pendingInitCommand ? (termData.agentType ?? null) : null,
 				});
 				// The component can unmount during the await above (tab churn while
@@ -852,6 +1007,9 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					}
 					return;
 				}
+				// CanvasTerminal chooses its transport at mount. Register ownership before
+				// mounting it, or a fresh remote PTY is attached to local Tauri IPC.
+				terminalsStore.setSessionId(props.id, sessionId);
 				setCurrentSessionId(sessionId);
 				if (sessionId) {
 					if (!isTauri()) {
@@ -871,6 +1029,8 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			}
 		} catch (err) {
 			appLogger.error("terminal", `Failed to create PTY: ${err}`);
+			if (!disposed)
+				setSpawnError(err instanceof HttpRpcError ? err.detail : err instanceof Error ? err.message : String(err));
 		}
 	};
 
@@ -879,7 +1039,13 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	// every tab in the group runs xterm/ResizeObserver/ScrollTracker/PTY-subscribe
 	// concurrently, which multiplies background work by the number of tabs per
 	// pane. The predicate itself lives in terminalVisibility.ts.
-	const isVisible = () => {
+	//
+	// A memo, not a plain accessor: the multiview inputs read every terminal's
+	// sessionId and lastDataAt, and `on(isVisible, …)` below re-runs its body on any
+	// dependency change, not only on a value change. Unmemoised, each output burst or
+	// session change re-ran the "became visible" path — and right after a suspend
+	// that path auto-resumed the tab the user had just suspended.
+	const isVisible = createMemo(() => {
 		const split = paneLayoutStore.isSplit();
 		const groupId = split ? paneLayoutStore.getGroupForTab(props.id) : null;
 		return isTerminalVisible({
@@ -893,7 +1059,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			inPaneGroup: !!groupId,
 			isGroupActiveTab: !!groupId && paneLayoutStore.state.groups[groupId]?.activeTabId === props.id,
 		});
-	};
+	});
 
 	// When this terminal becomes visible: init PTY session and auto-focus.
 	// CanvasTerminal handles its own rendering lifecycle.
@@ -905,35 +1071,81 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	createEffect(
 		on(isVisible, (visible) => {
 			if (!visible) return;
+			if (terminalsStore.get(props.id)?.suspended) {
+				void resumeTerminal(props.id);
+				return;
+			}
+			const containerIsSized = () => !!containerRef && containerRef.offsetWidth > 0 && containerRef.offsetHeight > 0;
+
 			rafHandle = requestAnimationFrame(() => {
 				rafHandle = 0;
-				if (!containerRef || containerRef.offsetWidth <= 0 || containerRef.offsetHeight <= 0) {
-					// Container not ready — retry on next frame
-					const retry = () => {
-						requestAnimationFrame(() => {
-							if (containerRef && containerRef.offsetWidth > 0 && containerRef.offsetHeight > 0) {
-								initSession();
-							} else {
-								retry();
-							}
-						});
-					};
-					retry();
+				if (!containerIsSized()) {
+					// Container not ready — retry on the next frames, but bounded and
+					// cancellable: a pane the user leaves collapsed never gets a size.
+					cancelSizeRetry = retryUntilSized(
+						containerIsSized,
+						() =>
+							initSession().catch((e) =>
+								appLogger.error("terminal", "initSession failed after size retry", { error: String(e) }),
+							),
+						() =>
+							appLogger.warn(
+								"terminal",
+								`Container stayed zero-size for ${SIZE_RETRY_MAX_FRAMES} frames — giving up on init for ${props.id}`,
+							),
+					);
 					return;
 				}
-				initSession();
+				initSession().catch((e) => appLogger.error("terminal", "initSession failed", { error: String(e) }));
 
 				// Never steal the caret from a field the user is typing in — the search
 				// bar and the compose panel live inside this same terminal wrapper.
 				if (terminalsStore.state.activeId === props.id && !focusIsInsideOwnInput(document.activeElement, props.id)) {
-					canvasTerminalRef()?.focus();
+					if (chatActive()) focusChatInput();
+					else canvasTerminalRef()?.focus();
 				}
 			});
 
 			onCleanup(() => {
 				if (rafHandle) cancelAnimationFrame(rafHandle);
+				rafHandle = 0;
+				cancelSizeRetry?.();
+				cancelSizeRetry = null;
 			});
 		}),
+	);
+
+	// Suspend detaches the PTY; resume attaches the replacement already opened by Rust.
+	createEffect(
+		on(
+			() => terminalsStore.get(props.id)?.suspended ?? false,
+			(suspended) => {
+				if (suspended) {
+					if (sessionId) pluginRegistry.removeSession(sessionId);
+					detachSessionListeners();
+					kittyFlags = 0;
+					sessionId = null;
+					setCurrentSessionId(null);
+					sessionInitialized = false;
+				} else {
+					sessionId = terminalsStore.get(props.id)?.sessionId ?? null;
+					setCurrentSessionId(sessionId);
+					if (sessionId)
+						sessionListenersReady = attachSessionListeners(sessionId).then(
+							() => true,
+							(err) => {
+								appLogger.error("terminal", "Failed to attach resumed session listeners", err);
+								return false;
+							},
+						);
+					if (isVisible())
+						initSession().catch((e) =>
+							appLogger.error("terminal", "initSession failed after resume", { error: String(e) }),
+						);
+				}
+			},
+			{ defer: true },
+		),
 	);
 
 	// Alt-screen recovery: when an agent exits without leaving alt-screen,
@@ -962,16 +1174,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		clearTimeout(retryTimer);
 		clearTimeout(agentDetectTimer);
 		clearTimeout(questionDebounceTimer);
-		safeUnlisten(unsubscribePty);
-		unsubscribePty = undefined;
-		safeUnlisten(unlistenParsed);
-		unlistenParsed = undefined;
-		safeUnlisten(unlistenKitty);
-		unlistenKitty = undefined;
-		safeUnlisten(unlistenTitle);
-		unlistenTitle = undefined;
-		safeUnlisten(unlistenClipboardStore);
-		unlistenClipboardStore = undefined;
+		detachSessionListeners();
 		kittyFlags = 0;
 
 		if (sessionId) pluginRegistry.removeSession(sessionId);
@@ -1002,14 +1205,36 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		},
 		refresh: () => canvasTerminalRef()?.refresh(),
 		focus: () => {
+			if (chatActive()) {
+				focusChatInput();
+				return;
+			}
 			const ref = canvasTerminalRef();
 			if (ref) ref.focus();
 			else pendingCanvasFocus = true;
 		},
 		getSessionId: () => sessionId,
-		openSearch: () => openSearchBar(),
-		closeSearch: () => closeSearchBar(),
+		openSearch: () => {
+			if (chatActive()) chatSearchRef?.open();
+			else openSearchBar();
+		},
+		closeSearch: () => {
+			closeSearchBar();
+			chatSearchRef?.close();
+		},
 		toggleCompose: () => {
+			if (chatActive()) {
+				// The dock is Chat's input when it is on screen: the shortcut opens it.
+				if (dockOwnsChat()) composeDockBridge.open();
+				else setComposeFocusRequest((n) => n + 1);
+				return;
+			}
+			if (composePinned()) {
+				// Pinned stays open: the shortcut moves the caret between the two inputs.
+				if (focusIsInsideOwnInput(document.activeElement, props.id)) canvasTerminalRef()?.focus();
+				else setComposeFocusRequest((n) => n + 1);
+				return;
+			}
 			if (composeOpen()) {
 				setComposeOpen(false);
 				canvasTerminalRef()?.focus();
@@ -1027,8 +1252,10 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			}
 		},
 		openComposeWithText: (text: string) => {
+			if (dockOwnsChat() && composeDockBridge.open({ replace: text })) return;
 			setPendingComposeText(text);
-			setComposeOpen(true);
+			if (!chatActive()) setComposeOpen(true);
+			setComposeTextRequest((n) => n + 1);
 		},
 		searchBuffer: (query: string) => {
 			if (!sessionId) return [];
@@ -1092,24 +1319,31 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		terminalsStore.update(props.id, { ref: refMethods });
 	});
 
-	// Re-register ref and resubscribe to grid channel when this terminal becomes
-	// visible again (e.g. after reattach from a floating window whose Terminal
-	// overwrote the grid channel subscription and ref in the store).
-	createEffect((prev: boolean) => {
-		const vis = isVisible();
-		if (vis && prev === false) {
+	// Re-register ref and resubscribe to grid channel after a REAL reattach: the
+	// tab was detached into a floating window whose Terminal overwrote the grid
+	// channel subscription and the ref in the store.
+	//
+	// Keyed on the detach, not on visibility alone. A plain tab switch also flips
+	// visibility false→true, and resubscribing there wiped the grid on every
+	// switch — `refresh()` drops the current frame before the replacement arrives,
+	// so the user saw paint → wipe → paint.
+	createEffect((prev: ReattachPhase) => {
+		const { phase, resubscribe } = stepReattachPhase(prev, isVisible(), terminalsStore.isDetached(props.id));
+		if (resubscribe) {
 			terminalsStore.update(props.id, { ref: refMethods });
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
 					const ref = canvasTerminalRef();
-					if (ref) {
-						ref.resubscribe().then(() => ref.refresh());
-					}
+					if (!ref) return;
+					ref
+						.resubscribe()
+						.then(() => ref.refresh())
+						.catch((e) => appLogger.warn("terminal", "Grid resubscribe after reattach failed", { error: String(e) }));
 				});
 			});
 		}
-		return vis;
-	}, false);
+		return phase;
+	}, REATTACH_PHASE_INITIAL);
 
 	const handleBell = () => {
 		const style = settingsStore.state.bellStyle;
@@ -1119,7 +1353,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			setTimeout(() => containerRef?.classList.remove("bell-flash"), 150);
 		}
 		if (style === "sound" || style === "both") {
-			notificationsStore.play("info").catch((err) => {
+			notificationsStore.play("info", { originSessionId: props.id }).catch((err) => {
 				appLogger.warn("terminal", "Bell audio playback failed", err);
 			});
 		}
@@ -1133,6 +1367,16 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				.sendCommand(sessionId, cmd, null)
 				.catch((e) => appLogger.error("terminal", "Failed to write resume command", { error: String(e) }));
 		}
+	};
+
+	/** What the tab was doing when it was saved — the intent if the agent declared one,
+	 *  otherwise the last prompt. Both are restored from the session snapshot. */
+	const resumeContext = () => {
+		const term = terminalsStore.get(props.id);
+		const intent = term?.agentIntent;
+		if (intent) return `Intent: ${intent}`;
+		const prompt = term?.lastPrompt;
+		return prompt ? `Prompt: ${prompt}` : null;
 	};
 
 	const handleDismissResume = (e: MouseEvent) => {
@@ -1159,28 +1403,88 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		const path = e.dataTransfer?.getData("application/x-tuic-path");
 		if (!path || !sessionId) return;
 		e.preventDefault();
-		const quoted = `'${path.replace(/'/g, "'\\''")}' `;
+		const quoted = `'${path.replaceAll("'", "'\\''")}' `;
 		pty.write(sessionId, quoted);
 		canvasTerminalRef()?.focus();
 	};
 
+	// The switch floats over the top-right corner of both views and is a sibling of each, so a wheel
+	// landing on it reaches neither scroller: the scroll stalls while the pointer crosses it.
+	const handleToggleWheel = (e: WheelEvent) => {
+		e.preventDefault();
+		if (!chatActive()) {
+			canvasTerminalRef()?.wheel(e);
+			return;
+		}
+		const transcript = (e.currentTarget as HTMLElement)
+			.closest("[data-terminal-id]")
+			?.querySelector("[data-terminal-chat]");
+		transcript?.scrollBy({ top: e.deltaY, left: e.deltaX });
+	};
+
+	// Keep transcript focus for selection, copy and scrolling. Only actual typing
+	// on its container returns to Compose; links, buttons and Find own their keys.
+	const handleChatTyping = (event: KeyboardEvent) => {
+		if (
+			!chatActive() ||
+			event.defaultPrevented ||
+			event.isComposing ||
+			event.metaKey ||
+			event.ctrlKey ||
+			event.altKey ||
+			event.key.length !== 1 ||
+			!(event.target instanceof HTMLElement) ||
+			!event.target.hasAttribute("data-terminal-chat") ||
+			!window.getSelection()?.isCollapsed
+		)
+			return;
+		// In front of the dock only the active terminal's typing goes there: the dock sends to the active terminal.
+		const inserted = dockOwnsChat()
+			? terminalsStore.state.activeId === props.id && composeDockBridge.open({ insert: event.key })
+			: !!insertComposeText?.(event.key);
+		if (!inserted) return;
+		event.preventDefault();
+		event.stopPropagation();
+	};
+
+	// The grid reports its own focus; in Chat the transcript stands in for it, so
+	// clicking a Chat tile makes it the terminal the dock sends to.
+	const handleChatFocusIn = (event: FocusEvent) => {
+		if (!chatActive() || terminalsStore.state.activeId === props.id) return;
+		if (event.target instanceof Element && containerRef?.contains(event.target)) return;
+		props.onFocus?.(props.id);
+	};
+
 	return (
 		<div
+			ref={wrapperRef}
 			class={s.wrapper}
 			data-terminal-id={props.id}
 			data-focus-target="terminal"
+			onKeyDown={handleChatTyping}
+			onFocusIn={handleChatFocusIn}
 			onDragOver={handleFileDragOver}
 			onDrop={handleFileDrop}
 		>
-			<TerminalSearch
-				visible={searchVisible()}
-				focusToken={searchFocusToken()}
-				canvasRef={canvasTerminalRef()}
-				onClose={() => {
-					closeSearchBar();
-					canvasTerminalRef()?.focus();
-				}}
+			<LongRunTip
+				eligible={
+					!!terminalsStore.get(props.id)?.agentType &&
+					terminalsStore.isBusy(props.id) &&
+					!settingsStore.state.preventSleepWhenBusy
+				}
+				busyDuration={terminalsStore.getBusyDuration(props.id)}
 			/>
+			<ContextualTip
+				id="autoRetry"
+				when={
+					retryHint() &&
+					terminalsStore.get(props.id)?.awaitingInput === "error" &&
+					!!terminalsStore.get(props.id)?.agentType &&
+					!agentConfigsForRepo(props.cwd).isAutoRetryEnabled(terminalsStore.get(props.id)!.agentType!)
+				}
+			/>
+			<ViewModeToggle terminalId={props.id} onWheel={handleToggleWheel} />
+			<ChatViewFallbackBanner terminalId={props.id} />
 			<Show
 				when={
 					settingsStore.state.showLastPrompt &&
@@ -1212,12 +1516,33 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					onKeyDown={onClickKeyDown(handleResume)}
 				>
 					<span>Agent session was active — click to resume</span>
-					<button class={s.resumeDismiss} onClick={handleDismissResume} title="Dismiss">
+					<Show when={resumeContext()}>
+						{(ctx) => (
+							<span class={s.resumeContext} title={ctx()}>
+								{ctx()}
+							</span>
+						)}
+					</Show>
+					<Button variant="ghost" class={s.resumeDismiss} onClick={handleDismissResume} title="Dismiss">
 						&times;
-					</button>
+					</Button>
 				</div>
 			</Show>
-			<div ref={containerRef} class={s.content}>
+			{/* Chat mode HIDES the grid (display:none, the background-tab path) and never
+			    unmounts it: a disposed CanvasTerminal under a queued frame event froze the UI. */}
+			<div ref={containerRef} class={s.content} classList={{ [s.contentHidden]: chatActive() }}>
+				{/* Anchor search below the Context/view-switch row, not over its controls. */}
+				<div class={s.searchAnchor}>
+					<TerminalSearch
+						visible={searchVisible()}
+						focusToken={searchFocusToken()}
+						canvasRef={canvasTerminalRef()}
+						onClose={() => {
+							closeSearchBar();
+							canvasTerminalRef()?.focus();
+						}}
+					/>
+				</div>
 				{/* keyed: pass sessionId as a stable string value, NOT the Show's reactive
 				    accessor. CanvasTerminal's onFrame (and ~35 other async IPC handlers) re-read
 				    props.sessionId on every backend frame. With a non-keyed Show, props.sessionId
@@ -1235,15 +1560,48 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					keyed
 					when={_currentSessionId()}
 					fallback={
-						<Show when={sessionEnded()}>
-							<div class={s.exitedNotice} data-testid="terminal-exited-notice">
-								<span class={s.exitedTitle}>{t("terminal.exited.title", "Session ended")}</span>
-								<span class={s.exitedHint}>
-									{t(
-										"terminal.exited.hint",
-										"The process exited and its output was released. Close this tab to remove it.",
-									)}
-								</span>
+						<Show
+							when={spawnError()}
+							fallback={
+								<>
+									<Show when={terminalsStore.get(props.id)?.suspended}>
+										<div class={s.exitedNotice} data-testid="terminal-suspended-notice">
+											<span class={s.exitedTitle}>{t("terminal.suspended.title", "Suspended")}</span>
+											<span class={s.exitedHint}>
+												{t(
+													"terminal.suspended.hint",
+													"The process was ended to free memory and CPU. Resume opens a new session in the same folder.",
+												)}
+											</span>
+											<Show when={resumeContext()}>
+												{(ctx) => (
+													<span class={s.resumeContext} title={ctx()}>
+														{ctx()}
+													</span>
+												)}
+											</Show>
+											<Button class={s.resumeButton} type="button" onClick={() => void resumeTerminal(props.id)}>
+												{t("terminal.suspended.resume", "Resume")}
+											</Button>
+										</div>
+									</Show>
+									<Show when={sessionEnded()}>
+										<div class={s.exitedNotice} data-testid="terminal-exited-notice">
+											<span class={s.exitedTitle}>{t("terminal.exited.title", "Session ended")}</span>
+											<span class={s.exitedHint}>
+												{t(
+													"terminal.exited.hint",
+													"The process exited and its output was released. Close this tab to remove it.",
+												)}
+											</span>
+										</div>
+									</Show>
+								</>
+							}
+						>
+							<div class={s.exitedNotice} role="alert">
+								<span class={s.exitedTitle}>{t("terminal.spawnFailed", "Terminal could not start")}</span>
+								<span class={s.exitedHint}>{spawnError()}</span>
 							</div>
 						</Show>
 					}
@@ -1278,31 +1636,45 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					)}
 				</Show>
 			</div>
-			<Show when={!composeOpen()}>
-				<div
-					class={s.composeHint}
-					data-compose-hint
-					onClick={() => setComposeOpen(true)}
-					title={`Open compose editor (${keyFor("toggle-compose-panel")})`}
-				>
-					<svg
-						width="10"
-						height="10"
-						viewBox="0 0 16 16"
-						fill="currentColor"
-						style={{ "margin-right": "4px", opacity: 0.7 }}
-					>
-						<path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708L5.854 13.146a.5.5 0 0 1-.233.131l-3.5 1a.5.5 0 0 1-.617-.617l1-3.5a.5.5 0 0 1 .131-.233L12.146.854z" />
-					</svg>
-					Compose {keyFor("toggle-compose-panel")}
-				</div>
+			<Show keyed when={chatActive() ? _currentSessionId() : null}>
+				{(sid) => (
+					<TerminalChatView
+						terminalId={props.id}
+						sessionId={sid}
+						onSearchRef={(ref) => {
+							chatSearchRef = ref;
+						}}
+					/>
+				)}
 			</Show>
-			<Show when={composeOpen()}>
+			<Show when={!composeOpen() && !chatActive()}>
+				<ComposeToggle
+					shortcut={keyFor("toggle-compose-panel")}
+					queuedCount={() => terminalsStore.get(props.id)?.queuedCommands ?? 0}
+					onOpen={() => setComposeOpen(true)}
+					onLoadQueue={() => (sessionId ? pty.listQueuedCommands(sessionId) : Promise.resolve([]))}
+				/>
+			</Show>
+			<Show when={composeVisible()}>
 				<Suspense>
 					<ComposePanel
-						isOpen={composeOpen}
+						isOpen={composeVisible}
 						initialText={pendingComposeText}
 						onTextChange={setPendingComposeText}
+						onSubmitted={finishCompose}
+						pinned={composeDocked}
+						persistent={chatActive}
+						onTogglePin={() => setComposePinned(!composePinned())}
+						onDismiss={() => {
+							setComposePinned(false);
+							setComposeOpen(false);
+							canvasTerminalRef()?.focus();
+						}}
+						onInsertText={(insert) => {
+							insertComposeText = insert;
+						}}
+						focusRequest={composeFocusRequest}
+						textRequest={composeTextRequest}
 						canEnqueue={() => !!terminalsStore.get(props.id)?.agentType}
 						queuedCount={() => terminalsStore.get(props.id)?.queuedCommands ?? 0}
 						onClearQueue={async () => {
@@ -1323,6 +1695,21 @@ export const Terminal: Component<TerminalProps> = (props) => {
 								return [];
 							}
 						}}
+						onRecallQueued={async () => {
+							const owner = sessionId;
+							if (!owner) return null;
+							try {
+								const queue = await pty.listQueuedCommands(owner);
+								const newest = queue.filter((item) => item.kind === "user_command").at(-1);
+								if (!newest || sessionId !== owner) return null;
+								if (!(await pty.removeQueuedCommand(owner, newest.id))) return null;
+								terminalsStore.update(props.id, { queuedCommands: queue.length - 1 });
+								return newest.text;
+							} catch (err) {
+								appLogger.error("terminal", "ComposePanel recall queued failed", { sessionId: owner, error: err });
+								return null;
+							}
+						}}
 						onRemoveQueued={async (commandId) => {
 							if (!sessionId) return;
 							try {
@@ -1336,39 +1723,42 @@ export const Terminal: Component<TerminalProps> = (props) => {
 							}
 						}}
 						onEnqueue={async (text) => {
-							if (!sessionId) return;
-							try {
-								const outcome = await pty.enqueueCommand(sessionId, text);
+							await submitCompose("enqueue", sessionId, async (id) => {
+								const outcome = await pty.enqueueCommand(id, text);
 								// Trust the call's own count instead of waiting for the next 1s
 								// lifecycle poll — the badge must react to the click.
 								terminalsStore.update(props.id, { queuedCommands: outcome.queued });
-								setPendingComposeText("");
-								setComposeOpen(false);
-								canvasTerminalRef()?.focus();
-							} catch (err) {
-								appLogger.error("terminal", "ComposePanel enqueue failed", { sessionId, error: err });
-								toastsStore.add("Could not queue the command", String(err), "error");
-							}
+							});
 						}}
 						onClose={() => {
-							setComposeOpen(false);
-							canvasTerminalRef()?.focus();
+							if (chatActive()) terminalsStore.setViewMode(props.id, "cli");
+							else {
+								if (!composePinned()) setComposeOpen(false);
+								canvasTerminalRef()?.focus();
+							}
 						}}
 						onSend={async (text) => {
-							if (sessionId) {
-								try {
-									const term = terminalsStore.get(props.id);
-									await pty.sendCommand(sessionId, text, term?.agentType);
-									setPendingComposeText("");
-									setComposeOpen(false);
-									canvasTerminalRef()?.focus();
-								} catch (err) {
-									appLogger.error("terminal", "ComposePanel send failed", { sessionId, error: err });
-								}
-							} else {
-								setPendingComposeText("");
-								setComposeOpen(false);
-								canvasTerminalRef()?.focus();
+							if (
+								chatActive() &&
+								terminalsStore.get(props.id)?.shellState === "busy" &&
+								terminalsStore.get(props.id)?.agentType &&
+								!terminalsStore.get(props.id)?.awaitingInput
+							) {
+								await submitCompose("enqueue", sessionId, async (id) => {
+									const outcome = await pty.enqueueCommand(id, text);
+									terminalsStore.update(props.id, { queuedCommands: outcome.queued });
+									void chatViewStore.refreshQueue(id).catch(() => {});
+								});
+								return;
+							}
+							const rollback = sessionId ? chatViewStore.beginSubmission(sessionId, text) : () => {};
+							try {
+								await submitCompose("send", sessionId, (id) =>
+									pty.sendCommand(id, text, terminalsStore.get(props.id)?.agentType),
+								);
+							} catch (error) {
+								rollback();
+								throw error;
 							}
 						}}
 					/>

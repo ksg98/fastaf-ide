@@ -1,0 +1,16 @@
+{
+  "sessionUpdate": "session_info_update",
+  "_meta": {
+    "ego": {
+      "providerRetry": {
+        "state": "waiting",
+        "attempt": 1,
+        "limit": 6,
+        "delayMs": 12000,
+        "kind": "transient",
+        "cause": "the provider returned HTTP 503: 1536 controlled temporary overload",
+        "text": "the provider returned HTTP 503: 1536 controlled temporary overload \u2014 connection problem, retrying in 12s (attempt 1/6)"
+      }
+    }
+  }
+}

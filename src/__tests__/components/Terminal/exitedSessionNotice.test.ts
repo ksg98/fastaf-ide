@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { sourceFormats } from "../../utils/sourceFormats";
 
 /**
  * When an agent session exits, `Terminal.tsx`'s pty-exit handler keeps the tab
@@ -28,12 +27,10 @@ import { describe, expect, it } from "vitest";
  * canvas stack, and the assertion here is about which branch guards which
  * subtree — something a scan can state exactly.
  */
-describe("exited-session notice", () => {
-	const source = readFileSync(join(process.cwd(), "src/components/Terminal/Terminal.tsx"), "utf8");
-
+describe.each(sourceFormats("src/components/Terminal/Terminal.tsx"))("exited-session notice: %s", (_format, source) => {
 	/** The `<Show>` that owns the content area, from its opening tag to CanvasTerminal. */
 	const contentShow = (): string => {
-		const start = source.indexOf("<Show\n\t\t\t\t\tkeyed\n\t\t\t\t\twhen={_currentSessionId()}");
+		const start = source.search(/<Show\s+keyed\s+when\s*=\s*\{\s*_currentSessionId\s*\(\s*\)\s*\}/);
 		expect(start, "the content-area <Show keyed when={_currentSessionId()}> must still exist").toBeGreaterThan(-1);
 		const end = source.indexOf("<CanvasTerminal", start);
 		expect(end).toBeGreaterThan(start);
@@ -41,7 +38,7 @@ describe("exited-session notice", () => {
 	};
 
 	it("renders a fallback when no session is mounted, so the panel is never an unexplained void", () => {
-		expect(contentShow()).toMatch(/fallback=\{/);
+		expect(contentShow()).toMatch(/fallback\s*=\s*\{/);
 	});
 
 	it("gates the notice on the exited shell state, not on a null sessionId", () => {
@@ -49,8 +46,8 @@ describe("exited-session notice", () => {
 		// The guard is `sessionEnded()` — pinned to the shellState by the next
 		// test. Gating on the absence of a sessionId instead would also match the
 		// pre-init state of a brand-new tab.
-		expect(fallback).toMatch(/<Show when=\{sessionEnded\(\)\}>/);
-		expect(fallback).not.toMatch(/when=\{!_currentSessionId\(\)\}/);
+		expect(fallback).toMatch(/<Show\s+when\s*=\s*\{\s*sessionEnded\s*\(\s*\)\s*\}\s*>/);
+		expect(fallback).not.toMatch(/when\s*=\s*\{\s*!\s*_currentSessionId\s*\(\s*\)\s*\}/);
 	});
 
 	it("derives the exited state from the store rather than a local signal that exit does not set", () => {

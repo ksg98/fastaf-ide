@@ -1,0 +1,27 @@
+// ego reaching the `tuicommander` MCP server over the ACP connection itself.
+//
+// The session entry must be the ACP transport, not a bridge command line. Then
+// ego connects, lists, fails a call, is refused an unknown server and an
+// unknown connection, is told something by TUIC, disconnects, and connects a
+// second time — which the host must release when the ACP connection ends.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","params":{"mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]},"capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","configOptions":[]}}
+{"step":"request","id":101,"method":"mcp/connect","params":{"serverId":"tuicommander"}}
+{"step":"expect_response","id":101,"result":{"connectionId":"mcp-1"}}
+{"step":"request","id":102,"method":"mcp/message","params":{"connectionId":"mcp-1","method":"tools/list","params":{}}}
+{"step":"expect_response","id":102,"result":{"tools":[{"name":"session"}]}}
+{"step":"request","id":103,"method":"mcp/message","params":{"connectionId":"mcp-1","method":"tools/boom"}}
+{"step":"expect_response","id":103,"errorCode":-32601}
+{"step":"request","id":104,"method":"mcp/connect","params":{"serverId":"somebody-else"}}
+{"step":"expect_response","id":104,"errorCode":-32602}
+{"step":"request","id":105,"method":"mcp/message","params":{"connectionId":"mcp-9","method":"tools/list"}}
+{"step":"expect_response","id":105,"errorCode":-32602}
+{"step":"notify","method":"mcp/message","params":{"connectionId":"mcp-1","method":"notifications/initialized"}}
+{"step":"expect","method":"mcp/message","params":{"connectionId":"mcp-1","method":"notifications/resources/updated","params":{"uri":"tuic://workspace"}}}
+{"step":"request","id":106,"method":"mcp/disconnect","params":{"connectionId":"mcp-1"}}
+{"step":"expect_response","id":106,"result":{}}
+{"step":"request","id":107,"method":"mcp/connect","params":{"serverId":"tuicommander"}}
+{"step":"expect_response","id":107,"result":{"connectionId":"mcp-2"}}
+{"step":"await_stdin_eof"}

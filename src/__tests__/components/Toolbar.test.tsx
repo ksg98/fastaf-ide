@@ -1,4 +1,5 @@
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModifierSymbol } from "../../platform";
 
@@ -47,9 +48,14 @@ import { Toolbar } from "../../components/Toolbar/Toolbar";
 import { activityStore } from "../../stores/activityStore";
 import { commandPaletteStore } from "../../stores/commandPalette";
 import { editorTabsStore } from "../../stores/editorTabs";
+import { githubStore } from "../../stores/github";
 import { prNotificationsStore } from "../../stores/prNotifications";
+import { progressStore } from "../../stores/progress";
 import { repositoriesStore } from "../../stores/repositories";
+import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
+import { makeTerminal } from "../helpers/store";
 
 function setTauriEnv(on: boolean) {
 	const global = globalThis as Record<string, unknown>;
@@ -73,10 +79,12 @@ describe("Toolbar", () => {
 		uiStore.setSidebarVisible(true);
 		prNotificationsStore.clearAll();
 		activityStore.clearAll();
+		progressStore.resetForTests();
 		editorTabsStore.clearAll();
 	});
 
 	afterEach(() => {
+		for (const toast of [...toastsStore.toasts]) toastsStore.remove(toast.id);
 		setTauriEnv(true);
 		commandPaletteStore.close();
 		prNotificationsStore._testCancelPendingTimers();
@@ -113,6 +121,37 @@ describe("Toolbar", () => {
 	it("renders toolbar element", () => {
 		const { container } = render(() => <Toolbar />);
 		expect(container.querySelector(".toolbar")).not.toBeNull();
+	});
+
+	// Catches: history arrows enabled at the ends of the history, or a tooltip that does not name the target terminal.
+	it("history arrows are disabled at the ends and their tooltip names the target terminal", () => {
+		const first = terminalsStore.add(makeTerminal({ name: "Alpha" }));
+		const second = terminalsStore.add(makeTerminal({ name: "Beta" }));
+		try {
+			terminalsStore.setActive(first);
+			terminalsStore.setActive(second);
+			const { container } = render(() => <Toolbar />);
+			const back = container.querySelector("[data-testid='history-back']") as HTMLButtonElement;
+			const forward = container.querySelector("[data-testid='history-forward']") as HTMLButtonElement;
+			expect(back.disabled).toBe(false);
+			expect(back.title).toContain("Alpha");
+			expect(forward.disabled).toBe(true);
+			fireEvent.click(back);
+			expect(back.disabled).toBe(true);
+			expect(forward.disabled).toBe(false);
+			expect(forward.title).toContain("Beta");
+		} finally {
+			terminalsStore.remove(first);
+			terminalsStore.remove(second);
+		}
+	});
+
+	// FastAF's Codex title bar carries no sidebar layout toggle or repo filter: the
+	// filter lives in the sidebar's Projects header and the layout in Settings.
+	it("keeps the sidebar layout and filter toggles out of the title bar", () => {
+		const { container } = render(() => <Toolbar />);
+		expect(container.querySelector("[data-testid='sidebar-density-toggle']")).toBeNull();
+		expect(container.querySelector(".filterToggle")).toBeNull();
 	});
 
 	it("renders sidebar toggle button", () => {
@@ -202,8 +241,8 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setBranch(repoPath, "feature-x", { name: "feature-x" });
-		repositoriesStore.setActiveBranch(repoPath, "feature-x");
+		repositoriesStore.setWorkspace(repoPath, "feature-x", { branchName: "feature-x" });
+		repositoriesStore.setActiveWorkspace(repoPath, "feature-x");
 
 		const { container } = render(() => <Toolbar />);
 		const branchBtn = container.querySelector(".branch");
@@ -217,8 +256,8 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setBranch(repoPath, "main", { name: "main" });
-		repositoriesStore.setActiveBranch(repoPath, "main");
+		repositoriesStore.setWorkspace(repoPath, "main", { branchName: "main" });
+		repositoriesStore.setActiveWorkspace(repoPath, "main");
 
 		const { container } = render(() => <Toolbar onBranchClick={handleBranchClick} />);
 		const branchBtn = container.querySelector(".branch")!;
@@ -244,7 +283,7 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setActiveBranch(repoPath, "nonexistent");
+		repositoriesStore.setActiveWorkspace(repoPath, "nonexistent");
 
 		const { container } = render(() => <Toolbar />);
 		expect(container.querySelector(".branch")).toBeNull();
@@ -254,8 +293,8 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setBranch(repoPath, "main", { name: "main" });
-		repositoriesStore.setActiveBranch(repoPath, "main");
+		repositoriesStore.setWorkspace(repoPath, "main", { branchName: "main" });
+		repositoriesStore.setActiveWorkspace(repoPath, "main");
 
 		const { container } = render(() => <Toolbar />);
 		const branchBtn = container.querySelector(".branch")!;
@@ -266,8 +305,8 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setBranch(repoPath, "dev", { name: "dev" });
-		repositoriesStore.setActiveBranch(repoPath, "dev");
+		repositoriesStore.setWorkspace(repoPath, "dev", { branchName: "dev" });
+		repositoriesStore.setActiveWorkspace(repoPath, "dev");
 
 		const { container } = render(() => <Toolbar />);
 		const icon = container.querySelector(".branchIcon");
@@ -279,11 +318,11 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setBranch(repoPath, "feature", {
-			name: "feature",
+		repositoriesStore.setWorkspace(repoPath, "feature", {
+			branchName: "feature",
 			worktreePath: "/test/repo-worktrees/feature",
 		});
-		repositoriesStore.setActiveBranch(repoPath, "feature");
+		repositoriesStore.setActiveWorkspace(repoPath, "feature");
 
 		const { container } = render(() => <Toolbar repoPath={repoPath} />);
 		const launcher = container.querySelector("[data-testid='ide-launcher']")!;
@@ -294,11 +333,11 @@ describe("Toolbar", () => {
 		const repoPath = "/test/repo";
 		repositoriesStore.add({ path: repoPath, displayName: "Test Repo" });
 		repositoriesStore.setActive(repoPath);
-		repositoriesStore.setBranch(repoPath, "main", {
-			name: "main",
+		repositoriesStore.setWorkspace(repoPath, "main", {
+			branchName: "main",
 			worktreePath: null,
 		});
-		repositoriesStore.setActiveBranch(repoPath, "main");
+		repositoriesStore.setActiveWorkspace(repoPath, "main");
 
 		const { container } = render(() => <Toolbar repoPath={repoPath} />);
 		const launcher = container.querySelector("[data-testid='ide-launcher']")!;
@@ -340,6 +379,87 @@ describe("Toolbar", () => {
 	// Bell (Activity Center) — PR notifications
 	// -------------------------------------------------------------------------
 	describe("PR notification bell", () => {
+		it("keeps Progress available with no unread entries and opens the active repository", () => {
+			repositoriesStore.add({ path: "/repo/progress", displayName: "Progress Repo" });
+			repositoriesStore.setActive("/repo/progress");
+			const { container } = render(() => <Toolbar />);
+			expect(container.querySelector(".notifCount")).toBeNull();
+			fireEvent.click(container.querySelector(".bell")!);
+			const item = Array.from(container.querySelectorAll(".activityItem")).find((node) =>
+				node.textContent?.includes("Terminal Progress"),
+			);
+			expect(item).toBeDefined();
+			expect(item?.textContent).toContain("Open project journal");
+			fireEvent.click(item!);
+			expect(progressStore.dialogVisible()).toBe(true);
+			expect(progressStore.requestedProject()).toBe("/repo/progress");
+		});
+
+		it("keeps the unread badge and count when Progress is available", () => {
+			progressStore.presentLive({
+				repo_path: "/repo",
+				payload: {
+					entry: { id: 1, project: "/repo", createdAtMs: 1, type: "done", text: "Starting" },
+				},
+			});
+			const { container } = render(() => <Toolbar />);
+			expect(container.querySelector(".notifCount")?.textContent).toBe("1");
+			fireEvent.click(container.querySelector(".bell")!);
+			expect(container.querySelector(".activityItemSubtitle")?.textContent).toBe("1 new update");
+			progressStore.presentLive({
+				repo_path: "/repo",
+				payload: {
+					entry: { id: 2, project: "/repo", createdAtMs: 2, type: "done", text: "Continuing" },
+				},
+			});
+			expect(container.querySelector(".notifCount")?.textContent).toBe("2");
+			expect(container.querySelector(".activityItemSubtitle")?.textContent).toBe("2 new updates");
+		});
+		// Catches: static plugin launchers contribute an impossible-to-dismiss badge.
+		it("keeps a status-only bell unbadged while its plugin row remains visible", () => {
+			activityStore.registerSection({ id: "status", label: "STATUS", priority: 10, canDismissAll: false });
+			activityStore.addItem({
+				id: "status",
+				pluginId: "test",
+				sectionId: "status",
+				title: "Plugin status",
+				icon: "<svg/>",
+				dismissible: false,
+			});
+			const { container } = render(() => <Toolbar />);
+			expect(container.querySelector(".notifCount")).toBeNull();
+			fireEvent.click(container.querySelector(".bell")!);
+			expect(container.textContent).toContain("Plugin status");
+			expect(container.textContent).toContain("Open project journal");
+			addTestNotif();
+			expect(container.querySelector(".notifCount")?.textContent).toBe("1");
+			prNotificationsStore.dismissAll();
+			expect(container.querySelector(".notifCount")).toBeNull();
+		});
+
+		// Catches: Progress unread counts have no explicit acknowledgement without opening the journal.
+		it("marks Progress read explicitly without clearing other notifications or opening the journal", () => {
+			progressStore.presentLive({
+				repo_path: "/repo",
+				payload: { entry: { id: 1, project: "/repo", createdAtMs: 1, type: "done", text: "Finished" } },
+			});
+			addTestNotif();
+			const { container, getByRole, queryByRole } = render(() => <Toolbar />);
+			expect(container.querySelector(".notifCount")?.textContent).toBe("2");
+			fireEvent.click(container.querySelector(".bell")!);
+			fireEvent.click(getByRole("button", { name: "Mark as read" }));
+			expect(progressStore.unreadCount).toBe(0);
+			expect(progressStore.dialogVisible()).toBe(false);
+			expect(container.querySelector(".notifCount")?.textContent).toBe("1");
+			expect(container.textContent).toContain("Open project journal");
+			expect(queryByRole("button", { name: "Mark as read" })).toBeNull();
+			progressStore.presentLive({
+				repo_path: "/repo",
+				payload: { entry: { id: 2, project: "/repo", createdAtMs: 2, type: "done", text: "Next" } },
+			});
+			expect(container.querySelector(".notifCount")?.textContent).toBe("2");
+		});
+
 		it("bell is always visible even with no notifications", () => {
 			const { container } = render(() => <Toolbar />);
 			expect(container.querySelector(".bell")).not.toBeNull();
@@ -435,6 +555,22 @@ describe("Toolbar", () => {
 			expect(prNotificationsStore.getActive().length).toBe(0);
 		});
 
+		// Catches: an old notification following a reused head branch to a different PR.
+		it("opens a PR notification using its captured conversation URL without a cached branch", async () => {
+			const open = vi.spyOn(window, "open").mockReturnValue(null);
+			addTestNotif({ url: "https://github.com/acme/remote/pull/42" });
+			const { container } = render(() => <Toolbar />);
+			fireEvent.click(container.querySelector(".bell")!);
+			fireEvent.click(container.querySelector(".notifItem")!);
+			await waitFor(() =>
+				expect(invoke).toHaveBeenCalledWith("open_default_app", {
+					target: "https://github.com/acme/remote/pull/42",
+					kind: "url",
+				}),
+			);
+			open.mockRestore();
+		});
+
 		it("clicking PR notification item opens PrDetailPopover", async () => {
 			addTestNotif({ repoPath: "/my/repo", branch: "feature", prNumber: 42 });
 			const { container } = render(() => <Toolbar />);
@@ -460,7 +596,9 @@ describe("Toolbar", () => {
 			addTestActivityItem({ title: "My Plan" });
 			const { container } = render(() => <Toolbar />);
 			fireEvent.click(container.querySelector(".bell")!);
-			const header = container.querySelector(".sectionLabel");
+			const header = Array.from(container.querySelectorAll(".sectionLabel")).find(
+				(node) => node.textContent === "ACTIVE PLAN",
+			);
 			expect(header?.textContent).toBe("ACTIVE PLAN");
 		});
 
@@ -468,7 +606,9 @@ describe("Toolbar", () => {
 			addTestActivityItem({ title: "My Plan" });
 			const { container } = render(() => <Toolbar />);
 			fireEvent.click(container.querySelector(".bell")!);
-			const title = container.querySelector(".activityItemTitle");
+			const title = Array.from(container.querySelectorAll(".activityItemTitle")).find(
+				(node) => node.textContent === "My Plan",
+			);
 			expect(title?.textContent).toBe("My Plan");
 		});
 
@@ -476,7 +616,10 @@ describe("Toolbar", () => {
 			addTestActivityItem({ title: "My Plan", subtitle: "/repo/plans/foo.md" });
 			const { container } = render(() => <Toolbar />);
 			fireEvent.click(container.querySelector(".bell")!);
-			const subtitle = container.querySelector(".activityItemSubtitle");
+			const item = Array.from(container.querySelectorAll(".activityItem")).find((node) =>
+				node.textContent?.includes("My Plan"),
+			);
+			const subtitle = item?.querySelector(".activityItemSubtitle");
 			expect(subtitle?.textContent).toContain("/repo/plans/foo.md");
 		});
 
@@ -653,6 +796,75 @@ describe("Toolbar", () => {
 		it("renders the trailing cluster inside the right region", () => {
 			const { container } = render(() => <Toolbar trailing={<span data-testid="trailing-slot">x</span>} />);
 			expect(container.querySelector(".right [data-testid='trailing-slot']")).not.toBeNull();
+		});
+	});
+	describe("ahead/behind count", () => {
+		/** Answers `get_github_status` per checkout path, like the Rust command does. */
+		function mockCheckoutStatus(byPath: Record<string, { ahead: number; behind: number }>) {
+			vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+				if (cmd !== "get_github_status") return undefined;
+				const path = (args as { path: string }).path;
+				const counts = byPath[path] ?? { ahead: 0, behind: 0 };
+				return { has_remote: true, current_branch: "b", ...counts };
+			});
+		}
+
+		function selectBranch(repoPath: string, branch: string, worktreePath: string | null) {
+			repositoriesStore.add({ path: repoPath, displayName: "Repo" });
+			repositoriesStore.setActive(repoPath);
+			repositoriesStore.setWorkspace(repoPath, branch, { branchName: branch, worktreePath });
+			repositoriesStore.setActiveWorkspace(repoPath, branch);
+		}
+
+		afterEach(() => {
+			vi.mocked(invoke).mockReset();
+			vi.mocked(invoke).mockResolvedValue(undefined);
+		});
+
+		it("does not show the repo root count next to a worktree branch without upstream", async () => {
+			const root = "/ab1/repo";
+			// Main checkout is 1004 ahead of origin/main; the worktree branch has no upstream (0/0).
+			githubStore.setRemoteStatus(root, { has_remote: true, current_branch: "main", ahead: 1004, behind: 0 });
+			mockCheckoutStatus({ "/ab1/repo-wt/feat": { ahead: 0, behind: 0 } });
+			selectBranch(root, "feat", "/ab1/repo-wt/feat");
+
+			const { container } = render(() => <Toolbar repoPath={root} />);
+
+			await waitFor(() =>
+				expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_github_status", { path: "/ab1/repo-wt/feat" }),
+			);
+			expect(container.querySelector(".aheadBehind")).toBeNull();
+		});
+
+		it("shows the worktree's own count when its branch is ahead of its upstream", async () => {
+			const root = "/ab2/repo";
+			githubStore.setRemoteStatus(root, { has_remote: true, current_branch: "main", ahead: 1004, behind: 0 });
+			mockCheckoutStatus({ "/ab2/repo-wt/feat": { ahead: 3, behind: 2 } });
+			selectBranch(root, "feat", "/ab2/repo-wt/feat");
+
+			const { container } = render(() => <Toolbar repoPath={root} />);
+
+			await waitFor(() => expect(container.querySelector(".aheadBehind")?.textContent).toBe(" ↑3 ↓2"));
+		});
+
+		it("shows the repo root count for the main checkout", () => {
+			const root = "/ab3/repo";
+			githubStore.setRemoteStatus(root, { has_remote: true, current_branch: "main", ahead: 5, behind: 0 });
+			selectBranch(root, "main", null);
+
+			const { container } = render(() => <Toolbar repoPath={root} />);
+
+			expect(container.querySelector(".aheadBehind")?.textContent).toBe(" ↑5");
+		});
+
+		it("shows no count for the main checkout when it is level with its upstream", () => {
+			const root = "/ab4/repo";
+			githubStore.setRemoteStatus(root, { has_remote: true, current_branch: "main", ahead: 0, behind: 0 });
+			selectBranch(root, "main", null);
+
+			const { container } = render(() => <Toolbar repoPath={root} />);
+
+			expect(container.querySelector(".aheadBehind")).toBeNull();
 		});
 	});
 });

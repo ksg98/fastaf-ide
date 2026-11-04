@@ -1,5 +1,4 @@
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import type { Accessor, Setter } from "solid-js";
+import { type Accessor, batch, type Setter } from "solid-js";
 import { invoke } from "../invoke";
 import { normalizeCombo } from "../keybindingDefaults";
 import { detachPanel, togglePanel } from "../panelRouter";
@@ -23,9 +22,11 @@ import { uiStore } from "../stores/ui";
 import { worktreeManagerStore } from "../stores/worktreeManager";
 import { isTauri } from "../transport";
 import { writeClipboard } from "../utils/clipboard";
+import { openDialog, saveDialog } from "../utils/nativeDialog";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { nextWaitingTerminal } from "../utils/nextWaitingTerminal";
 import { isAbsolutePath, joinPath, pathStripPrefix } from "../utils/pathUtils";
+import { runWithFeedback } from "../utils/promptContext";
 import { applyAppZoom } from "../zoom";
 import { nextZoomStep, ZOOM_DEFAULT } from "../zoomLevels";
 import type { useGitOperations } from "./useGitOperations";
@@ -90,17 +91,27 @@ function setAppZoom(level: number): void {
 /** Constructs the shared keyboard, palette, and native-menu action callbacks. */
 export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): ShortcutHandlers {
 	const { terminalLifecycle, gitOps, splitPanes, quickSwitcher } = options;
+	const zoomAll = (action: "zoomIn" | "zoomOut" | "zoomReset") => {
+		batch(() => {
+			terminalLifecycle[`${action}All`]();
+			for (const id of mdTabsStore.getIds()) mdTabsStore[action](id);
+			for (const id of editorTabsStore.getIds()) {
+				editorTabsStore[action](settingsStore.state.defaultFontSize, id);
+			}
+		});
+	};
 	return {
 		// Cmd +/-/0 zoom the whole app, the way Cursor and VS Code do. They used to
 		// resize only the active terminal's (or markdown tab's) font, which left the
 		// rest of the UI fixed. Per-terminal font size is still reachable through
-		// Cmd+Shift +/-/0 below and the Appearance settings.
+		// Cmd+Shift +/-/0 below (every terminal, markdown and editor tab) and the
+		// Appearance settings.
 		zoomIn: () => setAppZoom(nextZoomStep(settingsStore.state.appZoom, 1)),
 		zoomOut: () => setAppZoom(nextZoomStep(settingsStore.state.appZoom, -1)),
 		zoomReset: () => setAppZoom(ZOOM_DEFAULT),
-		zoomInAll: terminalLifecycle.zoomInAll,
-		zoomOutAll: terminalLifecycle.zoomOutAll,
-		zoomResetAll: terminalLifecycle.zoomResetAll,
+		zoomInAll: () => zoomAll("zoomIn"),
+		zoomOutAll: () => zoomAll("zoomOut"),
+		zoomResetAll: () => zoomAll("zoomReset"),
 		createNewTerminal: gitOps.handleNewTab,
 		closeTerminal: terminalLifecycle.closeTerminal,
 		reopenClosedTab: terminalLifecycle.reopenClosedTab,
@@ -108,6 +119,14 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 		focusLastTerminal: () => {
 			const previousId = terminalsStore.getPreviousActiveId();
 			if (previousId) navigateToTerminal(previousId);
+		},
+		historyBack: () => {
+			const id = terminalsStore.stepHistory("back");
+			if (id) navigateToTerminal(id);
+		},
+		historyForward: () => {
+			const id = terminalsStore.stepHistory("forward");
+			if (id) navigateToTerminal(id);
 		},
 		jumpWaitingTerminal: () => {
 			const waiting = terminalsStore
@@ -131,15 +150,14 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 		handleTerminalSelect: terminalLifecycle.handleTerminalSelect,
 		handleSplit: splitPanes.handleSplit,
 		handleRunCommand: (forceDialog) => {
-			const activeId = mdTabsStore.state.activeId;
-			if (activeId) {
-				const handle = mdTabsStore.getHandle<{ reload?: () => void }>(activeId);
-				if (handle?.reload) {
-					handle.reload();
-					return;
-				}
-			}
 			gitOps.handleRunCommand(forceDialog, () => options.setRunCommandDialogVisible(true));
+		},
+		reloadActiveTab: () => {
+			const activeId = mdTabsStore.state.activeId;
+			const handle = activeId ? mdTabsStore.getHandle<{ reload?: () => void }>(activeId) : undefined;
+			if (!handle?.reload) return false;
+			handle.reload();
+			return true;
 		},
 		switchToBranchByIndex: quickSwitcher.switchToBranchByIndex,
 		isQuickSwitcherOpen: options.quickSwitcherVisible,
@@ -150,7 +168,7 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 		toggleTaskQueue: () => options.setTaskQueueVisible((visible) => !visible),
 		toggleGitOpsPanel: () => togglePanel("git"),
 		toggleHelpPanel: () => options.setHelpPanelVisible((visible) => !visible),
-		toggleNotesPanel: uiStore.toggleNotesPanel,
+		toggleIdeasPanel: uiStore.toggleIdeasPanel,
 		toggleFileBrowserPanel: uiStore.toggleFileBrowserPanel,
 		requestFileBrowserContentSearch: uiStore.requestFileBrowserContentSearch,
 		toggleOutlinePanel: uiStore.toggleOutlinePanel,
@@ -185,7 +203,7 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 			if (!globalWorkspaceStore.hasPromoted()) return;
 			const repoPath = repositoriesStore.state.activeRepoPath;
 			const repo = repoPath ? repositoriesStore.state.repositories[repoPath] : null;
-			const key = repoPath && repo?.activeBranch ? paneLayoutKey(repoPath, repo.activeBranch) : undefined;
+			const key = repoPath && repo?.activeWorkspaceId ? paneLayoutKey(repoPath, repo.activeWorkspaceId) : undefined;
 			if (globalWorkspaceStore.isActive()) globalWorkspaceStore.deactivate(key);
 			else globalWorkspaceStore.activate(key);
 		},
@@ -258,9 +276,7 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 			);
 		},
 		toggleCommandOverview: mdTabsStore.addCommandOverview,
-		openAiTriage: () => {
-			if (settingsStore.isAiTriageEnabled()) uiStore.toggleAiTriagePanel();
-		},
+		openTasks: mdTabsStore.addTasks,
 		toggleComposePanel: () => terminalsStore.getActive()?.ref?.toggleCompose(),
 		detachActivityDashboard: () => {
 			if (!isTauri()) return;
@@ -297,15 +313,7 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 				);
 			if (!prompt) return false;
 			promptLibraryStore.markAsUsed(prompt.id);
-			options
-				.executeSmartPrompt(prompt)
-				.then((result) => {
-					if (!result.ok) toastsStore.add(prompt.name, result.reason ?? "Failed", "warn");
-				})
-				.catch((error) => {
-					appLogger.error("prompts", `Failed to run "${prompt.name}" via shortcut`, error);
-					toastsStore.add(prompt.name, String(error), "error");
-				});
+			void runWithFeedback(prompt, () => options.executeSmartPrompt(prompt));
 			return true;
 		},
 	};
@@ -318,11 +326,14 @@ function navigateCommandBlock(direction: "previous" | "next"): void {
 	if (!sessionId) return;
 	invoke<[number, number, number]>("terminal_scroll_info", { sessionId })
 		.then(([offset, total]) => {
-			const viewTop = total - offset;
+			const viewTop = terminal.historyBase + total - offset;
 			if (direction === "previous") {
 				for (let index = terminal.commandBlocks.length - 1; index >= 0; index--) {
-					if (terminal.commandBlocks[index].promptLine < viewTop - 1) {
-						terminal.ref!.scrollToLine(terminal.commandBlocks[index].promptLine);
+					if (
+						terminal.commandBlocks[index].promptLine >= terminal.historyBase &&
+						terminal.commandBlocks[index].promptLine < viewTop - 1
+					) {
+						terminal.ref!.scrollToLine(terminal.commandBlocks[index].promptLine - terminal.historyBase);
 						return;
 					}
 				}
@@ -330,7 +341,7 @@ function navigateCommandBlock(direction: "previous" | "next"): void {
 			}
 			for (const block of terminal.commandBlocks) {
 				if (block.promptLine > viewTop + 1) {
-					terminal.ref!.scrollToLine(block.promptLine);
+					terminal.ref!.scrollToLine(block.promptLine - terminal.historyBase);
 					return;
 				}
 			}
@@ -340,19 +351,23 @@ function navigateCommandBlock(direction: "previous" | "next"): void {
 }
 
 function toggleNearestCommandBlock(): void {
+	// No `blockFoldingEnabled` check here on purpose: `toggleBlockFold` enforces
+	// it for every caller, so this path cannot drift from CanvasTerminal's.
 	const terminal = terminalsStore.getActive();
 	if (!terminal?.ref || terminal.commandBlocks.length === 0) return;
 	const sessionId = terminal.ref.getSessionId();
 	if (!sessionId) return;
 	invoke<[number, number, number]>("terminal_scroll_info", { sessionId })
 		.then(([offset, total, screenRows]) => {
-			const viewCenter = total - offset + Math.floor(screenRows / 2);
-			let nearest = terminal.commandBlocks[0];
+			const viewCenter = terminal.historyBase + total - offset + Math.floor(screenRows / 2);
+			const blocks = terminal.commandBlocks.filter((block) => block.promptLine >= terminal.historyBase);
+			if (blocks.length === 0) return;
+			let nearest = blocks[0];
 			let bestDistance = Math.abs(nearest.promptLine - viewCenter);
-			for (let index = 1; index < terminal.commandBlocks.length; index++) {
-				const distance = Math.abs(terminal.commandBlocks[index].promptLine - viewCenter);
+			for (let index = 1; index < blocks.length; index++) {
+				const distance = Math.abs(blocks[index].promptLine - viewCenter);
 				if (distance < bestDistance) {
-					nearest = terminal.commandBlocks[index];
+					nearest = blocks[index];
 					bestDistance = distance;
 				}
 			}

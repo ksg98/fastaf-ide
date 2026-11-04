@@ -1,0 +1,1 @@
+{"v":1,"scope":"user","profile":"alpha","values":{"model":"ollama/qwen3","thinking":"low","mode":"plan","sandbox":"ro","budget":"20k","permissions.judge":"none","exec.env":"core","exec.env_allowlist":["PATH"],"network":"off","roots":[]}}

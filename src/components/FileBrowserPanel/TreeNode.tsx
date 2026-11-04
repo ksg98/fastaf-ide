@@ -65,13 +65,17 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 		fetching = true;
 		setLoading(true);
 		fb.listDirectory(props.fsRoot, props.entry.path)
-			.then((entries) => props.onChildrenLoaded(props.entry.path, entries))
-			.catch((err) => {
-				appLogger.error("app", "Failed to list directory", { path: props.entry.path, error: err });
-			})
-			.finally(() => {
+			.then((entries) => {
+				// Publishing children can synchronously invalidate this cache again.
+				// Release the completed fetch first so that invalidation can reload it.
 				fetching = false;
 				setLoading(false);
+				props.onChildrenLoaded(props.entry.path, entries);
+			})
+			.catch((err) => {
+				fetching = false;
+				setLoading(false);
+				appLogger.error("app", "Failed to list directory", { path: props.entry.path, error: err });
 			});
 	});
 
@@ -109,13 +113,27 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 				    folder glyph, no leaf spacer, so every name starts in one column. */}
 				<Show
 					when={props.entry.is_dir}
-					fallback={<FileIcon name={props.entry.name} isDir={false} class={s.entryIcon} />}
+					fallback={
+						<FileIcon
+							name={props.entry.name}
+							isDir={false}
+							isLink={props.entry.symlink_target_kind !== undefined}
+							class={s.entryIcon}
+						/>
+					}
 				>
 					<span class={s.entrySlot}>
 						<IconChevronRight size={14} class={cx(s.treeChevron, isExpanded() && s.treeChevronExpanded)} />
 					</span>
 				</Show>
-				<span class={s.entryName}>{props.entry.name}</span>
+				<span class={s.entryName}>
+					{props.entry.name}
+					<Show when={props.entry.symlink_target_kind}>
+						<span class={s.entryLink}>
+							{props.entry.symlink_target_kind} link → {props.entry.symlink_target ?? "Target unavailable"}
+						</span>
+					</Show>
+				</span>
 				<Show when={props.entry.git_status}>
 					<span
 						class={cx(g.dot, getStatusClass(props.entry.git_status), s.entryDot)}

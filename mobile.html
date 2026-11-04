@@ -2,10 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Opened as http://user:pass@host/mobile.html the document URL keeps the
+      // credentials (document.baseURI) while fetched modules drop them, so a lazy
+      // screen chunk imports the entry under a different key and evaluates it a
+      // second time (second shell). Same guard as index.html (story 1292), kept
+      // as an inline copy there: a shared script would add a blocking request to
+      // every page load. Keep both in step, and ahead of the first URL-bearing element.
+      (function () {
+        var u = new URL(document.baseURI);
+        if (u.username || u.password) {
+          var base = document.createElement('base');
+          base.href = u.origin + u.pathname + u.search;
+          document.head.appendChild(base);
+        }
+      })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content, viewport-fit=cover" />
     <meta name="theme-color" content="#1e1e1e" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="manifest" href="/mobile-manifest.json" />
     <link rel="icon" type="image/svg+xml" href="/mobile-icon.svg" />
     <link rel="apple-touch-icon" href="/mobile-icon.svg" />
@@ -22,11 +38,81 @@
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-size: 14px;
       }
+      #mobile-preloader {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #1e1e1e;
+        color: #848d97;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+        text-align: center;
+        padding: 24px;
+      }
+      #mobile-preloader .pl-spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid #30363d;
+        border-top-color: #848d97;
+        border-radius: 50%;
+        animation: pl-spin 0.9s linear infinite;
+      }
+      #mobile-preloader.failed .pl-spinner { display: none; }
+      #mobile-preloader button {
+        background: #21262d;
+        color: #c9d1d9;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 8px 20px;
+        font-size: 14px;
+      }
+      @keyframes pl-spin { to { transform: rotate(360deg); } }
     </style>
-    <script type="module" src="/src/mobile/index.tsx" defer></script>
+    <script>
+      // Boot watchdog. The shell can paint from the service worker cache while its
+      // JS cannot load (no connection). Without this the user sees an empty dark
+      // page. index.tsx sets __tuicMobileReady and removes #mobile-preloader on mount.
+      (function () {
+        var KEY = "tuic-boot-delay";
+        var timer;
+        function reload() { if (!window.__tuicMobileReady) location.reload(); }
+        window.__tuicBootFail = function () {
+          var box = document.getElementById("mobile-preloader");
+          if (window.__tuicMobileReady || !box || box.className === "failed") return;
+          box.className = "failed";
+          var text = document.getElementById("pl-text");
+          var button = document.getElementById("pl-retry");
+          var delay = Number(sessionStorage.getItem(KEY)) || 5;
+          sessionStorage.setItem(KEY, String(Math.min(delay * 2, 30)));
+          button.hidden = false;
+          button.onclick = reload;
+          window.addEventListener("online", reload);
+          var left = delay;
+          function tick() {
+            if (window.__tuicMobileReady) { clearInterval(timer); return; }
+            text.textContent = "Cannot reach FastAF. Retrying in " + left + "s";
+            if (left-- <= 0) { clearInterval(timer); reload(); }
+          }
+          tick();
+          timer = setInterval(tick, 1000);
+        };
+        setTimeout(window.__tuicBootFail, 15000);
+      })();
+    </script>
+    <script type="module" src="/src/mobile/index.tsx" defer onerror="window.__tuicBootFail()"></script>
   </head>
 
   <body>
+    <div id="mobile-preloader" role="status">
+      <div class="pl-spinner"></div>
+      <div id="pl-text">Loading FastAF…</div>
+      <button id="pl-retry" hidden>Retry now</button>
+    </div>
     <div id="mobile-app"></div>
   </body>
 </html>

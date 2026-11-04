@@ -1,0 +1,6 @@
+// The agent refuses to create a session. No attachment may survive that.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"error","to":"new","code":-32002,"message":"no such workspace"}
+{"step":"await_stdin_eof"}

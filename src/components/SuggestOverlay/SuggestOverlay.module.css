@@ -42,12 +42,16 @@
   }
 }
 
-.chip {
+/* Chips and the close button are ui/Buttons: element-qualified rules keep
+   FastAF's chip over the shared button variants. */
+button.chip {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
   max-width: min(40ch, 22vw);
+  height: auto;
+  flex-shrink: 1;
   font-family: var(--font-ui);
   font-size: var(--chip-font-size);
   padding: 8px 16px;
@@ -69,7 +73,7 @@
   white-space: nowrap;
 }
 
-.chip:hover {
+button.chip:hover:enabled {
   background: var(--accent);
   color: var(--text-on-accent);
   border-color: var(--accent);
@@ -80,7 +84,7 @@
   color: var(--text-on-accent);
 }
 
-.closeBtn {
+button.closeBtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -97,7 +101,7 @@
     background var(--duration-fast) var(--ease-out);
 }
 
-.closeBtn:hover {
+button.closeBtn:hover:enabled {
   color: var(--fg-primary);
   background: var(--surface-hover);
 }

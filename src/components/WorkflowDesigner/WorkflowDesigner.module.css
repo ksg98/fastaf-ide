@@ -1,0 +1,292 @@
+/* Workflow designer — the Designer view inside Plans and Stories. It sits on
+   the dialog's own surface: a 40px bar, drafts and the node palette on the
+   left, the canvas as a recessed well, the inspector on the right, columns
+   split by one hairline. Sentence-case 12px/600 section labels. */
+
+.designer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  color: var(--fg-primary);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  height: 44px;
+  padding: 0 10px 0 16px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+.header h3 {
+  margin: 0;
+  font-size: var(--font-md);
+  font-weight: 600;
+}
+
+.canvasTitle small,
+.muted {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.body {
+  display: grid;
+  grid-template-columns: minmax(170px, 21%) minmax(0, 1fr) minmax(200px, 24%);
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar,
+.canvas,
+.inspector {
+  min-width: 0;
+  overflow: auto;
+}
+
+.sidebar {
+  padding: 12px 6px;
+  border-right: var(--hairline-w) solid var(--hairline);
+}
+
+.inspector {
+  padding: 12px 14px;
+  border-left: var(--hairline-w) solid var(--hairline);
+}
+
+.sidebar h4,
+.inspector h4 {
+  margin: 0 0 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.sidebar h4 {
+  padding: 0 8px;
+}
+
+.sidebar h4:not(:first-child) {
+  margin-top: 20px;
+}
+
+/* A draft is a row: name, then kind and revisions; open --row-active. */
+button.draft[data-control-layout="row"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: var(--font-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+button.draft[data-control-layout="row"] strong {
+  font-weight: 500;
+}
+
+button.draft[data-control-layout="row"]:hover {
+  background: var(--wash-0);
+}
+
+button.draft[data-control-layout="row"][aria-current="true"] {
+  background: var(--row-active);
+}
+
+.draft small {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+/* The palette: quiet add-rows, not a wall of raised buttons. */
+.palette {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.palette button {
+  justify-content: flex-start;
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-weight: 400;
+  text-align: left;
+}
+
+.palette button:hover:enabled {
+  border-color: transparent;
+  background: var(--wash-0);
+  color: var(--fg-primary);
+}
+
+/* The canvas is a recessed well; nodes sit on it as quiet cards. */
+.canvas {
+  padding: 14px 16px;
+  background: var(--bg-primary);
+}
+
+.canvasTitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  font-weight: 500;
+}
+
+.graph {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  min-width: min-content;
+  margin-top: 32px;
+  padding-bottom: 20px;
+}
+
+.nodeColumn {
+  flex: 0 0 132px;
+  width: 132px;
+}
+
+button.node[data-control-layout="card"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-height: 72px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--wash-0);
+  color: var(--fg-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+button.node[data-control-layout="card"]:hover {
+  background: var(--wash-1);
+}
+
+/* Selected: the --row-selected fill and a stronger hairline, no ring. */
+button.node[data-control-layout="card"][aria-pressed="true"] {
+  border-color: var(--border-strong);
+  background: var(--row-selected);
+}
+
+.node strong {
+  font: 500 var(--font-sm) var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.nodeType {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.nodeType::first-letter {
+  text-transform: uppercase;
+}
+
+.links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 2px;
+  color: var(--fg-muted);
+  font: var(--font-xs) var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.nodeName {
+  margin: 0;
+  font: 500 var(--font-md) var(--font-mono);
+}
+
+.inspector .muted {
+  margin: 2px 0 0;
+}
+
+.inspector label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 14px 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.inspector select,
+.inspector textarea,
+.inspector input {
+  width: 100%;
+}
+
+.inspector button {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.error,
+.notice {
+  margin: 0;
+  padding: 8px 16px;
+  font-size: var(--font-sm);
+}
+
+.error {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+}
+
+.notice {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.draft:focus-visible,
+.node:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+@media (max-width: 760px) {
+  .body {
+    grid-template-columns: 150px minmax(0, 1fr);
+  }
+
+  .inspector {
+    grid-column: 1 / -1;
+    max-height: 210px;
+    border-top: var(--hairline-w) solid var(--hairline);
+    border-left: 0;
+  }
+
+  .palette {
+    grid-template-columns: 1fr;
+  }
+
+  .graph {
+    margin-top: 24px;
+  }
+}

@@ -2,23 +2,39 @@
    to the compose dock, and there is no status bar to sit above any more. */
 .container {
   position: fixed;
-  top: calc(var(--toolbar-height, 38px) + 12px);
-  right: 16px;
+  top: calc(var(--toolbar-height, 38px) + 4px);
+  /* Keep the lower half free for terminal prompts and the compose dock. */
+  max-height: max(0px, calc(50vh - var(--toolbar-height, 38px) - 16px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  /* Scroll tall cards without losing their actions; padding protects shadows. */
+  padding: 8px;
+  /* --toast-right-inset is set while a docked side panel (AI Chat) would
+     otherwise sit under the toasts. */
+  right: calc(8px + var(--toast-right-inset, 0px));
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 8px;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 /* Toast — overlay surface with a coloured level dot; warn/error tint the edge. */
 .toast {
   pointer-events: auto;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  flex-shrink: 0;
+  /* Two columns, two rows: the dot and the text share the first row, and the
+     buttons get their own row underneath, so the title never wraps one word
+     deep beside them. */
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 6px 10px;
   padding: 10px 14px;
-  max-width: 420px;
+  /* Never wider than the viewport: the container is right-anchored, so an
+     over-wide toast would run off the left edge on a narrow window. */
+  max-width: min(420px, calc(100vw - 32px - var(--toast-right-inset, 0px)));
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
@@ -49,6 +65,7 @@
 }
 
 .body {
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -70,7 +87,8 @@
 .titleRow {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 2px 6px;
   min-width: 0;
 }
 
@@ -93,6 +111,13 @@
 
 .title {
   font-weight: 600;
+  /* A flex BASIS, not just a min-width. `overflow-wrap: anywhere` puts the
+     title's min-content width at one character, so on its own the title would
+     never wrap onto its own line — it would squash into whatever column the
+     repo chip left, which is how a long title came to be drawn four words
+     deep and one word wide. With a basis, the row breaks when fewer than
+     ~14 characters fit beside the chip and the title gets the full width. */
+  flex: 1 1 14ch;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -102,12 +127,32 @@
   white-space: normal;
   overflow-wrap: anywhere;
   line-height: 1.4;
+  /* A progress report can be 500 characters; unclamped it covered the whole
+     terminal. Four lines is enough to know what happened, and the full text
+     is one click away in the Progress panel. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
 }
 
+/* Second row, under the text, aligned right. Collapses when a toast carries
+   no action. */
+.actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.actions:empty {
+  display: none;
+}
+
+/* The toast's own action: the one accent pill. */
 .action {
   flex-shrink: 0;
-  margin-top: 2px;
-  margin-left: auto;
   height: 24px;
   padding: 0 10px;
   font-size: var(--font-sm);
@@ -123,6 +168,28 @@
 
 .action:hover {
   background: var(--accent-hover);
+}
+
+/* "Go to repo" and a secondary action: quiet, a hairline and a hover wash. */
+.actionSecondary {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 10px;
+  font-size: var(--font-sm);
+  font-family: inherit;
+  font-weight: 500;
+  background: transparent;
+  color: var(--fg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.actionSecondary:hover {
+  background: var(--surface-hover);
+  color: var(--fg-primary);
 }
 
 @keyframes slideIn {

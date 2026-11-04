@@ -106,3 +106,49 @@
   66% { content: ".."; width: auto; }
   100% { content: "..."; width: auto; }
 }
+
+.voiceMeter {
+  position: relative;
+  width: 72px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--wash-2, var(--border));
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.voiceFill {
+  position: absolute;
+  inset: 0;
+  background: var(--activity);
+  transform-origin: left center;
+  transition: transform 120ms ease-out;
+}
+
+.controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.control:hover,
+.control:focus-visible {
+  background: var(--chip-fill-hover);
+  color: var(--fg-primary);
+}
+
+.controlOff {
+  opacity: 0.6;
+}
+

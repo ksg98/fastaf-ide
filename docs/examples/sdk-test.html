@@ -85,6 +85,7 @@
   <h2>Interactive Tests</h2>
   <div class="actions">
     <button class="btn" onclick="testOpen()">tuic.open("README.md")</button>
+    <button class="btn" onclick="testOpenUrl()">tuic.openUrl("https://example.org")</button>
     <button class="btn" onclick="testEdit()">tuic.edit("src/App.tsx", {line:10})</button>
     <button class="btn" onclick="testTerminal()">tuic.terminal(activeRepo)</button>
     <button class="btn" onclick="testToastInfo()">toast(info)</button>
@@ -303,6 +304,12 @@
       var repo = tuic.activeRepo();
       log("tuic.open('README.md') — activeRepo: " + repo);
       tuic.open("README.md");
+    }
+
+    function testOpenUrl() {
+      if (!tuic.openUrl) { log("openUrl requires an inline HTML panel"); return; }
+      log("tuic.openUrl('https://example.org')");
+      tuic.openUrl("https://example.org");
     }
 
     function testEdit() {

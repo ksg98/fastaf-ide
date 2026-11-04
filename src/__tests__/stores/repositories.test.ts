@@ -1,3 +1,4 @@
+import { batch } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepositoryState } from "../../stores/repositories";
 import { testInScope, testInScopeAsync } from "../helpers/store";
@@ -11,10 +12,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("repositoriesStore", () => {
 	let store: typeof import("../../stores/repositories").repositoriesStore;
 	let sortRepos: typeof import("../../stores/repositories").sortRepos;
+	let logger: typeof import("../../stores/appLogger").appLogger;
 
 	function lastRepositoryMutation() {
 		const calls = mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === "save_repositories");
-		const last = calls[calls.length - 1];
+		const last = calls.at(-1)!;
 		return (
 			last[1] as {
 				config: {
@@ -42,6 +44,7 @@ describe("repositoriesStore", () => {
 		const mod = await import("../../stores/repositories");
 		store = mod.repositoriesStore;
 		sortRepos = mod.sortRepos;
+		logger = (await import("../../stores/appLogger")).appLogger;
 		store._testSetHydrated(true);
 	});
 
@@ -89,17 +92,31 @@ describe("repositoriesStore", () => {
 			});
 		});
 
+		// Catches stale filesystem diagnostics being restored from persisted repository configuration.
+		it("does not persist transient worktree diagnostics", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorktreeDiagnostics("/repo", [
+					{ path: "/old/path", branch: null, state: "missing", guidance: "Run git worktree repair" },
+				]);
+				store.setWorkspace("/repo", "main");
+				vi.advanceTimersByTime(500);
+				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after;
+				expect(repo).not.toHaveProperty("worktreeDiagnostics");
+			});
+		});
+
 		it("does not persist terminals via invoke", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.setWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
 				vi.advanceTimersByTime(500);
 				// Find the last save_repositories call
 				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
-					branches: Record<string, { terminals: string[] }>;
+					workspaces: Record<string, { terminals: string[] }>;
 				};
-				expect(repo.branches.main.terminals).toEqual([]);
+				expect(repo.workspaces.main.terminals).toEqual([]);
 			});
 		});
 	});
@@ -108,26 +125,26 @@ describe("repositoriesStore", () => {
 		it("persists ciAutoHeal via invoke (debounced)", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
+				store.setWorkspace("/repo", "main");
 				store.setCiAutoHeal("/repo", "main", { enabled: true, attempts: 1 });
 				vi.advanceTimersByTime(500);
 				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
-					branches: Record<string, { ciAutoHeal: unknown }>;
+					workspaces: Record<string, { ciAutoHeal: unknown }>;
 				};
-				expect(repo.branches.main.ciAutoHeal).toEqual({ enabled: true, attempts: 1 });
+				expect(repo.workspaces.main.ciAutoHeal).toEqual({ enabled: true, attempts: 1 });
 			});
 		});
 
 		it("never persists the transient healing flag", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
+				store.setWorkspace("/repo", "main");
 				store.setCiAutoHeal("/repo", "main", { enabled: true, attempts: 2, healing: true });
 				vi.advanceTimersByTime(500);
 				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
-					branches: Record<string, { ciAutoHeal: { healing: boolean } }>;
+					workspaces: Record<string, { ciAutoHeal: { healing: boolean } }>;
 				};
-				expect(repo.branches.main.ciAutoHeal.healing).toBe(false);
+				expect(repo.workspaces.main.ciAutoHeal.healing).toBe(false);
 			});
 		});
 	});
@@ -175,6 +192,35 @@ describe("repositoriesStore", () => {
 				expect(mutation).toEqual({ before: null, after: "/path/to/repo" });
 			});
 		});
+
+		// The "and switch" half of the default `active_and_switch` index strategy.
+		// Without this call the strategy only ever pre-warms the boot repo, and a
+		// cross-repo content search reports every other repo as pending forever.
+		// Rust owns whether the warm actually runs (`content_index::warm_index`
+		// honours `index_strategy`); the store's only job is to say a switch
+		// happened.
+		it("asks the backend to warm the content index of the repo switched to", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				mockInvoke.mockClear();
+				store.setActive("/path/to/repo");
+
+				expect(mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === "warm_content_index")).toEqual([
+					["warm_content_index", { repoPath: "/path/to/repo" }],
+				]);
+			});
+		});
+
+		it("does not warm anything when the active repo is cleared", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				store.setActive("/path/to/repo");
+				mockInvoke.mockClear();
+				store.setActive(null);
+
+				expect(mockInvoke.mock.calls.some((call: unknown[]) => call[0] === "warm_content_index")).toBe(false);
+			});
+		});
 	});
 
 	describe("toggleExpanded()", () => {
@@ -189,99 +235,158 @@ describe("repositoriesStore", () => {
 	});
 
 	describe("branches", () => {
-		it("setBranch creates a new branch", () => {
+		it("setWorkspace creates a new branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "feature/test");
+				store.setWorkspace("/repo", "feature/test");
 				const repo = store.get("/repo")!;
-				expect(repo.branches["feature/test"]).toBeDefined();
-				expect(repo.branches["feature/test"].name).toBe("feature/test");
-				expect(repo.branches["feature/test"].isMain).toBe(false);
+				expect(repo.workspaces["feature/test"]).toBeDefined();
+				expect(repo.workspaces["feature/test"].branchName).toBe("feature/test");
+				expect(repo.workspaces["feature/test"].isMain).toBe(false);
 			});
 		});
 
-		it("setBranch detects main branches", () => {
+		it("setWorkspace detects main branches", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				expect(store.get("/repo")!.branches["main"].isMain).toBe(true);
+				store.setWorkspace("/repo", "main");
+				expect(store.get("/repo")!.workspaces["main"].isMain).toBe(true);
 
-				store.setBranch("/repo", "master");
-				expect(store.get("/repo")!.branches["master"].isMain).toBe(true);
+				store.setWorkspace("/repo", "master");
+				expect(store.get("/repo")!.workspaces["master"].isMain).toBe(true);
 
-				store.setBranch("/repo", "develop");
-				expect(store.get("/repo")!.branches["develop"].isMain).toBe(true);
+				store.setWorkspace("/repo", "develop");
+				expect(store.get("/repo")!.workspaces["develop"].isMain).toBe(true);
 			});
 		});
 
-		it("setBranch updates existing branch", () => {
+		it("setWorkspace updates existing branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.setBranch("/repo", "main", { additions: 5, deletions: 3 });
-				expect(store.get("/repo")!.branches["main"].additions).toBe(5);
+				store.setWorkspace("/repo", "main");
+				store.setWorkspace("/repo", "main", { additions: 5, deletions: 3 });
+				expect(store.get("/repo")!.workspaces["main"].additions).toBe(5);
 			});
 		});
 
 		it("setActiveBranch sets the active branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.setActiveBranch("/repo", "main");
-				expect(store.get("/repo")!.activeBranch).toBe("main");
+				store.setWorkspace("/repo", "main");
+				store.setActiveWorkspace("/repo", "main");
+				expect(store.get("/repo")!.activeWorkspaceId).toBe("main");
+			});
+		});
+
+		/**
+		 * A pointer at a row that does not exist breaks two things far from here: the
+		 * sidebar renders no tab for the active workspace, and the next terminal is
+		 * created with a null cwd — which the backend spawns in the user's HOME.
+		 * Observed live on a repo whose active id named a workspace that had been
+		 * pruned. The previous pointer at least names a row that exists.
+		 */
+		it("setActiveWorkspace refuses an id that names no workspace", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "main");
+				store.setActiveWorkspace("/repo", "main");
+
+				store.setActiveWorkspace("/repo", "branch-that-was-pruned");
+
+				expect(store.get("/repo")!.activeWorkspaceId).toBe("main");
+			});
+		});
+
+		it("setActiveWorkspace still accepts null — no repo has a workspace on screen", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "main");
+				store.setActiveWorkspace("/repo", "main");
+
+				store.setActiveWorkspace("/repo", null);
+
+				expect(store.get("/repo")!.activeWorkspaceId).toBeNull();
+			});
+		});
+
+		it("setActiveWorkspace accepts a row created in the same batch", () => {
+			// Several callers create the row and activate it back to back; a store read
+			// inside a batch sees the write, so the guard must not reject that order.
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				batch(() => {
+					store.setWorkspace("/repo", "feature", { branchName: "feature" });
+					store.setActiveWorkspace("/repo", "feature");
+				});
+				expect(store.get("/repo")!.activeWorkspaceId).toBe("feature");
+			});
+		});
+
+		it("removing the active workspace repoints rather than dangling", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "main");
+				store.setWorkspace("/repo", "feature");
+				store.setActiveWorkspace("/repo", "feature");
+
+				store.removeWorkspace("/repo", "feature");
+
+				const repo = store.get("/repo")!;
+				expect(repo.activeWorkspaceId).toBe("main");
+				expect(repo.workspaces[repo.activeWorkspaceId!]).toBeDefined();
 			});
 		});
 	});
 
 	describe("terminal-branch association", () => {
-		it("addTerminalToBranch adds terminal", () => {
+		it("addTerminalToWorkspace adds terminal", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				expect(store.get("/repo")!.branches["main"].terminals).toContain("term-1");
+				store.setWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				expect(store.get("/repo")!.workspaces["main"].terminals).toContain("term-1");
 			});
 		});
 
-		it("addTerminalToBranch prevents duplicates", () => {
+		it("addTerminalToWorkspace prevents duplicates", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				expect(store.get("/repo")!.branches["main"].terminals).toHaveLength(1);
+				store.setWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				expect(store.get("/repo")!.workspaces["main"].terminals).toHaveLength(1);
 			});
 		});
 
-		it("removeTerminalFromBranch removes terminal", () => {
+		it("removeTerminalFromWorkspace removes terminal", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				store.removeTerminalFromBranch("/repo", "main", "term-1");
-				expect(store.get("/repo")!.branches["main"].terminals).toHaveLength(0);
+				store.setWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				store.removeTerminalFromWorkspace("/repo", "main", "term-1");
+				expect(store.get("/repo")!.workspaces["main"].terminals).toHaveLength(0);
 			});
 		});
 
-		it("removeTerminalFromBranch clears savedTerminals when last terminal removed", () => {
+		it("removeTerminalFromWorkspace clears savedTerminals when last terminal removed", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main", {
+				store.setWorkspace("/repo", "main", {
 					savedTerminals: [
 						{ name: "T1", cwd: "/repo", fontSize: 14, agentType: null },
 						{ name: "T2", cwd: "/repo", fontSize: 14, agentType: null },
 					],
 				});
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				store.addTerminalToBranch("/repo", "main", "term-2");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				store.addTerminalToWorkspace("/repo", "main", "term-2");
 
 				// Remove first — savedTerminals should persist (still have one terminal)
-				store.removeTerminalFromBranch("/repo", "main", "term-1");
-				expect(store.get("/repo")!.branches["main"].savedTerminals).toHaveLength(2);
+				store.removeTerminalFromWorkspace("/repo", "main", "term-1");
+				expect(store.get("/repo")!.workspaces["main"].savedTerminals).toHaveLength(2);
 
 				// Remove last — savedTerminals should be cleared
-				store.removeTerminalFromBranch("/repo", "main", "term-2");
-				expect(store.get("/repo")!.branches["main"].savedTerminals).toHaveLength(0);
+				store.removeTerminalFromWorkspace("/repo", "main", "term-2");
+				expect(store.get("/repo")!.workspaces["main"].savedTerminals).toHaveLength(0);
 			});
 		});
 	});
@@ -290,8 +395,8 @@ describe("repositoriesStore", () => {
 		it("returns repo path for a known terminal", () => {
 			testInScope(() => {
 				store.add({ path: "/repo-a", displayName: "A" });
-				store.setBranch("/repo-a", "main");
-				store.addTerminalToBranch("/repo-a", "main", "term-1");
+				store.setWorkspace("/repo-a", "main");
+				store.addTerminalToWorkspace("/repo-a", "main", "term-1");
 				expect(store.getRepoPathForTerminal("term-1")).toBe("/repo-a");
 			});
 		});
@@ -299,7 +404,7 @@ describe("repositoriesStore", () => {
 		it("returns null for an unknown terminal", () => {
 			testInScope(() => {
 				store.add({ path: "/repo-a", displayName: "A" });
-				store.setBranch("/repo-a", "main");
+				store.setWorkspace("/repo-a", "main");
 				expect(store.getRepoPathForTerminal("nonexistent")).toBeNull();
 			});
 		});
@@ -308,10 +413,10 @@ describe("repositoriesStore", () => {
 			testInScope(() => {
 				store.add({ path: "/repo-a", displayName: "A" });
 				store.add({ path: "/repo-b", displayName: "B" });
-				store.setBranch("/repo-a", "main");
-				store.setBranch("/repo-b", "feature");
-				store.addTerminalToBranch("/repo-a", "main", "term-1");
-				store.addTerminalToBranch("/repo-b", "feature", "term-2");
+				store.setWorkspace("/repo-a", "main");
+				store.setWorkspace("/repo-b", "feature");
+				store.addTerminalToWorkspace("/repo-a", "main", "term-1");
+				store.addTerminalToWorkspace("/repo-b", "feature", "term-2");
 				expect(store.getRepoPathForTerminal("term-1")).toBe("/repo-a");
 				expect(store.getRepoPathForTerminal("term-2")).toBe("/repo-b");
 			});
@@ -320,33 +425,61 @@ describe("repositoriesStore", () => {
 		it("returns null after terminal is removed from branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.setWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
 				expect(store.getRepoPathForTerminal("term-1")).toBe("/repo");
-				store.removeTerminalFromBranch("/repo", "main", "term-1");
+				store.removeTerminalFromWorkspace("/repo", "main", "term-1");
 				expect(store.getRepoPathForTerminal("term-1")).toBeNull();
 			});
 		});
 	});
 
-	describe("removeBranch()", () => {
+	describe("removeWorkspace()", () => {
+		// Catches: recycling retracts the sidebar row but a saved peer placement still opens the obsolete path.
+		it("retracts declarations of a removed checkout without dropping sibling placements", async () => {
+			await testInScopeAsync(async () => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "feature", { worktreePath: "/repo__wt/old" });
+				const persisted = JSON.parse(
+					JSON.stringify({
+						repos: {
+							"/repo": {
+								...store.get("/repo"),
+								declaredWorktrees: {
+									old: { workspaceId: "feature", branch: "feature", worktreePath: "/repo__wt/old" },
+									sibling: { workspaceId: "other", branch: "other", worktreePath: "/repo__wt/other" },
+								},
+							},
+						},
+						repoOrder: ["/repo"],
+						activeRepoPath: "/repo",
+					}),
+				);
+				mockInvoke.mockImplementation(async (command) => (command === "load_repositories" ? persisted : undefined));
+				await store.hydrate();
+				expect(store.get("/repo")!.declaredWorktrees?.old.worktreePath).toBe("/repo__wt/old");
+				store.removeWorkspace("/repo", "feature");
+				expect(store.get("/repo")!.declaredWorktrees?.old).toBeUndefined();
+				expect(store.get("/repo")!.declaredWorktrees?.sibling.worktreePath).toBe("/repo__wt/other");
+			});
+		});
 		it("removes a branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "feature");
-				store.removeBranch("/repo", "feature");
-				expect(store.get("/repo")!.branches["feature"]).toBeUndefined();
+				store.setWorkspace("/repo", "feature");
+				store.removeWorkspace("/repo", "feature");
+				expect(store.get("/repo")!.workspaces["feature"]).toBeUndefined();
 			});
 		});
 
 		it("updates activeBranch when removed branch was active", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.setBranch("/repo", "feature");
-				store.setActiveBranch("/repo", "feature");
-				store.removeBranch("/repo", "feature");
-				expect(store.get("/repo")!.activeBranch).toBe("main");
+				store.setWorkspace("/repo", "main");
+				store.setWorkspace("/repo", "feature");
+				store.setActiveWorkspace("/repo", "feature");
+				store.removeWorkspace("/repo", "feature");
+				expect(store.get("/repo")!.activeWorkspaceId).toBe("main");
 			});
 		});
 	});
@@ -355,39 +488,39 @@ describe("repositoriesStore", () => {
 		it("renames a branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "old-name");
-				store.addTerminalToBranch("/repo", "old-name", "term-1");
+				store.setWorkspace("/repo", "old-name");
+				store.addTerminalToWorkspace("/repo", "old-name", "term-1");
 				store.renameBranch("/repo", "old-name", "new-name");
-				expect(store.get("/repo")!.branches["old-name"]).toBeUndefined();
-				expect(store.get("/repo")!.branches["new-name"]).toBeDefined();
-				expect(store.get("/repo")!.branches["new-name"].terminals).toContain("term-1");
+				expect(store.get("/repo")!.workspaces["old-name"]).toBeUndefined();
+				expect(store.get("/repo")!.workspaces["new-name"]).toBeDefined();
+				expect(store.get("/repo")!.workspaces["new-name"].terminals).toContain("term-1");
 			});
 		});
 
 		it("updates activeBranch when renamed branch was active", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "old-name");
-				store.setActiveBranch("/repo", "old-name");
+				store.setWorkspace("/repo", "old-name");
+				store.setActiveWorkspace("/repo", "old-name");
 				store.renameBranch("/repo", "old-name", "new-name");
-				expect(store.get("/repo")!.activeBranch).toBe("new-name");
+				expect(store.get("/repo")!.activeWorkspaceId).toBe("new-name");
 			});
 		});
 	});
 
-	describe("mergeBranchState()", () => {
+	describe("mergeWorkspaceState()", () => {
 		it("moves terminals and flags from source to target", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "old-branch", { hadTerminals: true });
-				store.addTerminalToBranch("/repo", "old-branch", "term-1");
-				store.addTerminalToBranch("/repo", "old-branch", "term-2");
-				store.setBranch("/repo", "new-branch", { worktreePath: "/repo" });
+				store.setWorkspace("/repo", "old-branch", { hadTerminals: true });
+				store.addTerminalToWorkspace("/repo", "old-branch", "term-1");
+				store.addTerminalToWorkspace("/repo", "old-branch", "term-2");
+				store.setWorkspace("/repo", "new-branch", { worktreePath: "/repo" });
 
-				store.mergeBranchState("/repo", "old-branch", "new-branch");
+				store.mergeWorkspaceState("/repo", "old-branch", "new-branch");
 
-				const oldB = store.get("/repo")!.branches["old-branch"];
-				const newB = store.get("/repo")!.branches["new-branch"];
+				const oldB = store.get("/repo")!.workspaces["old-branch"];
+				const newB = store.get("/repo")!.workspaces["new-branch"];
 				expect(oldB.terminals).toEqual([]);
 				expect(newB.terminals).toContain("term-1");
 				expect(newB.terminals).toContain("term-2");
@@ -400,32 +533,32 @@ describe("repositoriesStore", () => {
 		it("transfers savedTerminals when target has none", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "old", {
+				store.setWorkspace("/repo", "old", {
 					savedTerminals: [{ name: "T", cwd: "/repo", fontSize: 14, agentType: null }],
 				});
-				store.setBranch("/repo", "new", {});
+				store.setWorkspace("/repo", "new", {});
 
-				store.mergeBranchState("/repo", "old", "new");
+				store.mergeWorkspaceState("/repo", "old", "new");
 
-				expect(store.get("/repo")!.branches["old"].savedTerminals).toEqual([]);
-				expect(store.get("/repo")!.branches["new"].savedTerminals?.length).toBe(1);
+				expect(store.get("/repo")!.workspaces["old"].savedTerminals).toEqual([]);
+				expect(store.get("/repo")!.workspaces["new"].savedTerminals?.length).toBe(1);
 			});
 		});
 
 		it("does not overwrite target savedTerminals", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "old", {
+				store.setWorkspace("/repo", "old", {
 					savedTerminals: [{ name: "Old", cwd: "/repo", fontSize: 14, agentType: null }],
 				});
-				store.setBranch("/repo", "new", {
+				store.setWorkspace("/repo", "new", {
 					savedTerminals: [{ name: "Existing", cwd: "/repo", fontSize: 14, agentType: null }],
 				});
 
-				store.mergeBranchState("/repo", "old", "new");
+				store.mergeWorkspaceState("/repo", "old", "new");
 
 				// Target keeps its own savedTerminals
-				expect(store.get("/repo")!.branches["new"].savedTerminals?.[0]?.name).toBe("Existing");
+				expect(store.get("/repo")!.workspaces["new"].savedTerminals?.[0]?.name).toBe("Existing");
 			});
 		});
 	});
@@ -490,7 +623,7 @@ describe("repositoriesStore", () => {
 						initials: "TE",
 						expanded: true,
 						collapsed: false,
-						branches: {
+						workspaces: {
 							main: {
 								name: "main",
 								isMain: true,
@@ -509,7 +642,7 @@ describe("repositoriesStore", () => {
 				await store.hydrate();
 				const repo = store.get("/repo");
 				expect(repo).toBeDefined();
-				expect(repo!.branches["main"].terminals).toEqual([]);
+				expect(repo!.workspaces["main"].terminals).toEqual([]);
 				expect(mockInvoke).toHaveBeenCalledWith("load_repositories");
 			});
 		});
@@ -521,7 +654,7 @@ describe("repositoriesStore", () => {
 						path: "/repo",
 						displayName: "test",
 						initials: "TE",
-						branches: {
+						workspaces: {
 							main: {
 								name: "main",
 								isMain: true,
@@ -546,6 +679,104 @@ describe("repositoriesStore", () => {
 			});
 		});
 
+		// #763-d219: a repo record with a missing/blank displayName reached the
+		// Command Palette as `label: undefined`, and `baseSort` crashed the whole
+		// app on `undefined.localeCompare`. `normalizeLoadedRepo` must sanitize it
+		// on every path a record enters the store — hydrate here, adoption below.
+		describe("displayName sanitization (#763-d219)", () => {
+			it.each([
+				["missing", undefined],
+				["null", null],
+				["a number", 42],
+				["blank", ""],
+				["whitespace-only", "   "],
+			])("falls back to a path-derived name when displayName is %s", async (_label, badDisplayName) => {
+				mockInvoke.mockResolvedValueOnce({
+					repos: {
+						"/tmp/shell-repos/xyz-workspace": {
+							path: "/tmp/shell-repos/xyz-workspace",
+							displayName: badDisplayName,
+							initials: "",
+							isGitRepo: false,
+							workspaces: {},
+							activeWorkspaceId: null,
+						},
+					},
+				});
+				const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+				await testInScopeAsync(async () => {
+					await store.hydrate();
+					const repo = store.get("/tmp/shell-repos/xyz-workspace");
+					expect(repo).toBeDefined();
+					expect(repo!.displayName).toBe("xyz-workspace");
+					expect(typeof repo!.displayName).toBe("string");
+					expect(warnSpy).toHaveBeenCalledWith(
+						"[store]",
+						"Repository record had an invalid displayName; using path-derived fallback",
+					);
+					expect(logger.getEntries()).toContainEqual(
+						expect.objectContaining({
+							level: "warn",
+							source: "store",
+							data: expect.objectContaining({ path: "/tmp/shell-repos/xyz-workspace" }),
+						}),
+					);
+				});
+
+				warnSpy.mockRestore();
+			});
+
+			it("normalizes a Windows-style path the same way", async () => {
+				mockInvoke.mockResolvedValueOnce({
+					repos: {
+						"C:\\Users\\boss\\AppData\\Local\\Temp\\shell-repo": {
+							path: "C:\\Users\\boss\\AppData\\Local\\Temp\\shell-repo",
+							displayName: undefined,
+							initials: "",
+							isGitRepo: false,
+							workspaces: {},
+							activeWorkspaceId: null,
+						},
+					},
+				});
+				const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+				await testInScopeAsync(async () => {
+					await store.hydrate();
+					const repo = store.get("C:\\Users\\boss\\AppData\\Local\\Temp\\shell-repo");
+					expect(repo!.displayName).toBe("shell-repo");
+				});
+
+				warnSpy.mockRestore();
+			});
+
+			it("leaves a valid displayName untouched", async () => {
+				mockInvoke.mockResolvedValueOnce({
+					repos: {
+						"/repo": {
+							path: "/repo",
+							displayName: "My Repo",
+							initials: "MR",
+							workspaces: {},
+							activeWorkspaceId: null,
+						},
+					},
+				});
+
+				await testInScopeAsync(async () => {
+					await store.hydrate();
+					expect(store.get("/repo")!.displayName).toBe("My Repo");
+				});
+			});
+
+			// The adopt-path regression (a remote client's write coming back through
+			// the `repositories-changed` broadcast) lives in
+			// repositoriesRemoteSync.test.ts, which already mocks the Tauri
+			// `listen` used by that path — see "sanitizes a displayName the
+			// remote client wrote" there.
+		});
+
 		it("handles hydration failure gracefully", async () => {
 			mockInvoke.mockRejectedValueOnce(new Error("load failed"));
 			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -553,7 +784,15 @@ describe("repositoriesStore", () => {
 			await testInScopeAsync(async () => {
 				await store.hydrate(); // Should not throw
 				expect(store.getPaths()).toEqual([]);
-				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to hydrate repositories", expect.any(Error));
+				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to hydrate repositories");
+				expect(logger.getEntries()).toContainEqual(
+					expect.objectContaining({
+						level: "error",
+						source: "store",
+						message: "Failed to hydrate repositories",
+						data: expect.any(Error),
+					}),
+				);
 				errorSpy.mockRestore();
 			});
 		});
@@ -596,7 +835,7 @@ describe("repositoriesStore", () => {
 			await testInScopeAsync(async () => {
 				await store.hydrate();
 				expect(store.getPaths()).toEqual([]);
-				expect(errorSpy).toHaveBeenCalledWith("[store]", expect.stringContaining("mutation delta"), "");
+				expect(errorSpy).toHaveBeenCalledWith("[store]", expect.stringContaining("mutation delta"));
 
 				// The file is still the user's only copy. Saving the empty in-memory state
 				// over it is what made the incident unrecoverable, so saves stay blocked.
@@ -622,7 +861,7 @@ describe("repositoriesStore", () => {
 					"/repo": {
 						path: "/repo",
 						displayName: "Repo",
-						branches: {
+						workspaces: {
 							main: {
 								savedTerminals: [
 									{ name: "t1", cwd: null, fontSize: 12, agentType: "fx" },
@@ -637,7 +876,7 @@ describe("repositoriesStore", () => {
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				const saved = store.get("/repo")?.branches.main?.savedTerminals ?? [];
+				const saved = store.get("/repo")?.workspaces.main?.savedTerminals ?? [];
 				expect(saved.map((t) => t.agentType)).toEqual([null, "claude"]);
 			});
 		});
@@ -651,7 +890,7 @@ describe("repositoriesStore", () => {
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				expect(errorSpy).toHaveBeenCalledWith("[store]", expect.stringContaining("mutation delta"), "");
+				expect(errorSpy).toHaveBeenCalledWith("[store]", expect.stringContaining("mutation delta"));
 			});
 
 			errorSpy.mockRestore();
@@ -683,7 +922,7 @@ describe("repositoriesStore", () => {
 					initials: "TE",
 					expanded: true,
 					collapsed: false,
-					branches: {},
+					workspaces: {},
 					activeBranch: null,
 				},
 			};
@@ -706,7 +945,7 @@ describe("repositoriesStore", () => {
 					expanded: true,
 					collapsed: false,
 					parked: false,
-					branches: {},
+					workspaces: {},
 					activeBranch: null,
 				},
 			};
@@ -718,7 +957,13 @@ describe("repositoriesStore", () => {
 			await testInScopeAsync(async () => {
 				await store.hydrate();
 				expect(localStorage.getItem("tui-commander-repos")).not.toBeNull();
-				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to migrate legacy repositories", expect.any(Error));
+				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to migrate legacy repositories");
+				expect(logger.getEntries()).toContainEqual(
+					expect.objectContaining({
+						message: "Failed to migrate legacy repositories",
+						data: expect.any(Error),
+					}),
+				);
 			});
 
 			errorSpy.mockRestore();
@@ -738,78 +983,40 @@ describe("repositoriesStore", () => {
 		});
 	});
 
-	describe("toggleBranchTabsExpanded()", () => {
-		it("toggles tabsExpanded from falsy to true", () => {
+	describe("toggleWorkspaceTabsCollapsed()", () => {
+		it("starts expanded: a new workspace carries no collapsed flag", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "My Repo" });
-				store.setBranch("/repo", "feat/foo");
-				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBeFalsy();
-				store.toggleBranchTabsExpanded("/repo", "feat/foo");
-				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(true);
+				store.setWorkspace("/repo", "feat/foo");
+				expect(store.state.repositories["/repo"].workspaces["feat/foo"].tabsCollapsed).toBeFalsy();
 			});
 		});
 
-		it("toggles tabsExpanded from true to false", () => {
+		it("collapses on the first toggle and expands on the second", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "My Repo" });
-				store.setBranch("/repo", "feat/foo");
-				store.toggleBranchTabsExpanded("/repo", "feat/foo");
-				store.toggleBranchTabsExpanded("/repo", "feat/foo");
-				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(false);
+				store.setWorkspace("/repo", "feat/foo");
+				store.toggleWorkspaceTabsCollapsed("/repo", "feat/foo");
+				expect(store.state.repositories["/repo"].workspaces["feat/foo"].tabsCollapsed).toBe(true);
+				store.toggleWorkspaceTabsCollapsed("/repo", "feat/foo");
+				expect(store.state.repositories["/repo"].workspaces["feat/foo"].tabsCollapsed).toBe(false);
 			});
 		});
 
 		it("no-ops on unknown repo/branch", () => {
 			testInScope(() => {
-				expect(() => store.toggleBranchTabsExpanded("/nonexistent", "main")).not.toThrow();
+				expect(() => store.toggleWorkspaceTabsCollapsed("/nonexistent", "main")).not.toThrow();
 			});
 		});
 
 		it("persists via save_repositories (debounced)", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "My Repo" });
-				store.setBranch("/repo", "feat/foo");
-				store.toggleBranchTabsExpanded("/repo", "feat/foo");
+				store.setWorkspace("/repo", "feat/foo");
+				store.toggleWorkspaceTabsCollapsed("/repo", "feat/foo");
 				vi.advanceTimersByTime(500);
 				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
 				expect(calls.length).toBeGreaterThan(0);
-			});
-		});
-	});
-
-	describe("setBranchTabsExpanded()", () => {
-		it("sets tabsExpanded to true", () => {
-			testInScope(() => {
-				store.add({ path: "/repo", displayName: "My Repo" });
-				store.setBranch("/repo", "feat/foo");
-				store.setBranchTabsExpanded("/repo", "feat/foo", true);
-				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(true);
-			});
-		});
-
-		it("keeps tabsExpanded true when set true again (idempotent open)", () => {
-			testInScope(() => {
-				store.add({ path: "/repo", displayName: "My Repo" });
-				store.setBranch("/repo", "feat/foo");
-				store.setBranchTabsExpanded("/repo", "feat/foo", true);
-				store.setBranchTabsExpanded("/repo", "feat/foo", true);
-				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(true);
-			});
-		});
-
-		it("sets tabsExpanded to false", () => {
-			testInScope(() => {
-				store.add({ path: "/repo", displayName: "My Repo" });
-				store.setBranch("/repo", "feat/foo");
-				store.setBranchTabsExpanded("/repo", "feat/foo", true);
-				store.setBranchTabsExpanded("/repo", "feat/foo", false);
-				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(false);
-			});
-		});
-
-		it("no-ops on unknown repo/branch", () => {
-			testInScope(() => {
-				expect(() => store.setBranchTabsExpanded("/nonexistent", "main", true)).not.toThrow();
 			});
 		});
 	});
@@ -893,12 +1100,12 @@ describe("repositoriesStore", () => {
 		it("reorders terminals in a branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				store.addTerminalToBranch("/repo", "main", "term-2");
-				store.addTerminalToBranch("/repo", "main", "term-3");
+				store.setWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				store.addTerminalToWorkspace("/repo", "main", "term-2");
+				store.addTerminalToWorkspace("/repo", "main", "term-3");
 				store.reorderTerminals("/repo", "main", 0, 2);
-				expect(store.get("/repo")!.branches["main"].terminals).toEqual(["term-2", "term-3", "term-1"]);
+				expect(store.get("/repo")!.workspaces["main"].terminals).toEqual(["term-2", "term-3", "term-1"]);
 			});
 		});
 	});
@@ -908,9 +1115,9 @@ describe("repositoriesStore", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
 				store.setActive("/repo");
-				store.setBranch("/repo", "main");
-				store.setActiveBranch("/repo", "main");
-				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.setWorkspace("/repo", "main");
+				store.setActiveWorkspace("/repo", "main");
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
 				expect(store.getActiveTerminals()).toEqual(["term-1"]);
 			});
 		});
@@ -1026,7 +1233,7 @@ describe("repositoriesStore", () => {
 						initials: "TE",
 						expanded: true,
 						collapsed: false,
-						branches: {
+						workspaces: {
 							main: { name: "main", isMain: true, worktreePath: null, terminals: [], additions: 0, deletions: 0 },
 						},
 						activeBranch: "main",
@@ -1363,7 +1570,7 @@ describe("repositoriesStore", () => {
 						initials: "TE",
 						expanded: true,
 						collapsed: false,
-						branches: {
+						workspaces: {
 							main: { name: "main", isMain: true, worktreePath: null, terminals: [], additions: 0, deletions: 0 },
 						},
 						activeBranch: "main",
@@ -1407,8 +1614,8 @@ describe("repositoriesStore", () => {
 		it("coalesces rapid mutations into a single save call", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
-				store.setBranch("/repo", "feature");
+				store.setWorkspace("/repo", "main");
+				store.setWorkspace("/repo", "feature");
 				store.toggleExpanded("/repo");
 
 				// Before debounce fires, no save_repositories should have been called
@@ -1422,14 +1629,14 @@ describe("repositoriesStore", () => {
 			});
 		});
 
-		it("does not save for updateBranchStats (ephemeral data)", () => {
+		it("does not save for updateWorkspaceStats (ephemeral data)", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "test" });
-				store.setBranch("/repo", "main");
+				store.setWorkspace("/repo", "main");
 				vi.advanceTimersByTime(500);
 				mockInvoke.mockClear();
 
-				store.updateBranchStats("/repo", "main", 10, 5);
+				store.updateWorkspaceStats("/repo", "main", 10, 5);
 				vi.advanceTimersByTime(1000);
 
 				expect(mockInvoke).not.toHaveBeenCalled();
@@ -1465,10 +1672,12 @@ describe("repositoriesStore", () => {
 			await testInScopeAsync(async () => {
 				store.add({ path: "/repo", displayName: "Repo" });
 				await vi.advanceTimersByTimeAsync(500);
-				expect(errorSpy).toHaveBeenCalledWith(
-					"[store]",
-					"Repository changes were not saved",
-					expect.objectContaining({ message: expect.stringContaining("repository configuration conflict") }),
+				expect(errorSpy).toHaveBeenCalledWith("[store]", "Repository changes were not saved");
+				expect(logger.getEntries()).toContainEqual(
+					expect.objectContaining({
+						message: "Repository changes were not saved",
+						data: expect.objectContaining({ message: expect.stringContaining("repository configuration conflict") }),
+					}),
 				);
 			});
 
@@ -1521,7 +1730,7 @@ describe("repositoriesStore", () => {
 			// matches disk. The retry must carry disk's value as `before` and our value
 			// as `after` — last-writer-wins for the record we meant to change.
 			const onDisk = {
-				repos: { "/repo": { path: "/repo", displayName: "RenamedElsewhere", branches: {} } },
+				repos: { "/repo": { path: "/repo", displayName: "RenamedElsewhere", workspaces: {} } },
 				repoOrder: ["/repo"],
 				activeRepoPath: null,
 				groups: {},
@@ -1557,7 +1766,7 @@ describe("repositoriesStore", () => {
 			// later save diffed against a baseline disk had already moved past and was
 			// rejected too — permanently, for every repo, not just the conflicting one.
 			const onDisk = {
-				repos: { "/repo": { path: "/repo", displayName: "RenamedElsewhere", branches: {} } },
+				repos: { "/repo": { path: "/repo", displayName: "RenamedElsewhere", workspaces: {} } },
 				repoOrder: ["/repo"],
 				activeRepoPath: null,
 				groups: {},
@@ -1607,18 +1816,18 @@ describe("repositoriesStore", () => {
 		it("returns repo and branch for a registered terminal", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "Repo" });
-				store.setBranch("/repo", "main", { worktreePath: "/repo" });
-				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
 
 				const owner = store.findOwnerForTerminal("term-1");
-				expect(owner).toEqual({ repoPath: "/repo", branchName: "main" });
+				expect(owner).toEqual({ repoPath: "/repo", workspaceId: "main" });
 			});
 		});
 
 		it("returns null for an unknown terminal", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "Repo" });
-				store.setBranch("/repo", "main", { worktreePath: "/repo" });
+				store.setWorkspace("/repo", "main", { worktreePath: "/repo" });
 
 				expect(store.findOwnerForTerminal("unknown")).toBeNull();
 			});
@@ -1627,22 +1836,22 @@ describe("repositoriesStore", () => {
 		it("finds the correct branch when multiple branches exist", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "Repo" });
-				store.setBranch("/repo", "main", { worktreePath: "/repo" });
-				store.setBranch("/repo", "feature", { worktreePath: "/repo-feat" });
-				store.addTerminalToBranch("/repo", "main", "term-main");
-				store.addTerminalToBranch("/repo", "feature", "term-feat");
+				store.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+				store.setWorkspace("/repo", "feature", { worktreePath: "/repo-feat" });
+				store.addTerminalToWorkspace("/repo", "main", "term-main");
+				store.addTerminalToWorkspace("/repo", "feature", "term-feat");
 
-				expect(store.findOwnerForTerminal("term-main")).toEqual({ repoPath: "/repo", branchName: "main" });
-				expect(store.findOwnerForTerminal("term-feat")).toEqual({ repoPath: "/repo", branchName: "feature" });
+				expect(store.findOwnerForTerminal("term-main")).toEqual({ repoPath: "/repo", workspaceId: "main" });
+				expect(store.findOwnerForTerminal("term-feat")).toEqual({ repoPath: "/repo", workspaceId: "feature" });
 			});
 		});
 
 		it("returns null when terminal was removed from branch", () => {
 			testInScope(() => {
 				store.add({ path: "/repo", displayName: "Repo" });
-				store.setBranch("/repo", "main", { worktreePath: "/repo" });
-				store.addTerminalToBranch("/repo", "main", "term-1");
-				store.removeTerminalFromBranch("/repo", "main", "term-1");
+				store.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+				store.addTerminalToWorkspace("/repo", "main", "term-1");
+				store.removeTerminalFromWorkspace("/repo", "main", "term-1");
 
 				expect(store.findOwnerForTerminal("term-1")).toBeNull();
 			});
@@ -1651,15 +1860,15 @@ describe("repositoriesStore", () => {
 		it("works across multiple repos", () => {
 			testInScope(() => {
 				store.add({ path: "/repo-a", displayName: "A" });
-				store.setBranch("/repo-a", "main", { worktreePath: "/repo-a" });
-				store.addTerminalToBranch("/repo-a", "main", "term-a");
+				store.setWorkspace("/repo-a", "main", { worktreePath: "/repo-a" });
+				store.addTerminalToWorkspace("/repo-a", "main", "term-a");
 
 				store.add({ path: "/repo-b", displayName: "B" });
-				store.setBranch("/repo-b", "dev", { worktreePath: "/repo-b" });
-				store.addTerminalToBranch("/repo-b", "dev", "term-b");
+				store.setWorkspace("/repo-b", "dev", { worktreePath: "/repo-b" });
+				store.addTerminalToWorkspace("/repo-b", "dev", "term-b");
 
-				expect(store.findOwnerForTerminal("term-a")).toEqual({ repoPath: "/repo-a", branchName: "main" });
-				expect(store.findOwnerForTerminal("term-b")).toEqual({ repoPath: "/repo-b", branchName: "dev" });
+				expect(store.findOwnerForTerminal("term-a")).toEqual({ repoPath: "/repo-a", workspaceId: "main" });
+				expect(store.findOwnerForTerminal("term-b")).toEqual({ repoPath: "/repo-b", workspaceId: "dev" });
 			});
 		});
 	});
@@ -1696,6 +1905,201 @@ describe("repositoriesStore", () => {
 		});
 	});
 
+	// #763-d219 — the classifier itself lives in Rust (`config.rs`); this store
+	// only fetches its verdict and quarantines the named paths, so these tests
+	// drive `refreshStaleTempCandidates`/`repairStaleTemp` through a mocked
+	// `invoke` rather than asserting on any frontend-side classification logic.
+	describe("stale-temp repositories (#763-d219)", () => {
+		it("refreshStaleTempCandidates() populates the candidate list from the backend", async () => {
+			await testInScopeAsync(async () => {
+				mockInvoke.mockImplementationOnce((cmd: string) => {
+					if (cmd === "list_stale_temp_repository_candidates") {
+						return Promise.resolve([{ path: "/tmp/ghost", displayName: "ghost" }]);
+					}
+					return Promise.resolve(undefined);
+				});
+				await store.refreshStaleTempCandidates();
+				expect(store.getStaleTempCandidates()).toEqual([{ path: "/tmp/ghost", displayName: "ghost" }]);
+			});
+		});
+
+		it("logs via appLogger and leaves the list untouched when the backend call fails", async () => {
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			await testInScopeAsync(async () => {
+				mockInvoke.mockImplementationOnce((cmd: string) => {
+					if (cmd === "list_stale_temp_repository_candidates") return Promise.reject(new Error("boom"));
+					return Promise.resolve(undefined);
+				});
+				await store.refreshStaleTempCandidates();
+				expect(store.getStaleTempCandidates()).toEqual([]);
+				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to list stale-temp repository candidates");
+				expect(logger.getEntries()).toContainEqual(
+					expect.objectContaining({
+						message: "Failed to list stale-temp repository candidates",
+						data: expect.any(Error),
+					}),
+				);
+			});
+			errorSpy.mockRestore();
+		});
+
+		it("getGroupedLayout() and getOrderedRepos() quarantine classified candidates out of the sidebar", async () => {
+			await testInScopeAsync(async () => {
+				store.add({ path: "/legit", displayName: "Legit" });
+				store.add({ path: "/tmp/ghost", displayName: "ghost-fallback" });
+				mockInvoke.mockImplementationOnce((cmd: string) => {
+					if (cmd === "list_stale_temp_repository_candidates") {
+						return Promise.resolve([{ path: "/tmp/ghost", displayName: "ghost-fallback" }]);
+					}
+					return Promise.resolve(undefined);
+				});
+				await store.refreshStaleTempCandidates();
+
+				expect(store.getOrderedRepos().map((r) => r.path)).toEqual(["/legit"]);
+				const layout = store.getGroupedLayout();
+				expect(layout.ungrouped.map((r) => r.path)).toEqual(["/legit"]);
+
+				// The repo record itself is untouched — quarantine hides it from
+				// these two listings only, it never deletes anything.
+				expect(store.get("/tmp/ghost")).toBeDefined();
+			});
+		});
+
+		it("repairStaleTemp() sends exactly the given paths and drops only the removed ones from the candidate list", async () => {
+			await testInScopeAsync(async () => {
+				mockInvoke.mockImplementationOnce((cmd: string) => {
+					if (cmd === "list_stale_temp_repository_candidates") {
+						return Promise.resolve([
+							{ path: "/tmp/ghost-1", displayName: "ghost-1" },
+							{ path: "/tmp/ghost-2", displayName: "ghost-2" },
+						]);
+					}
+					return Promise.resolve(undefined);
+				});
+				await store.refreshStaleTempCandidates();
+
+				mockInvoke.mockImplementationOnce((cmd: string, args: unknown) => {
+					if (cmd === "repair_stale_temp_repositories") {
+						expect(args).toEqual({ paths: ["/tmp/ghost-1"] });
+						return Promise.resolve({
+							removed: ["/tmp/ghost-1"],
+							backupPath: "/config/repositories.repair-backup-x.json",
+						});
+					}
+					return Promise.resolve(undefined);
+				});
+				const summary = await store.repairStaleTemp(["/tmp/ghost-1"]);
+
+				expect(summary.removed).toEqual(["/tmp/ghost-1"]);
+				expect(store.getStaleTempCandidates().map((c) => c.path)).toEqual(["/tmp/ghost-2"]);
+			});
+		});
+
+		it("repairStaleTemp() propagates a backend refusal without touching the candidate list", async () => {
+			await testInScopeAsync(async () => {
+				mockInvoke.mockImplementationOnce((cmd: string) => {
+					if (cmd === "list_stale_temp_repository_candidates") {
+						return Promise.resolve([{ path: "/tmp/ghost-1", displayName: "ghost-1" }]);
+					}
+					return Promise.resolve(undefined);
+				});
+				await store.refreshStaleTempCandidates();
+
+				mockInvoke.mockImplementationOnce((cmd: string) => {
+					if (cmd === "repair_stale_temp_repositories") {
+						return Promise.reject(new Error("no longer a stale-temp candidate on disk"));
+					}
+					return Promise.resolve(undefined);
+				});
+
+				await expect(store.repairStaleTemp(["/tmp/ghost-1"])).rejects.toThrow(
+					"no longer a stale-temp candidate on disk",
+				);
+				expect(store.getStaleTempCandidates().map((c) => c.path)).toEqual(["/tmp/ghost-1"]);
+			});
+		});
+	});
+
+	describe("placementWorkspaceFor()", () => {
+		const rootOwner = { repoPath: "/repo", workspaceId: null };
+
+		it("places a root session in the root workspace even while a linked worktree is active", async () => {
+			const { placementWorkspaceFor } = await import("../../stores/repositories");
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+				store.setWorkspace("/repo", "feature", { worktreePath: "/repo__wt/feature" });
+				store.setActiveWorkspace("/repo", "feature");
+				expect(placementWorkspaceFor(rootOwner)).toBe("main");
+			});
+		});
+
+		it("matches the root workspace across a trailing slash and Windows separators", async () => {
+			const { placementWorkspaceFor } = await import("../../stores/repositories");
+			testInScope(() => {
+				store.add({ path: "C:\\repo", displayName: "test" });
+				store.setWorkspace("C:\\repo", "main", { worktreePath: "C:/repo/" });
+				store.setWorkspace("C:\\repo", "feature", { worktreePath: "C:/repo__wt/feature" });
+				store.setActiveWorkspace("C:\\repo", "feature");
+				expect(placementWorkspaceFor({ repoPath: "C:\\repo", workspaceId: null })).toBe("main");
+			});
+		});
+
+		it("does not misfile a root terminal in the active linked worktree before root discovery", async () => {
+			const { placementWorkspaceFor } = await import("../../stores/repositories");
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "feature", { worktreePath: "/repo__wt/feature" });
+				store.setActiveWorkspace("/repo", "feature");
+				expect(placementWorkspaceFor(rootOwner)).toBeNull();
+			});
+		});
+
+		it("returns null when neither a root workspace nor an active one exists", async () => {
+			const { placementWorkspaceFor } = await import("../../stores/repositories");
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "feature", { worktreePath: "/repo__wt/feature" });
+				store.setActiveWorkspace("/repo", null);
+				expect(placementWorkspaceFor(rootOwner)).toBeNull();
+			});
+		});
+
+		it("keeps an owner that already names its workspace", async () => {
+			const { placementWorkspaceFor } = await import("../../stores/repositories");
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+				expect(placementWorkspaceFor({ repoPath: "/repo", workspaceId: "feature" })).toBe("feature");
+			});
+		});
+	});
+	// Catches: a snapshot ack observes only the first save while a newer terminal snapshot is queued.
+	it("flushSave waits for both the in-flight save and the queued snapshot", async () => {
+		const completions: Array<() => void> = [];
+		mockInvoke.mockImplementation((command: string) =>
+			command === "save_repositories"
+				? new Promise<void>((resolve) => completions.push(resolve))
+				: Promise.resolve(undefined),
+		);
+		store.add({ path: "/first", displayName: "first" });
+		store.snapshotTerminals(new Map());
+		store.add({ path: "/second", displayName: "second" });
+		store.snapshotTerminals(new Map());
+		let settled = false;
+		const flushed = store.flushSave().then(() => {
+			settled = true;
+		});
+		expect(completions).toHaveLength(1);
+		completions[0]();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(completions).toHaveLength(2);
+		expect(settled).toBe(false);
+		completions[1]();
+		await flushed;
+		expect(settled).toBe(true);
+	});
+
 	describe("sort mode", () => {
 		it("defaults to manual", () => {
 			testInScope(() => {
@@ -1709,7 +2113,7 @@ describe("repositoriesStore", () => {
 				expect(store.state.sortMode).toBe("name");
 				vi.advanceTimersByTime(500);
 				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const last = calls[calls.length - 1];
+				const last = calls.at(-1) ?? [];
 				// Saves are keyed mutation batches: scalar fields carry before/after.
 				expect(last[1].config.sortMode).toEqual({ before: "manual", after: "name" });
 			});
@@ -1740,8 +2144,8 @@ describe("repositoriesStore", () => {
 			expanded: true,
 			collapsed: false,
 			parked: false,
-			branches: {},
-			activeBranch: null,
+			workspaces: {},
+			activeWorkspaceId: null,
 			...extra,
 		});
 
@@ -1772,7 +2176,10 @@ describe("repositoriesStore", () => {
 
 		it("recent falls back to the latest branch commit, name as tiebreak", () => {
 			const branch = (ts: number | null) => ({
-				name: "main",
+				workspaceId: "main",
+				branchName: "main",
+				kind: "main" as const,
+				parentRepoPath: null,
 				isMain: true,
 				worktreePath: null,
 				terminals: [],
@@ -1784,9 +2191,9 @@ describe("repositoriesStore", () => {
 				lastCommitTs: ts,
 			});
 			const repos = [
-				repo("/never-b", "b-never", { branches: { main: branch(null) } }),
-				repo("/commit", "committed", { branches: { main: branch(500) } }),
-				repo("/never-a", "a-never", { branches: { main: branch(null) } }),
+				repo("/never-b", "b-never", { workspaces: { main: branch(null) } }),
+				repo("/commit", "committed", { workspaces: { main: branch(500) } }),
+				repo("/never-a", "a-never", { workspaces: { main: branch(null) } }),
 				repo("/active", "activated", { lastActivatedAt: 1000 }),
 			];
 			expect(sortRepos(repos, "recent").map((r) => r.path)).toEqual(["/active", "/commit", "/never-a", "/never-b"]);
@@ -1812,81 +2219,81 @@ describe("repositoriesStore", () => {
 		});
 	});
 
-	describe("workspaces", () => {
-		it("initializes with no workspaces and All projects active", () => {
+	describe("named workspaces", () => {
+		it("initializes with no named workspaces and All projects active", () => {
 			testInScope(() => {
-				expect(store.state.workspaces).toEqual({});
-				expect(store.state.workspaceOrder).toEqual([]);
-				expect(store.state.activeWorkspaceId).toBeNull();
-				expect(store.getActiveWorkspace()).toBeUndefined();
+				expect(store.state.namedWorkspaces).toEqual({});
+				expect(store.state.namedWorkspaceOrder).toEqual([]);
+				expect(store.state.activeNamedWorkspaceId).toBeNull();
+				expect(store.getActiveNamedWorkspace()).toBeUndefined();
 			});
 		});
 
-		it("createWorkspace() captures the given repo paths and returns an ID", () => {
+		it("createNamedWorkspace() captures the given repo paths and returns an ID", () => {
 			testInScope(() => {
-				const id = store.createWorkspace("Client", ["/a", "/b"])!;
+				const id = store.createNamedWorkspace("Client", ["/a", "/b"])!;
 				expect(id).toBeTruthy();
-				expect(store.state.workspaces[id].name).toBe("Client");
-				expect(store.state.workspaces[id].repoPaths).toEqual(["/a", "/b"]);
-				expect(store.state.workspaceOrder).toContain(id);
+				expect(store.state.namedWorkspaces[id].name).toBe("Client");
+				expect(store.state.namedWorkspaces[id].repoPaths).toEqual(["/a", "/b"]);
+				expect(store.state.namedWorkspaceOrder).toContain(id);
 			});
 		});
 
-		it("createWorkspace() enforces unique names (case-insensitive)", () => {
+		it("createNamedWorkspace() enforces unique names (case-insensitive)", () => {
 			testInScope(() => {
-				store.createWorkspace("Client", []);
-				expect(store.createWorkspace("client", [])).toBeNull();
-				expect(store.createWorkspace("CLIENT", [])).toBeNull();
+				store.createNamedWorkspace("Client", []);
+				expect(store.createNamedWorkspace("client", [])).toBeNull();
+				expect(store.createNamedWorkspace("CLIENT", [])).toBeNull();
 			});
 		});
 
-		it("renameWorkspace() updates name and rejects duplicates", () => {
+		it("renameNamedWorkspace() updates name and rejects duplicates", () => {
 			testInScope(() => {
-				const id1 = store.createWorkspace("One", [])!;
-				store.createWorkspace("Two", []);
-				expect(store.renameWorkspace(id1, "two")).toBe(false);
-				expect(store.state.workspaces[id1].name).toBe("One");
-				expect(store.renameWorkspace(id1, "Three")).toBe(true);
-				expect(store.state.workspaces[id1].name).toBe("Three");
+				const id1 = store.createNamedWorkspace("One", [])!;
+				store.createNamedWorkspace("Two", []);
+				expect(store.renameNamedWorkspace(id1, "two")).toBe(false);
+				expect(store.state.namedWorkspaces[id1].name).toBe("One");
+				expect(store.renameNamedWorkspace(id1, "Three")).toBe(true);
+				expect(store.state.namedWorkspaces[id1].name).toBe("Three");
 			});
 		});
 
-		it("deleteWorkspace() removes it and falls back to All projects when active", () => {
+		it("deleteNamedWorkspace() removes it and falls back to All projects when active", () => {
 			testInScope(() => {
-				const id = store.createWorkspace("Client", [])!;
-				store.setActiveWorkspace(id);
-				expect(store.state.activeWorkspaceId).toBe(id);
-				store.deleteWorkspace(id);
-				expect(store.state.workspaces[id]).toBeUndefined();
-				expect(store.state.workspaceOrder).not.toContain(id);
-				expect(store.state.activeWorkspaceId).toBeNull();
+				const id = store.createNamedWorkspace("Client", [])!;
+				store.setActiveNamedWorkspace(id);
+				expect(store.state.activeNamedWorkspaceId).toBe(id);
+				store.deleteNamedWorkspace(id);
+				expect(store.state.namedWorkspaces[id]).toBeUndefined();
+				expect(store.state.namedWorkspaceOrder).not.toContain(id);
+				expect(store.state.activeNamedWorkspaceId).toBeNull();
 			});
 		});
 
-		it("setActiveWorkspace() ignores unknown IDs", () => {
+		it("setActiveNamedWorkspace() ignores unknown IDs", () => {
 			testInScope(() => {
-				store.setActiveWorkspace("nope");
-				expect(store.state.activeWorkspaceId).toBeNull();
+				store.setActiveNamedWorkspace("nope");
+				expect(store.state.activeNamedWorkspaceId).toBeNull();
 			});
 		});
 
 		it("add() auto-joins the new repo into the active workspace", () => {
 			testInScope(() => {
-				const id = store.createWorkspace("Client", ["/a"])!;
-				store.setActiveWorkspace(id);
+				const id = store.createNamedWorkspace("Client", ["/a"])!;
+				store.setActiveNamedWorkspace(id);
 				store.add({ path: "/b", displayName: "B" });
-				expect(store.state.workspaces[id].repoPaths).toEqual(["/a", "/b"]);
+				expect(store.state.namedWorkspaces[id].repoPaths).toEqual(["/a", "/b"]);
 			});
 		});
 
 		it("remove() strips the repo path from every workspace", () => {
 			testInScope(() => {
 				store.add({ path: "/a", displayName: "A" });
-				const w1 = store.createWorkspace("One", ["/a"])!;
-				const w2 = store.createWorkspace("Two", ["/a", "/b"])!;
+				const w1 = store.createNamedWorkspace("One", ["/a"])!;
+				const w2 = store.createNamedWorkspace("Two", ["/a", "/b"])!;
 				store.remove("/a");
-				expect(store.state.workspaces[w1].repoPaths).toEqual([]);
-				expect(store.state.workspaces[w2].repoPaths).toEqual(["/b"]);
+				expect(store.state.namedWorkspaces[w1].repoPaths).toEqual([]);
+				expect(store.state.namedWorkspaces[w2].repoPaths).toEqual(["/b"]);
 			});
 		});
 
@@ -1894,25 +2301,25 @@ describe("repositoriesStore", () => {
 			testInScope(() => {
 				store.add({ path: "/member", displayName: "M" });
 				store.add({ path: "/outsider", displayName: "O" });
-				const id = store.createWorkspace("Client", ["/member"])!;
-				store.setActiveWorkspace(id);
+				const id = store.createNamedWorkspace("Client", ["/member"])!;
+				store.setActiveNamedWorkspace(id);
 
 				store.setActive("/member");
-				expect(store.state.activeWorkspaceId).toBe(id);
+				expect(store.state.activeNamedWorkspaceId).toBe(id);
 
 				store.setActive("/outsider");
-				expect(store.state.activeWorkspaceId).toBeNull();
+				expect(store.state.activeNamedWorkspaceId).toBeNull();
 			});
 		});
 
-		it("persists workspaces in the save payload", () => {
+		it("persists named workspaces in the save payload (top-level wire keys)", () => {
 			testInScope(() => {
-				const id = store.createWorkspace("Client", ["/a"])!;
-				store.setActiveWorkspace(id);
+				const id = store.createNamedWorkspace("Client", ["/a"])!;
+				store.setActiveNamedWorkspace(id);
 				store.setSortMode("recent");
 				vi.advanceTimersByTime(500);
 				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const last = calls[calls.length - 1];
+				const last = calls.at(-1) ?? [];
 				// Saves are keyed mutation batches (see repositoryMutationBatch).
 				const ws = last[1].config.workspaces.find((m: { id: string }) => m.id === id);
 				expect(ws.after.repoPaths).toEqual(["/a"]);
@@ -1935,10 +2342,10 @@ describe("repositoriesStore", () => {
 			});
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				expect(store.state.workspaceOrder).toEqual(["w1", "w2"]);
-				expect(store.state.activeWorkspaceId).toBe("w1");
+				expect(store.state.namedWorkspaceOrder).toEqual(["w1", "w2"]);
+				expect(store.state.activeNamedWorkspaceId).toBe("w1");
 				// Unknown repo paths are kept (filtered at render, not pruned)
-				expect(store.state.workspaces["w1"].repoPaths).toEqual(["/gone", "/a"]);
+				expect(store.state.namedWorkspaces["w1"].repoPaths).toEqual(["/gone", "/a"]);
 			});
 		});
 
@@ -1951,7 +2358,7 @@ describe("repositoriesStore", () => {
 			});
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				expect(store.state.activeWorkspaceId).toBeNull();
+				expect(store.state.activeNamedWorkspaceId).toBeNull();
 			});
 		});
 
@@ -1959,9 +2366,9 @@ describe("repositoriesStore", () => {
 			mockInvoke.mockResolvedValueOnce({ repos: {}, repoOrder: [] });
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				expect(store.state.workspaces).toEqual({});
-				expect(store.state.workspaceOrder).toEqual([]);
-				expect(store.state.activeWorkspaceId).toBeNull();
+				expect(store.state.namedWorkspaces).toEqual({});
+				expect(store.state.namedWorkspaceOrder).toEqual([]);
+				expect(store.state.activeNamedWorkspaceId).toBeNull();
 				expect(store.state.sortMode).toBe("manual");
 			});
 		});

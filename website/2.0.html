@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>FastAF 2.0 — the film and what changed</title>
+  <meta name="description" content="FastAF 2.0: native plans and stories, Tasks, pull request review in place, CLI | Chat, Progress Flow, AI Chat on the built-in engine, and agents on other machines." />
+  <meta property="og:title" content="FastAF 2.0" />
+  <meta property="og:description" content="Watch the 2.0 film and see what changed, area by area." />
+  <meta property="og:url" content="https://tuicommander.com/2.0.html" />
+  <meta name="twitter:title" content="FastAF 2.0" />
+  <meta name="twitter:description" content="Watch the 2.0 film and see what changed, area by area." />
+  <link rel="canonical" href="https://tuicommander.com/2.0.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Release · 2.0</p>
+      <h1>FastAF 2.0. One day, <em>ten projects</em>.</h1>
+      <p>The film follows one person through one working day: ten projects, dozens of agents, one orchestrator. Everything in it is the real 2.0 interface.</p>
+    </div>
+  </header>
+
+  <section class="film-section">
+    <div class="container">
+      <!-- @include film -->
+      <!-- Chapter times follow the 4:43 cut; re-read the as-built table after the final render. -->
+      <ul class="chapters">
+        <li><button type="button" data-t="0"><time>0:00</time>Ten projects, one window</button></li>
+        <li><button type="button" data-t="16"><time>0:16</time>Sidebar, agent menu, CLI | Chat</button></li>
+        <li><button type="button" data-t="32"><time>0:32</time>Ideas</button></li>
+        <li><button type="button" data-t="42"><time>0:42</time>Voice</button></li>
+        <li><button type="button" data-t="60"><time>1:00</time>Stories, Kanban, workflows, automations</button></li>
+        <li><button type="button" data-t="89"><time>1:29</time>Agents spawn agents, mail</button></li>
+        <li><button type="button" data-t="106"><time>1:46</time>Progress Flow</button></li>
+        <li><button type="button" data-t="114"><time>1:54</time>Files, Markdown, Design Mode, plugins</button></li>
+        <li><button type="button" data-t="156"><time>2:36</time>Questions, rate limits, Activity</button></li>
+        <li><button type="button" data-t="175"><time>2:55</time>Tasks: GitHub, Jira, GitLab</button></li>
+        <li><button type="button" data-t="202"><time>3:22</time>PR, CI auto-heal, line review</button></li>
+        <li><button type="button" data-t="223"><time>3:43</time>Phone</button></li>
+        <li><button type="button" data-t="235"><time>3:55</time>AI Chat</button></li>
+        <li><button type="button" data-t="250"><time>4:10</time>Git: diff, stage, commit</button></li>
+        <li><button type="button" data-t="269"><time>4:29</time>MCP, remote, prompts, themes</button></li>
+      </ul>
+      <p class="note">The film's project data is fictional. The interface is not.</p>
+    </div>
+  </section>
+
+  <section class="changes">
+    <div class="container">
+      <div class="section-head">
+        <h2>What changed, area by area</h2>
+        <p>The biggest release since the first one. Each area has its own page.</p>
+      </div>
+      <div class="card-grid">
+        <a class="card" href="/features/orchestration.html">
+          <h3>Orchestrate agents</h3>
+          <p>Rich sidebar cards, the <code>+</code> agent menu, CLI | Chat for Claude, Codex, Grok and ego, agents that spawn and message agents, Progress List and Flow, AI Chat on FastAF's built-in engine.</p>
+        </a>
+        <a class="card" href="/features/planning.html">
+          <h3>Plan the work</h3>
+          <p>Native plans and stories with criteria, dependencies, revisions and a Kanban board; the Workflow designer; automations with templates, Run now and history.</p>
+        </a>
+        <a class="card" href="/features/git-and-review.html">
+          <h3>Review and ship</h3>
+          <p>Tasks for work items from a provider plugin you install; pull request line review threads; CI auto-heal for GitHub Actions and CircleCI; multiple GitHub accounts.</p>
+        </a>
+        <a class="card" href="/features/workspace.html">
+          <h3>Workspace</h3>
+          <p>Markdown panel with inline review comments, Design Mode, settings search, light themes, suspendable tabs.</p>
+        </a>
+        <a class="card" href="/features/anywhere.html">
+          <h3>Anywhere</h3>
+          <p>Mobile Chat view and question cards with push, remote machines over SSH with <code>tuic-remote</code>, hands-free voice and spoken replies.</p>
+        </a>
+        <a class="card" href="/features/extend.html">
+          <h3>Extend</h3>
+          <p>MCP Proxy Hub with secret headers and tool filters, private secret forms for agents, the <code>fastaf</code> CLI and plugins installed from a folder or ZIP file.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="not-filmed">
+    <div class="container">
+      <div class="section-head">
+        <h2>Shipped, not filmed</h2>
+        <p>Quiet changes that matter on a long day.</p>
+      </div>
+      <div class="card-grid">
+        <div class="card">
+          <h3>Resume after an update</h3>
+          <p>After an update restart, every agent tab with a confirmed session resumes on its own. The restart waits until no agent is busy or waiting for you.</p>
+        </div>
+        <div class="card">
+          <h3>Hibernation</h3>
+          <p>Idle agent tabs that can resume are hibernated after a time you choose, and wake on open, input or mail.</p>
+        </div>
+        <div class="card">
+          <h3>Tray and menu bar</h3>
+          <p>A tray icon with live agent counts and an attention indicator. Choose always, only in background, or never.</p>
+        </div>
+        <div class="card">
+          <h3>Native scrollback</h3>
+          <p>Claude, Codex, Grok and supported OpenCode versions start without alternate-screen rendering, so the terminal keeps their full history.</p>
+        </div>
+        <div class="card">
+          <h3>Windows, tested</h3>
+          <p>The test suite now builds and runs on Windows in CI, so Windows stays working.</p>
+        </div>
+        <div class="card">
+          <h3>Private secret forms</h3>
+          <p>An agent asks for a password or a one-time code; you type it into a separate window, and the agent never sees the value.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="upgrade">
+    <div class="container prose">
+      <h2>Upgrading from 1.7</h2>
+      <ul>
+        <li>Updates install as before. <strong>Settings → General → Updates</strong> has two new switches, both on by default: resume all agents after an update, and wait for agents before restarting.</li>
+        <li>FastAF ships no Tasks provider plugin. Tasks appears once you install one from a folder or a ZIP file; configure its accounts in Tasks, not in a plugin settings page.</li>
+        <li>AI Chat keeps running on FastAF's built-in engine. Sign in with ChatGPT or add a provider in Settings → Providers, then turn on Experimental Features and its AI Chat sub-toggle; no external agent is needed.</li>
+      </ul>
+      <p>Every change is in the <a href="https://github.com/ksg98/fastaf-ide/blob/main/CHANGELOG.md" rel="noopener noreferrer">changelog</a>.</p>
+      <div class="ctas ctas-left">
+        <a href="/download.html" class="btn btn-primary">Download 2.0</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

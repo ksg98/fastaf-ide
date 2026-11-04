@@ -1,0 +1,18 @@
+<div class="install-section">
+  <div class="install-tabs" role="tablist">
+    <button class="install-tab active" data-tab="unix" role="tab" aria-selected="true" type="button">macOS / Linux</button>
+    <button class="install-tab" data-tab="windows" role="tab" aria-selected="false" type="button">Windows</button>
+  </div>
+  <div class="install-panel active" data-panel="unix">
+    <div class="install-block">
+      <span class="install-label">Shell (macOS and Linux, detects your system)</span>
+      <div class="install-code"><code>curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/website/public/install.sh | sh</code><button class="copy-btn" data-analytics-setup="shell" title="Copy" type="button" aria-label="Copy"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button></div>
+    </div>
+  </div>
+  <div class="install-panel" data-panel="windows">
+    <div class="install-block">
+      <span class="install-label">PowerShell</span>
+      <div class="install-code"><code>irm https://raw.githubusercontent.com/ksg98/fastaf-ide/main/website/public/install.ps1 | iex</code><button class="copy-btn" data-analytics-setup="powershell" title="Copy" type="button" aria-label="Copy"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button></div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,16 @@
+// The repository on screen rides on each prompt as `_meta`, never as the
+// session's cwd. The first turn is held until the client cancels it, so the
+// second prompt is certainly queued and must keep its own hint when it drains.
+// A prompt sent with no repository on screen carries no `_meta` at all.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"_meta":{"tuicommander/viewedRepo":"/repo/one"}},"capture":"one"}
+{"step":"expect","method":"session/cancel"}
+{"step":"respond","to":"one","result":{"stopReason":"cancelled"}}
+{"step":"expect","method":"session/prompt","params":{"_meta":{"tuicommander/viewedRepo":"/repo/two"}},"capture":"two"}
+{"step":"respond","to":"two","result":{"stopReason":"end_turn"}}
+{"step":"expect","method":"session/prompt","forbid_params":["_meta"],"capture":"plain"}
+{"step":"respond","to":"plain","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

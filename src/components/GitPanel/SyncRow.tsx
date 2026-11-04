@@ -152,7 +152,9 @@ export const SyncRow: Component<SyncRowProps> = (props) => {
 			<div class={s.actions}>
 				{OPERATIONS.map((op) => (
 					<button
+						type="button"
 						class={cx(s.btn, runningOp() === op.id && s.btnRunning)}
+						aria-busy={runningOp() === op.id}
 						onClick={() => runOperation(op)}
 						disabled={isRunning()}
 						title={op.title}

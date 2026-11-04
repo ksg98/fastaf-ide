@@ -1,0 +1,125 @@
+{
+  "recorded_at": "2026-10-07T23:35:14.344305+00:00",
+  "agent": "pi",
+  "binary": "/opt/homebrew/bin/pi",
+  "scenario": {
+    "agent": "pi",
+    "args": [
+      "--no-tools",
+      "--no-extensions",
+      "--no-skills",
+      "--no-session",
+      "--provider",
+      "google",
+      "--model",
+      "gemini-2.5-flash"
+    ],
+    "steps": [
+      {
+        "action": "wait",
+        "expect": {
+          "agent": "idle",
+          "awaiting": false
+        },
+        "replay_expect": {
+          "awaiting": false
+        },
+        "timeout_secs": 20
+      },
+      {
+        "action": "prompt",
+        "text": "Ask me a yes-or-no question about continuing, then wait for my answer. Do not use any tools."
+      },
+      {
+        "action": "wait",
+        "expect": {
+          "agent": "working"
+        },
+        "timeout_secs": 20
+      },
+      {
+        "action": "wait",
+        "text": "?",
+        "timeout_secs": 30
+      },
+      {
+        "action": "wait",
+        "expect": {
+          "agent": "idle",
+          "awaiting": false
+        },
+        "replay_expect": {
+          "awaiting": false
+        },
+        "timeout_secs": 30
+      },
+      {
+        "action": "question",
+        "text": "Yes. Respond with the single uppercase English word meaning prepared."
+      },
+      {
+        "action": "wait",
+        "expect": {
+          "agent": "working"
+        },
+        "timeout_secs": 20
+      },
+      {
+        "action": "wait",
+        "text": "READY",
+        "timeout_secs": 30
+      },
+      {
+        "action": "interrupt"
+      }
+    ]
+  },
+  "expected_states": [
+    {
+      "awaiting": false
+    },
+    {
+      "agent": "working"
+    },
+    {
+      "awaiting": false
+    },
+    {
+      "agent": "working"
+    }
+  ],
+  "status": "captured",
+  "daemon_health": {
+    "ok": true,
+    "uptime_secs": 0,
+    "session_count": 0,
+    "protocol_version": 1,
+    "build": {
+      "version": "1.8.0",
+      "target": "aarch64-apple-darwin",
+      "sha256": "0fece3d5e06bb87845d765695ecef7148f87a1326f8fb033f0aaa2ee1556bbdb"
+    },
+    "socket_path": "<output>/tuic-mcp-4b74633f38b03a11.sock",
+    "instance_id": "6d09e528-8bbf-4eb2-9bd8-344e017af549"
+  },
+  "observed_states": [
+    {
+      "agent": "idle",
+      "awaiting": false
+    },
+    {
+      "agent": "working",
+      "awaiting": false
+    },
+    {
+      "agent": "idle",
+      "awaiting": false
+    },
+    {
+      "agent": "working",
+      "awaiting": false
+    }
+  ],
+  "sha256": "1a890451ccc2e50bd56543b7ce1906623c50a1116254d01e14c8dd0981cfadc6",
+  "capture": "<output>/raw/cd24b4d3-bc4b-4a46-86bd-79702f7d7e07.tcap"
+}

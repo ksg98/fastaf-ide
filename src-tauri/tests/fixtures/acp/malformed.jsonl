@@ -1,0 +1,10 @@
+// Bytes on stdout that are not a JSON-RPC frame, from an agent that then dies.
+//
+// That pairing is deliberate: it is what a broken agent actually does, and it
+// keeps this scenario about the frame rather than about how long a client
+// waits. An agent that writes garbage and *stays alive* is a different case
+// with a different answer: see `malformed-after-ready`, where the connection
+// survives it. What ends this one is the exit, not the frame.
+{"step":"expect","method":"initialize","capture":"init"}
+{"step":"raw","bytes":"not-json\n"}
+{"step":"exit","code":0}

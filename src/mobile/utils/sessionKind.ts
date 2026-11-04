@@ -24,11 +24,12 @@ export function isPtySession(session: SessionInfo): boolean {
 }
 
 /**
- * Agents first, plain PTYs last, insertion order preserved inside each group.
+ * Waiting sessions first, then idle agents, then plain PTYs. Preserve insertion
+ * order inside each group.
  *
- * The list is a triage surface: an agent can be waiting on an answer, a shell
- * never is. Shells also outnumber agents on a busy machine, so leaving them
- * interleaved pushes the sessions that need attention off the first screen.
+ * The list is a triage surface: sessions awaiting input need attention before
+ * idle agents or shells. Shells can outnumber agents on a busy machine, so
+ * leaving them interleaved pushes agent sessions off the first screen.
  *
  * Returns a new array — never sorts in place. `useSessions.reconcileSessions`
  * hands back the *previous* array reference when an idle poll changed nothing,
@@ -36,5 +37,6 @@ export function isPtySession(session: SessionInfo): boolean {
  */
 export function ptysLast(sessions: SessionInfo[]): SessionInfo[] {
 	// Stable per spec, so equal keys keep the backend's ordering.
-	return [...sessions].sort((a, b) => Number(isPtySession(a)) - Number(isPtySession(b)));
+	const priority = (session: SessionInfo) => (session.state?.awaiting_input ? 0 : isPtySession(session) ? 2 : 1);
+	return sessions.toSorted((a, b) => priority(a) - priority(b));
 }

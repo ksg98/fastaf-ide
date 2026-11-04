@@ -2,27 +2,29 @@ use std::path::Path;
 
 use super::profile::{ForwardSpec, StrictHostKeyChecking, TunnelProfile};
 
-/// Build the ssh argument vector for a tunnel profile.
-pub fn build_ssh_args(profile: &TunnelProfile) -> Vec<String> {
+/// Directory containing the multiplexed SSH control sockets owned by TUIC.
+pub(crate) fn ssh_control_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(crate::config::config_dir)
+        .join(".ssh")
+}
+
+/// Create the multiplexed SSH socket directory before spawning ssh or scp.
+pub(crate) fn ensure_ssh_control_dir() -> std::io::Result<()> {
+    std::fs::create_dir_all(ssh_control_dir())
+}
+
+/// Build the options shared by tunnel, one-shot ssh and scp processes.
+///
+/// Port is expressed as an ssh option because `ssh -p` and `scp -P` are not
+/// compatible. `%C` keeps the Unix-domain socket name fixed-size and avoids
+/// putting the remote host in the local filesystem.
+pub(crate) fn build_ssh_base_args(profile: &TunnelProfile) -> Vec<String> {
     let mut args = Vec::new();
 
-    // argv[0]
-    args.push("ssh".to_string());
-
-    // No shell, no stdin, no TTY
-    args.push("-N".to_string());
-    args.push("-n".to_string());
-    args.push("-T".to_string());
-
-    // No interactive prompts
     args.push("-o".to_string());
     args.push("BatchMode=yes".to_string());
 
-    // Fail if any forward can't bind
-    args.push("-o".to_string());
-    args.push("ExitOnForwardFailure=yes".to_string());
-
-    // Keep-alive
     args.push("-o".to_string());
     args.push(format!(
         "ServerAliveInterval={}",
@@ -34,7 +36,6 @@ pub fn build_ssh_args(profile: &TunnelProfile) -> Vec<String> {
         profile.options.server_alive_count_max
     ));
 
-    // Host key policy
     let shk_value = match profile.options.strict_host_key_checking {
         StrictHostKeyChecking::Yes => "yes",
         StrictHostKeyChecking::AcceptNew => "accept-new",
@@ -42,19 +43,55 @@ pub fn build_ssh_args(profile: &TunnelProfile) -> Vec<String> {
     args.push("-o".to_string());
     args.push(format!("StrictHostKeyChecking={shk_value}"));
 
-    // Security policy: never forward the agent
     args.push("-o".to_string());
     args.push("ForwardAgent=no".to_string());
+    args.push("-o".to_string());
+    args.push(format!(
+        "Compression={}",
+        if profile.options.compression {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
 
-    // SSH port
-    args.push("-p".to_string());
-    args.push(profile.port.to_string());
+    args.push("-o".to_string());
+    args.push(format!("Port={}", profile.port));
 
-    // Identity file (optional)
+    args.push("-o".to_string());
+    args.push("ControlMaster=auto".to_string());
+    args.push("-o".to_string());
+    args.push("ControlPath=~/.ssh/tuic-%C".to_string());
+    args.push("-o".to_string());
+    // A one-shot exec or copy must not leave a background master behind: a
+    // later tunnel would attach to it as a multiplex client and exit 0 while
+    // the forward kept running in an unmonitored process. A live tunnel still
+    // acts as the shared master for concurrent one-shot commands.
+    args.push("ControlPersist=no".to_string());
+
     if let Some(identity) = &profile.identity_file {
         args.push("-i".to_string());
         args.push(identity.to_string_lossy().into_owned());
     }
+
+    args
+}
+
+/// Build the ssh argument vector for a tunnel profile.
+pub fn build_ssh_args(profile: &TunnelProfile) -> Vec<String> {
+    // argv[0], followed by no shell, no stdin, no TTY.
+    let mut args = vec![
+        "ssh".to_string(),
+        "-N".to_string(),
+        "-n".to_string(),
+        "-T".to_string(),
+    ];
+
+    args.extend(build_ssh_base_args(profile));
+
+    // Fail if any forward can't bind
+    args.push("-o".to_string());
+    args.push("ExitOnForwardFailure=yes".to_string());
 
     // Port forwards
     for forward in &profile.forwards {
@@ -78,7 +115,8 @@ pub fn build_ssh_args(profile: &TunnelProfile) -> Vec<String> {
         }
     }
 
-    // Destination — must be last
+    // Destination — must be last; `--` keeps a user starting with `-` from being an option
+    args.push("--".to_string());
     args.push(format!("{}@{}", profile.user, profile.host));
 
     args
@@ -131,6 +169,76 @@ mod tests {
         args.windows(2)
             .find(|w| w[0] == "-o" && w[1].starts_with(prefix))
             .map(|w| w[1].as_str())
+    }
+
+    #[test]
+    fn a_tunnel_compresses_its_channel_by_default() {
+        // The WebSocket layer refuses to deflate a loopback peer because it
+        // assumes this. If the default ever flips, a tunnelled terminal stream
+        // crosses the link uncompressed and nothing else notices.
+        assert_eq!(
+            find_option(&build_ssh_args(&base_profile()), "Compression="),
+            Some("Compression=yes")
+        );
+    }
+
+    #[test]
+    fn compression_off_is_said_out_loud_rather_than_omitted() {
+        let mut profile = base_profile();
+        profile.options.compression = false;
+
+        // Not "absent": ssh would then read `Compression` from the user's
+        // ssh_config, and the operator who turned it off here would get it back
+        // from a file this app never saw.
+        assert_eq!(
+            find_option(&build_ssh_args(&profile), "Compression="),
+            Some("Compression=no")
+        );
+    }
+
+    #[test]
+    fn shared_base_args_use_a_short_user_owned_control_socket() {
+        let args = build_ssh_base_args(&base_profile());
+
+        assert_eq!(
+            find_option(&args, "ControlMaster="),
+            Some("ControlMaster=auto")
+        );
+        assert_eq!(
+            find_option(&args, "ControlPersist="),
+            Some("ControlPersist=no")
+        );
+        let control_path = find_option(&args, "ControlPath=").expect("ControlPath option");
+        assert_eq!(control_path, "ControlPath=~/.ssh/tuic-%C");
+        assert!(!control_path.contains("example.com"));
+        assert!(
+            control_path.len() < 100,
+            "ControlPath exceeds ssh sun_path limit"
+        );
+    }
+
+    /// Catches: a profile user starting with `-` becoming an ssh option because
+    /// no `--` precedes the destination.
+    #[test]
+    fn tunnel_destination_follows_double_dash() {
+        let mut profile = base_profile();
+        profile.user = "-oProxyCommand=evil".to_string();
+        let args = build_ssh_args(&profile);
+        let n = args.len();
+        assert_eq!(args[n - 2], "--", "{args:?}");
+        assert_eq!(args[n - 1], "-oProxyCommand=evil@example.com");
+    }
+
+    #[test]
+    fn tunnel_master_stays_in_the_foreground() {
+        let args = build_ssh_args(&base_profile());
+        let persist_options: Vec<_> = args
+            .windows(2)
+            .filter(|window| window[0] == "-o" && window[1].starts_with("ControlPersist="))
+            .map(|window| window[1].as_str())
+            .collect();
+
+        assert_eq!(persist_options, ["ControlPersist=no"]);
     }
 
     #[test]
@@ -238,7 +346,7 @@ mod tests {
     #[test]
     fn no_agent_socket_yields_empty_env() {
         let env = build_ssh_env(None);
-        assert!(env.is_empty());
+        assert_eq!(env, [] as [(std::string::String, std::string::String); 0]);
     }
 
     #[test]

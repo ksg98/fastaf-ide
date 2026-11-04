@@ -1,0 +1,158 @@
+.placementGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+}
+
+.placementCheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-md);
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+/* Placements are a multi-choice grid: small boxes, the accent when on. */
+.placementCheck input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.placementCheck input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.placementCheck input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 4px;
+  width: 3px;
+  height: 7px;
+  border: solid var(--text-on-accent);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.placementCheck input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.placementCheck:has(input:checked) {
+  color: var(--fg-primary);
+}
+
+.fieldHint {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.fieldWarning {
+  color: var(--warning);
+}
+
+.fieldWarningIcon {
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
+/* Variable dropdown */
+
+.varDropdownWrap {
+  position: relative;
+}
+
+.varChevron {
+  color: var(--fg-muted);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.varChevronOpen {
+  transform: rotate(180deg);
+}
+
+/* A menu (STYLE_GUIDE › Menus): overlay surface, hairline, radius 8, 4px
+   inset, 28px rows; group labels are sentence-case section labels. */
+.varDropdownList {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  max-height: 280px;
+  margin-top: 4px;
+  padding: 4px;
+  overflow-y: auto;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+}
+
+.varGroupLabel {
+  padding: 8px 8px 4px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+button.varItem[data-control-layout="row"] {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+button.varItem[data-control-layout="row"]:hover {
+  background: var(--surface-hover);
+}
+
+.varName {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--accent);
+  flex-shrink: 0;
+  min-width: 120px;
+}
+
+.varDesc {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+/* Actions row */
+
+.editorActions {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: var(--hairline-w) solid var(--hairline);
+}

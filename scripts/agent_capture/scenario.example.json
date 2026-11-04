@@ -1,0 +1,11 @@
+{
+  "agent": "pi",
+  "args": [],
+  "steps": [
+    {"action": "wait", "expect": {"agent": "idle"}, "timeout_secs": 60},
+    {"action": "prompt", "text": "Reply with the single word READY. Do not access files or tools."},
+    {"action": "wait", "expect": {"agent": "working"}, "timeout_secs": 60},
+    {"action": "wait", "expect": {"agent": "idle"}, "timeout_secs": 120},
+    {"action": "interrupt"}
+  ]
+}

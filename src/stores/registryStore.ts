@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store";
 import { invoke } from "../invoke";
-import { compareSemver } from "../plugins/pluginLoader";
+import { compareSemver } from "../utils/semver";
 
 /** A plugin entry from the remote registry */
 export interface RegistryEntry {
@@ -13,6 +13,8 @@ export interface RegistryEntry {
 	minAppVersion: string;
 	capabilities: string[];
 	downloadUrl: string;
+	/** SHA-256 of the published payload tree, excluding mutable plugin data. */
+	contentSha256?: string;
 }
 
 interface RegistryStoreState {
@@ -23,6 +25,13 @@ interface RegistryStoreState {
 }
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * FastAF ships no plugin registry: `DEFAULT_REGISTRY_URL` in `src-tauri/src/registry.rs`
+ * is `None`, so `fetch_plugin_registry` always answers an empty list. The UI hides
+ * Browse and the update check while this is false. Flip both together.
+ */
+export const PLUGIN_REGISTRY_ENABLED = false;
 
 const [state, setState] = createStore<RegistryStoreState>({
 	entries: [],
@@ -52,10 +61,17 @@ async function refresh(): Promise<void> {
 }
 
 /** Check if a plugin has an update available (semver-aware) */
-function hasUpdate(installedId: string, installedVersion: string): RegistryEntry | null {
+function hasUpdate(
+	installedId: string,
+	installedVersion: string,
+	installedContentSha256?: string,
+): RegistryEntry | null {
 	const entry = state.entries.find((e) => e.id === installedId);
 	if (!entry) return null;
-	return compareSemver(entry.latestVersion, installedVersion) > 0 ? entry : null;
+	const versionOrder = compareSemver(entry.latestVersion, installedVersion);
+	if (versionOrder > 0) return entry;
+	if (versionOrder < 0) return null;
+	return entry.contentSha256 && installedContentSha256 && entry.contentSha256 !== installedContentSha256 ? entry : null;
 }
 
 export const registryStore = {

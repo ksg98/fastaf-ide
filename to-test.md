@@ -36,6 +36,35 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Upstream 2.0.0 sync (2026-11-03)
+
+Branch `sync/upstream-2.0.0`. Rust compiled (`cargo check --workspace --features dictation --tests`) and
+7,419/7,525 lib tests pass; the rest need fish or Python ≥3.11. Vitest 12,058/12,091 before the last fixes,
+then every failing file fixed. The shell harness (`.tmp/readme-harness`, headless WebKit) showed the main window
+and the General, Appearance, Providers and Dictation pages rendering. None of the items below can be seen there.
+
+- [ ] AI Chat with a provider configured and **no ego installed**: send a message, approve a tool call, reload the conversation. FastAF's own engine is restored (`ai_agent/`, `llm_api.rs`, `conversationStore`); nothing may say "Configure ego".
+- [ ] ChatGPT sign-in from Settings → Providers still completes (Docker holds :1455, so the device-code path runs).
+- [ ] Smart Prompts in API mode, PR review ("Run" in the PR popover), changelog generation, the improvement scan and Stories "AI fill" all answer through the Headless slot, with no ego.
+- [ ] The voice agent speaks with Kokoro, without downloading Pocket first.
+- [ ] Hands-free spoken replies default to Pocket (local). The Microsoft Edge voice is gone: it is not offered anywhere in Settings › Dictation or Voice.
+- [ ] Pocket TTS runs on the statically linked ONNX Runtime (`libloading` is gone).
+- [ ] Dictation: hold the hotkey, speak, release. The AI rewrite still runs when it is configured.
+- [ ] Settings in the real window: upstream's new layout (search, Expert, grouped nav, cards) in FastAF's palette, in both themes. This is the largest visible change in the sync.
+- [ ] The orphan-worktree dialog: with it open, the sidebar's diff counts still update behind it.
+- [ ] Remote access: turn it off and on again; the QR code shows a new token and a phone paired before is signed out.
+- [ ] Remote access with one network picked: `lsof -nP -iTCP -sTCP:LISTEN | grep FastAF` shows that IP and 127.0.0.1, not `*:9876`. A plain-http pairing link shows the unencrypted warning.
+- [ ] A config with `speech_engine: "edge"` speaks with Pocket; a config with `update_channel: "beta"` shows Nightly in Settings › General.
+- [ ] Terminal "Toggle AI Suggestions" (tab context menu): a failing command in that terminal shows a toast with "Investigate", which opens AI Chat on that terminal.
+- [ ] Help › Licenses opens the bundled notices in a Markdown tab.
+- [ ] Scheduled tasks: Settings › AI Chat lists the jobs in an existing `ai-cron.json`. Add an "Every 5 minutes" task; within 5 minutes a `cron:job-…` terminal opens, the agent runs and a "Scheduled task completed" toast appears on any screen. A "Runs once" task turns itself off.
+- [ ] Scheduled task approval: a task whose agent wants a destructive command (e.g. goal "delete the build folder") shows a sticky toast "Scheduled task wants to run: …" naming the task's goal, with Approve and Deny. Deny refuses it; a second click on the same toast does nothing.
+- [ ] Scheduled tasks reuse their terminal: the second run of an "Every 5 minutes" task types into the same `cron:job-…` terminal. Close that terminal and the next run opens a new one.
+- [ ] Remote access paused: pick the Tailscale address, then stop Tailscale (or pick an address and switch that interface off). Settings › Remote Access shows "Remote access paused: … isn't on this Mac yet", the QR row is hidden, and `lsof` shows only 127.0.0.1. Bring Tailscale back: within a few seconds FastAF listens on that address again.
+- [ ] Terminal look in the real window: the CLI | Chat pill is a faint outline while the pointer is on the terminal and solid when pointed at; Chat's Find bar (⌘F in Chat) matches the CLI Find bar.
+- [ ] Shell installer, on the first release built from this branch: `curl -fsSL …/install.sh | sh` replaces /Applications/FastAF.app only after the signature check passes. Never test this with a local build (see the release flow).
+- [ ] `make build` on a machine with meson and ninja installed (`pip install meson==1.11.2 ninja==1.13.2`); the dictation crate's webrtc build needs both.
+
 ## Right-panel redesign: Git panel and Files (2026-10-22)
 
 Frontend only. 130 harness scenes × 2 themes were shot in headless WebKit
@@ -817,7 +846,7 @@ display-only metadata from the original spawn prompt.
 - [ ] [VISUAL] Live (needs rebuild): search inside a diff tab → orange match ticks appear on the diff scrollbar and track scroll. _(2026-08-21 Luna audit: shared SearchBar/search-overview code and targeted SearchBar/editor tests passed; no diff editor was active in the browser DOM, so trusted query/scroll observation was skipped.)_
 - [ ] [VISUAL] Live (needs rebuild): editor scrollbar visually matches the terminal's (14px track, rounded inset thumb). _(2026-08-21 Luna audit: source inspection confirms the shared scrollbar rule in `src/components/CodeEditorPanel/theme.ts:22-23` and 14px search ruler in `searchOverview.ts:103-123`; no editor canvas was active for a visual comparison.)_
 - [ ] [VISUAL] Live (needs rebuild): open a file deep in a subtree → the file browser (tree view) auto-expands its parents and scrolls it into view, highlighted with the accent bar. Switching the active editor tab moves the highlight. _(2026-08-21 Luna audit: `src/components/FileBrowserPanel/FileBrowserPanel.tsx:260-289` implements ancestor expansion/scroll and targeted FileBrowser tests passed; the browser had no safe throwaway repo/editor target, so no click was made.)_
-- [ ] [VISUAL] Live (needs rebuild, story 443-ea2b): install/enable the `docx-preview` plugin, open a `.docx` from File Browser, and confirm it opens the Mammoth HTML preview panel with conversion notes/raw-text toggle; Edit opens the same file in CodeMirror. Requires backend restart because `host.readFileBase64()` is Rust-backed. _(2026-08-21 Luna audit: `plugins/docx-preview/main.js:8-64` and plugin-host tests were inspected; `GET /plugins/list` did not list `docx-preview`, and installing/opening a DOCX would require config/repo mutation plus the Rust restart explicitly called out here.)_
+- [ ] [VISUAL] Live (needs rebuild, story 443-ea2b): install/enable the `docx-preview` plugin, open a `.docx` from File Browser, and confirm it opens the Mammoth HTML preview panel with conversion notes/raw-text toggle; Edit opens the same file in CodeMirror. Requires backend restart because `host.readFileBase64()` is Rust-backed. _(2026-08-21 Luna audit: `plugins/docx-preview/main.js:8-64` and plugin-host tests were inspected; `GET /plugins/list` did not list `docx-preview`, and installing/opening a DOCX would require config/repo mutation plus the Rust restart explicitly called out here.)_ _(NOTE 2026-11-03: FastAF does not ship `docx-preview`; upstream's plugin repository has no license and `plugins/` is gone from this repository. Testable only with a copy the tester obtains and installs from a folder or `.zip`.)_
 - [ ] DEFERRED (story 041-cd15): HTML Preview search → shared SearchBar (in-iframe search needs a postMessage bridge); shared sidebar-filter component for Error Log / Knowledge History / Branch Switcher etc. ("consistency of a different kind" for narrow sidebars).
 - [ ] [VISUAL] Live (story 040-29e1): open a tracked file in the code editor → a dim italic annotation "Author · relative time · summary" appears at the end of the active line and follows the cursor (no flicker, no fetch per keystroke). Edit a line → it shows "You · Uncommitted changes". Toggle `settingsStore.setInlineBlameEnabled(false)` → annotation disappears. External (absolute-path) files show no annotation. _(2026-08-21 Luna audit: `inlineBlame.test.ts` passed and `CodeEditorTab.tsx:453-488` confirms reactive enable/fetch behavior; no tracked editor was activated, and editing the dirty worktree was intentionally skipped.)_
 

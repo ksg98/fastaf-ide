@@ -20,7 +20,7 @@ All values below were captured live from a real PTY session (raw ANSI), not infe
 **Process identity gotcha.** `proc_pidpath()` (macOS) and `/proc/<pid>/comm` (Linux) both return
 the **node** interpreter for a pi session, not `pi`. Foreground-process classification therefore
 falls back to `argv[0]` for known interpreters — see `is_script_interpreter` in `pty.rs` and
-`read_process_argv0` in `process_env.rs`. Without that fallback pi is invisible as an agent.
+`read_process_argv0` in `tuic-core/src/process_env.rs`. Without that fallback pi is invisible as an agent.
 
 ## Bottom zone
 
@@ -85,7 +85,7 @@ it sits on so every spinner frame collapses to one stable name (`π | tuicommand
 | Clear to line start | `ctrl+u` (`tui.editor.deleteToLineStart`) |
 | Interrupt | `ctrl+c` (`app.clear`) |
 
-`sendCommand`'s agent path (Ctrl-U prefix, 50ms gap, separate `\r`) is correct for pi as-is —
+`sendCommand`'s agent path (Ctrl-U alone, 50ms gap, text, 50ms gap, separate `\r`) is correct for pi as-is —
 `ctrl+u` is a real binding, so the prefix is consumed rather than echoed.
 
 ## Not yet observed

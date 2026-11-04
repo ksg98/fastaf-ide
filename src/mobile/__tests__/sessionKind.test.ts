@@ -30,6 +30,16 @@ describe("session kind", () => {
 });
 
 describe("ptysLast", () => {
+	it("puts every waiting session before idle agents and shells", () => {
+		const idle = session("idle", "claude");
+		const waitingShell = { ...session("waiting-shell"), state: { awaiting_input: true } } as SessionInfo;
+		const waitingAgent = {
+			...session("waiting-agent", "codex"),
+			state: { agent_type: "codex", awaiting_input: true },
+		} as SessionInfo;
+		const ordered = ptysLast([idle, waitingShell, waitingAgent]);
+		expect(ordered.map((item) => item.session_id)).toEqual(["waiting-shell", "waiting-agent", "idle"]);
+	});
 	it("moves plain shells below the agents", () => {
 		const ordered = ptysLast([
 			session("shell-1", null),

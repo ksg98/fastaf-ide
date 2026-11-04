@@ -89,6 +89,38 @@ export async function startContentSearch(
 		files_skipped: result?.files_skipped ?? 0,
 		truncated: result?.truncated ?? false,
 		repos_pending: result?.repos_pending ?? 0,
+		repos_indexing: result?.repos_indexing ?? 0,
 		repos_searched: result?.repos_searched ?? 0,
 	});
+}
+
+/**
+ * What to say when a content search found nothing.
+ *
+ * A cross-repo search can only cover repos whose index is already built, so
+ * "No results" alone is a lie while others are unsearched. The old message went
+ * the other way and claimed they were all "still indexing, retry shortly" —
+ * also a lie: under the default `active_and_switch` strategy an unvisited repo
+ * is queued for nothing, and retrying forever changes nothing.
+ *
+ * `reposIndexing` is the backend's count of builds actually in flight
+ * (`ContentSearchResult::repos_indexing`), and it is the only part of the
+ * pending set a retry can resolve. Splitting the sentence on it is what keeps
+ * the wording and the scheduler honest with each other.
+ */
+export function contentSearchEmptyMessage(counts: {
+	reposSearched: number;
+	reposPending: number;
+	reposIndexing: number;
+}): string {
+	if (counts.reposPending <= 0) return "No results";
+	// Clamped: a backend that predates `repos_indexing` sends 0, and one that
+	// disagreed with itself must still not render a negative "not indexed" count.
+	const indexing = Math.min(counts.reposIndexing, counts.reposPending);
+	const unscheduled = counts.reposPending - indexing;
+	const parts: string[] = [];
+	if (indexing > 0) parts.push(`${indexing} still indexing (retry shortly)`);
+	if (unscheduled > 0) parts.push(`${unscheduled} not indexed`);
+	const scope = `${counts.reposSearched} repo${counts.reposSearched === 1 ? "" : "s"}`;
+	return `No results in ${scope} — ${parts.join(", ")}`;
 }

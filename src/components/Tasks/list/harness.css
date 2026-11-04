@@ -1,0 +1,3 @@
+html, body, #tasks-harness { height: 100%; margin: 0; }
+.stress-list { height: 100%; display: flex; flex-direction: column; background: var(--bg-primary); color: var(--fg-primary); }
+.stress-list h1 { font: 600 var(--font-lg) var(--font-ui); padding: 12px; margin: 0; background: var(--bg-secondary); }

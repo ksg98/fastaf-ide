@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render } from "@solidjs/testing-library";
+import { marked } from "marked";
 import { createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
-import { ContentRenderer, stripEventHandlers } from "../../components/ui/ContentRenderer";
+import { applyCommentBlockMetadata, ContentRenderer, stripEventHandlers } from "../../components/ui/ContentRenderer";
+import { appLogger } from "../../stores/appLogger";
+import { handleOpenUrl } from "../../utils/openUrl";
 import { stripAnsi } from "../../utils/stripAnsi";
+import { findTweakCommentBlocks, insertTweakBlockComment } from "../../utils/tweakComments";
+
+vi.mock("../../utils/openUrl", () => ({ handleOpenUrl: vi.fn() }));
 
 describe("stripAnsi", () => {
 	it("strips ANSI escape codes", () => {
@@ -39,6 +45,151 @@ describe("stripEventHandlers", () => {
 });
 
 describe("ContentRenderer", () => {
+	// Catches: shared copy actions duplicate on streaming updates, copy their label, or outlive their callback.
+	it.each([false, true])("keeps one live code-copy action across updates (incremental=%s)", async (incremental) => {
+		const [content, setContent] = createSignal("```sh\nprintf '%s' geometry\n```\n");
+		const [enabled, setEnabled] = createSignal(true);
+		const copy = vi.fn();
+		const { container } = render(() => (
+			<ContentRenderer content={content()} incremental={incremental} onCodeCopy={enabled() ? copy : undefined} />
+		));
+		await Promise.resolve();
+		setContent((text) => `${text}\nA later streaming paragraph.\n`);
+		await Promise.resolve();
+		const buttons = container.querySelectorAll<HTMLButtonElement>("button[data-copy-code]");
+		expect(buttons).toHaveLength(1);
+		fireEvent.click(buttons[0]);
+		expect(copy).toHaveBeenCalledExactlyOnceWith("printf '%s' geometry");
+		setEnabled(false);
+		await Promise.resolve();
+		expect(container.querySelector("button[data-copy-code]")).toBeNull();
+	});
+
+	it("annotates rendered markdown blocks with exact source ranges when comments are enabled", async () => {
+		const source = "# Heading\n\nA **formatted** [paragraph](SPEC.md).";
+		const { container } = render(() => <ContentRenderer content={source} commentableBlocks />);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+		const heading = container.querySelector("h1") as HTMLElement;
+		const paragraph = container.querySelector("p") as HTMLElement;
+		expect(source.slice(Number(heading.dataset.commentSourceStart), Number(heading.dataset.commentSourceEnd))).toBe(
+			"# Heading",
+		);
+		expect(source.slice(Number(paragraph.dataset.commentSourceStart), Number(paragraph.dataset.commentSourceEnd))).toBe(
+			"A **formatted** [paragraph](SPEC.md).",
+		);
+	});
+
+	// Catches: assigning the list's range to every item or omitting nested/task/ordered items.
+	it("gives each plain, task, nested, and ordered item its own source target", async () => {
+		const source = "- parent\n  - nested\n- [ ] task\n- sibling\n\n1. ordered\n";
+		const { container } = render(() => <ContentRenderer content={source} commentableBlocks />);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		const items = Array.from(container.querySelectorAll<HTMLElement>("li[data-comment-source-start]"));
+		expect(items).toHaveLength(5);
+		expect(
+			items.map((item) => source.slice(Number(item.dataset.commentSourceStart), Number(item.dataset.commentSourceEnd))),
+		).toEqual(["- parent", "  - nested", "- [ ] task", "- sibling", "1. ordered"]);
+		expect(container.querySelector("ul[data-comment-source-start]")).toBeNull();
+		expect(container.querySelector("ol[data-comment-source-start]")).toBeNull();
+	});
+
+	it("refreshes comment source ranges and highlights when a saved file replaces the rendered source", async () => {
+		const initial = "1. First question\n2. Second question\n";
+		const [source, setSource] = createSignal(initial);
+		const first = findTweakCommentBlocks(initial).find((block) => block.tag === "LI")!;
+		const { container } = render(() => <ContentRenderer content={source()} commentableBlocks />);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		setSource(
+			insertTweakBlockComment(
+				initial,
+				{
+					id: "c_first",
+					highlighted: initial.slice(first.start, first.end),
+					comment: "Yes",
+					createdAt: "2026-09-27T12:00:00.000Z",
+				},
+				first,
+			),
+		);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		const items = Array.from(container.querySelectorAll<HTMLElement>("li"));
+		expect(Number(items[0].dataset.commentSourceStart)).toBeGreaterThan(initial.length);
+		expect(items[0].classList.contains("tweak-block-highlight")).toBe(true);
+	});
+
+	// Catches: retracting one source-only block comment clears surviving or inline comments too.
+	it("reconciles externally removed block comments while preserving surviving and inline metadata", async () => {
+		const marker = "<!--tweak:block:c_remove @2026-10-26T12:00:00.000Z\nRemove note-->\n";
+		const remaining = "<!--tweak:block:c_keep @2026-10-26T12:00:00.000Z\nKeep note-->\n";
+		const tail =
+			"Second.\n\n<!--tweak:begin:c_inline-->Inline<!--tweak:end:c_inline @2026-10-26T12:00:00.000Z\nInline note-->\n";
+		const [source, setSource] = createSignal(`${marker}First.\n\n${remaining}${tail}`);
+		const { container } = render(() => <ContentRenderer content={source()} commentableBlocks />);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		const first = container.querySelector<HTMLElement>("p")!;
+		const inline = container.querySelector<HTMLElement>(".tweak-highlight")!;
+		setSource(`First.\n\n${remaining}${tail}`);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		expect(container.querySelector("p")).toBe(first);
+		expect(first.classList.contains("tweak-block-highlight")).toBe(false);
+		expect(first.dataset.tweakId).toBeUndefined();
+		expect(first.dataset.tweakAt).toBeUndefined();
+		expect(first.dataset.tweakComment).toBeUndefined();
+		expect(container.querySelectorAll(".tweak-block-highlight")).toHaveLength(1);
+		expect(container.querySelector<HTMLElement>(".tweak-block-highlight")?.dataset.tweakId).toBe("c_keep");
+		expect(inline.dataset.tweakId).toBe("c_inline");
+	});
+
+	it("keeps structural markdown intact and highlights an existing block comment", async () => {
+		const source = "# Heading\n\nParagraph.";
+		const heading = findTweakCommentBlocks(source)[0];
+		const commented = insertTweakBlockComment(
+			source,
+			{
+				id: "c_heading",
+				highlighted: source.slice(heading.start, heading.end),
+				comment: "Clarify this heading",
+				createdAt: "2026-09-22T12:00:00.000Z",
+			},
+			heading,
+		);
+
+		const { container } = render(() => <ContentRenderer content={commented} commentableBlocks />);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+		const renderedHeading = container.querySelector("h1");
+		expect(renderedHeading?.textContent).toBe("Heading");
+		expect(renderedHeading?.classList.contains("tweak-block-highlight")).toBe(true);
+		expect(renderedHeading?.getAttribute("data-tweak-id")).toBe("c_heading");
+	});
+
+	it("annotates a CRLF document with ranges that slice exactly the rendered block", async () => {
+		const source = "# Heading\r\n\r\nFirst line\r\nsecond line\r\n\r\nLast.\r\n";
+		const { container } = render(() => <ContentRenderer content={source} commentableBlocks />);
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+		const ranges = Array.from(container.querySelectorAll<HTMLElement>("[data-comment-source-start]")).map((el) =>
+			source.slice(Number(el.dataset.commentSourceStart), Number(el.dataset.commentSourceEnd)),
+		);
+		expect(ranges).toEqual(["# Heading", "First line\r\nsecond line", "Last."]);
+	});
+
+	// Metadata runs after every render of a file tab; it must lex the document once.
+	it("lexes the source once when attaching block metadata", () => {
+		const source = "<!--tweak:block:c_h @2026-09-23T08:00:00.000Z\nnote-->\n# Heading\n\nParagraph.";
+		const container = document.createElement("div");
+		container.innerHTML = "<div><h1>Heading</h1><p>Paragraph.</p></div>";
+		const lexer = vi.spyOn(marked, "lexer");
+		try {
+			applyCommentBlockMetadata(container, source);
+			expect(lexer).toHaveBeenCalledTimes(1);
+		} finally {
+			lexer.mockRestore();
+		}
+		expect(container.querySelector("h1")?.dataset.tweakId).toBe("c_h");
+	});
+
 	it("renders markdown content as HTML", () => {
 		const { container } = render(() => <ContentRenderer content="# Hello" />);
 		const content = container.querySelector("#markdown-content");
@@ -103,12 +254,126 @@ describe("ContentRenderer", () => {
 		expect(onLinkClick).not.toHaveBeenCalled();
 	});
 
-	it("does not intercept .md links when onLinkClick is not provided", () => {
-		const { container } = render(() => <ContentRenderer content="See [readme](docs/README.md) for details" />);
-		const link = container.querySelector('a[href="docs/README.md"]') as HTMLAnchorElement;
-		expect(link).not.toBeNull();
-		// Should not throw when clicked without handler
-		fireEvent.click(link);
+	it("prevents a local link when no file handler is provided", () => {
+		const debug = vi.spyOn(appLogger, "debug").mockImplementation(() => {});
+		try {
+			const { container } = render(() => <ContentRenderer content="See [readme](docs/README.md) for details" />);
+			const link = container.querySelector('a[href="docs/README.md"]') as HTMLAnchorElement;
+			expect(link).not.toBeNull();
+			const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+			link.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(true);
+			expect(debug).toHaveBeenCalledExactlyOnceWith("app", "Markdown link has no file handler", {
+				href: "docs/README.md",
+			});
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it.each([
+		"doc.md#section",
+		"src/main.rs",
+		"src/App.tsx",
+		"script.sh",
+		"Makefile",
+		"LICENSE",
+		"docs/",
+		"#heading",
+		"/tmp/file.py",
+		"file.rs:42",
+		"file.rs#L42",
+		"My%20File.md",
+		"./doc.md",
+		"//attacker.example/share/readme.md",
+		"file://etc/passwd",
+		"javascript:alert(1)",
+		"javascript:42",
+		"data:text/plain,hi",
+	])("never lets rendered link %s navigate the webview", (href) => {
+		const debug = vi.spyOn(appLogger, "debug").mockImplementation(() => {});
+		try {
+			const onLinkClick = vi.fn();
+			const { container } = render(() => <ContentRenderer content={`[link](${href})`} onLinkClick={onLinkClick} />);
+			const link = container.querySelector("a") as HTMLAnchorElement | null;
+			if (!link) return; // DOMPurify may remove unsafe links entirely.
+			const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+			link.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(true);
+			if (href.startsWith("file:") || href.startsWith("javascript:") || href.startsWith("data:")) {
+				expect(debug).toHaveBeenCalledExactlyOnceWith("app", "Blocked Markdown link scheme", { href });
+			} else expect(debug).not.toHaveBeenCalled();
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it.each(["https://example.com", "http://example.com", "mailto:boss@example.com"])(
+		"opens %s explicitly without navigating the webview",
+		(href) => {
+			vi.mocked(handleOpenUrl).mockClear();
+			const onLinkClick = vi.fn();
+			const { container } = render(() => <ContentRenderer content={`[link](${href})`} onLinkClick={onLinkClick} />);
+			const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+			container.querySelector("a")!.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(true);
+			expect(handleOpenUrl).toHaveBeenCalledWith(href);
+			expect(onLinkClick).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["src/main.rs", "file.rs:42", "Makefile:42", "My%20File.md", "docs/", "#heading"])(
+		"passes local link %s to its file handler",
+		(href) => {
+			const onLinkClick = vi.fn();
+			const { container } = render(() => <ContentRenderer content={`[link](${href})`} onLinkClick={onLinkClick} />);
+			const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+			container.querySelector("a")!.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(true);
+			expect(onLinkClick).toHaveBeenCalledWith(href);
+		},
+	);
+
+	it("blocks a numeric-suffixed URI scheme instead of treating it as a file line", () => {
+		const debug = vi.spyOn(appLogger, "debug").mockImplementation(() => {});
+		try {
+			const onLinkClick = vi.fn();
+			const { container } = render(() => <ContentRenderer content="[bad](javascript:42)" onLinkClick={onLinkClick} />);
+			const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+			container.querySelector("a")!.dispatchEvent(event);
+			expect(event.defaultPrevented).toBe(true);
+			expect(onLinkClick).not.toHaveBeenCalled();
+			expect(debug).toHaveBeenCalledExactlyOnceWith("app", "Blocked Markdown link scheme", { href: "javascript:42" });
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it.each([
+		'<a data-tuic-href="https://evil.example" href="docs/guide.md">guide</a>',
+		"<a data-tuic-href='https://evil.example' href='docs/guide.md'>guide</a>",
+		'<a data-tuic-href=https://evil.example href="docs/guide.md">guide</a>',
+		'<a data-tuic-href="https://evil.example/?q=>" href="docs/guide.md">guide</a>',
+		'<a data-tuic-href href="docs/guide.md">guide</a>',
+		'<a href="docs/guide.md" href="https://evil.example" data-tuic-href="https://evil.example">guide</a>',
+		"<a href='docs/guide.md' href=\"https://evil.example\" data-tuic-href='https://evil.example'>guide</a>",
+		'<A DATA-TUIC-HREF="https://evil.example" HREF="docs/guide.md">guide</A>',
+	])("does not let raw HTML pre-seed the dispatched link", (content) => {
+		vi.mocked(handleOpenUrl).mockClear();
+		const onLinkClick = vi.fn();
+		const { container } = render(() => <ContentRenderer content={content} onLinkClick={onLinkClick} />);
+		fireEvent.click(container.querySelector("a")!);
+		expect(onLinkClick).toHaveBeenCalledWith("docs/guide.md");
+		expect(handleOpenUrl).not.toHaveBeenCalledWith("https://evil.example");
+	});
+
+	it("removes forms and image-map links from raw Markdown HTML", () => {
+		const { container } = render(() => (
+			<ContentRenderer
+				content={'<form action="?mode=panel"><button>go</button></form><map><area href="?mode=panel"></map>'}
+			/>
+		));
+		expect(container.querySelector("form, map, area")).toBeNull();
 	});
 
 	describe("image src sanitization", () => {
@@ -122,6 +387,25 @@ describe("ContentRenderer", () => {
 			const img = container.querySelector("img") as HTMLImageElement;
 			expect(img).not.toBeNull();
 			expect(img.getAttribute("src")).toBe("asset://localhost/Users/me/repo/assets/diagram.png");
+		});
+
+		it("resolves a relative image against baseDir for a file outside any repository", () => {
+			const { container } = render(() => (
+				<ContentRenderer content="![x](img/x.png)" baseDir="/Users/me/Gits/.tmp/boss" />
+			));
+			expect(container.querySelector("img")?.getAttribute("src")).toBe(
+				"asset://localhost/Users/me/Gits/.tmp/boss/img/x.png",
+			);
+		});
+
+		// Catches: absolute path concatenated onto baseDir (`<baseDir>//Users/...`).
+		it("maps an absolute image path to the asset protocol without prefixing baseDir", () => {
+			const { container } = render(() => (
+				<ContentRenderer content="![x](/Users/me/Gits/.tmp/boss/img/x.png)" baseDir="/Users/me/other" />
+			));
+			expect(container.querySelector("img")?.getAttribute("src")).toBe(
+				"asset://localhost/Users/me/Gits/.tmp/boss/img/x.png",
+			);
 		});
 
 		it("preserves tauri:// image src through sanitization", () => {
@@ -141,6 +425,18 @@ describe("ContentRenderer", () => {
 	});
 
 	describe("GFM task-list checkboxes", () => {
+		it("ignores checkbox-shaped lines inside block comment bodies when mapping source lines", () => {
+			const onToggle = vi.fn();
+			const md =
+				"<!--tweak:block:c_tasks @2026-09-23T08:00:00.000Z\n- [ ] Mentioned only in the comment-->\n- [ ] Real task";
+			const { container } = render(() => <ContentRenderer content={md} onCheckboxToggle={onToggle} />);
+			const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+
+			expect(checkbox?.dataset.sourceLine).toBe("2");
+			fireEvent.click(checkbox!);
+			expect(onToggle).toHaveBeenCalledWith(2, "x");
+		});
+
 		it("renders checkboxes as enabled input elements with data-source-line", () => {
 			const md = "- [ ] First\n- [x] Second\n- [ ] Third";
 			const { container } = render(() => <ContentRenderer content={md} />);
@@ -371,6 +667,20 @@ describe("ContentRenderer incremental mode", () => {
 		expect(codes.length).toBe(1);
 		expect(codes[0].textContent).toContain("const a = 1;");
 		expect(codes[0].textContent).toContain("const b = 2;");
+	});
+
+	// A streaming tick must cost the tail alone; block comments are a file-tab
+	// feature, so the answer is never lexed for block ranges.
+	it("does not lex the whole answer for block comments on a streaming tick", async () => {
+		const lexer = vi.spyOn(marked, "lexer");
+		try {
+			const { setContent } = streamed("<!--tweak:block:c_q @0\nquoted-->\nFirst.\n\n");
+			setContent("<!--tweak:block:c_q @0\nquoted-->\nFirst.\n\nSecond.\n");
+			await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+			expect(lexer).not.toHaveBeenCalled();
+		} finally {
+			lexer.mockRestore();
+		}
 	});
 
 	it("re-renders from scratch when the content is replaced rather than appended", () => {

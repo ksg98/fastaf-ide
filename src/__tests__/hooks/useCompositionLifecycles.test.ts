@@ -18,7 +18,9 @@ vi.mock("../../hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: mockK
 vi.mock("../../plugins", () => ({ initPlugins: mockPlugin.init }));
 vi.mock("../../plugins/pluginRegistry", () => ({ pluginRegistry: { notifyStateChange: mockPlugin.notify } }));
 vi.mock("../../stores/appLogger", () => ({ appLogger: { error: vi.fn() } }));
-vi.mock("../../stores/repositories", () => ({ repositoriesStore: { state: { activeRepoPath: "/repo" } } }));
+vi.mock("../../stores/repositories", () => ({
+	repositoriesStore: { state: { activeRepoPath: "/repo" }, getActive: () => null },
+}));
 vi.mock("../../stores/settings", () => ({ settingsStore: { state: { theme: "dark", font: "JetBrains Mono" } } }));
 vi.mock("../../themes", () => ({
 	applyAppTheme: mockAppearance.applyTheme,

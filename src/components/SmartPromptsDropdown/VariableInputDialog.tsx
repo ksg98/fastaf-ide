@@ -1,6 +1,7 @@
 import { type Component, createSignal, For, onMount } from "solid-js";
 import { VARIABLE_DESCRIPTIONS } from "../../data/smartPromptsBuiltIn";
 import { registerModal } from "../../stores/modalStack";
+import { Button, Input } from "../ui";
 import s from "./VariableInputDialog.module.css";
 
 export interface VariableInputDialogProps {
@@ -48,10 +49,16 @@ export const VariableInputDialog: Component<VariableInputDialogProps> = (props) 
 
 	return (
 		<div class={s.overlay} onClick={props.onCancel}>
-			<form class={s.dialog} onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit}>
+			<form
+				class={s.dialog}
+				role="dialog"
+				aria-modal="true"
+				aria-label={props.promptName}
+				onClick={(e) => e.stopPropagation()}
+				onSubmit={handleSubmit}
+			>
 				<div class={s.header}>
 					<span class={s.title}>{props.promptName}</span>
-					<span class={s.subtitle}>Fill in the required values</span>
 				</div>
 
 				<div class={s.fields}>
@@ -61,10 +68,8 @@ export const VariableInputDialog: Component<VariableInputDialogProps> = (props) 
 							return (
 								<label class={s.field}>
 									<span class={s.fieldName}>{`{${varName}}`}</span>
-									<span class={s.fieldDesc}>{desc}</span>
-									<input
+									<Input
 										ref={i() === 0 ? (el) => (firstInputRef = el) : undefined}
-										class={s.fieldInput}
 										type="text"
 										placeholder={desc}
 										value={values()[varName] ?? ""}
@@ -77,12 +82,12 @@ export const VariableInputDialog: Component<VariableInputDialogProps> = (props) 
 				</div>
 
 				<div class={s.actions}>
-					<button type="button" class={s.cancelBtn} onClick={props.onCancel}>
+					<Button type="button" onClick={props.onCancel}>
 						Cancel
-					</button>
-					<button type="submit" class={s.submitBtn} disabled={!allFilled()}>
+					</Button>
+					<Button type="submit" variant="primary" disabled={!allFilled()}>
 						Run
-					</button>
+					</Button>
 				</div>
 			</form>
 		</div>

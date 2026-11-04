@@ -1,0 +1,8 @@
+// A fork is a second session, not a rename of the first.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/fork","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"fork"}
+{"step":"respond","to":"fork","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000bb","configOptions":[]}}
+{"step":"await_stdin_eof"}

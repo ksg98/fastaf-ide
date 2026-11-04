@@ -2,9 +2,13 @@
 
 ## File Browser Panel
 
+Drop files from Finder onto a folder or empty panel space to transfer them into that directory. A remote repository always receives a copy over its connected daemon; your Mac originals stay in place. Confirm directory recursion before copying folders. Existing destination names are skipped, as with local drops. Uploads are limited to 256 MiB (including archive overhead) and 10,000 entries per top-level source; symlinks and special files are not uploaded. The remote destination must be inside a registered repository. Executable scripts keep their safe permission bits, and filenames follow the destination platform rules. Slow uploads continue while data arrives; 30 seconds without data aborts the transfer.
+
 Toggle with `Cmd+E` or the Files icon at the right of the title bar. The file browser shows the directory tree of the active repository (or linked worktree when on a worktree branch).
 
 The file browser, Markdown viewer, and Diff panels are mutually exclusive — opening one closes any other that is open.
+
+The file browser opens in tree view by default. Use the toolbar buttons to switch between the tree and flat list. Your choice is saved.
 
 ### Navigation
 
@@ -12,6 +16,10 @@ The file browser, Markdown viewer, and Diff panels are mutually exclusive — op
 - **Enter** — Open a file or enter a directory
 - **Backspace** — Go up to the parent directory
 - **Breadcrumb** (list view) — The row under the search field shows where you are, starting with the folder's own name (`fastaf › src › components`). Click any segment to jump to that directory; click the first to return to the root
+
+Symbolic links show a link icon, target path and target kind (directory, file, or unavailable). The link text length is not shown as a file size. Opening a link outside the repository shows a target-specific refusal; it does not grant access to that target. Links inside the repository keep their existing open behavior.
+
+Delete removes the selected symbolic link, including an unavailable link, without deleting its target or target contents. A failed deletion shows the backend error in a persistent error notification.
 
 Directories are listed first, then files. Hover a row for its full path, its size and when it last changed. An empty folder says so and offers **New file**, which opens a name field in place (Enter creates the file, `Esc` cancels).
 
@@ -26,7 +34,9 @@ Click the sort button (the up/down arrows) in the panel header to switch sort or
 
 ### Live Refresh
 
-The panel watches the current directory for filesystem changes. When a file is created, deleted, or renamed outside the app, the listing refreshes automatically without a visible loading spinner.
+Successful drops refresh the listing and expanded tree folders immediately, including the source after a move and transfers accepted in the confirmation dialog.
+
+The panel watches the current directory and each visible expanded tree folder for filesystem changes. Files and folders created, deleted, or renamed outside the app appear automatically without manual refresh. This also applies to non-Git folders and nested Git repositories. Collapsed folders reload when expanded again, so they do not retain changes missed while unwatched.
 
 ### Git Status Indicators
 
@@ -126,6 +136,8 @@ Clicking a non-Markdown file opens it in an in-app code editor tab in the main t
 - **Syntax highlighting** — Auto-detected from file extension; disabled for files larger than 500 KB
 - **Line numbers**, bracket matching, active line highlight, indentation support
 - **Save** — `Cmd+S` saves the file when the editor tab is focused
+- **Wrap lines** — Click the wrap button in the editor header or press `Alt+Z` (`Option+Z` on macOS). Text, logs, unknown file types, and Markdown start wrapped; code starts unwrapped. The choice is remembered separately for text and code files on this client.
+- **Open links** — Hold `Cmd` (macOS) or `Ctrl` (Windows/Linux) to underline a link, then click it. HTTP(S) URLs open in the system browser. Markdown links and absolute, `~/`, file-relative, or repository-relative paths open in FastAF. Add `:line` to jump to a source line. Directories open in the File Browser; a missing path shows a toast.
 
 ### Read-Only Mode
 
@@ -150,4 +162,17 @@ When the editor has no unsaved changes, files reload silently when they change o
 
 `.md` and `.mdx` files open in the Markdown viewer panel instead of the code editor. The viewer renders Markdown with syntax-highlighted code blocks.
 
+Links in rendered Markdown stay inside FastAF: file links open a Markdown or media preview when supported, otherwise the code editor; directory links open the File Browser. `#heading` scrolls within a document, and `file.rs:42` or `file.rs#L42` opens the editor at that line. Relative paths resolve from the Markdown file, including percent-encoded spaces and local symlinks; direct UNC/network hrefs are refused. Missing files show a toast. Web and email links open with the system handler; other URL schemes are blocked.
+
 See [ai-agents.md](ai-agents.md) for how AI-generated plan files are detected and surfaced as a one-click shortcut to open in the viewer.
+
+Browser HTML and Markdown previews load local images only from open repositories and their linked worktrees, through the authenticated repository image route. Images outside those roots show “Image unavailable: outside open repositories.” Desktop asset loading is unchanged.
+
+Filename searches share a path-only inventory per repository. Repeated queries
+filter it in memory; result sizes and timestamps are read from disk for matches.
+Repository events invalidate the inventory, and a 60-second reconciliation
+bound covers roots without a repository watcher. Cold queries share one build
+per repository. Up to eight repository inventories are retained, with ten-minute
+idle eviction.
+
+Markdown image paths can use `.` and `..` to refer to images next to the document or in parent folders. The desktop preview resolves these segments before creating the local asset URL.

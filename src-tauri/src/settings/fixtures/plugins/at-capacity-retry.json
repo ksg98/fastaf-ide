@@ -1,0 +1,8 @@
+{
+  "retryDelayMs": 60000,
+  "maxRetriesPerWindow": 3,
+  "windowMs": 3600000,
+  "retryText": "retry last request",
+  "detectDebounceMs": 20000,
+  "tickerIntervalMs": 5000
+}

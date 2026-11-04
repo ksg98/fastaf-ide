@@ -17,6 +17,7 @@ from pathlib import Path
 class Client:
     def __init__(self, base_url: str, auth: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
+        self.token = None
         # The headless `tuic-remote` binary has no desktop loopback bypass, so it
         # demands Basic Auth even on 127.0.0.1. A desktop `make dev` instance does
         # not, which is why this is optional.
@@ -25,10 +26,20 @@ class Client:
             token = base64.b64encode(auth.encode()).decode()
             self.headers["Authorization"] = f"Basic {token}"
 
+    def use_session_token(self) -> None:
+        """Avoid repeating bcrypt on every request to an isolated headless server."""
+        self.token = self.request("GET", "/api/auth/session-token")["token"]
+        self.headers.pop("Authorization", None)
+
+    def url(self, path: str) -> str:
+        if self.token:
+            path += ("&" if "?" in path else "?") + urllib.parse.urlencode({"token": self.token})
+        return self.base_url + path
+
     def request(self, method: str, path: str, body: dict | None = None) -> dict:
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(
-            self.base_url + path,
+            self.url(path),
             data=data,
             method=method,
             headers=self.headers,
@@ -38,7 +49,7 @@ class Client:
 
     def request_bytes(self, path: str) -> bytes:
         request = urllib.request.Request(
-            self.base_url + path, method="GET", headers=self.headers
+            self.url(path), method="GET", headers=self.headers
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.read()
@@ -73,11 +84,14 @@ def verify(lines: list[str], count: int, scenario: str) -> None:
         for line in observed
         if line.startswith("REC-") and len(line) != len(expected_record(0))
     )
-    if missing or duplicates or unexpected or truncated:
+    reordered = [line for line in lines if line.startswith("REC-")] != [
+        expected_record(index) for index in range(count)
+    ]
+    if missing or duplicates or unexpected or truncated or reordered:
         raise AssertionError(
             f"{scenario} failed: missing={missing[:20]}, "
             f"duplicates={duplicates[:20]}, unexpected={unexpected[:20]}, "
-            f"truncated={truncated[:20]}"
+            f"truncated={truncated[:20]}, reordered={reordered}"
         )
 
 
@@ -108,6 +122,12 @@ def verify_reflow(lines: list[str], count: int) -> None:
         problems.append(f"duplicated={duplicates[:5]} ({len(duplicates)} total)")
     if truncated:
         problems.append(f"overlong={truncated[:5]} ({len(truncated)} total)")
+    expected_sequence = [value for index in range(count)
+                         for value in (expected_record(index)[:8 + index % 17],
+                                       expected_record(index))]
+    observed_sequence = [line for line in lines if line.startswith("REC-")]
+    if observed_sequence != expected_sequence:
+        problems.append("partial/full record sequence changed")
     if problems:
         raise AssertionError("reflow: " + "; ".join(problems))
 
@@ -193,18 +213,18 @@ def run_scenario(
     created = client.request(
         "POST",
         "/sessions",
-        {"rows": 12, "cols": 72, "shell": "/bin/zsh", "cwd": str(repo_root)},
+        {"rows": 12, "cols": 72, "shell": "/bin/sh", "cwd": str(repo_root)},
     )
     session_id = created["session_id"]
     try:
         command = (
             "python3 tests/terminal-stress/producer.py "
-            f"--scenario {scenario} --count {count}"
+            f"--controlled --scenario {scenario} --count {count}"
         )
         # Wait for the login shell to render its first prompt. Writing at a
-        # fixed short delay is racy under load: zsh initialization can still be
+        # fixed short delay is racy under load: shell initialization can still be
         # replacing the line discipline and the command may be partially lost.
-        shell_deadline = time.monotonic() + min(timeout_seconds, 10.0)
+        shell_deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < shell_deadline:
             initial = client.request(
                 "GET", f"/sessions/{session_id}/output?limit=256&format=text"
@@ -221,6 +241,19 @@ def run_scenario(
         client.request("POST", f"/sessions/{session_id}/write", {"data": command})
         time.sleep(0.01)
         client.request("POST", f"/sessions/{session_id}/write", {"data": "\r"})
+
+        # Do not race shell line editing/startup with terminal resize. Only
+        # start the workload once the producer has installed raw mode.
+        ready_deadline = time.monotonic() + timeout_seconds
+        ready_marker = f"TUIC_PRODUCER_READY:{scenario}"
+        while time.monotonic() < ready_deadline:
+            lines = read_all_lines(client, session_id)
+            if ready_marker in lines:
+                break
+            time.sleep(0.02)
+        else:
+            raise TimeoutError("producer did not establish the raw-mode handshake")
+        client.request("POST", f"/sessions/{session_id}/write", {"data": "g"})
 
         if scenario == "slash-pressure":
             ready_marker = "TUIC_STRESS_READY:slash-pressure"
@@ -327,6 +360,8 @@ def main() -> None:
 
     repo_root = Path(__file__).resolve().parents[2]
     client = Client(args.base_url, args.auth)
+    if args.auth:
+        client.use_session_token()
     scenarios = (
         (
             "atomic",

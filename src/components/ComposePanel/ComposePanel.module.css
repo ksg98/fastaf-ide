@@ -6,7 +6,7 @@
   bottom: 0;
   left: 0;
   right: 0;
-  height: 200px;
+  height: auto;
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
@@ -14,6 +14,7 @@
   box-shadow: var(--highlight-inset), var(--shadow-bottom-anchor);
   display: flex;
   flex-direction: column;
+  container-type: inline-size;
   z-index: var(--z-overlay);
   transform: translateY(100%);
   transition: transform var(--duration-base) var(--ease-out);
@@ -25,16 +26,29 @@
   pointer-events: auto;
 }
 
+/* Pinned: leave the overlay and take a slot in the terminal wrapper's flex
+   column, so the terminal content above shrinks and the PTY resizes to fit
+   instead of being drawn under the panel. */
+.panelPinned {
+  position: relative;
+  flex-shrink: 0;
+  box-shadow: none;
+  transition: none;
+}
+
 .editor {
-  flex: 1;
+  flex-shrink: 0;
+  --auto-grow-max-height: 96px;
   overflow: hidden;
 }
 
 .statusBar {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
-  padding: 3px 12px;
+  gap: 12px;
+  padding: 4px 8px 4px 12px;
   color: var(--fg-muted);
   font-size: var(--font-xs);
   font-family: var(--font-ui);
@@ -42,8 +56,54 @@
   user-select: none;
 }
 
-.actions {
+/* Legend: mirrors the command palette footer (`.footerHint kbd`). */
+.hints {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Split terminals can be compact even in a wide window. */
+@container (max-width: 640px) {
+  .hints {
+    display: none;
+  }
+}
+
+.hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.hint kbd {
+  display: inline-block;
+  padding: 0 5px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  line-height: 16px;
+}
+
+.divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
@@ -53,10 +113,6 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 20px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg-muted);
   font-size: var(--font-xs);
@@ -66,12 +122,10 @@
 
 .queueBadge:hover {
   color: var(--fg-primary);
-  border-color: var(--fg-muted);
 }
 
 .queueBadgeOpen {
   color: var(--fg-primary);
-  border-color: var(--fg-muted);
 }
 
 .queueChevron {
@@ -83,7 +137,8 @@
 }
 
 .queueList {
-  max-height: 120px;
+  /* The queue scrolls independently; it never consumes the reserved editor space. */
+  max-height: 78px;
   overflow-y: auto;
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
@@ -101,14 +156,11 @@
   user-select: none;
 }
 
-.queueClearAll {
-  border: none;
-  background: transparent;
+.queueClearAll {  background: transparent;
   color: var(--fg-muted);
   font-family: var(--font-ui);
   font-size: var(--font-xs);
   cursor: pointer;
-  padding: 0;
 }
 
 .queueClearAll:hover {
@@ -140,14 +192,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  border: none;
-  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
-  padding: 0;
   flex-shrink: 0;
 }
 
@@ -159,39 +206,36 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
-  padding: 0;
   flex-shrink: 0;
 }
 
 .queueButton:hover {
   color: var(--fg-primary);
-  border-color: var(--fg-muted);
 }
 
-.sendButton {
+.closeButton {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 20px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--text-on-accent);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-muted);
   cursor: pointer;
-  padding: 0;
   flex-shrink: 0;
-  box-shadow: var(--highlight-inset);
   transition: background var(--duration-fast) var(--ease-out);
 }
 
-.sendButton:hover {
-  background: var(--accent-hover);
+.closeButton:hover {
+  color: var(--fg-primary);
+  background: var(--chip-fill-hover);
+}
+
+.imageError {
+  padding: 4px 12px;
+  color: var(--error);
+  font-size: var(--font-xs);
+  font-family: var(--font-ui);
 }

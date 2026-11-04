@@ -6,7 +6,7 @@ import { decodeBinaryFrame, decodeStyledRange } from "../canvasTerminalUtils";
  *
  * The grid is the only place that knows a logical line spilled onto the next
  * display row, and it says so in bit 15 of the row's `col_count`
- * (`ROW_WRAPPED_FLAG` in src-tauri/src/terminal_grid.rs). Before that bit
+ * (`ROW_WRAPPED_FLAG` in src-tauri/crates/tuic-terminal/src/terminal_grid.rs). Before that bit
  * existed the decoders reported `isWrapped: false` for every row, which made the
  * suggest overlay's continuation scan dead code and left a wrapped
  * `suggest: [ … ]` block painted raw on screen.

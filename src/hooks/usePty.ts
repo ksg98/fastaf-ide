@@ -1,17 +1,21 @@
 import { appLogger } from "../stores/appLogger";
-import { isTauri, rpc } from "../transport";
+import { isTauri, owningConnectionFor, rpc } from "../transport";
 import type { OrchestratorStats, PtyConfig } from "../types";
 import { clearShellFamilyCache, getShellFamily, sendCommand as sendCommandUtil } from "../utils/sendCommand";
 import { browserCreatedSessions } from "./useAppInit";
 
-/** Pre-generate a session id for browser-mode creates and register it locally
- *  BEFORE the create RPC. The backend's `session-created` event is delivered to
- *  the browser over SSE, which can arrive before the RPC's HTTP response — so
+/** Pre-generate a session id for creates that travel over HTTP and register it
+ *  locally BEFORE the create RPC. The backend's `session-created` event is
+ *  delivered over SSE, which can arrive before the RPC's HTTP response — so
  *  registering the id up front closes that race window and the echo is dropped
  *  by the `session-created` listener instead of spawning a duplicate "PTY:" tab.
- *  Desktop (Tauri) has no such echo race, so the backend mints the id there. */
-function preRegisterBrowserSessionId(): string | undefined {
-	if (isTauri()) return undefined;
+ *
+ *  The desktop over Tauri IPC has no such echo race, but a desktop create for a
+ *  REMOTE repo is routed to that machine's daemon and does, which is why the
+ *  predicate is "not local", not "not Tauri" — the same one `rpc()` uses to
+ *  decide whether `write_pty` needs its per-session queue. */
+function preRegisterBrowserSessionId(command: string, args: Record<string, unknown>): string | undefined {
+	if (isTauri() && !owningConnectionFor(command, args)) return undefined;
 	const id = crypto.randomUUID();
 	browserCreatedSessions.add(id);
 	return id;
@@ -54,6 +58,14 @@ export interface QueuedCommand {
 	/** Stable across drains — deleting by list position would race the FIFO. */
 	id: number;
 	text: string;
+	/**
+	 * Who parked it. `user_command` is the operator's own Compose entry;
+	 * `notice` is a server wake pointing at the agent's inbox; `initial_prompt`
+	 * is a spawned child's task still waiting for its TUI to be ready. All three
+	 * block the composer identically. Desktop Compose lists all three for
+	 * diagnosis; the mobile prompt panel shows only operator user_command entries.
+	 */
+	kind: "user_command" | "notice" | "initial_prompt";
 }
 
 /** Active session info returned by list_active_sessions */
@@ -64,15 +76,36 @@ export interface ActiveSessionInfo {
 	worktree_branch: string | null;
 	display_name?: string | null;
 	display_name_is_custom: boolean;
+	/** The name was given by the agent spawn that created the session, and no
+	 *  user rename has replaced it. The agent's own OSC title must not override it. */
+	display_name_from_spawn?: boolean;
 	is_remote: boolean;
+	/** Session (or `$TUIC_SESSION`) of the agent that spawned this one. Only the
+	 *  resolved id is sent — never an unregistered caller's placeholder. */
+	parent_session?: string | null;
 	pty_description?: string | null;
+	/** Terminal alias (e.g. `tu-3`). The only record of it after a WebView reload:
+	 *  `term-alias-assigned` fires once, at spawn. */
+	alias?: string | null;
 	state?: {
 		shell_state?: "busy" | "idle";
 		agent_state?: "starting" | "working" | "awaiting_input" | "idle" | "completed";
 		agent_type?: string | null;
+		agent_intent?: string | null;
+		last_prompt?: string | null;
 		background_work?: boolean;
 		queued_commands?: number;
+		last_activity_ms?: number;
 	} | null;
+	/**
+	 * Which remote machine runs this session; absent for a local one. The list
+	 * holds both since #791-055e, and this is the only field that tells them
+	 * apart — everything else about a mirrored row is shaped like a local one on
+	 * purpose.
+	 */
+	connection_id?: string | null;
+	/** Live agent identity; may differ from the PTY's session_id. */
+	tuic_session?: string | null;
 }
 
 /** PTY hook for managing terminal sessions */
@@ -89,7 +122,7 @@ export function usePty() {
 
 	/** Create a new PTY session */
 	async function createSession(config: PtyConfig): Promise<string> {
-		const requestedId = preRegisterBrowserSessionId();
+		const requestedId = preRegisterBrowserSessionId("create_pty", { config });
 		const sessionId = await rpc<string>("create_pty", {
 			config: requestedId ? { ...config, session_id: requestedId } : config,
 		});
@@ -102,7 +135,10 @@ export function usePty() {
 		ptyConfig: PtyConfig,
 		worktreeConfig: WorktreeConfig,
 	): Promise<WorktreeResult> {
-		const requestedId = preRegisterBrowserSessionId();
+		const requestedId = preRegisterBrowserSessionId("create_pty_with_worktree", {
+			pty_config: ptyConfig,
+			worktree_config: worktreeConfig,
+		});
 		const result = await rpc<WorktreeResult>("create_pty_with_worktree", {
 			pty_config: requestedId ? { ...ptyConfig, session_id: requestedId } : ptyConfig,
 			worktree_config: worktreeConfig,
@@ -119,7 +155,7 @@ export function usePty() {
 	/** Send or insert text through the central agent-aware command path. */
 	async function sendCommand(sessionId: string, text: string, agentType?: string | null, submit = true): Promise<void> {
 		const shellFamily = await getShellFamily(sessionId);
-		await sendCommandUtil((data) => write(sessionId, data), text, agentType, shellFamily, submit);
+		await sendCommandUtil((data) => write(sessionId, data), text, agentType, shellFamily, submit, sessionId);
 	}
 
 	/** Hand a command to the backend's idle gate instead of typing it now: it is
@@ -127,7 +163,11 @@ export function usePty() {
 	 *  busy→idle transition, so a running turn is never steered.
 	 *  Rejects for non-agent sessions — a plain shell has no composer to wait for. */
 	async function enqueueCommand(sessionId: string, text: string): Promise<EnqueuedCommand> {
-		return await rpc<EnqueuedCommand>("enqueue_agent_command", { sessionId, text });
+		return await rpc<EnqueuedCommand>("enqueue_agent_command", {
+			sessionId,
+			text,
+			idempotencyKey: crypto.randomUUID(),
+		});
 	}
 
 	/** Drop every command still queued for a session. Returns how many were dropped. */

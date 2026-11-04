@@ -1,6 +1,7 @@
 import { batch } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { invoke } from "../invoke";
+import { settingsRefresh } from "../services/settingsRefresh";
 import { appLogger } from "./appLogger";
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,12 @@ export interface ProfileOptions {
 	server_alive_interval: number;
 	server_alive_count_max: number;
 	strict_host_key_checking: "Yes" | "AcceptNew";
+	/**
+	 * `ssh -C`. On by default: a tunnel usually carries a terminal stream, and
+	 * the WebSocket layer refuses to deflate a loopback peer precisely because a
+	 * tunnelled client's frames are compressed here instead.
+	 */
+	compression: boolean;
 }
 
 export type TunnelStatus =
@@ -73,6 +80,13 @@ function createTunnelsStore() {
 	});
 
 	const actions = {
+		startRemoteSync(): () => void {
+			return settingsRefresh.register({
+				section: "tunnels",
+				read: () => invoke<TunnelProfile[]>("list_tunnel_profiles"),
+				apply: (profiles) => setState("profiles", profiles ?? []),
+			});
+		},
 		/** Load profiles and active tunnels from backend */
 		async hydrate(): Promise<void> {
 			if (hydrated) return;

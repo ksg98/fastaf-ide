@@ -1,0 +1,1 @@
+{"v": 1, "sections": [{"section": "credentials", "items": [{"id": {"probe": "credentials.store", "subject": null}, "status": "not_checked", "detail": "no provider credentials are stored", "source": "the credential store", "remediation": "ego auth login PROVIDER"}]}]}

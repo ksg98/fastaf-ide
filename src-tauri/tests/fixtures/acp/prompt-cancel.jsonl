@@ -1,0 +1,12 @@
+// A cancel reaches a prompt that is still running, and only the prompt
+// response settles the turn.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before"}}}}
+{"step":"expect","method":"session/cancel","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"}}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"after"}}}}
+{"step":"respond","to":"prompt","result":{"stopReason":"cancelled"}}
+{"step":"await_stdin_eof"}

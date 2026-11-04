@@ -1,0 +1,14 @@
+// Deterministic host-ordering scenario; steer response and capabilities are real ego recordings.
+{"step":"expect","method":"initialize","capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-steer-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"prompt":[{"type":"text","text":"desktop"}]},"capture":"desktop"}
+{"step":"expect","method":"_ego/steer","params":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","prompt":[{"type":"text","text":"phone"}]},"capture":"steer"}
+{"step":"respond","to":"steer","result_file":"ego-steer-rejected.json"}
+{"step":"expect","method":"session/list","capture":"barrier"}
+{"step":"respond","to":"barrier","result":{"sessions":[]}}
+{"step":"respond","to":"desktop","result":{"stopReason":"end_turn"}}
+{"step":"expect","method":"session/prompt","params":{"prompt":[{"type":"text","text":"phone"}]},"capture":"phone"}
+{"step":"respond","to":"phone","result":{"stopReason":"end_turn"}}
+{"step":"expect_no_frame"}

@@ -3,6 +3,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
+/// The generic external-ingest contract owned by mdkb (030-9ce2).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalDocument {
+    pub title: String,
+    pub body: String,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExternalRecord {
+    pub id: String,
+    pub revision: i64,
+    pub document_id: Option<i64>,
+    pub deleted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdkbPing {
     pub pong: bool,
@@ -22,15 +38,46 @@ pub struct MdkbSymbol {
     pub scope_context: Option<String>,
 }
 
-/// `code_find`'s envelope. `total` is the unclamped match count, so a capped
-/// `symbols` cannot be mistaken for the whole set.
+/// `code_find`'s envelope on the wire.
+///
+/// Both counts are optional because a daemon that does not send them is a
+/// different fact from one that sends zero, and the two must not collapse: an
+/// absent `total` means "mdkb did not say how many there were", never "there
+/// were as many as arrived".
 ///
 /// `cfg(unix)` because only the socket client decodes it; the Windows stub
 /// answers without ever talking to a daemon.
 #[cfg(unix)]
 #[derive(Debug, Deserialize)]
 struct CodeFindResponse {
+    #[serde(default)]
+    total: Option<u32>,
+    #[serde(default)]
+    showing: Option<u32>,
     symbols: Vec<MdkbSymbol>,
+}
+
+/// What `code_find` found, and how much of it this is.
+///
+/// mdkb caps the rows at `limit.unwrap_or(50)` and ships `total` precisely so a
+/// capped list cannot read as the whole set. This client used to parse that
+/// count and throw it away, so fifty matches out of three hundred reached the
+/// UI looking exactly like fifty out of fifty, and raising the cap upstream
+/// would have changed a displayed number with no shape change to notice.
+///
+/// `total` is NOT `symbols.len()`. `None` means mdkb sent no count.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MdkbFindResult {
+    pub symbols: Vec<MdkbSymbol>,
+    pub total: Option<u32>,
+}
+
+impl MdkbFindResult {
+    /// Whether mdkb held rows back. `None` when it did not say — a caller that
+    /// must render a count has to show that it does not know one.
+    pub fn capped(&self) -> Option<bool> {
+        self.total.map(|total| total as usize > self.symbols.len())
+    }
 }
 
 // Unix sockets are not available on Windows
@@ -46,8 +93,8 @@ mod platform {
     pub struct MdkbClient;
 
     impl MdkbClient {
-        pub fn socket_path() -> PathBuf {
-            PathBuf::new()
+        pub fn socket_path() -> Option<PathBuf> {
+            None
         }
 
         pub async fn connect() -> Result<Self> {
@@ -97,8 +144,8 @@ mod platform {
             _root: &str,
             _name: &str,
             _kind: Option<&str>,
-        ) -> Result<Vec<MdkbSymbol>> {
-            Ok(vec![])
+        ) -> Result<MdkbFindResult> {
+            Ok(MdkbFindResult::default())
         }
     }
 }
@@ -109,12 +156,19 @@ mod platform {
     use anyhow::Context;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
     static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
     const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+    /// How long one request/response exchange may take before the client gives
+    /// up. A daemon that accepts the connection and then never answers used to
+    /// wedge the caller for ever — and, through the shared `MdkbDaemon` lock,
+    /// every other mdkb caller in the process with it.
+    const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
     fn unwrap_text_field(resp: &Value) -> Result<String> {
         match resp.get("text").and_then(Value::as_str) {
@@ -136,12 +190,43 @@ mod platform {
         serde_json::from_value(symbols.clone()).context("mdkb: parse code_graph symbols")
     }
 
+    /// Frame the request, send it, and read the framed reply.
+    ///
+    /// Split out of `call` so a single `timeout` can bound the whole exchange
+    /// while borrowing nothing but the socket.
+    async fn exchange(stream: &mut UnixStream, body: &[u8]) -> Result<Vec<u8>> {
+        let len = u32::try_from(body.len()).context("request too large")?;
+
+        stream.write_all(&len.to_le_bytes()).await?;
+        stream.write_all(body).await?;
+        stream.flush().await?;
+
+        let mut hdr = [0u8; 4];
+        stream
+            .read_exact(&mut hdr)
+            .await
+            .context("mdkb: read response header")?;
+        let resp_len = u32::from_le_bytes(hdr) as usize;
+        if resp_len == 0 || resp_len > MAX_RESPONSE_BYTES {
+            bail!("mdkb: invalid response length {resp_len}");
+        }
+
+        let mut resp_buf = vec![0u8; resp_len];
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .context("mdkb: read response body")?;
+        Ok(resp_buf)
+    }
+
     #[derive(Debug)]
     pub struct MdkbClient {
-        #[cfg(not(test))]
         stream: UnixStream,
-        #[cfg(test)]
-        pub(super) stream: UnixStream,
+        timeout: Duration,
+        /// Set when a deadline cut an exchange in half. The daemon may still
+        /// write the abandoned reply, and the next `call` would read it as its
+        /// own length header — so the connection can never be trusted again.
+        poisoned: bool,
     }
 
     #[derive(Debug, Deserialize)]
@@ -159,21 +244,50 @@ mod platform {
     }
 
     impl MdkbClient {
-        pub fn socket_path() -> PathBuf {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".mdkb/daemon-hook.sock")
+        /// mdkb's daemon socket, `~/.mdkb/daemon-hook.sock`. `None` when there
+        /// is no home directory: there is no shared fallback (a predictable
+        /// socket in `/tmp` is one any local user could plant).
+        pub fn socket_path() -> Option<PathBuf> {
+            Self::socket_path_in(dirs::home_dir())
+        }
+
+        pub(crate) fn socket_path_in(home: Option<PathBuf>) -> Option<PathBuf> {
+            home.map(|home| home.join(".mdkb/daemon-hook.sock"))
         }
 
         pub async fn connect() -> Result<Self> {
-            let path = Self::socket_path();
+            Self::connect_to(Self::socket_path()).await
+        }
+
+        pub(crate) async fn connect_to(path: Option<PathBuf>) -> Result<Self> {
+            let path =
+                path.context("mdkb: no home directory, so no daemon socket to connect to")?;
             let stream = UnixStream::connect(&path)
                 .await
                 .with_context(|| format!("mdkb: connect to {}", path.display()))?;
-            Ok(Self { stream })
+            Ok(Self {
+                stream,
+                timeout: CALL_TIMEOUT,
+                poisoned: false,
+            })
+        }
+
+        /// Build a client on an already-connected socket with an explicit
+        /// deadline. Tests use it to keep the suite fast.
+        #[cfg(test)]
+        pub(crate) fn from_stream(stream: UnixStream, timeout: Duration) -> Self {
+            Self {
+                stream,
+                timeout,
+                poisoned: false,
+            }
         }
 
         pub async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+            if self.poisoned {
+                bail!("mdkb: connection abandoned after a timeout, cannot send '{method}'");
+            }
+
             let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
             let req = json!({
                 "jsonrpc": "2.0",
@@ -182,27 +296,20 @@ mod platform {
                 "params": params,
             });
             let body = serde_json::to_vec(&req)?;
-            let len = u32::try_from(body.len()).context("request too large")?;
 
-            self.stream.write_all(&len.to_le_bytes()).await?;
-            self.stream.write_all(&body).await?;
-            self.stream.flush().await?;
-
-            let mut hdr = [0u8; 4];
-            self.stream
-                .read_exact(&mut hdr)
-                .await
-                .context("mdkb: read response header")?;
-            let resp_len = u32::from_le_bytes(hdr) as usize;
-            if resp_len == 0 || resp_len > MAX_RESPONSE_BYTES {
-                bail!("mdkb: invalid response length {resp_len}");
-            }
-
-            let mut resp_buf = vec![0u8; resp_len];
-            self.stream
-                .read_exact(&mut resp_buf)
-                .await
-                .context("mdkb: read response body")?;
+            // One deadline over the whole exchange, so a stalled write and a
+            // reply that never arrives are bounded by the same budget.
+            let resp_buf =
+                match tokio::time::timeout(self.timeout, exchange(&mut self.stream, &body)).await {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        self.poisoned = true;
+                        bail!(
+                            "mdkb: '{method}' timed out after {}ms",
+                            self.timeout.as_millis()
+                        );
+                    }
+                };
 
             let resp: RpcResponse =
                 serde_json::from_slice(&resp_buf).context("mdkb: parse response")?;
@@ -295,7 +402,7 @@ mod platform {
             root: &str,
             name: &str,
             kind: Option<&str>,
-        ) -> Result<Vec<MdkbSymbol>> {
+        ) -> Result<MdkbFindResult> {
             let mut params = json!({ "root": root, "name": name });
             if let Some(k) = kind {
                 params["kind"] = json!(k);
@@ -306,23 +413,123 @@ mod platform {
             // array: the row cap means `total` has to travel with the rows.
             let found: CodeFindResponse =
                 serde_json::from_str(&text).context("mdkb: parse code_find response")?;
-            Ok(found.symbols)
+            // `showing` must describe the rows that actually arrived. When it
+            // does not, this is not the envelope this client understands, and
+            // guessing which of the two numbers to believe would put a wrong
+            // count on screen. Say so instead.
+            if let Some(showing) = found.showing
+                && showing as usize != found.symbols.len()
+            {
+                bail!(
+                    "mdkb: code_find reported showing={showing} but sent {} rows",
+                    found.symbols.len()
+                );
+            }
+            Ok(MdkbFindResult {
+                symbols: found.symbols,
+                total: found.total,
+            })
         }
     }
 }
 
 pub use platform::MdkbClient;
 
+impl MdkbClient {
+    pub async fn external_list(&mut self, root: &str, source: &str) -> Result<Vec<ExternalRecord>> {
+        #[derive(Deserialize)]
+        struct Listing {
+            documents: Vec<ExternalRecord>,
+        }
+        let result = self
+            .call(
+                "external.list",
+                serde_json::json!({ "root": root, "source": source }),
+            )
+            .await?;
+        Ok(serde_json::from_value::<Listing>(result)?.documents)
+    }
+
+    pub async fn external_upsert(
+        &mut self,
+        root: &str,
+        source: &str,
+        id: &str,
+        revision: i64,
+        document: ExternalDocument,
+    ) -> Result<ExternalRecord> {
+        let params = serde_json::json!({
+            "root": root, "source": source, "id": id, "revision": revision,
+            "title": document.title, "body": document.body, "metadata": document.metadata,
+        });
+        self.external_mutation("external.upsert", params, id, revision)
+            .await
+    }
+
+    pub async fn external_delete(
+        &mut self,
+        root: &str,
+        source: &str,
+        id: &str,
+        revision: i64,
+    ) -> Result<ExternalRecord> {
+        self.external_mutation(
+            "external.delete",
+            serde_json::json!({
+                "root": root, "source": source, "id": id, "revision": revision,
+            }),
+            id,
+            revision,
+        )
+        .await
+    }
+
+    async fn external_mutation(
+        &mut self,
+        method: &str,
+        params: Value,
+        id: &str,
+        revision: i64,
+    ) -> Result<ExternalRecord> {
+        let record: ExternalRecord = serde_json::from_value(self.call(method, params).await?)?;
+        if record.id != id
+            || record.revision < revision
+            || record.deleted != record.document_id.is_none()
+        {
+            bail!("mdkb: inconsistent {method} acknowledgement");
+        }
+        Ok(record)
+    }
+}
+
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::path::Path;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
 
+    // Catches: a `/tmp` (or any shared) fallback when HOME is unresolvable.
+    #[test]
+    fn no_home_means_no_daemon_socket() {
+        assert_eq!(MdkbClient::socket_path_in(None), None);
+        assert_eq!(
+            MdkbClient::socket_path_in(Some(PathBuf::from("/h"))),
+            Some(PathBuf::from("/h/.mdkb/daemon-hook.sock"))
+        );
+    }
+
+    // Catches: connect() reaching for any socket when there is no path.
+    #[tokio::test]
+    async fn connect_without_socket_path_errors() {
+        let err = MdkbClient::connect_to(None).await.unwrap_err();
+        assert!(err.to_string().contains("no home directory"), "{err}");
+    }
+
     async fn spawn_mock_server() -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::short_socket_tempdir();
         let sock_path = dir.path().join("test.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let path = sock_path.clone();
@@ -433,9 +640,13 @@ mod tests {
         (path, handle)
     }
 
-    async fn connect_to_mock(path: &Path) -> platform::MdkbClient {
+    /// A deadline short enough to keep the suite fast, long enough that a
+    /// mock answering over a local socket is never a flake.
+    const TEST_TIMEOUT: Duration = Duration::from_millis(300);
+
+    async fn connect_to_mock(path: &Path) -> MdkbClient {
         let stream = UnixStream::connect(path).await.unwrap();
-        platform::MdkbClient { stream }
+        MdkbClient::from_stream(stream, TEST_TIMEOUT)
     }
 
     #[tokio::test]
@@ -493,10 +704,57 @@ mod tests {
         // swallows the error as "no results" — a silent, total blind spot.
         let (path, _server) = spawn_mock_server().await;
         let mut client = connect_to_mock(&path).await;
-        let symbols = client.code_find("/repo", "foo", None).await.unwrap();
-        assert_eq!(symbols.len(), 1, "envelope rows must be unwrapped");
-        assert_eq!(symbols[0].name, "foo");
-        assert_eq!(symbols[0].file_path, "src/main.rs");
+        let found = client.code_find("/repo", "foo", None).await.unwrap();
+        assert_eq!(found.symbols.len(), 1, "envelope rows must be unwrapped");
+        assert_eq!(found.symbols[0].name, "foo");
+        assert_eq!(found.symbols[0].file_path, "src/main.rs");
+    }
+
+    /// The mock answers `total: 7` with one row: a capped list. That count must
+    /// survive the parse, or the UI shows one match where there are seven.
+    #[tokio::test]
+    async fn a_capped_code_find_list_does_not_read_as_the_whole_set() {
+        let (path, _server) = spawn_mock_server().await;
+        let mut client = connect_to_mock(&path).await;
+        let found = client.code_find("/repo", "foo", None).await.unwrap();
+
+        assert_eq!(found.total, Some(7), "the unclamped count must survive");
+        assert_eq!(
+            found.capped(),
+            Some(true),
+            "one row out of seven matches is a capped list"
+        );
+    }
+
+    /// The other half of the same fact: a list that is complete must say so.
+    /// Without this, `capped()` could return `Some(true)` always and the test
+    /// above would still pass.
+    #[tokio::test]
+    async fn a_complete_code_find_list_is_not_reported_as_capped() {
+        let complete = MdkbFindResult {
+            symbols: vec![MdkbSymbol {
+                name: "foo".into(),
+                kind: "Function".into(),
+                file_path: "src/main.rs".into(),
+                line_start: 4,
+                line_end: Some(8),
+                signature: None,
+                scope_context: None,
+            }],
+            total: Some(1),
+        };
+        assert_eq!(complete.capped(), Some(false));
+    }
+
+    /// A daemon that sends no count leaves the question open. Answering it with
+    /// the row count would be the same lie in a quieter voice.
+    #[tokio::test]
+    async fn a_missing_total_is_unknown_not_complete() {
+        let silent = MdkbFindResult {
+            symbols: vec![],
+            total: None,
+        };
+        assert_eq!(silent.capped(), None);
     }
 
     #[tokio::test]
@@ -546,13 +804,202 @@ mod tests {
         assert!(err.to_string().contains("unknown tool: bad_method"));
     }
 
+    /// A daemon that accepts the connection and then goes silent. This is the
+    /// shape that used to hang `call` for ever.
+    pub(crate) async fn spawn_silent_server() -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let dir = crate::test_support::short_socket_tempdir();
+        let sock_path = dir.path().join("silent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let path = sock_path.clone();
+
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            // Never reached: the task owns the accepted connection and the
+            // temp dir so both outlive every client the test builds.
+            drop((stream, dir));
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        (path, handle)
+    }
+
+    #[tokio::test]
+    async fn call_times_out_when_the_daemon_never_answers() {
+        let (path, _server) = spawn_silent_server().await;
+        let mut client = connect_to_mock(&path).await;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.call("ping", json!({})),
+        )
+        .await;
+
+        let err = outcome
+            .expect("call must return on its own deadline, never hang")
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_client_refuses_every_later_call() {
+        // The abandoned reply may still arrive. Reusing the socket would read
+        // it as the length header of the next request and answer the wrong
+        // question with a straight face, so the client must stay shut.
+        let (path, _server) = spawn_silent_server().await;
+        let mut client = connect_to_mock(&path).await;
+
+        client.call("ping", json!({})).await.unwrap_err();
+
+        let err = client.call("ping", json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("abandoned"), "err: {err}");
+    }
+
     #[tokio::test]
     async fn test_connection_refused() {
         let result = MdkbClient::connect().await;
         // Will fail unless mdkb daemon is actually running — that's expected in test env
         // The important thing is it doesn't panic
         if let Err(err) = result {
-            assert!(err.to_string().contains("mdkb: connect"));
+            // With no home directory there is no socket path to dial at all.
+            let want = if MdkbClient::socket_path().is_some() {
+                "mdkb: connect"
+            } else {
+                "no home directory"
+            };
+            assert!(err.to_string().contains(want), "{err}");
+        }
+    }
+
+    /// The mdkb binary this machine would actually talk to, or `None`.
+    ///
+    /// Same order the app uses: whatever is on `PATH` first, then the usual
+    /// install location.
+    fn installed_mdkb() -> Option<PathBuf> {
+        if let Ok(out) = std::process::Command::new("sh")
+            .args(["-c", "command -v mdkb"])
+            .output()
+            && out.status.success()
+        {
+            let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        let fallback = dirs::home_dir()?.join(".local/bin/mdkb");
+        fallback.is_file().then_some(fallback)
+    }
+
+    /// mdkb reports symbol lines **0-based**, and `editor_line` adds one.
+    ///
+    /// Every other test around that conversion asserts the SHIFT — that TUIC
+    /// adds one — which stays true whatever mdkb does. If mdkb ever normalised
+    /// `symbol_to_json`'s `line_start` to 1-based, every outline click and
+    /// go-to-definition would land one line late and this repo's suite would
+    /// stay green. This test asserts the SOURCE instead: it runs the installed
+    /// mdkb over a fixture whose symbol sits on a known line and reads back
+    /// what mdkb calls that line.
+    ///
+    /// The daemon it spawns is fully isolated — its own `HOME`, so its own
+    /// `~/.mdkb`, pid file and sockets. It cannot see or disturb the daemon the
+    /// developer is using.
+    ///
+    /// When mdkb is not installed the contract cannot be exercised and the test
+    /// says so on stderr rather than asserting anything. That is a real gap: CI
+    /// runners have no mdkb, so upstream breakage is caught on a developer
+    /// machine, not in CI. Wiring mdkb into CI would close it.
+    #[tokio::test]
+    async fn mdkb_reports_symbol_lines_zero_based() {
+        let Some(mdkb) = installed_mdkb() else {
+            eprintln!(
+                "mdkb_reports_symbol_lines_zero_based: mdkb is not installed, \
+                 so the 0-based line contract went UNCHECKED on this machine"
+            );
+            return;
+        };
+
+        // mdkb binds daemon-hook.sock.<pid>.tmp before renaming it. The normal
+        // repository test root can exceed macOS SUN_LEN before that bind.
+        let tmp = tempfile::Builder::new()
+            .prefix("s")
+            .tempdir_in(crate::test_support::short_socket_test_temp_root())
+            .expect("short socket test dir");
+        let home = tmp.path().to_path_buf();
+        let repo = tmp.path().join("repo");
+        assert!(
+            home.join(".mdkb/daemon-hook.sock.4294967295.tmp")
+                .as_os_str()
+                .len()
+                < 104,
+            "mdkb daemon socket path exceeds macOS SUN_LEN: {}",
+            home.display()
+        );
+        std::fs::create_dir_all(home.join(".mdkb")).expect("home");
+        std::fs::create_dir_all(repo.join("src")).expect("repo");
+        // Symbols on human lines 1, 5, and 9 expose the base and any drift.
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn first_harvest() {}\n// 2\n// 3\n// 4\npub fn zonk_harvest() {}\n// 6\n// 7\n// 8\npub fn last_harvest() {}\n",
+        )
+        .expect("fixture");
+        std::fs::write(
+            home.join(".mdkb/daemon.toml"),
+            format!("whitelist_dirs = [\"{}\"]\n", tmp.path().display()),
+        )
+        .expect("daemon config");
+
+        let run = |args: &[&str]| {
+            std::process::Command::new(&mdkb)
+                .args(args)
+                .current_dir(&repo)
+                .env("HOME", &home)
+                .output()
+                .expect("run mdkb")
+        };
+        run(&["init"]);
+        run(&["code", "index"]);
+        run(&["serve", "--daemon", "--global", "--detach"]);
+
+        let sock = home.join(".mdkb/daemon-hook.sock");
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&sock).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let symbols = match stream {
+            Some(stream) => {
+                let mut client = MdkbClient::from_stream(stream, Duration::from_secs(30));
+                client
+                    .symbols_in_file(&repo.to_string_lossy(), "src/lib.rs")
+                    .await
+            }
+            None => Err(anyhow::anyhow!("the isolated daemon never opened {sock:?}")),
+        };
+        // Stop the daemon before asserting, so a failure does not leak it.
+        std::process::Command::new(&mdkb)
+            .args(["daemon", "stop"])
+            .env("HOME", &home)
+            .output()
+            .ok();
+
+        let symbols = symbols.expect("symbols_in_file");
+        for (name, expected_line) in [
+            ("first_harvest", 0),
+            ("zonk_harvest", 4),
+            ("last_harvest", 8),
+        ] {
+            let found = symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("mdkb indexed no {name}: {symbols:?}"));
+            assert_eq!(
+                found.line_start, expected_line,
+                "mdkb must report {name} as a 0-based line; \
+                 `mdkb_commands::editor_line` adds one for editor jumps"
+            );
         }
     }
 }

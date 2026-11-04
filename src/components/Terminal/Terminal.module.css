@@ -8,6 +8,7 @@
 }
 
 .content {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -19,6 +20,25 @@
 /* With the dock below, the agent's own prompt sits close to the bar. */
 :global(#app.compose-dock) .content {
   padding-bottom: 2px;
+}
+
+.contentHidden {
+  display: none;
+}
+
+/* The search bar's containing block: the content's top edge, or, while an
+   agent's CLI | Chat pill floats over that corner (no Context row to host
+   it), just below the pill, so Find never opens underneath it. */
+.searchAnchor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 0;
+}
+
+:global([data-terminal-view-toggle]:not(:has(~ [data-terminal-context]))) ~ .content > .searchAnchor {
+  top: 30px;
 }
 
 .content :global(.xterm) {
@@ -81,7 +101,19 @@
   background: var(--surface-hover);
 }
 
-.resumeDismiss {
+.resumeContext {
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
+  font-style: italic;
+}
+
+/* A ghost ui/Button: element-qualified so the bare × keeps FastAF's look over
+   the shared ghost variant. */
+button.resumeDismiss {
+  height: auto;
   background: none;
   border: none;
   color: var(--fg-muted);
@@ -91,7 +123,8 @@
   line-height: 1;
 }
 
-.resumeDismiss:hover {
+button.resumeDismiss:hover:enabled {
+  background: none;
   color: var(--error);
 }
 
@@ -125,17 +158,20 @@
 }
 
 /* Compose panel tab — bottom edge handle that pulls up the compose panel */
-.composeHint {
+button.composeHint {
   position: absolute;
   bottom: 0;
   left: 12px;
   z-index: var(--z-sticky);
   display: flex;
   align-items: center;
+  gap: 4px;
+  height: auto;
   padding: 2px 10px;
   font-size: var(--font-xs);
   font-weight: 500;
   font-family: var(--font-ui);
+  line-height: normal;
   color: var(--fg-muted);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-subtle);
@@ -148,9 +184,26 @@
     color var(--duration-base) var(--ease-out);
 }
 
-.composeHint:hover {
+button.composeHint svg {
+  opacity: 0.7;
+}
+
+/* The handle is a ui/Button (variant="hint"): out-rank its hover wash so the
+   tab only brightens, as it always has. */
+button.composeHint:hover:enabled,
+button.composeHint:focus-visible:enabled {
   opacity: 1;
   color: var(--fg-primary);
+  background: var(--bg-tertiary);
+  border-color: var(--border-subtle);
+}
+
+.composeQueueCount {
+  color: var(--fg-secondary);
+  background: var(--bg-highlight);
+  border-radius: var(--radius-sm);
+  padding-inline: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Shown in place of CanvasTerminal once the backend session has exited. */
@@ -178,4 +231,9 @@
   opacity: 0.7;
   max-width: 42ch;
   line-height: 1.5;
+}
+
+/* Resume action of the suspended-tab notice. */
+.resumeButton {
+  margin-top: 6px;
 }

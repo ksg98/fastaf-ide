@@ -11,7 +11,7 @@ build-dir = "book"
 [output.html]
 site-url = "/docs/"
 default-theme = "light"
-git-repository-url = "https://github.com/sstraus/tuicommander"
+git-repository-url = "https://github.com/ksg98/fastaf-ide"
 additional-css = ["theme/custom.css"]
 additional-js = ["theme/search.js"]
 

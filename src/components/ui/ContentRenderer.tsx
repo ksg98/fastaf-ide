@@ -1,17 +1,28 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import AnsiToHtml from "ansi-to-html";
 // DOMPurify's template scrubbing relies on a complete NodeIterator implementation.
 // The component tests therefore use jsdom instead of the suite-wide happy-dom
 // environment so security behavior matches real browser engines.
 import DOMPurify from "dompurify";
-import { marked, type Tokens } from "marked";
+import { marked, Renderer, type Tokens } from "marked";
+import { render } from "solid-js/web";
+import { Button } from "./Button";
 import "./markdown-content.css";
 import { type Component, createEffect, createMemo, Index, onCleanup, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
 import { type MarkdownSegment, type StreamSplit, splitStream } from "../../utils/incrementalMarkdown";
+import { handleOpenUrl } from "../../utils/openUrl";
+import { rewriteLocalImages } from "../../utils/repoImageUrl";
 import { stripAnsi } from "../../utils/stripAnsi";
-import { injectTweakSentinels, parseTweakComments } from "../../utils/tweakComments";
+import {
+	findTweakCommentBlocks,
+	injectTweakSentinels,
+	maskTweakCommentSyntax,
+	parseInlineTweakComments,
+	parseTweakComments,
+} from "../../utils/tweakComments";
 import { applyTweakDomHighlights } from "../../utils/tweakDomHighlight";
+import { filePathRegex, isWholeFilePath } from "../Terminal/linkProvider";
+import { type ChatTableActions, enhanceChatTables, tableSources } from "./chatTables";
 
 /** DOMPurify's default allowed-URI schemes plus Tauri's local asset protocols
  *  (`asset:`, `tauri:`). Without these, DOMPurify strips the rewritten image
@@ -21,16 +32,22 @@ import { applyTweakDomHighlights } from "../../utils/tweakDomHighlight";
 const ALLOWED_URI_REGEXP =
 	/^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|asset|tauri):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
 
-/** File extensions that can be previewed inline when clicked as relative links.
- *  .md files open in a markdown tab; all others open in the file preview tab. */
-const PREVIEWABLE_RE =
-	/\.(md|pdf|html?|png|jpe?g|gif|webp|svg|avif|ico|bmp|mp4|webm|mov|ogg|mp3|wav|flac|aac|m4a|txt|json|csv|log|xml|ya?ml|toml|ini|cfg|conf)$/i;
-
 export interface ContentRendererProps {
 	content: string;
+	/** Provider-authored content cannot supply CSS that changes the host UI. */
+	untrustedContent?: boolean;
+	/** Opt-in copy action for fenced code blocks. Receives the original source text. */
+	onCodeCopy?: (text: string) => void;
+	/** AI Chat only: smart columns and exact-source table actions. */
+	tableActions?: ChatTableActions;
+	/** Turn plain file paths into links; the caller still resolves and validates them. */
+	autoLinkFiles?: boolean;
 	emptyMessage?: string;
-	/** Called when a relative file link is clicked (href passed as argument) */
-	onLinkClick?: (href: string) => void;
+	/**
+	 * Called for local file, directory, and heading links (raw href passed as argument).
+	 * Resolving to `false` reports a dead target: the clicked link is replaced by its text.
+	 */
+	onLinkClick?: (href: string) => void | Promise<boolean | undefined> | Promise<void>;
 	/**
 	 * Called when a checkbox is clicked (source line, new mark, and — for a
 	 * whole-cell checkbox in a table — the column of its `[`, since one row can
@@ -39,10 +56,14 @@ export interface ContentRendererProps {
 	onCheckboxToggle?: (sourceLine: number, mark: " " | "x" | "~", sourceCol?: number) => void;
 	/** Absolute directory path of the source file, used to resolve relative image src attributes */
 	baseDir?: string;
+	/** Browser URL for a relative image, when local asset URLs are unavailable. */
+	imageSrc?: (relativePath: string) => string;
 	/** Ref callback to expose the rendered content container for search */
 	contentRef?: (el: HTMLDivElement) => void;
 	/** Override the root font size in pixels (children use em, so everything scales). */
 	fontSize?: number;
+	/** Add exact raw-source ranges to Markdown blocks and individual list items for gutter comments. */
+	commentableBlocks?: boolean;
 	/**
 	 * Render a growing answer as a committed prefix plus a live tail, so a tick
 	 * only re-parses the block still being written instead of the whole
@@ -58,6 +79,56 @@ export function stripEventHandlers(html: string): string {
 	return html.replace(/\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)/gi, "");
 }
 
+/** Attach raw-source ranges to the top-level elements produced by marked. */
+export function applyCommentBlockMetadata(container: HTMLElement, source: string): void {
+	const blocks = findTweakCommentBlocks(source);
+	const comments = parseTweakComments(source, blocks).filter((comment) => comment.anchor === "block");
+	const renderRoot = container.firstElementChild ?? container;
+	// Invisible marker edits can leave the rendered HTML unchanged. Reconcile
+	// retained DOM metadata with the source instead of only adding highlights.
+	for (const element of renderRoot.querySelectorAll<HTMLElement>(".tweak-block-highlight")) {
+		element.classList.remove("tweak-block-highlight");
+		delete element.dataset.tweakId;
+		delete element.dataset.tweakAt;
+		delete element.dataset.tweakComment;
+	}
+	const elements = Array.from(renderRoot.children) as HTMLElement[];
+	const listItems = Array.from(renderRoot.querySelectorAll<HTMLElement>("li"));
+	let elementIndex = 0;
+	let itemIndex = 0;
+	// DEFERRED (2026-09-23) — pairing is by tag only. A raw HTML token (e.g.
+	// `<p align="center">`) renders an element with no entry in `blocks`, so the
+	// next same-tag block binds to it and every later one shifts by one. The fix
+	// needs per-token element counts for `html` tokens (after DOMPurify), which
+	// is more than a local change; the save path already refuses a stale range.
+	for (const block of blocks) {
+		let element: HTMLElement | undefined;
+		if (block.tag === "LI") element = listItems[itemIndex++];
+		else {
+			while (
+				elementIndex < elements.length &&
+				(elements[elementIndex].classList.contains("mermaid-diagram") ? "PRE" : elements[elementIndex].tagName) !==
+					block.tag
+			)
+				elementIndex++;
+			element = elements[elementIndex++];
+		}
+		if (!element) break;
+		if (block.tag !== "UL" && block.tag !== "OL") {
+			element.dataset.commentSourceStart = String(block.start);
+			element.dataset.commentSourceEnd = String(block.end);
+		}
+		const comment = comments.find(
+			(candidate) => candidate.sourceStart === block.start && candidate.sourceEnd === block.end,
+		);
+		if (!comment) continue;
+		element.classList.add("tweak-block-highlight");
+		element.dataset.tweakId = comment.id;
+		element.dataset.tweakAt = comment.createdAt;
+		element.dataset.tweakComment = comment.comment;
+	}
+}
+
 // Configure marked for safe rendering
 marked.setOptions({
 	gfm: true, // GitHub Flavored Markdown
@@ -70,15 +141,21 @@ const ANSI_CSI_RE = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/;
 // Custom renderer: code blocks with ANSI sequences render with colors.
 marked.use({
 	renderer: {
+		table(token: Tokens.Table) {
+			return Renderer.prototype.table
+				.call(this, token)
+				.replace("<table>", `<table data-raw-table="${encodeURIComponent(token.raw)}">`);
+		},
 		code(token: Tokens.Code) {
 			const lang = token.lang ?? "";
 			const baseCls = lang ? `language-${lang}` : "";
+			const raw = encodeURIComponent(token.text);
 			if (ANSI_CSI_RE.test(token.text)) {
 				const cls = [baseCls, "ansi-block"].filter(Boolean).join(" ");
-				return `<pre><code class="${cls}">${ansiConverter.toHtml(token.text)}</code></pre>\n`;
+				return `<pre data-raw-code="${raw}"><code class="${cls}">${ansiConverter.toHtml(token.text)}</code></pre>\n`;
 			}
-			const escaped = token.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-			return `<pre><code${baseCls ? ` class="${baseCls}"` : ""}>${escaped}</code></pre>\n`;
+			const escaped = token.text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+			return `<pre data-raw-code="${raw}"><code${baseCls ? ` class="${baseCls}"` : ""}>${escaped}</code></pre>\n`;
 		},
 	},
 });
@@ -225,6 +302,11 @@ async function renderMermaidBlocks(container: HTMLElement): Promise<void> {
 				const wrapper = document.createElement("div");
 				wrapper.className = "mermaid-diagram";
 				wrapper.innerHTML = svg;
+				// The diagram stands where the block was: it keeps the block's source range and comment metadata.
+				for (const [key, value] of Object.entries(pre.dataset)) {
+					if (key.startsWith("commentSource") || key.startsWith("tweak")) wrapper.dataset[key] = value ?? "";
+				}
+				if (pre.classList.contains("tweak-block-highlight")) wrapper.classList.add("tweak-block-highlight");
 				pre.replaceWith(wrapper);
 			} catch {
 				pre.dataset.mermaidRendered = "error";
@@ -245,7 +327,16 @@ async function renderMermaidBlocks(container: HTMLElement): Promise<void> {
  * At offset 0 — the whole-document path — every step below is exactly what it
  * has always been.
  */
-function renderMarkdownSegment(source: string, opts: { baseDir?: string; lineOffset: number }): string {
+function renderMarkdownSegment(
+	source: string,
+	opts: {
+		baseDir?: string;
+		imageSrc?: (path: string) => string;
+		lineOffset: number;
+		untrustedContent?: boolean;
+		smartTables?: boolean;
+	},
+): string {
 	const raw = stripAnsiOutsideCodeBlocks(source);
 	try {
 		// 1. Convert [~] to [ ] so marked renders them as standard GFM task-list items.
@@ -254,24 +345,27 @@ function renderMarkdownSegment(source: string, opts: { baseDir?: string; lineOff
 
 		// 2. Build source-line map BEFORE any transforms: domIndex → sourceLine.
 		//    This must use the tilde-cleaned source (same checkbox count as marked sees).
-		const lineMap = buildCheckboxLineMap(cleaned);
+		const mappingSource = maskTweakCommentSyntax(cleaned);
+		const lineMap = buildCheckboxLineMap(mappingSource);
 		//    Table cells need their own map: marked emits no <input> for them, so
 		//    they cannot share the sequential index of the marked-rendered ones.
-		const tableMap = buildTableCheckboxMap(cleaned);
+		const tableMap = buildTableCheckboxMap(mappingSource);
 
 		// 3. Replace tweak markers with sentinel delimiters (highlight spans are
 		//    applied to the rendered DOM afterwards), then parse markdown.
 		const withSentinels = injectTweakSentinels(cleaned);
 		let html = marked.parse(withSentinels, { async: false }) as string;
-
-		// 4. Rewrite relative image src attributes to loadable asset:// URLs.
-		const baseDir = opts.baseDir;
-		if (baseDir) {
+		if (opts.smartTables) {
+			const originals = tableSources(source);
+			let tableIndex = 0;
 			html = html.replace(
-				/(<img\b[^>]*\ssrc=")(?!https?:\/\/|data:|asset:\/\/)([^"]+)"/gi,
-				(_, prefix, relativePath) => `${prefix}${convertFileSrc(`${baseDir}/${relativePath}`)}"`,
+				/data-raw-table="[^"]*"/g,
+				() => `data-raw-table="${encodeURIComponent(originals[tableIndex++] ?? "")}"`,
 			);
-		}
+		} else html = html.replace(/ data-raw-table="[^"]*"/g, "");
+
+		// 4. Resolve local images through the active transport and repository boundary.
+		html = rewriteLocalImages(html, opts.baseDir, opts.imageSrc);
 
 		// 5. Make GFM task-list checkboxes interactive and inject source-line metadata.
 		//    Sequential checkbox index in the HTML maps to lineMap[domIndex]. Both
@@ -308,8 +402,26 @@ function renderMarkdownSegment(source: string, opts: { baseDir?: string; lineOff
 			return `<${tag}${attrs}><input type="checkbox"${checked}${tilde} data-source-line="${opts.lineOffset + site.line}" data-source-col="${site.col}"></${tag}>`;
 		});
 
+		// Preserve the source href in an inert attribute. DOMPurify strips unsafe
+		// href schemes, including useful `file.rs:42` line links; the click
+		// dispatcher still needs their text to block or route them explicitly.
+		// Remove any source-supplied copy first so raw HTML cannot dispatch a
+		// different destination from the link shown to the user.
+		if (/<a\b/i.test(html)) {
+			const template = document.createElement("template");
+			template.innerHTML = html;
+			for (const anchor of template.content.querySelectorAll("a")) {
+				const href = anchor.getAttribute("href");
+				anchor.removeAttribute("data-tuic-href");
+				if (href !== null) anchor.setAttribute("data-tuic-href", href);
+			}
+			html = template.innerHTML;
+		}
 		return DOMPurify.sanitize(stripEventHandlers(html), {
+			FORBID_TAGS: opts.untrustedContent ? ["form", "map", "area", "style"] : ["form", "map", "area"],
+			FORBID_ATTR: opts.untrustedContent ? ["style"] : [],
 			ADD_ATTR: [
+				"data-tuic-href",
 				"data-tweak-id",
 				"data-tweak-at",
 				"data-tweak-comment",
@@ -322,14 +434,23 @@ function renderMarkdownSegment(source: string, opts: { baseDir?: string; lineOff
 		});
 	} catch (err) {
 		appLogger.error("app", "Markdown parsing error", err);
-		return `<pre>${raw}</pre>`;
+		const escaped = raw.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+		return `<pre>${escaped}</pre>`;
 	}
 }
 
 export const ContentRenderer: Component<ContentRendererProps> = (props) => {
 	// Whole-document path: one parse of everything, exactly as before.
 	const processedContent = createMemo(() =>
-		props.incremental ? "" : renderMarkdownSegment(props.content ?? "", { baseDir: props.baseDir, lineOffset: 0 }),
+		props.incremental
+			? ""
+			: renderMarkdownSegment(props.content ?? "", {
+					baseDir: props.baseDir,
+					imageSrc: props.imageSrc,
+					lineOffset: 0,
+					untrustedContent: props.untrustedContent,
+					smartTables: !!props.tableActions,
+				}),
 	);
 
 	/**
@@ -344,6 +465,9 @@ export const ContentRenderer: Component<ContentRendererProps> = (props) => {
 	let renderedHtml: string[] = [];
 	let renderedFor: MarkdownSegment[] = [];
 	let renderedBaseDir: string | undefined;
+	let renderedImageSrc: ContentRendererProps["imageSrc"];
+	let renderedUntrusted: boolean | undefined;
+	let renderedSmartTables: boolean | undefined;
 	const incrementalContent = createMemo(() => {
 		if (!props.incremental) return { committed: [] as string[], tail: "" };
 		split = splitStream(props.content ?? "", split);
@@ -352,8 +476,16 @@ export const ContentRenderer: Component<ContentRendererProps> = (props) => {
 		// Segment identity is not the whole cache key: `baseDir` rewrites image
 		// src values, so cached HTML from another directory points at the wrong
 		// files.
-		if (props.baseDir !== renderedBaseDir) {
+		if (
+			props.baseDir !== renderedBaseDir ||
+			props.imageSrc !== renderedImageSrc ||
+			props.untrustedContent !== renderedUntrusted ||
+			!!props.tableActions !== renderedSmartTables
+		) {
 			renderedBaseDir = props.baseDir;
+			renderedImageSrc = props.imageSrc;
+			renderedUntrusted = props.untrustedContent;
+			renderedSmartTables = !!props.tableActions;
 			renderedHtml = [];
 			renderedFor = [];
 		} else if (n > committed.length || (n > 0 && committed[n - 1] !== renderedFor[n - 1])) {
@@ -362,23 +494,42 @@ export const ContentRenderer: Component<ContentRendererProps> = (props) => {
 		}
 		for (let i = renderedFor.length; i < committed.length; i++) {
 			renderedHtml.push(
-				renderMarkdownSegment(committed[i].text, { baseDir: props.baseDir, lineOffset: committed[i].lineOffset }),
+				renderMarkdownSegment(committed[i].text, {
+					baseDir: props.baseDir,
+					imageSrc: props.imageSrc,
+					lineOffset: committed[i].lineOffset,
+					untrustedContent: props.untrustedContent,
+					smartTables: !!props.tableActions,
+				}),
 			);
 			renderedFor.push(committed[i]);
 		}
 		return {
 			committed: renderedHtml.slice(),
-			tail: renderMarkdownSegment(split.tail.text, { baseDir: props.baseDir, lineOffset: split.tail.lineOffset }),
+			tail: renderMarkdownSegment(split.tail.text, {
+				baseDir: props.baseDir,
+				imageSrc: props.imageSrc,
+				lineOffset: split.tail.lineOffset,
+				untrustedContent: props.untrustedContent,
+				smartTables: !!props.tableActions,
+			}),
 		};
 	});
 
 	const isEmpty = createMemo(() => (props.content ?? "").trim() === "");
 
-	// Tweak comments parsed from the raw source — applied to the rendered DOM below.
-	const tweakComments = createMemo(() => parseTweakComments(props.content ?? ""));
+	// Inline tweak comments parsed from the raw source — applied to the rendered DOM
+	// below. Block comments are attached by `applyCommentBlockMetadata`; parsing them
+	// here would lex the whole document again, on every streaming tick too.
+	const inlineTweakComments = createMemo(() => parseInlineTweakComments(props.content ?? ""));
 
 	const handleClick = (e: MouseEvent) => {
 		const target = e.target as HTMLElement;
+		if (target.closest("button[data-copy-code]") && props.onCodeCopy) {
+			const raw = target.closest("pre")?.getAttribute("data-raw-code");
+			if (raw !== null && raw !== undefined) props.onCodeCopy(decodeURIComponent(raw));
+			return;
+		}
 
 		// GFM task-list checkbox toggle (tri-state: [ ] → [x] → [~] → [ ])
 		if (target instanceof HTMLInputElement && target.type === "checkbox" && target.dataset.sourceLine != null) {
@@ -408,18 +559,73 @@ export const ContentRenderer: Component<ContentRendererProps> = (props) => {
 			return;
 		}
 
-		// Relative file link navigation
-		if (!props.onLinkClick) return;
 		const anchor = target.closest("a");
 		if (!anchor) return;
-		const href = anchor.getAttribute("href");
-		if (href && !href.startsWith("http") && PREVIEWABLE_RE.test(href)) {
-			e.preventDefault();
-			props.onLinkClick(href);
+		const href = anchor.getAttribute("data-tuic-href") ?? anchor.getAttribute("href");
+		// All rendered links are untrusted document content. Nothing may fall
+		// through to WebView navigation, including links without a host handler.
+		e.preventDefault();
+		e.stopPropagation();
+		if (!href) {
+			appLogger.debug("app", "Blocked Markdown link without a safe href");
+			return;
+		}
+		if (/^(https?:|mailto:)/i.test(href)) {
+			handleOpenUrl(href);
+		} else if (
+			// A bare name:42 can be an extensionless file; Rust resolves the target.
+			// Keep known URL schemes out of that ambiguous file-line form.
+			/^[a-z][a-z\d+.-]*:/i.test(href) &&
+			!/^tuic:\/\/open\//i.test(href) &&
+			!/^[a-z]:[\\/]/i.test(href) &&
+			!(
+				/^[^:/\\]+:[1-9]\d*$/.test(href) &&
+				!/^(?:javascript|vbscript|data|file|blob|about|ftp|https?|mailto|tel|sms|callto|cid|xmpp|asset|tauri|wss?):/i.test(
+					href,
+				)
+			)
+		) {
+			appLogger.debug("app", "Blocked Markdown link scheme", { href });
+		} else if (props.onLinkClick) {
+			void Promise.resolve(props.onLinkClick(href)).then((opened) => {
+				if (opened !== false) return;
+				deadHrefs.add(href);
+				if (anchor.isConnected) anchor.replaceWith(...anchor.childNodes);
+			});
+		} else if (href.startsWith("#")) {
+			const heading = Array.from(containerRef?.querySelectorAll("h1,h2,h3,h4,h5,h6") ?? []).find(
+				(el) =>
+					el.id === href.slice(1) ||
+					el.textContent
+						?.trim()
+						.toLowerCase()
+						.replace(/[^\p{L}\p{N}\s-]/gu, "")
+						.replace(/\s+/g, "-") === href.slice(1).toLowerCase(),
+			);
+			heading?.scrollIntoView({ block: "start" });
+		} else {
+			appLogger.debug("app", "Markdown link has no file handler", { href });
 		}
 	};
 
 	let containerRef: HTMLDivElement | undefined;
+	// Hrefs that resolved to nothing; the auto-link pass must not turn their text back into links.
+	const deadHrefs = new Set<string>();
+	createEffect(() => {
+		processedContent();
+		incrementalContent();
+		const actions = props.tableActions;
+		if (!actions) return;
+		let active = true;
+		let dispose: (() => void) | undefined;
+		queueMicrotask(() => {
+			if (active && containerRef) dispose = enhanceChatTables(containerRef, actions);
+		});
+		onCleanup(() => {
+			active = false;
+			dispose?.();
+		});
+	});
 
 	// After render, set indeterminate property on [~] checkboxes (not settable via HTML attribute)
 	// and render Mermaid diagrams from ```mermaid code blocks.
@@ -430,15 +636,84 @@ export const ContentRenderer: Component<ContentRendererProps> = (props) => {
 		// that survive a tick are simply skipped.
 		processedContent();
 		incrementalContent();
+		// Comment markers are invisible in the rendered HTML. A source-only edit
+		// still moves block ranges and must refresh their DOM metadata.
+		if (props.commentableBlocks && !props.incremental) props.content;
 		if (!containerRef) return;
+		if (props.autoLinkFiles) {
+			queueMicrotask(() => {
+				if (!containerRef) return;
+				const walker = document.createTreeWalker(containerRef, NodeFilter.SHOW_TEXT);
+				const nodes: Text[] = [];
+				while (walker.nextNode()) {
+					const node = walker.currentNode as Text;
+					const parent = node.parentElement;
+					if (!parent) continue;
+					// Inline code links only when the whole span is one path: `src/a.ts:12`, not `cat src/a.ts`.
+					const wholePath = parent.tagName === "CODE" && !parent.closest("a, pre") && isWholeFilePath(node.data);
+					if (wholePath || !parent.closest("a, code, pre, button, textarea, input")) nodes.push(node);
+				}
+				for (const node of nodes) {
+					const source = node.textContent ?? "";
+					const regex = filePathRegex();
+					const fragment = document.createDocumentFragment();
+					let end = 0;
+					for (const match of source.matchAll(regex)) {
+						const path = match[1];
+						if (deadHrefs.has(path)) continue;
+						const start = match.index + match[0].indexOf(path);
+						fragment.append(document.createTextNode(source.slice(end, start)));
+						const anchor = document.createElement("a");
+						anchor.href = path;
+						anchor.dataset.tuicHref = path;
+						anchor.textContent = path;
+						fragment.append(anchor);
+						end = start + path.length;
+					}
+					if (!end) continue;
+					fragment.append(document.createTextNode(source.slice(end)));
+					node.replaceWith(fragment);
+				}
+			});
+		}
+		if (props.onCodeCopy) {
+			const disposers: (() => void)[] = [];
+			let disposed = false;
+			onCleanup(() => {
+				disposed = true;
+				for (const dispose of disposers) dispose();
+			});
+			queueMicrotask(() => {
+				if (disposed) return;
+				containerRef?.querySelectorAll<HTMLPreElement>("pre[data-raw-code]").forEach((pre) => {
+					if (pre.querySelector("button[data-copy-code]")) return;
+					const host = document.createElement("span");
+					host.style.display = "contents";
+					pre.append(host);
+					const dispose = render(
+						() => (
+							<Button data-copy-code="" aria-label="Copy code">
+								Copy
+							</Button>
+						),
+						host,
+					);
+					disposers.push(() => {
+						dispose();
+						host.remove();
+					});
+				});
+			});
+		}
 		const raf = requestAnimationFrame(() => {
 			if (!containerRef) return;
 			containerRef.querySelectorAll<HTMLInputElement>(`input[${TILDE_SENTINEL}]`).forEach((cb) => {
 				cb.indeterminate = true;
 			});
 			// Turn highlight sentinels into <span class="tweak-highlight"> wrappers.
-			const comments = tweakComments();
-			if (comments.length > 0) applyTweakDomHighlights(containerRef, comments);
+			const inlineComments = inlineTweakComments();
+			if (inlineComments.length > 0) applyTweakDomHighlights(containerRef, inlineComments);
+			if (props.commentableBlocks && !props.incremental) applyCommentBlockMetadata(containerRef, props.content ?? "");
 			renderMermaidBlocks(containerRef);
 		});
 		onCleanup(() => cancelAnimationFrame(raf));

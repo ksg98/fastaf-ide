@@ -30,12 +30,6 @@
   color: var(--fg-primary);
 }
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-}
-
 .dropdown {
   position: absolute;
   top: 100%;
@@ -58,26 +52,8 @@
   border-bottom: 1px solid var(--border);
 }
 
-.searchInput {
-  width: 100%;
-  padding: 6px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
-  font-size: var(--font-base);
-  font-family: inherit;
-  outline: none;
-}
 
-.searchInput:focus {
-  border-color: var(--accent);
-}
 
-.searchInput::placeholder {
-  color: var(--fg-muted);
-  opacity: 0.5;
-}
 
 .statusBanner {
   display: flex;
@@ -164,6 +140,17 @@
   border-top: 1px solid var(--border);
 }
 
+
+
+.empty {
+  padding: 16px 10px;
+  text-align: center;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.searchInput { width: 100%; }
+
 .manageLink {
   background: none;
   border: none;
@@ -175,11 +162,4 @@
 
 .manageLink:hover {
   color: var(--accent);
-}
-
-.empty {
-  padding: 16px 10px;
-  text-align: center;
-  font-size: var(--font-sm);
-  color: var(--fg-muted);
 }

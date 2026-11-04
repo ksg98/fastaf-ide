@@ -80,6 +80,35 @@
   color: var(--fg-primary);
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Expert switch — STYLE_GUIDE "Toggle switch": 36×20 track, white thumb, 0.2s */
+.expertSwitch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+/* Search-result marker for an expert setting — STYLE_GUIDE badge metrics */
+.expertBadge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--fg-muted);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--fg-muted);
+  vertical-align: middle;
+}
+
 .body {
   display: flex;
   flex: 1;
@@ -98,7 +127,7 @@
   position: relative;
 }
 
-.navItem {
+button[data-control-layout="row"].navItem {
   display: block;
   width: 100%;
   text-align: left;
@@ -119,12 +148,32 @@
   flex-shrink: 0;
 }
 
-.navItem:hover {
+.navItemPlugin {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.pluginLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pluginIdentity {
+  flex-shrink: 0;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
+
+.navItem:hover,
+button[data-control-layout="row"].navItem:hover {
   background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
-.navItem.active {
+.navItem.active,
+button[data-control-layout="row"].navItem.active {
   background: rgba(var(--accent-rgb), 0.14);
   color: var(--fg-primary);
 }
@@ -145,7 +194,8 @@
   flex-shrink: 0;
 }
 
-.navItemRepo {
+.navItemRepo,
+button[data-control-layout="row"].navItemRepo {
   padding-left: 20px;
 }
 
@@ -169,6 +219,7 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 20px 24px 28px;
 }
 
@@ -293,6 +344,7 @@
 .hint {
   margin-top: 4px;
   font-size: var(--font-xs);
+  line-height: 1.5;
   color: var(--fg-muted);
 }
 
@@ -447,6 +499,7 @@
   display: flex;
   gap: 8px;
   margin-top: 20px;
+  margin-bottom: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--border-subtle);
 }
@@ -472,22 +525,6 @@
 }
 
 /* ── Color Picker (shared by AppearanceTab + RepoWorktreeTab) ── */
-.colorPickerSwatch {
-  position: relative;
-  width: 36px;
-  height: 36px;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.colorPickerSwatch input[type="color"] {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  width: 100%;
-  height: 100%;
-  cursor: pointer;
-}
 
 /* ── Groups Tab ── */
 .groupItem {
@@ -542,51 +579,8 @@
 .groupColorPicker {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
   margin-top: 8px;
-}
-
-.colorSwatch {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  transition: transform 0.1s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: var(--font-xs);
-  color: var(--fg-secondary);
-  padding: 0;
-}
-
-.colorSwatch:hover {
-  transform: scale(1.15);
-}
-
-.colorSwatch.active {
-  border-color: var(--fg-primary);
-  box-shadow: 0 0 0 2px var(--bg-primary);
-}
-
-.colorSwatchCustom {
-  position: relative;
-  overflow: hidden;
-  border: 1px dashed var(--border);
-}
-
-.colorSwatchCustom input[type="color"] {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  width: 100%;
-  height: 100%;
-  cursor: pointer;
-}
-
-.colorSwatchCustom.active {
-  border-color: var(--fg-primary);
-  border-style: solid;
 }
 
 .colorSwatchLabel {
@@ -595,11 +589,6 @@
   pointer-events: none;
   color: var(--fg-muted);
   transform: translateY(1.5px);
-}
-
-.colorSwatchClear {
-  background: var(--bg-secondary);
-  border: 1px dashed var(--border);
 }
 
 .groupsEmpty {
@@ -694,35 +683,37 @@
   align-items: flex-start;
 }
 
-.raBody {
+/* Remote Access pairing: the QR beside its link, on a full-width row of its own. */
+.raPairing {
   display: flex;
-  gap: 16px;
-  align-items: flex-start;
-}
-
-.raFields {
-  flex: 1;
-  min-width: 0;
-}
-
-.qr {
-  display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  padding-top: 4px;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
 }
 
-.qr img {
+.raPairing img {
+  flex-shrink: 0;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
 }
 
-.qrLabel {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  text-align: center;
+.raPairingText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.raPairingTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.raPairingText .hint {
+  margin: 0;
 }
 
 .urlRow {
@@ -755,6 +746,15 @@
   font-family: var(--font-mono);
   word-break: break-all;
   user-select: all;
+}
+
+/* A link shown on one line: never broken mid-token, the rest ellipsised
+   (the full value is in its title and behind the copy button). */
+.urlOneLine {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
 }
 
 .copyBtn {
@@ -859,12 +859,10 @@
 }
 
 .infoBadge .infoBadgeTip {
-  display: none;
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
+  visibility: hidden;
+  position: fixed;
   width: max-content;
-  max-width: 320px;
+  max-width: min(320px, calc(100vw - 16px));
   padding: 8px 12px;
   background: var(--bg-highlight);
   border: 1px solid var(--border-subtle);
@@ -874,13 +872,15 @@
   font-size: var(--font-sm);
   font-weight: 400;
   line-height: 1.4;
-  white-space: normal;
+  white-space: pre-line;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   z-index: 100;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
-.infoBadge:hover .infoBadgeTip {
-  display: block;
+.infoBadge .infoBadgeTip[data-visible="true"] {
+  visibility: visible;
 }
 
 .downloadBtn {
@@ -999,49 +999,6 @@
   cursor: pointer;
   margin: 0;
   padding: 0;
-}
-
-.schedulerOneShotLabel input[type="checkbox"] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  min-width: 14px;
-  min-height: 14px;
-  max-height: 14px;
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  cursor: pointer;
-  position: relative;
-  flex-shrink: 0;
-  vertical-align: middle;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.schedulerOneShotLabel input[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.schedulerOneShotLabel input[type="checkbox"]:checked::after {
-  content: "";
-  display: block;
-  position: absolute;
-  top: 1px;
-  left: 4px;
-  width: 3px;
-  height: 7px;
-  border: solid white;
-  border-width: 0 1.5px 1.5px 0;
-  transform: rotate(45deg);
-}
-
-.schedulerAdd .testBtn {
-  height: 32px;
 }
 
 .schedulerCronInput {
@@ -1189,3 +1146,208 @@
   display: block;
 }
 
+/* ── Settings Search ── */
+.searchBox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0 0 8px;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.searchIcon {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  pointer-events: none;
+}
+
+.searchResults {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+button[data-control-layout="row"].searchResult {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+button[data-control-layout="row"].searchResult:hover {
+  background: var(--bg-highlight);
+}
+
+.searchResultLabel {
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+}
+
+.searchResultTrail {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
+
+/* ── Provider availability indicator (ProvidersTab) ── */
+.availabilityOk,
+.availabilityBad {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-xs);
+  vertical-align: middle;
+}
+
+.availabilityOk {
+  color: var(--success);
+}
+
+.availabilityBad {
+  color: var(--warning);
+}
+
+.availabilityDetail {
+  margin-top: 4px;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
+
+.group [data-form-control]:not(button):not([data-form-control="switch"]):not([data-form-control="color"]):not([data-form-control="swatch"]), .input[data-form-control] { width: 100%; }
+
+/* Shared row layout; existing field layout is retained unless opted in. */
+.settingRow { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.settingRow:last-child, .settingRow:has(+ .hint:last-child) { border-bottom: 0; }
+.settingRowText { flex: 1; min-width: 0; }
+.settingRowText label { font-size: 13px; font-weight: 600; color: var(--fg-primary); }
+.settingRowText .hint { color: var(--fg-secondary); margin-bottom: 0; }
+.settingRowControl { flex: 0 1 260px; min-width: 0; max-width: 48%; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+/* Only aligned editors let named child layouts own their geometry. Other rows keep wrapping. */
+.settingRowControl > div:not(.settingRowValue):where(:not(.alignedRows [class])) { width: 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.settingRowControl > div > [data-form-control]:not(button):not([data-form-control="switch"]):not([data-form-control="color"]):not([data-form-control="swatch"]) { width: 100%; }
+.settingRowControl > div > .hint { margin: 0; text-align: right; }
+.settingRowControl > [data-form-control]:not(button):not([data-form-control="switch"]):not([data-form-control="color"]):not([data-form-control="swatch"]) { width: 100%; }
+.fieldError { margin: 4px 0 0; color: var(--error); font-size: 12px; line-height: 1.5; }
+@media (max-width: 800px) {
+  .content { padding: 20px; }
+  .settingRow { flex-direction: column; align-items: stretch; gap: 8px; }
+  .settingRowControl { flex-basis: auto; width: 100%; max-width: 100%; }
+}
+@media (max-width: 600px) {
+  .panel { width: calc(100vw - 24px); }
+  .body { flex-direction: column; }
+  .nav { width: 100% !important; max-height: 180px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .content { padding: 16px; }
+}
+
+.compactNav { display: none; }
+@media (max-width: 600px) {
+ .nav > :not(.compactNav):not(.navSearch) { display: none; }
+ .nav { overflow: visible; padding: 8px 16px; max-height: none; }
+ .compactNav { display: block; }
+ .compactNav select { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+}
+
+.settingRowText .infoBadge { width: 14px; height: 14px; border: 1px solid var(--fg-muted); background: transparent; font-size: 10px; line-height: 1; }
+.settingHelp { display: inline-flex; border-radius: 50%; }
+.settingHelp:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* Application pages opt in; existing stacked consumers retain their layout. */
+.settingRowControl:has(> [data-form-control="switch"]) { flex: 0 0 auto; display: flex; justify-content: flex-end; }
+.applicationPage .hint { color: var(--fg-secondary); }
+.applicationPage .soundRow { gap: 12px; flex-wrap: wrap; padding: 12px 0; }
+.applicationPage .soundRow .toggle { flex: 1; }
+.applicationPage .soundRow .toggle [data-form-control="switch"] { order: 2; margin-left: auto; }
+.applicationPage .soundRow svg { margin-left: 0; }
+.applicationPage .groupRow { flex-wrap: wrap; }
+.applicationPage .groupNameInput { min-width: 0; }
+.applicationPage .slider input { min-width: 0; }
+
+.applicationPage .groupItem { padding: 12px 0; border-bottom: 1px solid var(--border); }
+
+@media (max-width: 600px) { .navSearch { order: -1; } }
+
+.navSearch { padding: 0 0 8px; box-sizing: border-box; }
+.navSearch > [data-form-control], .compactNav > [data-form-control] { width: 100%; box-sizing: border-box; }
+@media (max-width: 600px) { .navSearch { padding: 0 0 8px; } }
+
+.notificationEventsHeading { margin: 20px 0 6px; font-size: 13px; font-weight: 600; color: var(--fg-primary); }
+.applicationPage .notificationEventsHeading label { margin: 0; font-size: inherit; font-weight: inherit; color: inherit; }
+.soundControls { display: flex; justify-content: flex-end; align-items: center; gap: 12px; }
+.soundPattern { width: 36px; display: inline-flex; justify-content: center; padding: 4px; border-radius: var(--radius-md); background: var(--bg-tertiary); }
+
+@media (pointer: coarse) { .infoBadge { width: 44px; height: 44px; } }
+.infoBadge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.settingRowWithActions { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.settingRowValue { flex: 1; min-width: 0; }
+.settingRowValue > [data-form-control] { width: 100%; }
+.settingRowWithActions > button { flex-shrink: 0; }
+
+/* Shared link copy uses a readable accent without changing action fills. */
+.content a { color: var(--link-foreground); }
+
+/* Keep contextual help with its label in stacked, row and grid fields. */
+.helpLabel { display: block; min-width: 0; width: fit-content; max-width: 100%; }
+.group .helpLabel { margin-bottom: 6px; }
+.helpLabel > label { display: inline; min-width: 0; margin-bottom: 0; }
+.helpLabel > .infoBadge { flex-shrink: 0; }
+
+.helpLabel > .settingHelp { flex-shrink: 0; }
+.helpLabel .infoBadge { width: 14px; height: 14px; border: 1px solid var(--fg-secondary); background: transparent; font-size: 10px; line-height: 1; }
+.navLabel > span { display: inline-flex; vertical-align: middle; line-height: 1; }
+@media (max-width: 600px) {
+  .panel { height: calc(100dvh - 24px); max-height: calc(100dvh - 24px); }
+  .header, .footer { padding: 8px 16px; }
+  .nav { box-sizing: border-box; padding-right: 24px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+  .navSearch { padding: 0; min-width: 0; }
+  .compactNav { min-width: 0; }
+}
+
+/* Catalogue labels wrap their controls rather than sharing a setting row. */
+.catalogueLabel { display: flex; flex-direction: column; gap: 8px; }
+.catalogueLabel select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Reserve the badge width on the final inline label fragment, then occupy that space. */
+.helpLabel > label:has(+ .infoBadge) { padding-inline-end: 20px; }
+.helpLabel > label + .infoBadge { margin-inline-start: -14px; }
+
+.catalogueActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-start: 8px; }
+
+.searchBox > input { flex: 1; width: 100%; }
+
+
+@media (max-width: 600px) {
+ button[data-control-layout="row"].navItem, button[data-control-layout="row"].searchResult { min-height: 44px; }
+}
+
+/* Dense structured editors opt in; named child layouts retain their own display. */
+.alignedRows {
+  --control-height: 28px;
+  --control-icon-height: 28px;
+  --control-font-size: var(--font-sm);
+  --control-radius: var(--radius-sm);
+}
+.alignedRows .settingRow {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.alignedRows .settingRowText { padding-top: 6px; }
+.alignedRows .settingRowControl {
+  width: 100%;
+  max-width: none;
+  align-items: stretch;
+}
+.alignedRows .settingRowControl > div:not([class]) { justify-content: flex-start; }
+.alignedRows .settingRowWithActions { flex-direction: row; align-items: center; }
+@media (max-width: 600px) {
+  .alignedRows .settingRow { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+}

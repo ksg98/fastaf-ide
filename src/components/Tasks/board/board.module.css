@@ -1,0 +1,45 @@
+/* Tasks board: lanes are columns split by one hairline (no boxed lanes), cards
+   are quiet --wash-0 blocks with no border, the drop target lights with a
+   faint accent wash. */
+.container { display: flex; flex-direction: column; min-height: 0; height: 100%; color: var(--fg-primary); background: var(--bg-primary); font-family: var(--font-ui); }
+.header { display: flex; align-items: center; height: 36px; padding: 0 18px; }
+.header h2 { margin: 0; color: var(--fg-secondary); font-size: var(--font-sm); font-weight: 600; }
+.board { display: flex; flex: 1; min-height: 0; padding: 0 6px; overflow-x: auto; }
+.lane { display: flex; flex-direction: column; flex: 1 0 280px; min-width: 280px; min-height: 0; max-width: 400px; border-right: var(--hairline-w) solid var(--hairline); }
+.lane:last-child { border-right: 0; }
+.laneHeader { display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 12px; }
+.laneHeader h3 { margin: 0; color: var(--fg-secondary); font-size: var(--font-sm); font-weight: 600; }
+.laneHeader span { color: var(--fg-muted); font-size: var(--font-sm); font-variant-numeric: tabular-nums; }
+.key { color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--font-sm); }
+.laneScroll { flex: 1; overflow-y: auto; min-height: 0; padding: 0 6px 6px; }
+/* The 8px under each card is the gap to the next one (cards are positioned
+   absolutely by the virtualizer); it stays transparent. */
+.card { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 0; border-bottom: 8px solid transparent; background-clip: padding-box; border-radius: var(--radius-lg); background-color: var(--wash-0); touch-action: pan-y; user-select: none; cursor: grab; transition: background-color var(--duration-fast) var(--ease-out); }
+.card:hover { background-color: var(--wash-1); }
+.card[aria-busy="true"] { opacity: 0.5; cursor: progress; }
+.cardHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cardHead .key { height: 22px; padding: 0 4px; margin-left: -4px; }
+.key { text-align: left; }
+.title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left; padding: 0; border: 0; background: transparent; color: var(--fg-primary); font: inherit; font-size: var(--font-md); line-height: 1.4; cursor: pointer; }
+
+.key:focus-visible, .moveTrigger:focus-visible, .moveMenu button:focus-visible, .more:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25); }
+.dropTarget { background: rgba(var(--accent-rgb), 0.08); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.45); }
+.ghost { position: fixed; z-index: 1000; pointer-events: none; width: 256px; padding: 10px 12px; color: var(--fg-primary); background: var(--surface-overlay); backdrop-filter: var(--blur-overlay); -webkit-backdrop-filter: var(--blur-overlay); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--highlight-inset), var(--shadow-dropdown); }
+.ghost p { margin: 6px 0 0; }
+.error { margin: 8px 16px; color: var(--error); font-size: var(--font-sm); }
+.empty { color: var(--fg-muted); text-align: center; font-size: var(--font-sm); }
+.pending { color: var(--warning); font-size: var(--font-sm); }
+.announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@container (max-width: 600px) { .lane { flex-basis: 85cqw; min-width: 85cqw; } }
+
+.metadata { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 4px; max-height: 44px; overflow: auto; font-size: var(--font-xs); color: var(--fg-secondary); }
+.assignee, .label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assignee { padding: 0 4px; }
+/* Labels: neutral tinted chips, never outlined. */
+.label { padding: 1px 6px; border-radius: var(--radius-pill); background: var(--wash-1); }
+.moveTrigger { align-self: flex-start; margin-top: auto; }
+.more { margin: 8px; }
+/* The move menu is a menu: overlay surface, radius 8, 4px inset, quiet items. */
+.moveMenu { position: fixed; z-index: 1000; display: flex; flex-direction: column; width: 200px; max-height: 184px; overflow-y: auto; gap: 2px; padding: 4px; background: var(--surface-overlay); backdrop-filter: var(--blur-overlay); -webkit-backdrop-filter: var(--blur-overlay); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); box-shadow: var(--highlight-inset), var(--shadow-dropdown); }
+.moveMenu button { justify-content: flex-start; flex-shrink: 0; text-align: left; border-color: transparent; background: transparent; box-shadow: none; }
+.moveMenu button:hover:enabled { border-color: transparent; background: var(--surface-hover); }

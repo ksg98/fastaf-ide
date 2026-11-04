@@ -1,0 +1,22 @@
+name: CSP policy
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  csp-policy:
+    name: Guard permissive CSP
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Guard permissive CSP
+        run: bash scripts/with-test-tmp.sh pnpm exec vitest run src/__tests__/csp-policy.test.ts

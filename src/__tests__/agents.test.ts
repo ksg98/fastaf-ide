@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { AGENT_DISPLAY, AGENT_TYPES, AGENTS, type AgentType, MCP_SUPPORT } from "../agents";
 
 describe("agents", () => {
+	// Catches: a removed harness still appears in launch and detection lists.
+	it("excludes the removed aider harness from the agent list", () => {
+		expect(AGENT_TYPES).not.toContain("aider");
+		expect(Object.keys(AGENTS)).not.toContain("aider");
+		expect(Object.values(AGENTS).map((agent) => agent.binary)).not.toContain("aider");
+	});
 	/** Agent types that are not real CLI agents and should be excluded from UI agent lists */
 	const NON_CLI_TYPES: AgentType[] = ["git", "api"];
 
@@ -20,10 +26,6 @@ describe("agents", () => {
 
 	it("MCP_SUPPORT excludes 'api'", () => {
 		expect(MCP_SUPPORT.api).toBe(false);
-	});
-
-	it("AGENT_DISPLAY has an entry for 'api'", () => {
-		expect(AGENT_DISPLAY.api).toBeDefined();
 	});
 
 	it("all AGENT_TYPES have corresponding entries in AGENTS, MCP_SUPPORT, and AGENT_DISPLAY", () => {

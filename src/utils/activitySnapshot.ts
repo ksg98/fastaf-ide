@@ -1,6 +1,8 @@
 import { globalWorkspaceStore } from "../stores/globalWorkspace";
 import { rateLimitStore } from "../stores/ratelimit";
+import { repositoriesStore } from "../stores/repositories";
 import { terminalsStore } from "../stores/terminals";
+import { displayTask } from "./displayTask";
 
 export type EffectiveActivityState =
 	| "rate_limited"
@@ -45,35 +47,20 @@ export function isActivityWorking(state: EffectiveActivityState): boolean {
 	return state === "rate_limited" || state === "awaiting_input" || state === "working";
 }
 
-/** Every label `terminalStatusLabel` can produce, lowercased. */
-const STATUS_LABELS = new Set(["rate limited", "error", "waiting for input", "working", "completed", "idle"]);
-
-/**
- * The task worth showing next to a status badge — `null` when there is none.
- *
- * A `current_task` is whatever the agent painted on its status line. When that
- * is a bare spinner verb it repeats the badge sitting right next to it: a row
- * reading "Working / Working" costs a line and says nothing. Claude's verbs are
- * dropped wholesale because it cycles decorative ones ("Undulating",
- * "Crunching") that restate the badge without matching its wording.
- *
- * Matching is exact against the labels this module itself produces, so a real
- * task ("Waiting for background terminal") is never mistaken for a verb.
- */
-export function displayTask(
-	currentTask: string | null | undefined,
-	agentType: string | null | undefined,
-): string | null {
-	if (!currentTask) return null;
-	if (agentType === "claude") return null;
-	return STATUS_LABELS.has(currentTask.trim().toLowerCase()) ? null : currentTask;
-}
-
 /** Extract project name (last path segment) from cwd */
 export function projectName(cwd: string | null): string | null {
 	if (!cwd) return null;
 	const segments = cwd.replace(/\/+$/, "").split("/");
-	return segments[segments.length - 1] || null;
+	return segments.at(-1)! || null;
+}
+
+/** Use the same repository display name as tabs and the owning workspace's branch. */
+export function terminalProjectName(id: string, cwd: string | null): string | null {
+	const repoName = repositoriesStore.getRepoForTerminal(id);
+	if (!repoName) return projectName(cwd);
+	const owner = repositoriesStore.findOwnerForTerminal(id);
+	const workspace = owner ? repositoriesStore.get(owner.repoPath)?.workspaces[owner.workspaceId] : undefined;
+	return workspace?.kind === "worktree" ? `${repoName} · ${workspace.branchName}` : repoName;
 }
 
 /** Derive display status from terminal state fields.
@@ -119,6 +106,7 @@ export function reconcileActivityOrder(spine: string[], ids: string[], isWorking
 }
 
 export interface ActivityTerminalRow {
+	project: string | null;
 	id: string;
 	name: string;
 	shellState: string | null;
@@ -138,6 +126,7 @@ export interface ActivityTerminalRow {
 	backgroundWork: boolean;
 	isBusy: boolean; // Debounced busy (2s hold) — calmer than raw shellState for badge/ordering
 	isPromoted: boolean;
+	subAgentTag: string | null;
 }
 
 export interface ActivitySnapshot {
@@ -158,6 +147,7 @@ export function buildActivitySnapshot(): ActivitySnapshot {
 		rowById.set(id, {
 			id,
 			name: t?.name ?? "",
+			project: terminalProjectName(id, t?.cwd ?? null),
 			shellState: t?.shellState ?? null,
 			awaitingInput: t?.awaitingInput ?? null,
 			sessionId: t?.sessionId ?? null,
@@ -175,6 +165,7 @@ export function buildActivitySnapshot(): ActivitySnapshot {
 			backgroundWork: t?.backgroundWork ?? false,
 			isBusy: terminalsStore.isBusy(id),
 			isPromoted: globalWorkspaceStore.isPromoted(id),
+			subAgentTag: terminalsStore.getSubAgentTag(id),
 		});
 	}
 	const isWorking = (id: string): boolean => {

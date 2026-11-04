@@ -1,0 +1,2427 @@
+{
+  "events": [
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.99",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3140.854611
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.99",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3140.857664
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.99",
+      "time": 3140.857344
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.100",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3143.853453
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.100",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3143.855683
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.100",
+      "time": 3143.85544
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "DF7757FA49B661DBF630E032D0BE9148",
+      "url": "http://localhost:9876/mobile.html",
+      "types": null,
+      "method": "GET",
+      "type": "Document",
+      "time": 3146.786972
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "DF7757FA49B661DBF630E032D0BE9148",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.793851
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.102",
+      "url": "http://localhost:9876/assets/mobile-CvLIkqf8.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796428
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.102",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.79647
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.102",
+      "time": 3146.796477
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.103",
+      "url": "http://localhost:9876/assets/preload-helper-BKrSQD1R.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796501
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.103",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.79653
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.103",
+      "time": 3146.796534
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.104",
+      "url": "http://localhost:9876/assets/rolldown-runtime-C0FnF6B9.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.79655
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.104",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796576
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.104",
+      "time": 3146.796579
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.105",
+      "url": "http://localhost:9876/assets/core-DmOBTv47.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796594
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.105",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796618
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.105",
+      "time": 3146.796621
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.106",
+      "url": "http://localhost:9876/assets/transport-BUcCAzY5.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796634
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.106",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796661
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.106",
+      "time": 3146.796665
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.107",
+      "url": "http://localhost:9876/assets/appLogger-r66_pU4m.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796677
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.107",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796702
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.107",
+      "time": 3146.796706
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.108",
+      "url": "http://localhost:9876/assets/event-2yrHlxu4.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796717
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.108",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796744
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.108",
+      "time": 3146.796747
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.109",
+      "url": "http://localhost:9876/assets/invoke-Dl35RqrV.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796759
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.109",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796784
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.109",
+      "time": 3146.796787
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.110",
+      "url": "http://localhost:9876/assets/activityStore-CpYxjXii.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796799
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.110",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796824
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.110",
+      "time": 3146.796827
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.111",
+      "url": "http://localhost:9876/assets/debugRegistry-B5KdUiim.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796838
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.111",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796862
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.111",
+      "time": 3146.796865
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.112",
+      "url": "http://localhost:9876/assets/settingsRefresh-gG9KW3c3.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796876
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.112",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796901
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.112",
+      "time": 3146.796905
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.113",
+      "url": "http://localhost:9876/assets/openUrl-UdUAZDAj.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796915
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.113",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.79694
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.113",
+      "time": 3146.796944
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.114",
+      "url": "http://localhost:9876/assets/modalStack-C5HDnku3.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796955
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.114",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.796981
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.114",
+      "time": 3146.796985
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.115",
+      "url": "http://localhost:9876/assets/dialog.module-DKmu4pNr.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.796996
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.115",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.797021
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.115",
+      "time": 3146.797024
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.116",
+      "url": "http://localhost:9876/assets/visibilityInterval-Ds82gg-0.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.797036
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.116",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.797063
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.116",
+      "time": 3146.797067
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.117",
+      "url": "http://localhost:9876/assets/dialog-BmAemTJf.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3146.79708
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.117",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.797105
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.117",
+      "time": 3146.797109
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.118",
+      "url": "http://localhost:9876/assets/visibilityInterval-CtUCVu2k.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3146.797123
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.118",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.797147
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.118",
+      "time": 3146.797151
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.119",
+      "url": "http://localhost:9876/assets/mobile-CYi3BwLg.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3146.797162
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.119",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.797189
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.119",
+      "time": 3146.797192
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "DF7757FA49B661DBF630E032D0BE9148",
+      "time": 3146.794487
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.139",
+      "url": "http://localhost:9876/logs",
+      "types": null,
+      "method": "POST",
+      "type": "Fetch",
+      "time": 3146.806892
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.140",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3146.807149
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.141",
+      "url": "http://localhost:9876/api/version",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3146.807351
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.142",
+      "url": "http://localhost:9876/assets/mobileTheme-BmieiGNW.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.808159
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.142",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.808249
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.142",
+      "time": 3146.808254
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.143",
+      "url": "http://localhost:9876/assets/themes-HmKJCDAA.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.808329
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.143",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.808392
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.143",
+      "time": 3146.808395
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.144",
+      "url": "http://localhost:9876/assets/settings-0qSAl4LG.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.808428
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.144",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.808488
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.144",
+      "time": 3146.808492
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.145",
+      "url": "http://localhost:9876/assets/i18n-N1pV2JtE.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3146.808527
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.145",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3146.80859
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.145",
+      "time": 3146.808593
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.146",
+      "url": "http://localhost:9876/config/notes",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3146.80871
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.147",
+      "url": "http://localhost:9876/events",
+      "types": "chat-view-changed,session-created,session-closed,pty-parsed",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3146.809857
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.148",
+      "url": "http://localhost:9876/events",
+      "types": "mcp-confirm,mcp-confirm-resolved,remote-connection-status",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3146.809961
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.149",
+      "url": "http://localhost:9876/mobile-manifest.json",
+      "types": null,
+      "method": "GET",
+      "type": "Manifest",
+      "time": 3146.810055
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.150",
+      "url": "http://localhost:9876/config/ui-prefs",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3146.81066
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.151",
+      "url": "http://localhost:9876/config/themes",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3146.810737
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.139",
+      "status": 204,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3146.816328
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.140",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7673,
+      "time": 3146.816583
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.141",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3146.816668
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.146",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3146.817014
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.147",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7673,
+      "time": 3146.817062
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.148",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7678,
+      "time": 3146.817153
+    },
+    {
+      "event": "loadingFailed",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.139",
+      "time": 3146.817391,
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.140",
+      "time": 3146.812451
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.141",
+      "time": 3146.813128
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.150",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3146.817625
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.149",
+      "status": 401,
+      "protocol": "http/1.1",
+      "connectionId": 7697,
+      "time": 3146.817716
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.149",
+      "time": 3146.816582
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.146",
+      "time": 3146.81534
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.152",
+      "url": "http://localhost:9876/mobile-manifest.json",
+      "types": null,
+      "method": "GET",
+      "type": "Manifest",
+      "time": 3146.819552
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.150",
+      "time": 3146.816518
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.151",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3146.820208
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.151",
+      "time": 3146.818646
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.152",
+      "status": 401,
+      "protocol": "http/1.1",
+      "connectionId": 7697,
+      "time": 3146.84075
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.152",
+      "time": 3146.821649
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.154",
+      "url": "http://localhost:9876/assets/SessionDetailScreen-9Fdz4Thf.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.572436
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.155",
+      "url": "http://localhost:9876/assets/ContentRenderer-DMplTX2e.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.572867
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.156",
+      "url": "http://localhost:9876/assets/repositories-CumG7cuw.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.572968
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.157",
+      "url": "http://localhost:9876/assets/ContentRenderer-5W3R2z_X.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3147.573075
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.158",
+      "url": "http://localhost:9876/assets/sendCommand-C_hmS6rr.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.573203
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.159",
+      "url": "http://localhost:9876/assets/Transcript-DOSVNq3q.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.573307
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.160",
+      "url": "http://localhost:9876/assets/screenWakeLock-CNqxfFHA.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.573405
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.161",
+      "url": "http://localhost:9876/assets/Transcript-CC4Zyn-h.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3147.573514
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.162",
+      "url": "http://localhost:9876/assets/TerminalChatTranscript-C5qt97R4.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.573612
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.163",
+      "url": "http://localhost:9876/assets/TerminalChatTranscript-BSSustk0.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3147.573717
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.164",
+      "url": "http://localhost:9876/assets/time-Bg45Mqxh.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.573816
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.165",
+      "url": "http://localhost:9876/assets/uploadAttachment-CRpaW3B7.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.573908
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.166",
+      "url": "http://localhost:9876/assets/uploadAttachment-CQ_qN0wV.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3147.57401
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.167",
+      "url": "http://localhost:9876/assets/useKeyboardCorrection-e_HBE0QE.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.574109
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.168",
+      "url": "http://localhost:9876/assets/mobileFontSize-D5yXLJ8-.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.574204
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.169",
+      "url": "http://localhost:9876/assets/useMobileVoice-BnVeKIeu.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.574299
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.170",
+      "url": "http://localhost:9876/assets/SessionDetailScreen-liPwpva1.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3147.574411
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.157",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.575557
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.157",
+      "time": 3147.574545
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.161",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.575689
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.161",
+      "time": 3147.575624
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.158",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.57608
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.158",
+      "time": 3147.575575
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.163",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.576249
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.163",
+      "time": 3147.576199
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.166",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.576366
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.166",
+      "time": 3147.576285
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.160",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.576467
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.160",
+      "time": 3147.575714
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.164",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.576836
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.164",
+      "time": 3147.57625
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.162",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.576925
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.162",
+      "time": 3147.576032
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.156",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.577018
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.156",
+      "time": 3147.57581
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.167",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.577128
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.167",
+      "time": 3147.576467
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.165",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.577187
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.165",
+      "time": 3147.576366
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.154",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.577293
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.154",
+      "time": 3147.575993
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.159",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.57742
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.159",
+      "time": 3147.576238
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.170",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.578281
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.170",
+      "time": 3147.57824
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.168",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.578485
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.168",
+      "time": 3147.578235
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.169",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.578829
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.169",
+      "time": 3147.578719
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.155",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.580276
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.155",
+      "time": 3147.576278
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.171",
+      "url": "http://localhost:9876/dictation/config",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3147.594679
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.172",
+      "url": "http://localhost:9876/dictation/hands-free",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3147.595596
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.173",
+      "url": "http://localhost:9876/sessions/8bd862ff-ae99-496d-b5ba-6aea97b14616/output",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3147.60381
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.174",
+      "url": "http://localhost:9876/repo/open-markdown-tabs",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3147.604212
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.175",
+      "url": "http://localhost:9876/events",
+      "types": "open-markdown-tabs-changed,repositories-changed",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3147.604654
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.171",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3147.605659
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.172",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3147.605821
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.171",
+      "time": 3147.601158
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.173",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3147.605962
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.172",
+      "time": 3147.60164
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.173",
+      "time": 3147.605592
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.176",
+      "url": "http://localhost:9876/assets/dictation-DfcyOeVO.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3147.60644
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.174",
+      "status": 403,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3147.629944
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.175",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7649,
+      "time": 3147.630067
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.176",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3147.63019
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.176",
+      "time": 3147.608092
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.174",
+      "time": 3147.607026
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.178",
+      "url": "http://localhost:9876/dictation/config",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3147.633045
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.179",
+      "url": "http://localhost:9876/events",
+      "types": "dictation-backend-info,dictation-download-progress,dictation-partial,speech-download-progress,speech-utterance",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3147.633857
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.180",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3149.80769
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.181",
+      "url": "http://localhost:9876/sessions/8bd862ff-ae99-496d-b5ba-6aea97b14616/write",
+      "types": null,
+      "method": "POST",
+      "type": "Fetch",
+      "time": 3154.272825
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "60677045FC0E002272027BAC1EA4C815",
+      "url": "http://localhost:9876/mobile.html",
+      "types": null,
+      "method": "GET",
+      "type": "Document",
+      "time": 3154.678544
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.182",
+      "url": "http://localhost:9876/repo/open-markdown-tabs",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3154.775977
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "60677045FC0E002272027BAC1EA4C815",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3181.972705
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.179",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7763,
+      "time": 3181.972016
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.178",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7762,
+      "time": 3181.972374
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.2",
+      "url": "http://localhost:9876/assets/mobile-CvLIkqf8.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.974923
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.178",
+      "time": 3181.971996
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.3",
+      "url": "http://localhost:9876/assets/preload-helper-BKrSQD1R.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975085
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.181",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7762,
+      "time": 3181.974817
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.4",
+      "url": "http://localhost:9876/assets/rolldown-runtime-C0FnF6B9.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975211
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.180",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7761,
+      "time": 3181.974984
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.5",
+      "url": "http://localhost:9876/assets/core-DmOBTv47.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975272
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.6",
+      "url": "http://localhost:9876/assets/transport-BUcCAzY5.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975322
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.7",
+      "url": "http://localhost:9876/assets/appLogger-r66_pU4m.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975371
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.8",
+      "url": "http://localhost:9876/assets/event-2yrHlxu4.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975413
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.180",
+      "time": 3181.974231
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.9",
+      "url": "http://localhost:9876/assets/invoke-Dl35RqrV.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975451
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.10",
+      "url": "http://localhost:9876/assets/activityStore-CpYxjXii.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975495
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.181",
+      "time": 3181.974288
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.11",
+      "url": "http://localhost:9876/assets/debugRegistry-B5KdUiim.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975524
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.12",
+      "url": "http://localhost:9876/assets/settingsRefresh-gG9KW3c3.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.97559
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.13",
+      "url": "http://localhost:9876/assets/openUrl-UdUAZDAj.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975618
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.14",
+      "url": "http://localhost:9876/assets/modalStack-C5HDnku3.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975655
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.15",
+      "url": "http://localhost:9876/assets/dialog.module-DKmu4pNr.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975683
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.16",
+      "url": "http://localhost:9876/assets/visibilityInterval-Ds82gg-0.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3181.975725
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.17",
+      "url": "http://localhost:9876/assets/dialog-BmAemTJf.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3181.975764
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.18",
+      "url": "http://localhost:9876/assets/visibilityInterval-CtUCVu2k.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3181.975812
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.19",
+      "url": "http://localhost:9876/assets/mobile-CYi3BwLg.css",
+      "types": null,
+      "method": "GET",
+      "type": "Stylesheet",
+      "time": 3181.975852
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "60677045FC0E002272027BAC1EA4C815",
+      "time": 3181.973772
+    },
+    {
+      "event": "response",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.182",
+      "status": 403,
+      "protocol": "http/1.1",
+      "connectionId": 7761,
+      "time": 3181.979579
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.182",
+      "time": 3181.978513
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.3",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.013381
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.3",
+      "time": 3181.978576
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.4",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.013496
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.4",
+      "time": 3181.978697
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.2",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.013581
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.2",
+      "time": 3181.979064
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.39",
+      "url": "http://localhost:9876/mobile-manifest.json",
+      "types": null,
+      "method": "GET",
+      "type": "Manifest",
+      "time": 3182.014203
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.17",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.014889
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.17",
+      "time": 3182.014467
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.19",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.015012
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.19",
+      "time": 3182.014894
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.18",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.015175
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.18",
+      "time": 3182.014905
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.7",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.016337
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.7",
+      "time": 3182.016127
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.5",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.01705
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.5",
+      "time": 3182.016332
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.8",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.017295
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.8",
+      "time": 3182.017156
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.6",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.017566
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.6",
+      "time": 3182.016521
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.9",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.02526
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.9",
+      "time": 3182.018031
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.11",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.025455
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.11",
+      "time": 3182.018394
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.10",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.025541
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.10",
+      "time": 3182.018482
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.14",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.0265
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.14",
+      "time": 3182.026358
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.12",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.026741
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.12",
+      "time": 3182.026506
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.13",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.027048
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.13",
+      "time": 3182.026585
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.15",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.027598
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.15",
+      "time": 3182.027401
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.39",
+      "status": 401,
+      "protocol": "http/1.1",
+      "connectionId": 7697,
+      "time": 3182.028473
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.39",
+      "time": 3182.028307
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.16",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.028941
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.16",
+      "time": 3182.028365
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.41",
+      "url": "http://localhost:9876/logs",
+      "types": null,
+      "method": "POST",
+      "type": "Fetch",
+      "time": 3182.031923
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.42",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.032831
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.43",
+      "url": "http://localhost:9876/api/version",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.033143
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.44",
+      "url": "http://localhost:9876/assets/mobileTheme-BmieiGNW.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3182.035423
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.45",
+      "url": "http://localhost:9876/assets/themes-HmKJCDAA.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3182.035661
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.46",
+      "url": "http://localhost:9876/assets/settings-0qSAl4LG.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3182.035733
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.47",
+      "url": "http://localhost:9876/assets/i18n-N1pV2JtE.js",
+      "types": null,
+      "method": "GET",
+      "type": "Script",
+      "time": 3182.035809
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.48",
+      "url": "http://localhost:9876/config/notes",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.036142
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.49",
+      "url": "http://localhost:9876/events",
+      "types": "chat-view-changed,session-created,session-closed,pty-parsed",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3182.037552
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.41",
+      "status": 204,
+      "protocol": "http/1.1",
+      "connectionId": 7762,
+      "time": 3182.037716
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.42",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7762,
+      "time": 3182.037872
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.43",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7761,
+      "time": 3182.037949
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.50",
+      "url": "http://localhost:9876/events",
+      "types": "mcp-confirm,mcp-confirm-resolved,remote-connection-status",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3182.038072
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.44",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.038316
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.44",
+      "time": 3182.036641
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.45",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.038555
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.45",
+      "time": 3182.037549
+    },
+    {
+      "event": "loadingFailed",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.41",
+      "time": 3182.038673,
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.42",
+      "time": 3182.035174
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.43",
+      "time": 3182.03522
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.48",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7761,
+      "time": 3182.043843
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.47",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.043988
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.47",
+      "time": 3182.039807
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.50",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7761,
+      "time": 3182.04412
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.49",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 7762,
+      "time": 3182.044223
+    },
+    {
+      "event": "response",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.46",
+      "status": 200,
+      "protocol": "http/1.1",
+      "connectionId": 0,
+      "time": 3182.044853
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.46",
+      "time": 3182.038119
+    },
+    {
+      "event": "loadingFinished",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.48",
+      "time": 3182.039466
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.51",
+      "url": "http://localhost:9876/config/ui-prefs",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.053696
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.52",
+      "url": "http://localhost:9876/config/themes",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.054829
+    },
+    {
+      "event": "request",
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.94",
+      "url": "http://localhost:9876/mobile-manifest.json",
+      "types": null,
+      "method": "GET",
+      "type": "Manifest",
+      "time": 3182.107056
+    },
+    {
+      "event": "request",
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.183",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.807957
+    }
+  ],
+  "open": [
+    {
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.147",
+      "url": "http://localhost:9876/events",
+      "types": "chat-view-changed,session-created,session-closed,pty-parsed",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3146.809857
+    },
+    {
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.148",
+      "url": "http://localhost:9876/events",
+      "types": "mcp-confirm,mcp-confirm-resolved,remote-connection-status",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3146.809961
+    },
+    {
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.175",
+      "url": "http://localhost:9876/events",
+      "types": "open-markdown-tabs-changed,repositories-changed",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3147.604654
+    },
+    {
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.179",
+      "url": "http://localhost:9876/events",
+      "types": "dictation-backend-info,dictation-download-progress,dictation-partial,speech-download-progress,speech-utterance",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3147.633857
+    },
+    {
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.49",
+      "url": "http://localhost:9876/events",
+      "types": "chat-view-changed,session-created,session-closed,pty-parsed",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3182.037552
+    },
+    {
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.50",
+      "url": "http://localhost:9876/events",
+      "types": "mcp-confirm,mcp-confirm-resolved,remote-connection-status",
+      "method": "GET",
+      "type": "EventSource",
+      "time": 3182.038072
+    },
+    {
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.51",
+      "url": "http://localhost:9876/config/ui-prefs",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.053696
+    },
+    {
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.52",
+      "url": "http://localhost:9876/config/themes",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.054829
+    },
+    {
+      "tab": "0D4C9355F33AB8D25A16D5B0CF5EB37E",
+      "id": "30297.94",
+      "url": "http://localhost:9876/mobile-manifest.json",
+      "types": null,
+      "method": "GET",
+      "type": "Manifest",
+      "time": 3182.107056
+    },
+    {
+      "tab": "ED8377EA6DA519EC051B6DDC9EFA202A",
+      "id": "63861.183",
+      "url": "http://localhost:9876/sessions",
+      "types": null,
+      "method": "GET",
+      "type": "Fetch",
+      "time": 3182.807957
+    }
+  ]
+}

@@ -2,6 +2,13 @@
 
 Hooks contain business logic and side effects, bridging stores and Tauri commands.
 
+## useOpenMarkdownPublication
+
+`src/hooks/useOpenMarkdownPublication.ts` observes main-window desktop file tabs and sends
+metadata to `sync_open_markdown_tabs`. It serializes writes, coalesces rapid
+changes and retries failures. Browser and mobile documents do not publish.
+The Rust snapshot is temporary and contains no file contents.
+
 ## useAppInit
 
 **File:** `src/hooks/useAppInit.ts`
@@ -14,7 +21,7 @@ export function initApp(deps: AppInitDeps): Promise<void>
 
 **What it does:**
 1. Hydrates all stores from Rust backend (settings, repos, UI, prompts, etc.)
-2. Detects installed binaries (Claude, Aider)
+2. Detects installed binaries (Claude, Codex)
 3. Applies platform CSS class (`platform-darwin`, `platform-win32`, `platform-linux`)
 4. Sets up close handler (quit confirmation dialog)
 5. Starts GitHub polling
@@ -54,11 +61,19 @@ Low-level PTY session management. Wraps Tauri PTY commands.
 
 **File:** `src/hooks/useSmartPrompts.ts`
 
-Resolves Smart Prompt variables and routes inject, shell, headless, and API
+Resolves Smart Prompt variables and routes inject, shell and headless
 execution. For inject mode, explicit Insert/Run choices take precedence over
 `autoExecute`; prompts without that persisted field retain their legacy target
 default. Only actions that will submit are idle-gated. PTY delivery always uses
 `usePty.sendCommand`, including review-only fallback with `submit=false`.
+
+**`api` mode has no executor.** `canExecute` refuses it with a reason naming
+#787-ee50 rather than falling through to inject, and `resolveHeadlessAgent`
+returns `api` as its own answer so a headless prompt pointing at the removed
+External API slot is refused the same way. The mode stays a value a saved prompt
+can hold, and stays an option the editor offers, because ego restores it — but
+silently running the prompt as something the user did not choose is worse than
+saying where it went.
 
 ---
 
@@ -67,6 +82,8 @@ default. Only actions that will submit are idle-gated. PTY delivery always uses
 **File:** `src/hooks/useGitOperations.ts`
 
 High-level git workflows: branch switching, worktree creation, repo management.
+
+Worktree removal holds a per-repository/workspace lock through preflight, confirmation and cleanup, and releases it in `finally`. A failed initial confirmation propagates its error, preserves the workspace and terminals, and allows a later retry.
 
 ### Dependencies
 
@@ -229,6 +246,10 @@ Git repository operations (lower level than useGitOperations).
 **File:** `src/hooks/useQuickSwitcher.ts`
 
 Held-key branch quick-switcher (Cmd+Ctrl on macOS, Ctrl+Alt on Win/Linux).
+Number keys select branches before configurable actions. Configured letter actions,
+including Ctrl+Alt+V on Windows/Linux, still dispatch while the chord is held.
+The shortcut dispatcher captures handled quick-switcher chords before terminal
+input so the same key does not also write PTY bytes.
 
 ```typescript
 switchToBranchByIndex(index: number): void
@@ -269,7 +290,15 @@ Confirmation and info dialogs using Tauri dialog plugin.
 
 **File:** `src/hooks/useDictation.ts`
 
-Push-to-talk dictation integration.
+Push-to-talk dictation integration. The destination and selection are captured before any asynchronous work. Explicit editors take priority; transcript or BODY focus in terminal Chat targets that terminal's Compose editor when one is mounted (a detached terminal window). Otherwise `dictationTarget.ts` opens the compose dock through `composeDockBridge` and targets its field as a plain input, provided the terminal is the active one. CodeMirror receives a transaction, preserving the surrounding draft. Terminal Chat Compose also honors auto-send through its editor-owned submit callback, sharing normal Send deduplication and successful-draft cleanup; ordinary editors remain review-only. CLI uses the captured PTY session and its existing auto-send semantics, even if the active tab changes.
+
+Detached AI Chat mounts the same hook and hotkey lifecycle in its own WebView,
+hydrates the shared dictation configuration, and supplies its composer as the
+fallback when its transcript has focus. Main-window callers supply no fallback,
+so terminal and form targeting stay unchanged. Native Fn chooses the focused
+supported window at key-down; focus changes do not move the captured target.
+
+A removed target, replaced session, changed draft, or failed insertion retains the transcript in a sticky error message and the Messages bell. It never falls through to another destination. Start and delivery logs contain the recording id, target kind, terminal/session identity, character count and outcome, without transcript text.
 
 | Method | Description |
 |--------|-------------|
@@ -307,6 +336,8 @@ Handles external file drag & drop using Tauri's native `onDragDropEvent` API (no
 | `isDragging()` | `boolean` | `true` while files are being dragged over the window |
 
 ### Behaviour
+
+A folder target takes precedence. The File Browser panel supplies its connection id to descendant folder rows. Local drops call `fs_transfer_paths`; remote drops call the local Rust `fs_transfer_remote_paths` coordinator with that id, and always use copy semantics. Recursive-directory confirmation retains the connection id when retrying.
 
 1. **Active PTY session** — dropped file paths are written to the terminal as space-separated quoted strings (enables Claude Code image drops)
 2. **No active PTY** — `.md`/`.mdx` files open in the Markdown viewer; all other files open in the Code Editor
@@ -372,7 +403,22 @@ The three-attempt budget counts only prompts successfully delivered to the agent
 
 **File:** `src/hooks/useAgentPolling.ts`
 
+Backend lifecycle snapshots own `exactAgentSessionId`: only a validated
+`codex_binding.session_id` sets it, and omission clears it. The native ID also
+updates the normal persisted resume ID; asynchronous heuristic discovery cannot
+overwrite that ID while exact evidence is live. Codex Chat availability reads
+the live exact field rather than the resume/discovery field.
+
 Polls agent status (foreground process detection) for all active terminal sessions at regular intervals.
+
+Lifecycle state arrives through `session-state-changed`, with a session snapshot
+catch-up on terminal/session attachment and browser stream resync. Attachment
+changes during an in-flight request schedule a trailing catch-up without
+restarting the discovery timer or event subscription. The common path also
+restores `agent_intent` and `last_prompt` into the terminal store, so an idle
+session's Context bar does not depend on replaying its original parsed events.
+A delayed catch-up is discarded if the terminal's session, shell revision, intent
+or prompt changed while the request was in flight.
 
 ---
 
@@ -402,3 +448,10 @@ Handles worktree lifecycle events. A newly created worktree can be opened or dec
 **File:** `src/hooks/useFileBrowser.ts`
 
 File browser panel logic: directory listing, file operations (create, delete, rename, copy), content search, and gitignore management.
+
+
+### Automatic agent toast cards (#1760-bab7)
+
+MCP toast notices show a transient card when their origin terminal is not active or the window is unfocused. Settings → Notifications → **Show cards from other terminals** defaults on and is saved per client; turning it off restores urgent-only cards. Urgent notices always show a card, and notices without an origin session remain bell-only unless urgent. The listener reads `terminalsStore.state.activeId` and `document.hasFocus()` at arrival; `notificationsStore.state.autoToastCards` is stored under `tui-commander-auto-toast-cards` in localStorage. Bell deduplication, sound and terminal navigation are preserved.
+
+Desktop close decisions come from Rust through `close-dialog`; `useAppInit` forwards the request to the close dialog store. There is no JavaScript `onCloseRequested` interceptor or frontend PTY teardown on desktop Quit.

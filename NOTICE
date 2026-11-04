@@ -1,0 +1,13 @@
+FastAF
+Copyright 2026 The FastAF authors
+https://github.com/ksg98/fastaf-ide
+
+This product is derived from TUICommander
+(https://github.com/sstraus/tuicommander), Copyright 2026 Stefano Straus,
+licensed under the Apache License, Version 2.0.
+
+FastAF modifies TUICommander and adds to it. FastAF is distributed under the
+same license; the full text is in LICENSE.
+
+Third-party components included in FastAF, and their licenses, are listed in
+THIRD_PARTY_NOTICES.md.

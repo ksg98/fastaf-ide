@@ -1,59 +1,127 @@
+#![recursion_limit = "256"]
 #![cfg_attr(
     not(feature = "desktop"),
     allow(dead_code, unused_imports, unused_variables)
 )]
 
+pub(crate) mod accounts;
+#[cfg(test)]
+mod accounts_regression_tests;
+pub mod acp;
+pub(crate) mod acp_chat;
+pub(crate) mod acp_commands;
 pub(crate) mod agent;
 pub(crate) mod agent_hook;
 pub(crate) mod agent_hook_codex;
+pub(crate) mod agent_hook_codex_trust;
 pub(crate) mod agent_hook_commands;
 pub(crate) mod agent_hook_installer;
+pub(crate) mod agent_hook_launch;
 pub(crate) mod agent_hook_opencode;
 pub(crate) mod agent_mcp;
 pub(crate) mod agent_session;
 pub(crate) mod ai_agent;
 pub(crate) mod ai_chat;
-pub(crate) mod ai_chat_registry;
+pub(crate) mod attachments;
+#[cfg(feature = "desktop")]
+pub(crate) mod audio_enumeration;
+pub(crate) mod background_mode;
+#[cfg(test)]
+mod background_mode_tests;
+#[cfg(all(debug_assertions, feature = "desktop"))]
+pub mod dev_backend;
+pub(crate) mod launch_instructions;
+pub(crate) mod mail_subscriptions;
+pub(crate) mod prompt_receipt;
+pub(crate) mod session_resume;
+pub(crate) mod session_wake;
+pub(crate) mod suspended_sessions;
+pub mod work_items;
+pub use tuic_core::app_instance;
+mod agent_test;
 pub(crate) mod app_logger;
 pub(crate) mod changelog;
 pub(crate) mod chatgpt;
-pub(crate) mod chrome;
+mod frame_workload;
+mod stall_journal;
+pub(crate) use tuic_terminal::chrome;
+pub(crate) mod circleci;
 pub(crate) mod claude_usage;
-pub(crate) mod cli;
+pub(crate) use tuic_core::cli;
+mod ai_chat_selection;
+#[expect(
+    dead_code,
+    reason = "Automation runtime and API consumers follow in plan steps 2–8"
+)]
+pub(crate) mod automations;
+pub(crate) mod cli_usage_rpc;
+pub(crate) mod codex_usage;
 pub(crate) mod config;
 pub(crate) mod conflict_assist;
 pub(crate) mod content_index;
+pub(crate) mod mcp_capabilities;
+mod open_markdown_tabs;
+pub(crate) mod session_usage;
+pub mod settings;
+pub(crate) use tuic_git::cow;
 pub(crate) mod cpu_watchdog;
-pub(crate) mod credentials;
+pub(crate) use tuic_core::credentials;
 #[cfg(feature = "desktop")]
+mod default_app;
+pub(crate) mod design_mode;
+// Tests of the sidecar config override that build.rs also compiles; a build
+// script has no test harness.
+#[cfg(test)]
+#[path = "../build_sidecars.rs"]
+mod build_sidecars;
+#[cfg(feature = "dictation")]
 mod dictation;
-#[cfg(feature = "desktop")]
-mod voice;
-pub(crate) mod diff_triage;
 pub(crate) mod dir_watcher;
-pub(crate) mod error_classification;
+pub(crate) mod ego_cli;
+#[cfg(all(feature = "desktop", not(feature = "dictation")))]
+#[path = "dictation/ownership.rs"]
+mod input_ownership;
+// FastAF's voice agent captures through the dictation crate's microphone
+// path, so it is built wherever dictation is.
+#[cfg(feature = "dictation")]
+mod voice;
+pub(crate) use tuic_core::error_classification;
+pub(crate) mod frontend_liveness;
 pub(crate) mod fs;
 pub(crate) mod generators;
 pub(crate) mod git;
-pub(crate) mod git_cli;
+pub(crate) mod remote_transfer;
+pub(crate) use tuic_git::git_cli;
 pub(crate) mod git_graph;
-pub(crate) mod git_reads;
+pub(crate) mod idle_close;
+pub(crate) mod llm_api;
+pub(crate) use tuic_git::git_locks;
+pub(crate) use tuic_git::git_reads;
+#[cfg(test)]
+mod critic_1420_tests;
 pub(crate) mod github;
 pub(crate) mod github_account;
 pub(crate) mod github_auth;
 pub(crate) mod github_clone;
 #[cfg(test)]
 mod github_compat_tests;
-pub(crate) mod github_debug;
+#[cfg(feature = "desktop")]
+pub(crate) mod github_pr_action_commands;
+pub(crate) mod github_pr_actions;
+pub(crate) mod github_pr_api;
+pub(crate) mod github_review_threads;
+pub(crate) mod pr_open_threads;
+pub(crate) use tuic_git::github_debug;
 pub(crate) mod github_poller;
 #[cfg(feature = "desktop")]
 mod global_hotkey;
 pub(crate) mod import;
-pub(crate) mod grid_gate;
+pub(crate) use tuic_terminal::grid_gate;
+pub(crate) mod grid_watch;
+pub(crate) mod grok_usage;
 pub(crate) mod improvement_scan;
-mod input_line_buffer;
-pub(crate) mod jsonc_edit;
-pub(crate) mod llm_api;
+pub(crate) use tuic_core::jsonc_edit;
+pub(crate) use tuic_terminal::input_line_buffer;
 pub(crate) mod mcp_http;
 #[allow(dead_code)] // Incremental build: wired in story 1196+ (OAuth flow/token/registry)
 pub(crate) mod mcp_oauth;
@@ -65,56 +133,107 @@ pub(crate) mod mdkb_client;
 #[cfg(feature = "desktop")]
 pub(crate) mod mdkb_commands;
 pub(crate) mod mdkb_daemon;
+pub(crate) mod memory_report;
 #[cfg(feature = "desktop")]
 mod menu;
+#[cfg(feature = "desktop")]
+mod native_clipboard;
+#[cfg(feature = "desktop")]
+mod native_dialog;
 #[cfg(feature = "desktop")]
 mod native_drag;
 #[cfg(feature = "desktop")]
 mod native_keys;
 #[cfg(feature = "desktop")]
+mod native_notification;
+#[cfg(feature = "desktop")]
 pub(crate) mod notification_sound;
-mod output_parser;
-pub(crate) mod output_watchers;
+pub(crate) mod secrets;
+pub(crate) use tuic_terminal::output_parser;
+pub(crate) use tuic_terminal::output_watchers;
+#[cfg(feature = "desktop")]
+mod app_nap;
 #[cfg(feature = "desktop")]
 mod panel_window;
+mod plugin_content;
 pub(crate) mod plugin_credentials;
 pub(crate) mod plugin_exec;
 pub(crate) mod plugin_fs;
+pub(crate) mod plugin_github;
 pub(crate) mod plugin_http;
 pub(crate) mod plugin_pty;
+pub(crate) mod plugin_settings;
 pub(crate) mod plugins;
+pub(crate) mod pr_review;
+pub(crate) mod provider_registry;
+// The elevated-copy staging serves the desktop-only mdkb installer.
 #[cfg(feature = "desktop")]
 mod press_and_hold;
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) mod private_scratch;
 #[cfg(feature = "desktop")]
 mod text_extraction;
-pub(crate) mod process_env;
+pub(crate) use tuic_core::process_env;
+pub(crate) mod progress;
 pub(crate) mod prompt;
-pub(crate) mod provider_registry;
 pub(crate) mod pty;
 pub(crate) mod pty_capture;
 pub(crate) mod push;
+pub(crate) use tuic_core::redaction;
+pub(crate) mod chat_view;
+mod codex_binding;
+mod monitoring_status;
 pub(crate) mod registry;
 pub(crate) mod relay_client;
+pub(crate) mod relay_tunnel;
+pub use relay_tunnel::service::{RelayPairOptions, relay_pair};
 #[allow(dead_code)] // Constructors used by remote binary and future tests
 pub(crate) mod remote_connection;
+pub(crate) mod remote_deploy;
+#[cfg_attr(feature = "desktop", allow(dead_code))]
+pub(crate) mod remote_lifetime;
+pub(crate) mod remote_mirror;
+pub(crate) mod remote_runtime;
+pub(crate) mod remote_update;
 pub(crate) mod repo_watcher;
 mod shell_integration;
 #[cfg(feature = "desktop")]
 pub(crate) mod sleep_prevention;
 pub(crate) mod smart_prompt;
 pub(crate) mod state;
+pub(crate) mod stories;
+pub(crate) mod subagent_map;
 pub(crate) mod tailscale;
 pub(crate) mod tasks;
-pub(crate) mod terminal_grid;
-pub(crate) mod text_rank;
-pub(crate) mod themes;
-pub(crate) mod tool_search;
+#[expect(
+    dead_code,
+    reason = "Telegram offline ports await native integration after 1419/1420"
+)]
+pub(crate) mod telegram;
+pub(crate) mod transcript_tail;
+pub(crate) use tuic_terminal::terminal_grid;
+#[cfg(test)]
+mod build_graph_tests;
+#[cfg(test)]
+pub(crate) mod replay_oracle;
+#[cfg(feature = "desktop")]
+pub(crate) mod terminal_grid_commands;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub(crate) use tuic_core::text_rank;
 #[cfg(feature = "desktop")]
 mod fastaf_cli;
+pub(crate) mod themes;
+pub(crate) mod tool_search;
 #[allow(dead_code)] // Many items used only by the remote binary (not(desktop) build)
 pub(crate) mod tunnels;
 #[cfg(feature = "desktop")]
 mod updater;
+pub(crate) mod webview_recovery;
+#[cfg(feature = "desktop")]
+pub(crate) mod webview_url;
+pub(crate) mod workflows;
+pub(crate) mod workitem_links;
 pub(crate) mod worktree;
 
 use std::path::{Path, PathBuf};
@@ -124,8 +243,6 @@ use tauri::{Emitter, Manager, State, WebviewWindow};
 
 // Re-export shared types from state module
 pub(crate) use state::MAX_CONCURRENT_SESSIONS;
-#[cfg(test)]
-pub(crate) use state::SessionMetrics;
 pub(crate) use state::{AppState, OutputRingBuffer, PtySession};
 
 #[cfg(feature = "desktop")]
@@ -141,10 +258,13 @@ async fn open_secondary_window(app: tauri::AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("/?mode=secondary".into());
-    let builder = tauri::WebviewWindowBuilder::new(&app, "secondary", url)
-        .title("FastAF — Secondary")
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(800.0, 600.0);
+    let builder = themes::window_background::configure(
+        tauri::WebviewWindowBuilder::new(&app, "secondary", url),
+        themes::window_background::current(&app),
+    )
+    .title("FastAF — Secondary")
+    .inner_size(1200.0, 800.0)
+    .min_inner_size(800.0, 600.0);
     with_vibrancy(builder)
         .build()
         .map_err(|e| format!("Failed to create secondary window: {e}"))?;
@@ -174,6 +294,7 @@ fn with_vibrancy<R: tauri::Runtime, M: tauri::Manager<R>>(
         state: Some(WindowEffectState::FollowsWindowActiveState),
         radius: None,
         color: None,
+        interactive: false,
     })
 }
 
@@ -365,13 +486,17 @@ mod boot_commands {
 /// Save configuration to disk, update the AppState cache, and live-restart the HTTP server
 /// if MCP / Remote Access settings changed (no app restart required).
 #[tauri::command]
-fn save_config(state: State<'_, Arc<AppState>>, config: config::AppConfig) -> Result<(), String> {
+fn save_config(
+    state: State<'_, Arc<AppState>>,
+    base: config::AppConfig,
+    config: config::AppConfig,
+) -> Result<(), String> {
     // Serialized read-merge-persist: see config::commit_config_change. Two overlapping
     // saves used to read the same snapshot and the loser's fields were silently dropped.
-    let effects = config::commit_config_change(state.inner(), move |_current| Ok(config))?;
+    let effects = config::commit_config_save(state.inner(), base, config)?;
 
     if effects.tools_changed {
-        let _ = state.mcp_tools_changed.send(());
+        let _ = state.mcp.tools_changed.send(());
     }
 
     if effects.server_changed {
@@ -379,6 +504,16 @@ fn save_config(state: State<'_, Arc<AppState>>, config: config::AppConfig) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn save_app_config(
+    state: State<'_, Arc<AppState>>,
+    base: config::AppConfig,
+    config: config::AppConfig,
+) -> Result<(), String> {
+    save_config(state, base, config)
 }
 
 /// Hash a plaintext password with bcrypt for remote access config
@@ -403,6 +538,180 @@ fn clear_caches(state: State<'_, Arc<AppState>>) {
 #[tauri::command]
 fn clear_repo_caches(state: State<'_, Arc<AppState>>, path: String) {
     state.invalidate_repo_caches(&path);
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn report_progress_event(
+    state: State<'_, Arc<AppState>>,
+    project: String,
+    report: crate::progress::ProgressReportInput,
+) -> Result<crate::progress::ProgressReceipt, String> {
+    // A local caller is not an agent: it has no name to attribute and no
+    // per-agent override to apply.
+    crate::mcp_http::mcp_transport::report_progress(
+        state.inner(),
+        Some(&project),
+        report,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn progress_list(
+    project: String,
+    input: progress::ProgressListInput,
+) -> Result<progress::ProgressList, String> {
+    progress::progress_list(&project, input)
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn progress_projects() -> Result<Vec<String>, String> {
+    progress::progress_projects()
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn progress_delete(
+    project: String,
+    input: progress::ProgressDeleteInput,
+) -> Result<progress::ProgressDeleteReceipt, String> {
+    progress::progress_delete(&project, input)
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn progress_flow(
+    state: State<'_, Arc<AppState>>,
+    project: String,
+    input: progress::ProgressFlowInput,
+) -> Result<progress::ProgressFlow, String> {
+    progress::progress_flow_blocking(state.inner().clone(), project, input).await
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn chat_view_snapshot(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    epoch: Option<u64>,
+    from_seq: Option<u64>,
+    pending_texts: Option<Vec<String>>,
+) -> Result<chat_view::ChatViewSnapshot, String> {
+    chat_view::chat_view_snapshot_blocking(
+        state.inner().clone(),
+        session_id,
+        epoch,
+        from_seq.unwrap_or(0),
+        pending_texts.unwrap_or_default(),
+    )
+    .await
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn progress_flow_detail(
+    state: State<'_, Arc<AppState>>,
+    input: progress::ProgressFlowDetailInput,
+) -> Result<progress::ProgressFlowDetail, String> {
+    progress::progress_flow_detail_blocking(state.inner().clone(), input).await
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn progress_mark_viewed(
+    project: String,
+    pty_id: Option<String>,
+) -> Result<progress::ProgressViewedReceipt, String> {
+    progress::progress_mark_viewed(&project, pty_id.as_deref())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn save_notes(
+    state: State<'_, Arc<AppState>>,
+    base: serde_json::Value,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    config::save_notes(base, config)?;
+    state.notify_ideas_changed();
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn story_capabilities() -> bool {
+    true
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn story_action_command(
+    state: State<'_, Arc<AppState>>,
+    project: String,
+    action: stories::StoryAction,
+    session_id: Option<String>,
+) -> Result<stories::StoryReply, String> {
+    story_action_command_for_state(state.inner().clone(), project, action, session_id).await
+}
+
+#[cfg(feature = "desktop")]
+async fn story_action_command_for_state(
+    state: Arc<AppState>,
+    project: String,
+    action: stories::StoryAction,
+    session_id: Option<String>,
+) -> Result<stories::StoryReply, String> {
+    tokio::task::spawn_blocking(move || {
+        stories::story_action_for_session(&state, &project, action, session_id.as_deref())
+    })
+    .await
+    .map_err(|error| format!("story task failed: {error}"))?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn story_generate_draft(
+    project: String,
+    request: String,
+    // Accepted for the transport contract and ignored: FastAF drafts on its
+    // own engine, which has no ego turn to reserve or cancel.
+    request_id: Option<String>,
+) -> Result<stories::draft::StoryDraft, String> {
+    let _ = request_id;
+    stories::draft::generate(project, request).await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn automation_action(
+    state: State<'_, Arc<AppState>>,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    automations::api::execute(input, state.inner().clone()).await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn workflow_definition_action(
+    project: String,
+    action: workflows::WorkflowAction,
+) -> Result<workflows::WorkflowReply, String> {
+    tokio::task::spawn_blocking(move || workflows::definition_action(&project, action))
+        .await
+        .map_err(|error| format!("workflow definition task failed: {error}"))?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn workflow_run_action(
+    state: State<'_, Arc<AppState>>,
+    project: String,
+    action: workflows::RunAction,
+) -> Result<workflows::RunReply, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || workflows::run_action_with_events(&state, &project, action))
+        .await
+        .map_err(|error| format!("workflow run task failed: {error}"))?
 }
 
 /// Receive a screenshot response from the frontend (captured iframe content).
@@ -447,7 +756,32 @@ struct LocalIpEntry {
 /// Implementation shared between Tauri command and HTTP handler.
 pub(crate) fn get_local_ips_impl(state: &AppState) -> Vec<LocalIpEntry> {
     let ipv6_enabled = state.config.read().services.server.ipv6_enabled;
-    get_local_ips_with_config(ipv6_enabled)
+    order_remote_access_ips(state, get_local_ips_with_config(ipv6_enabled))
+}
+
+/// Pairing and phone entry use the first candidate. Keep all addresses available
+/// for an explicit user selection, preserving interface order within each rank.
+fn order_remote_access_ips(state: &AppState, mut ips: Vec<LocalIpEntry>) -> Vec<LocalIpEntry> {
+    let tailscale_https = matches!(
+        &*state.tailscale_state.read(),
+        tailscale::TailscaleState::Running {
+            https_enabled: true,
+            ..
+        }
+    ) && state.tls_listener.read().strong_count() > 0;
+    ips.sort_by_key(|entry| {
+        let tailscale = crate::mcp_http::auth::is_tailscale_ip(&entry.ip);
+        if tailscale && tailscale_https {
+            0
+        } else if entry.label.contains("Wi-Fi") || entry.label.contains("LAN") {
+            1
+        } else if tailscale {
+            2
+        } else {
+            3
+        }
+    });
+    ips
 }
 
 #[cfg(feature = "desktop")]
@@ -607,13 +941,8 @@ fn classify_ipv6_addr(ip: &std::net::IpAddr) -> String {
     }
 }
 
-/// Pick preferred IP from a list (Tailscale > Wi-Fi/LAN > any)
+/// Pick the first address from the backend-ranked remote access candidates.
 pub(crate) fn pick_preferred_ip(ips: Vec<LocalIpEntry>) -> Option<String> {
-    for label_prefix in &["Tailscale", "Wi-Fi", "LAN"] {
-        if let Some(e) = ips.iter().find(|e| e.label.contains(label_prefix)) {
-            return Some(e.ip.clone());
-        }
-    }
     ips.into_iter().next().map(|e| e.ip)
 }
 
@@ -774,6 +1103,15 @@ pub(crate) fn read_file_impl_with_limit(
         .map_err(|e| format!("Failed to resolve file path: {e}"))?;
 
     if !canonical_file.starts_with(&canonical_repo) {
+        if file_path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(format!(
+                "Cannot open symbolic link \"{file}\": target \"{}\" is outside the repository.",
+                canonical_file.display()
+            ));
+        }
         return Err("Access denied: file is outside repository".to_string());
     }
 
@@ -855,6 +1193,13 @@ pub(crate) fn write_external_file_impl(path: String, content: String) -> Result<
     fs::atomic_write(p, content.as_bytes()).map_err(|e| format!("Failed to write file: {e}"))
 }
 
+/// Body-free MCP tools/call outcome audit; `enabled: false` while the setting is off.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn get_mcp_audit(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    Ok(mcp_http::mcp_call_audit::snapshot(&state))
+}
+
 /// Get MCP server status (running, port, active sessions).
 /// Async to avoid blocking the Tauri IPC thread during the TCP self-test.
 #[cfg(feature = "desktop")]
@@ -865,8 +1210,8 @@ async fn get_mcp_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::V
         let cfg = state.config.read();
         (
             cfg.services.server.enabled,
-            state.sessions.len(),
-            state.mcp_sessions.len(),
+            state.session_maps.sessions.len(),
+            state.mcp.sessions.len(),
         )
     };
 
@@ -883,9 +1228,7 @@ async fn get_mcp_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::V
     // TCP reachability self-test for remote access
     let remote_port = state.config.read().services.server.port;
     let reachable = if remote_enabled {
-        let preferred_ip = pick_preferred_ip(get_local_ips_with_config(
-            state.config.read().services.server.ipv6_enabled,
-        ));
+        let preferred_ip = pick_preferred_ip(get_local_ips_impl(&state));
         if let Some(ip) = preferred_ip {
             let port = remote_port;
             let addr = if ip.contains(':') {
@@ -909,7 +1252,9 @@ async fn get_mcp_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::V
         None
     };
 
-    Ok(serde_json::json!({
+    let mut status = serde_json::json!({
+        "native_tools": mcp_http::mcp_transport::native_tool_catalog(),
+        "native_capabilities": mcp_http::mcp_transport::native_capability_catalog(&state),
         "enabled": true,
         "running": running,
         "remote_port": if remote_enabled { Some(remote_port) } else { None },
@@ -917,7 +1262,15 @@ async fn get_mcp_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::V
         "mcp_clients": mcp_protocol_sessions,
         "max_sessions": MAX_CONCURRENT_SESSIONS,
         "reachable": reachable,
-    }))
+        "tls_active": state.tls_listener.read().strong_count() > 0,
+    });
+    // FastAF: remote_bind_state / remote_bind_address (fail-closed bind address).
+    if let (Some(status), serde_json::Value::Object(bind)) =
+        (status.as_object_mut(), mcp_http::remote_bind_status(&state))
+    {
+        status.extend(bind);
+    }
+    Ok(status)
 }
 
 /// Execute an MCP tool call via deep link: `tuic://cmd/{tool}/{action}?{params}`.
@@ -951,13 +1304,13 @@ async fn deep_link_mcp_call(
     args.insert("action".to_string(), serde_json::Value::String(action));
 
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();
-    let result = mcp_http::mcp_transport::handle_mcp_tool_call(
+    let result = Box::pin(mcp_http::mcp_transport::handle_mcp_tool_call(
         &state.inner().clone(),
         addr,
         &tool,
         &serde_json::Value::Object(args),
         None,
-    )
+    ))
     .await;
 
     Ok(result)
@@ -982,21 +1335,30 @@ fn regenerate_session_token(state: State<'_, Arc<AppState>>) {
 #[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_connect_url(state: State<'_, Arc<AppState>>, ip: String) -> String {
-    let port = state.config.read().services.server.port;
     let token = state.session_token.read().clone();
+    let (scheme, host, port) = remote_access_address(&state, &ip);
+    build_connect_url(scheme, &host, port, &token)
+}
 
-    // If TLS is active and the IP is a Tailscale address, use https + FQDN
+/// Shared address policy for pairing and private phone-entry links.
+pub(crate) fn remote_access_base_url(state: &AppState, ip: &str) -> String {
+    let (scheme, host, port) = remote_access_address(state, ip);
+    build_remote_base_url(scheme, &host, port)
+}
+
+fn remote_access_address(state: &AppState, ip: &str) -> (&'static str, String, u16) {
+    let port = state.config.read().services.server.port;
     let ts = state.tailscale_state.read().clone();
     if let tailscale::TailscaleState::Running {
         ref fqdn,
         https_enabled: true,
     } = ts
-        && crate::mcp_http::auth::is_tailscale_ip(&ip)
+        && state.tls_listener.read().strong_count() > 0
+        && crate::mcp_http::auth::is_tailscale_ip(ip)
     {
-        return build_connect_url("https", fqdn, port, &token);
+        return ("https", fqdn.clone(), port);
     }
-
-    build_connect_url("http", &ip, port, &token)
+    ("http", ip.to_string(), port)
 }
 
 /// Get Tailscale daemon status for the frontend Settings panel.
@@ -1044,6 +1406,7 @@ fn restart_server(state: &Arc<AppState>, reason: &'static str) {
         remote_enabled = state.config.read().services.server.enabled,
         "HTTP server reconfiguration requested; local MCP IPC remains active"
     );
+    *state.tls_listener.write() = std::sync::Weak::new();
     // Shutdown existing server
     if let Some(tx) = state.server_shutdown.lock().take()
         && tx.send(()).is_err()
@@ -1083,6 +1446,18 @@ where
 async fn recheck_tailscale_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<tailscale::TailscaleState, String> {
+    let new_state = tokio::task::spawn_blocking(tailscale::detect)
+        .await
+        .map_err(|e| format!("detect task failed: {e}"))?;
+    Ok(apply_tailscale_status(&state, new_state))
+}
+
+/// Publish a fresh detection through the same state used by the Host guard.
+fn apply_tailscale_status(
+    state: &Arc<AppState>,
+    new_state: tailscale::TailscaleState,
+) -> tailscale::TailscaleState {
+    #[cfg(feature = "desktop")]
     let old_https = matches!(
         *state.tailscale_state.read(),
         tailscale::TailscaleState::Running {
@@ -1091,10 +1466,7 @@ async fn recheck_tailscale_status(
         }
     );
 
-    let new_state = tokio::task::spawn_blocking(tailscale::detect)
-        .await
-        .map_err(|e| format!("detect task failed: {e}"))?;
-
+    #[cfg(feature = "desktop")]
     let new_https = matches!(
         new_state,
         tailscale::TailscaleState::Running {
@@ -1106,23 +1478,51 @@ async fn recheck_tailscale_status(
     *state.tailscale_state.write() = new_state.clone();
 
     // Restart server if HTTPS availability changed (HTTP→HTTPS or HTTPS→HTTP)
-    if old_https != new_https && state.config.read().services.server.enabled {
+    #[cfg(feature = "desktop")]
+    if (old_https != new_https || (new_https && state.tls_listener.read().strong_count() == 0))
+        && state.config.read().services.server.enabled
+    {
         tracing::info!(
             source = "tailscale",
             old_https,
             new_https,
             "HTTPS state changed, restarting server"
         );
-        restart_server(&state, "Tailscale HTTPS availability changed");
+        restart_server(state, "Tailscale HTTPS availability changed");
     }
 
-    Ok(new_state)
+    new_state
 }
 
-/// Get relay client status (enabled, connected, url, session_id).
+#[cfg(any(not(feature = "desktop"), test))]
+/// Retry often enough to recover boot ordering without continuously spawning CLI processes.
+const TAILSCALE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Refresh after boot; daemon TLS stays under its explicit manual/off configuration.
+#[cfg(any(not(feature = "desktop"), test))]
+async fn maintain_tailscale_status<D, F>(state: Arc<AppState>, mut detect: D)
+where
+    D: FnMut() -> F,
+    F: std::future::Future<Output = tailscale::TailscaleState>,
+{
+    let mut ticks = tokio::time::interval_at(
+        tokio::time::Instant::now() + TAILSCALE_REFRESH_INTERVAL,
+        TAILSCALE_REFRESH_INTERVAL,
+    );
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticks.tick().await;
+        let detected = detect_tailscale_bounded(detect()).await;
+        apply_tailscale_status(&state, detected);
+    }
+}
+
+/// Relay client status (enabled, connected, url, session_id).
+///
+/// Shared by the `get_relay_status` command and `GET /system/relay-status`:
+/// one body means the two transports cannot answer different shapes.
 #[cfg(feature = "desktop")]
-#[tauri::command]
-fn get_relay_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+pub(crate) fn relay_status_json(state: &AppState) -> serde_json::Value {
     let cfg = state.config.read();
     let connected = state
         .relay
@@ -1134,6 +1534,13 @@ fn get_relay_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
         "url": cfg.services.relay.url,
         "session_id": cfg.services.relay.session_id,
     })
+}
+
+/// Get relay client status (enabled, connected, url, session_id).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn get_relay_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    relay_status_json(&state)
 }
 
 /// Raise the open-file descriptor soft limit toward the hard limit.
@@ -1210,9 +1617,136 @@ fn boot_repo_paths(repositories: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// Which repos to pre-warm a content index for at boot, in order.
+///
+/// - `active_only` / `active_and_switch`: the active repo, if it is known.
+/// - `all_sequential`: every known repo, active first.
+///
+/// Pure, and shared by both boot paths on purpose. The desktop spawns the warm
+/// loop through Tauri's runtime and the daemon through tokio's, but *which*
+/// repos get an index must not be able to differ between them: a repo that is
+/// never warmed on the daemon is a repo cross-repo search skips forever, since
+/// `search_content_all` reports it pending and deliberately starts no build.
+fn repos_to_prewarm(
+    mut known: Vec<String>,
+    active: Option<String>,
+    index_strategy: &str,
+) -> Vec<String> {
+    if known.is_empty() {
+        return Vec::new();
+    }
+    match index_strategy {
+        "all_sequential" => {
+            if let Some(ref active) = active
+                && let Some(pos) = known.iter().position(|p| p == active)
+            {
+                known.swap(0, pos);
+            }
+            known
+        }
+        _ => match active {
+            Some(active) if known.contains(&active) => vec![active],
+            _ => Vec::new(),
+        },
+    }
+}
+
+/// Build the content index of each repo in turn, one at a time.
+///
+/// The two second delay keeps the first build off the boot path, where it would
+/// compete with the window (desktop) or the socket bind (daemon).
+async fn prewarm_content_indices(state: Arc<AppState>, repos: Vec<String>) {
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    for repo in repos {
+        let index_arc = crate::content_index::ensure_index(&state, &repo);
+        while !index_arc.read().is_ready() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+    tracing::info!("content index pre-warm complete");
+}
+
+#[cfg(feature = "desktop")]
+fn is_app_navigation(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    // Wry invokes this callback for subframes on macOS and Linux. Keep the
+    // origins and schemes used by previews, plugin panels and downloads here;
+    // rendered Markdown links are intercepted before they can navigate a frame.
+    let bundled_origin = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (cfg!(windows)
+            && url.scheme() == "http"
+            && url.host_str() == Some("tauri.localhost")
+            && url.port().is_none());
+    let internal_frame = matches!(url.scheme(), "asset" | "plugin")
+        || (url.scheme() == "http"
+            && matches!(url.host_str(), Some("asset.localhost" | "plugin.localhost")))
+        || (url.scheme() == "about" && matches!(url.path(), "blank" | "srcdoc"))
+        || matches!(url.scheme(), "data" | "blob")
+        || (matches!(url.scheme(), "http" | "https")
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")));
+    #[cfg(debug_assertions)]
+    {
+        bundled_origin || internal_frame || dev_url.is_some_and(|dev| url.origin() == dev.origin())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = dev_url;
+        bundled_origin || internal_frame
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn release_webview_document_resources(state: &AppState, webview_label: &str) {
+    let mut removed = Vec::new();
+    state.grid.channels.retain(|session_id, subscription| {
+        if subscription.webview_label == webview_label {
+            removed.push((session_id.clone(), subscription.epoch));
+            false
+        } else {
+            true
+        }
+    });
+    for (session_id, epoch) in removed {
+        state
+            .grid
+            .gates
+            .remove_if(&session_id, |_, gate| gate.epoch() == epoch);
+    }
+    state
+        .plugin_output_watchers
+        .write()
+        .remove_webview(webview_label);
+}
+
+/// Isolated desktop entry point. Normal launches cannot enable this policy by env.
+#[cfg(feature = "desktop")]
+pub fn run_agent_test(mut context: tauri::Context<tauri::Wry>) {
+    // DEFERRED (2026-10-20) — coordinator owns simultaneous desktop/TCC proof;
+    // the implementation-only peer must not launch another desktop instance.
+    if let Err(error) = agent_test::enable() {
+        eprintln!("agent-test: {error}");
+        std::process::exit(1);
+    }
+    context.config_mut().identifier = "com.tuic.commander.agent-test".into();
+    context.config_mut().product_name = Some("TUICommander Agent Test".into());
+    for window in &mut context.config_mut().app.windows {
+        window.title = "TUICommander Agent Test".into();
+    }
+    run(context);
+}
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(mut context: tauri::Context<tauri::Wry>) {
+    // Must run before the first `config::config_dir()` read (below) — see
+    // `app_instance::select_app_instance_from_env` for why this exists: a
+    // debug/test build launched with `TUIC_APP_INSTANCE=<id>` gets its own
+    // isolated config directory instead of sharing Boss's production
+    // `repositories.json` (#763-d219).
+    if let Err(e) = app_instance::select_app_instance_from_env() {
+        eprintln!("Invalid {}: {e}", app_instance::APP_INSTANCE_ENV_VAR);
+        std::process::exit(1);
+    }
+
     // Install the rustls CryptoProvider before anything touches TLS.
     // With both `ring` and `aws-lc-rs` features active, rustls cannot
     // auto-detect which provider to use and panics at runtime.
@@ -1240,6 +1774,9 @@ pub fn run() {
     let worktrees_dir = config::config_dir().join("worktrees");
 
     let mut config = config::load_app_config();
+    if let Some(port) = agent_test::port() {
+        agent_test::apply_config(&mut config, port);
+    }
 
     // Auto-generate VAPID keys and session token on first run
     let mut config_dirty = false;
@@ -1267,30 +1804,28 @@ pub fn run() {
         tracing::error!(source = "app", "Failed to persist config: {e}");
     }
 
-    let (github_token, github_token_source) = crate::github_auth::resolve_token_without_keychain();
-    if github_token.is_none() {
-        tracing::info!(
-            source = "github",
-            "No GitHub token from env/CLI — keychain deferred until first use"
-        );
-    }
+    // Boot reads the environment and nothing else. The other token source reads
+    // the OS credential store, which is not guaranteed to answer, and this runs
+    // before the window is built. `setup()` finishes the chain
+    // once the window exists.
+    let (github_token, github_token_source) = crate::github_auth::resolve_token_from_env();
 
     let data_dir = config::config_dir();
 
+    agent_hook_launch::regenerate_launch_assets_at_boot(&data_dir);
+
     let mut app_state = AppState::new(data_dir, worktrees_dir, config.clone(), log_buffer);
-    *app_state.github_token.get_mut() = github_token;
-    *app_state.github_token_source.get_mut() = github_token_source;
+    *app_state.github.token.get_mut() = github_token;
+    *app_state.github.token_source.get_mut() = github_token_source;
 
     let state = Arc::new(app_state);
     state.wire_event_bus();
 
-    let relay_rx = if config.services.relay.enabled {
-        let (relay_tx, relay_rx) = tokio::sync::oneshot::channel();
-        *state.relay.shutdown.lock() = Some(relay_tx);
-        Some(relay_rx)
-    } else {
-        None
-    };
+    // The relay supervisor runs whether or not the relay is enabled at boot:
+    // "off" is a state it supervises, and spawning it only when the setting was
+    // already on is what made the Settings toggle need an app restart.
+    let (relay_tx, relay_rx) = tokio::sync::oneshot::channel();
+    *state.relay.shutdown.lock() = Some(relay_tx);
 
     // Always start HTTP API server (Unix socket is always on; TCP only if remote access enabled)
     // Tailscale detection + TLS provisioning happens inside the server thread (non-blocking to Tauri setup)
@@ -1302,14 +1837,14 @@ pub fn run() {
                 .expect("Failed to create tokio runtime for HTTP server");
             rt.block_on(async move {
                 spawn_background_tasks(&server_state);
+                telegram::start(&server_state);
 
-                if let Some(relay_rx) = relay_rx {
-                    let relay_state = server_state.clone();
-                    tokio::spawn(relay_client::run(relay_state, relay_rx));
+                if !agent_test::active() {
+                    tokio::spawn(relay_client::supervise(server_state.clone(), relay_rx));
                 }
 
                 // Detect Tailscale and provision TLS cert (async, doesn't block window render)
-                let tls_config = if remote_enabled {
+                let tls_config = if remote_enabled && !agent_test::active() {
                     let ts_state = detect_tailscale_bounded(async {
                         tokio::task::spawn_blocking(tailscale::detect)
                             .await
@@ -1339,6 +1874,12 @@ pub fn run() {
                 // Claude Code while still connecting saved upstreams at boot.
                 let auto_state = server_state.clone();
                 let settle_guard = auto_state.clone();
+                // Remote machines come up on their own too, for the same reason
+                // upstreams do: a machine the user registered is one they expect
+                // to be there. Each gets a supervisor that connects and then
+                // keeps retrying, so this returns at once and nothing here waits
+                // on a machine that is asleep.
+                crate::remote_runtime::autoconnect_all(&auto_state);
                 let auto_handle = tokio::spawn(async move {
                     crate::mcp_upstream_config::auto_connect_saved_upstreams(&auto_state).await;
                 });
@@ -1353,7 +1894,8 @@ pub fn run() {
                             "auto_connect_saved_upstreams task failed: {e}"
                         );
                         settle_guard
-                            .mcp_upstream_registry
+                            .mcp
+                            .upstream_registry
                             .mark_initial_connect_complete();
                     }
                 });
@@ -1375,45 +1917,60 @@ pub fn run() {
     // Skips agents the user explicitly disabled via Settings > Agents.
     agent_mcp::ensure_mcp_configs(&config.disabled_mcp_agents);
 
-    sanitize_window_state();
+    if !agent_test::active() {
+        sanitize_window_state();
+    }
 
+    let themes_dir = config::config_dir().join("themes");
+    if let Err(e) = themes::seed_builtin_themes(&themes_dir) {
+        tracing::warn!("Failed to seed themes: {e}");
+    }
+    let startup_background =
+        themes::window_background::resolve(&themes::load_themes(&themes_dir), &config.theme);
+    for window in &mut context.config_mut().app.windows {
+        window.background_color = Some(tauri::window::Color(
+            startup_background[0],
+            startup_background[1],
+            startup_background[2],
+            255,
+        ));
+    }
     let index_strategy = config.index_strategy.clone();
     let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(!agent_test::active());
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(
+        tauri::plugin::Builder::<tauri::Wry, ()>::new("dev-backend-identity")
+            .js_init_script(format!(
+                "window.__TUIC_DEV_BACKEND__ = {};",
+                dev_backend::identity()
+            ))
+            .build(),
+    );
     let builder = plugins::register_plugin_protocol(builder);
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
-                .on_navigation(|_webview, url| {
-                    // Allow internal navigation (tauri://, localhost in dev,
-                    // and http://tauri.localhost/ on Windows production builds)
-                    let scheme = url.scheme();
-                    if scheme == "tauri" || scheme == "asset" || scheme == "plugin" {
+                .on_navigation(|webview, url| {
+                    // Wry also calls this for subframes on macOS/Linux; allow
+                    // internal preview/panel origins while refusing external
+                    // top-document navigation. Explicit opens use the opener.
+                    let dev_url = webview.app_handle().config().build.dev_url.as_ref();
+                    if is_app_navigation(url, dev_url) {
                         return true;
                     }
-                    let host = url.host_str().unwrap_or("");
-                    if host == "tauri.localhost" || host == "localhost" || host == "127.0.0.1" {
-                        return true;
+                    // The callback has no user-gesture or frame identity. Tell the
+                    // UI what was blocked, but never open it from here: scripts in
+                    // an embedded dashboard could otherwise spam the OS browser.
+                    if matches!(url.scheme(), "http" | "https" | "mailto") {
+                        let _ = webview.emit("navigation-blocked", url.as_str());
                     }
-                    // External URL — open in system browser, block webview navigation
-                    if scheme == "http" || scheme == "https" {
-                        let url_str = url.to_string();
-                        tracing::info!(url = %url_str, "Opening external URL in browser");
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("open").arg(&url_str).spawn();
-                        #[cfg(target_os = "linux")]
-                        let _ = std::process::Command::new("xdg-open").arg(&url_str).spawn();
-                        #[cfg(target_os = "windows")]
-                        {
-                            let mut cmd = std::process::Command::new("cmd");
-                            cmd.args(["/c", "start", &url_str]);
-                            cli::apply_no_window(&mut cmd);
-                            let _ = cmd.spawn();
-                        }
-                        return false;
-                    }
-                    true
+                    tracing::debug!(url = %url, "Blocked implicit WebView navigation");
+                    false
                 })
                 .on_page_load(|webview, payload| {
                     // Every window's webview passes through here, so this covers
@@ -1422,24 +1979,34 @@ pub fn run() {
                     if payload.event() == tauri::webview::PageLoadEvent::Started {
                         text_extraction::disable(webview);
                     }
-                    // WebKit WebContent process crashes leave the WebView on about:blank.
-                    // Detect this and force-reload the embedded app page.
+                    if payload.event() == tauri::webview::PageLoadEvent::Started
+                        && let Some(state) = webview.try_state::<Arc<AppState>>()
+                    {
+                        release_webview_document_resources(state.inner(), webview.label());
+                    }
+                    // A WebContent crash leaves the WebView on about:blank; the
+                    // 2026-09-08 standby incident left it on about:srcdoc. Both
+                    // are blank top documents with no URL behind them, so both
+                    // are recovered the same way — see `webview_recovery`.
                     if payload.event() == tauri::webview::PageLoadEvent::Finished
-                        && payload.url().as_str() == "about:blank"
+                        && webview_recovery::is_lost(payload.url().as_str())
                     {
                         tracing::error!(
                             source = "webview",
                             label = webview.label(),
-                            "WebView landed on about:blank — WebContent likely crashed, reloading app"
+                            url = %payload.url(),
+                            "WebView landed on a blank document — navigating back to the app"
                         );
-                        let label = webview.label().to_string();
                         let handle = webview.app_handle().clone();
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            if let Some(wv) = handle.get_webview_window(&label) {
-                                let target: url::Url = "tauri://localhost/".parse().unwrap();
-                                let _ = wv.navigate(target);
-                            }
+                            // The last healthy URL, not a hardcoded one: the
+                            // previous `tauri://localhost/` was never the dev
+                            // server's address, so this hook could not recover
+                            // a `make dev` window at all.
+                            let state: tauri::State<'_, Arc<AppState>> = handle.state();
+                            let _ =
+                                webview_recovery::navigate_home(state.inner(), "page_load_hook");
                         });
                     }
                 })
@@ -1448,6 +2015,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
+                .with_filter(|_| !agent_test::active())
                 .with_state_flags(
                     // Exclude SIZE to prevent progressive shrinking with titleBarStyle Overlay
                     tauri_plugin_window_state::StateFlags::POSITION
@@ -1458,46 +2026,99 @@ pub fn run() {
                 )
                 .build(),
         )
+        .manage(background_mode::desktop::BackgroundMode::default())
+        .manage(background_mode::tray::desktop::NativeTray::default())
         .manage(state)
         .manage(crate::fs::ContentSearchCancel(std::sync::Mutex::new(None)))
-        .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
-;
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                background_mode::desktop::close_window(window, api);
+            }
+            if window.label() == "main"
+                && let tauri::WindowEvent::Focused(focused) = event
+            {
+                window
+                    .state::<Arc<AppState>>()
+                    .desktop_window_focused
+                    .store(*focused, std::sync::atomic::Ordering::Relaxed);
+            }
+            #[cfg(all(target_os = "macos", feature = "dictation"))]
+            if matches!(event, tauri::WindowEvent::Focused(false))
+                && dictation::fn_key_monitor::DICTATION_WINDOWS.contains(&window.label())
+            {
+                dictation::fn_key_monitor::release_on_focus_loss(window.app_handle());
+            }
+            if matches!(event, tauri::WindowEvent::Focused(true)) && window.label() == "main" {
+                background_mode::desktop::shown(window.app_handle());
+            }
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && let Some(state) = window.try_state::<Arc<AppState>>()
+            {
+                release_webview_document_resources(state.inner(), window.label());
+            }
+        })
+        .manage(native_clipboard::NativeClipboard::default());
+    let builder = if agent_test::active() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_deep_link::init())
+    };
 
     #[cfg(feature = "desktop")]
-    let builder = builder
-        .manage(dictation::DictationState::new())
-        .manage(voice::VoiceState::new())
-        .manage(sleep_prevention::SleepBlocker::new());
+    let builder = builder.manage(Arc::new(sleep_prevention::SleepBlocker::new()));
+
+    #[cfg(feature = "dictation")]
+    let builder = builder.manage(dictation::DictationState::new());
+    #[cfg(feature = "dictation")]
+    let builder = builder.manage(voice::VoiceState::new());
 
     // Single-instance lock only in release builds — allows tauri dev to run
     // alongside the installed TUIC-preview.app (they share the same identifier).
     #[cfg(not(debug_assertions))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
+        background_mode::desktop::leave_background(app);
     }));
 
     builder
         .setup(move |app| {
             #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            if !agent_test::active() {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
 
             #[cfg(feature = "desktop")]
             {
                 let m = menu::build_menu(app)?;
                 app.set_menu(m)?;
                 app.on_menu_event(|app_handle, event| {
+                    // Tray Show uses the same menu event path as application menus.
+                    if event.id().0 == "show" {
+                        background_mode::desktop::leave_background(app_handle);
+                        return;
+                    }
+                    if event.id().0 == "quit-app" {
+                        background_mode::desktop::request_quit(app_handle.clone());
+                        return;
+                    }
                     let _ = app_handle.emit("menu-action", event.id().0.as_str());
                 });
+            }
+
+            if !agent_test::active() {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |_| background_mode::desktop::leave_background(&handle));
             }
 
             // Store AppHandle so HTTP handlers can emit Tauri events
             let app_state: &Arc<AppState> = app.state::<Arc<AppState>>().inner();
             *app_state.app_handle.write() = Some(app.handle().clone());
+            sleep_prevention::spawn(
+                app_state,
+                app.state::<Arc<sleep_prevention::SleepBlocker>>().inner().clone(),
+            )?;
+            background_mode::tray::desktop::sync(app.handle());
 
             // Ensure main window exists — if tauri.conf.json windows[] is
             // empty (accidental edit, merge conflict), create it programmatically
@@ -1505,7 +2126,7 @@ pub fn run() {
             if app.get_webview_window("main").is_none() {
                 tracing::warn!("Main window missing from config — creating programmatically");
                 let builder = tauri::WebviewWindowBuilder::new(
-                    app,
+                    app.handle(),
                     "main",
                     tauri::WebviewUrl::App("index.html".into()),
                 )
@@ -1519,34 +2140,50 @@ pub fn run() {
                 let builder = builder
                     .hidden_title(true)
                     .title_bar_style(tauri::TitleBarStyle::Overlay);
-                builder.build()?;
-            }
-
-            // Track desktop window focus so push notifications can be
-            // suppressed while the user is at their machine.
-            if let Some(window) = app.get_webview_window("main") {
-                let push_flag = Arc::clone(app_state);
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Focused(focused) = event {
-                        push_flag
-                            .desktop_window_focused
-                            .store(*focused, std::sync::atomic::Ordering::Relaxed);
-                    }
-                });
+                themes::window_background::configure(builder, startup_background).build()?;
             }
 
             #[cfg(feature = "desktop")]
             {
-                // Install global hotkey plugin (registers handler, no shortcuts yet)
+                #[cfg(feature = "dictation")]
+                let input_plan = {
+                    let dictation_state = app.state::<dictation::DictationState>();
+                    dictation_state.claim_ownership(&config::config_dir());
+                    dictation::ownership::GlobalInputPlan::for_ownership(dictation_state.is_owner())
+                };
+                #[cfg(feature = "dictation")]
+                let restore_hotkey = input_plan.restore_hotkey;
+                #[cfg(not(feature = "dictation"))]
+                let restore_hotkey = {
+                    let ownership = input_ownership::Ownership::acquire(&config::config_dir());
+                    let is_owner = ownership.is_owner();
+                    tracing::info!(source = "dictation", path = %ownership.path().display(), owner = is_owner, "Global input ownership");
+                    app.manage(ownership);
+                    is_owner
+                };
+
+                // The same config-directory lock guards global shortcuts with or without voice.
                 if let Err(e) = global_hotkey::init(app.handle()) {
                     tracing::warn!(source = "global-hotkey", "Failed to init plugin: {e}");
-                } else {
+                } else if restore_hotkey {
                     global_hotkey::restore_from_config(app.handle());
                 }
 
-                // Install Fn/Globe key monitor for push-to-talk dictation
-                dictation::fn_key_monitor::install(app.handle().clone());
+                #[cfg(feature = "dictation")]
+                {
+                    // Install Fn/Globe key monitor for push-to-talk dictation
+                    if input_plan.install_fn_monitor {
+                        dictation::fn_key_monitor::install(app.handle().clone());
+                    }
+                    dictation::spawn_idle_unload_sweeper(app.handle().clone());
+                    // Before any conversation can be armed: a speaker built without
+                    // this one reports its replies to nobody but a poller.
+                    dictation::commands::install_utterance_observer(app.handle());
+                }
+            }
 
+            #[cfg(feature = "desktop")]
+            {
                 // Install the native key monitor (macOS swallows Ctrl+Tab and F13-F20
                 // before JS/WKWebView ever sees them)
                 native_keys::install(app.handle().clone());
@@ -1554,14 +2191,25 @@ pub fn run() {
                 // Disable macOS press-and-hold accent popup so held keys repeat
                 // in the terminal's hidden input (vim j/l/i — issue #79)
                 press_and_hold::disable();
+
+                // An occluded window must not nap the backend: PTYs, the local
+                // API and the heartbeat share this process (story 1638-c94c).
+                app_nap::disable();
             }
 
-            // Seed built-in themes on first run, then start hot-reload watcher
-            let themes_dir = config::config_dir().join("themes");
-            if let Err(e) = themes::seed_builtin_themes(&themes_dir) {
-                tracing::warn!("Failed to seed built-in themes: {e}");
+            // Themes are seeded before window creation so the first paint uses
+            // the saved theme. Start hot reload after the AppHandle is available.
+            themes::start_theme_watcher(config::config_dir().join("themes"), app_state);
+
+            // Former built-ins are seeded once as ordinary uninstallable plugins.
+            // Seed before the watcher starts so startup does not emit redundant
+            // hot-reload events for packages the frontend has not loaded yet.
+            if let Err(e) = plugins::seed_externalized_builtin_plugins(&config::config_dir()) {
+                tracing::warn!(
+                    source = "plugins",
+                    "Failed to seed externalized plugins: {e}"
+                );
             }
-            themes::start_theme_watcher(themes_dir, app_state);
 
             // Start plugin directory watcher for hot-reload
             plugins::start_plugin_watcher(app.handle());
@@ -1572,7 +2220,7 @@ pub fn run() {
             // (inotify) notify emulates recursion with a per-directory walk, so
             // registration is not free there (see issue #82 / repo_watcher.rs).
             let repos_json = config::load_repositories();
-            let mut known_repo_paths = boot_repo_paths(&repos_json);
+            let known_repo_paths = boot_repo_paths(&repos_json);
             for repo_path in &known_repo_paths {
                 if let Err(e) = repo_watcher::start_watching(repo_path, app_state) {
                     app_logger::log_via_state(
@@ -1592,65 +2240,59 @@ pub fn run() {
                 }
             });
 
-            // Pre-warm content indices based on index_strategy setting:
-            // - "active_only": only the active repo at boot
-            // - "active_and_switch": active repo at boot, others on repo switch (default)
-            // - "all_sequential": all repos sequentially
-            // Global semaphore in AppState (capacity 1) serialises concurrent builds.
-            if !known_repo_paths.is_empty() {
-                let active_repo = repos_json
+            // Finish GitHub token resolution now the window exists. Boot only
+            // took the env vars; the keychain/`gh` part of the chain runs here,
+            // off the window path and under its own timeout.
+            crate::github_auth::spawn_deferred_token_resolution(Arc::clone(app_state));
+
+            // Pre-warm content indices per the `index_strategy` setting. The
+            // global semaphore in AppState (capacity 1) serialises the builds.
+            let repos_to_warm = repos_to_prewarm(
+                known_repo_paths,
+                repos_json
                     .get("activeRepoPath")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned());
-
-                let repos_to_warm = match index_strategy.as_str() {
-                    "all_sequential" => {
-                        if let Some(ref active) = active_repo
-                            && let Some(pos) = known_repo_paths.iter().position(|p| p == active)
-                        {
-                            known_repo_paths.swap(0, pos);
-                        }
-                        known_repo_paths
-                    }
-                    _ => {
-                        // active_only and active_and_switch: only pre-warm the active repo
-                        if let Some(active) = active_repo {
-                            if known_repo_paths.contains(&active) {
-                                vec![active]
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                };
-
-                if !repos_to_warm.is_empty() {
-                    let state_for_prewarm = Arc::clone(app_state);
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        for repo in repos_to_warm {
-                            let index_arc =
-                                crate::content_index::ensure_index(&state_for_prewarm, &repo);
-                            while !index_arc.read().is_ready() {
-                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            }
-                        }
-                        tracing::info!("content index pre-warm complete");
-                    });
-                }
+                    .map(|s| s.to_owned()),
+                &index_strategy,
+            );
+            if !repos_to_warm.is_empty() {
+                let state_for_prewarm = Arc::clone(app_state);
+                tauri::async_runtime::spawn(prewarm_content_indices(
+                    state_for_prewarm,
+                    repos_to_warm,
+                ));
             }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            background_mode::desktop::request_quit,
+            background_mode::desktop::resolve_close,
+            background_mode::desktop::ack_background_snapshot,
+            telegram::settings::telegram_settings,
+            telegram::settings::telegram_setup,
             generators::generate_value,
+            native_dialog::pick_path,
+            native_clipboard::write_clipboard_text,
+            native_clipboard::read_clipboard_text,
             native_drag::start_native_drag,
             remote_connection::list_remote_connections,
             remote_connection::save_remote_connection,
             remote_connection::delete_remote_connection,
+            remote_connection::set_remote_connection_password,
+            remote_connection::set_remote_connection_relay_pairing,
+            remote_connection::remote_connection_password_exists,
+            remote_connection::fetch_remote_connection_token,
+            remote_runtime::connect_remote_connection,
+            remote_runtime::disconnect_remote_connection,
+            remote_runtime::remote_connection_statuses,
+            remote_update::prepare_remote_update,
+            remote_update::update_and_restart_remote,
+            remote_deploy::service::install_remote_daemon,
+            remote_deploy::service::uninstall_remote_daemon,
             open_secondary_window,
+            default_app::open_default_app,
+            native_notification::show_native_notification,
             panel_window::open_panel_window,
             panel_window::focus_panel_window,
             panel_window::close_panel_window,
@@ -1658,28 +2300,34 @@ pub fn run() {
             pty::create_pty,
             pty::create_pty_with_worktree,
             pty::list_worktrees,
+            pty::force_retry_provider_recovery_command,
             pty::write_pty,
             pty::write_pty_parts,
             pty::get_input_buffer_content,
+            pty::send_agent_input_if_empty,
             pty::resize_pty,
             pty::set_ansi_colors,
             pty::pause_pty,
             pty::resume_pty,
             pty::get_kitty_flags,
             pty::get_last_prompt,
+            prompt_receipt::get_prompt_receipt,
             pty::get_shell_state,
             pty::get_session_shell_family,
             pty::close_pty,
             worktree::get_worktrees_dir,
             git::get_repo_info,
             git::get_remote_url,
+            work_items::provider_bridge::work_item_provider_bridge,
+            workitem_links::get_git_remotes,
+            workitem_links::list_workitem_links,
+            workitem_links::link_workitem,
+            workitem_links::unlink_workitem,
             git::get_git_diff,
             git::get_diff_stats,
             git::get_changed_files,
             git::get_file_diff,
             git::get_gutter_changes,
-            diff_triage::run_diff_triage,
-            diff_triage::run_pr_review,
             git::get_recent_commits,
             list_markdown_files,
             read_file,
@@ -1696,18 +2344,20 @@ pub fn run() {
             pty::clear_queued_agent_commands,
             pty::list_queued_agent_commands,
             pty::remove_queued_agent_command,
+            pty::send_queued_agent_command_now,
             pty::get_process_stats,
-            pty::read_vt_log,
             pty::subscribe_terminal_grid,
             pty::unsubscribe_terminal_grid,
             pty::terminal_request_frame,
             pty::ack_terminal_frame,
+            frontend_liveness::frontend_heartbeat,
+            frame_workload::save_frame_workload,
             pty::terminal_exit_alt_screen,
             pty::terminal_scroll,
             pty::terminal_scroll_to_offset,
+            pty::terminal_scroll_to_anchor,
             pty::terminal_styled_rows,
             pty::terminal_scroll_to,
-            pty::terminal_get_block_rows,
             pty::terminal_scroll_info,
             pty::terminal_search,
             pty::terminal_search_buffer,
@@ -1716,14 +2366,16 @@ pub fn run() {
             pty::terminal_get_selection_text,
             pty::terminal_get_lines,
             pty::terminal_get_cursor_line,
-            pty::terminal_hyperlink_at,
             pty::terminal_hyperlink_span,
             pty::set_session_visible,
             pty::set_session_name,
+            ai_chat_selection::ai_chat_selection,
+            ai_chat_selection::select_ai_chat_conversation,
+            open_markdown_tabs::sync_open_markdown_tabs,
+            open_markdown_tabs::list_open_markdown_tabs,
             pty::get_session_foreground_process,
             pty::get_session_leaf_pid,
             pty::has_foreground_process,
-            pty::debug_agent_detection,
             pty_capture::get_pty_capture,
             pty_capture::set_pty_capture,
             load_config,
@@ -1741,14 +2393,17 @@ pub fn run() {
             agent::open_in_custom,
             agent::detect_claude_binary,
             agent::detect_agent_binary,
+            agent_hook_launch::prepare_agent_launch_args,
             agent::detect_all_agent_binaries,
             agent::spawn_agent,
+            mcp_http::launch_transaction::managed_agent_launch,
             agent_session::discover_agent_session,
             agent_session::verify_agent_session,
             agent_session::claude_project_dir,
             import::discover_importable_projects,
             worktree::remove_worktree,
             worktree::check_worktree_dirty,
+            worktree::get_workspace_lifecycle,
             worktree::delete_local_branch,
             agent::detect_installed_ides,
             worktree::create_worktree,
@@ -1768,7 +2423,6 @@ pub fn run() {
             git::check_is_main_branch,
             git::get_initials,
             git::run_git_command,
-            git::get_git_panel_context,
             git::get_working_tree_status,
             git::git_stage_files,
             git::git_unstage_files,
@@ -1785,20 +2439,38 @@ pub fn run() {
             git::get_file_blame,
             github::get_github_viewer_login,
             github::get_ci_checks,
+            github::get_pr_review_threads,
             github::get_repo_pr_statuses,
             github::get_all_pr_statuses,
             github::merge_pr_via_github,
             github::get_pr_diff,
             github::approve_pr,
+            github::update_pr_branch,
+            github::close_pr,
             github::create_pr,
             github::create_issue,
             github::post_pr_review,
+            github_pr_action_commands::get_pr_action_state,
+            github_pr_action_commands::set_pr_auto_merge,
+            github_pr_action_commands::set_pr_merge_queue,
+            github_pr_action_commands::merge_or_enqueue_pr,
+            github_pr_action_commands::rerun_failed_pr_jobs,
+            github_review_threads::get_pr_line_threads,
+            pr_open_threads::get_pr_open_threads,
+            github_review_threads::get_pr_thread_comments,
+            github_review_threads::set_pr_thread_resolved,
+            github_review_threads::reply_pr_thread,
+            github_review_threads::submit_pr_draft_review,
             github::get_merged_prs,
+            pr_review::run_pr_review,
             changelog::generate_changelog,
-            conflict_assist::start_conflict_assist,
             improvement_scan::run_improvement_scan,
             improvement_scan::create_issue_from_proposal,
+            conflict_assist::start_conflict_assist,
             github::fetch_ci_failure_logs,
+            circleci::circleci_token_status,
+            circleci::circleci_set_token,
+            circleci::circleci_delete_token,
             github::get_all_issues,
             github::get_issue_detail,
             github::close_issue,
@@ -1817,7 +2489,8 @@ pub fn run() {
             github_auth::github_disconnect,
             github_auth::github_diagnostics,
             github_auth::github_auth_status,
-            github_account::github_add_account,
+            accounts::account_action,
+            secrets::account_sink::account_secret_form,
             github_account::github_remove_account,
             github_account::github_bind_repo,
             github_account::github_unbind_repo,
@@ -1831,72 +2504,167 @@ pub fn run() {
             worktree::generate_clone_branch_name_cmd,
             worktree::merge_and_archive_worktree,
             worktree::finalize_merged_worktree,
+            worktree::sweep_archive_retention,
             worktree::list_local_branches,
             worktree::list_base_ref_options,
             worktree::switch_branch,
             worktree::checkout_remote_branch,
             worktree::detect_orphan_worktrees,
+            worktree::assess_orphan_cleanup,
+            worktree::begin_orphan_cleanup,
+            worktree::pending_orphan_cleanup_answer,
+            worktree::clear_orphan_cleanup,
             worktree::remove_orphan_worktree,
             worktree::run_setup_script,
             clear_caches,
             clear_repo_caches,
+            report_progress_event,
+            progress_list,
+            progress_projects,
+            progress_delete,
+            progress_mark_viewed,
+            progress_flow,
+            progress_flow_detail,
+            chat_view_snapshot,
+            story_action_command,
+            story_capabilities,
+            automation_action,
+            workflow_definition_action,
+            workflow_run_action,
             get_local_ip,
             get_local_ips,
             updater::check_update_channel,
             get_mcp_status,
+            get_mcp_audit,
             deep_link_mcp_call,
             get_connect_url,
             regenerate_session_token,
             get_tailscale_status,
             recheck_tailscale_status,
             get_relay_status,
+            #[cfg(feature = "dictation")]
             dictation::commands::get_dictation_status,
+            #[cfg(feature = "dictation")]
             dictation::commands::get_model_info,
+            #[cfg(feature = "dictation")]
             dictation::commands::download_whisper_model,
+            #[cfg(feature = "dictation")]
             dictation::commands::delete_whisper_model,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_speech_assets,
+            #[cfg(feature = "dictation")]
+            dictation::commands::download_speech_asset,
+            #[cfg(feature = "dictation")]
+            dictation::commands::cancel_speech_download,
+            #[cfg(feature = "dictation")]
+            dictation::commands::delete_speech_asset,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_speech_voices,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_edge_voices,
+            #[cfg(feature = "dictation")]
+            dictation::commands::import_speech_voice,
+            #[cfg(feature = "dictation")]
+            dictation::commands::delete_speech_voice,
+            #[cfg(feature = "dictation")]
+            dictation::commands::preview_speech_voice,
+            #[cfg(feature = "dictation")]
+            dictation::commands::speak_reply,
+            #[cfg(feature = "dictation")]
+            dictation::commands::stop_speech,
+            #[cfg(feature = "dictation")]
+            dictation::commands::pause_speech,
+            #[cfg(feature = "dictation")]
+            dictation::commands::resume_speech,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_speech_status,
+            #[cfg(feature = "dictation")]
             dictation::commands::start_dictation,
+            #[cfg(feature = "dictation")]
             dictation::commands::stop_dictation_and_transcribe,
+            #[cfg(feature = "dictation")]
             dictation::commands::get_correction_map,
+            #[cfg(feature = "dictation")]
             dictation::commands::set_correction_map,
+            #[cfg(feature = "dictation")]
             dictation::commands::list_audio_devices,
+            #[cfg(feature = "dictation")]
             dictation::commands::inject_text,
+            #[cfg(feature = "dictation")]
             dictation::commands::get_dictation_config,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_hands_free_default_notice,
+            #[cfg(feature = "dictation")]
             dictation::commands::set_dictation_config,
+            #[cfg(feature = "dictation")]
             dictation::commands::check_microphone_permission,
+            #[cfg(feature = "dictation")]
             dictation::commands::open_microphone_settings,
+            #[cfg(feature = "dictation")]
             dictation::rewrite::dictation_rewrite,
+            #[cfg(feature = "dictation")]
             dictation::rewrite::dictation_fetch_rewrite_models,
+            #[cfg(feature = "dictation")]
             dictation::rewrite::dictation_rewrite_request_preview,
+            #[cfg(feature = "dictation")]
             dictation::stt_cloud::dictation_fetch_stt_models,
+            #[cfg(feature = "dictation")]
             dictation::stt_cloud::set_dictation_stt_api_key,
+            #[cfg(feature = "dictation")]
             dictation::stt_cloud::dictation_stt_api_key_exists,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_status,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_model_info,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_list_voices,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_download_model,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_download_voice,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_delete_model,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_delete_voice,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_load_engine,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_unload_engine,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_start,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_stop,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_set_muted,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_speak,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_cancel_speech,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_get_config,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_set_config,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_list_output_devices,
+            #[cfg(feature = "dictation")]
             dictation::stt_cloud::delete_dictation_stt_api_key,
+            #[cfg(feature = "dictation")]
+            dictation::commands::arm_hands_free_dictation,
+            #[cfg(feature = "dictation")]
+            dictation::commands::disarm_hands_free_dictation,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_hands_free_status,
+            #[cfg(feature = "dictation")]
+            dictation::commands::get_voice_targets,
             global_hotkey::set_global_hotkey,
             config::load_app_config,
-            config::save_app_config,
+            save_app_config,
             boot_commands::load_notification_config_async,
-            config::save_notification_config,
+            settings::legacy::save_notification_config,
             boot_commands::load_ui_prefs_async,
-            config::save_ui_prefs,
+            settings::legacy::save_ui_prefs,
             boot_commands::load_repo_settings_async,
-            config::save_repo_settings,
+            settings::legacy::save_repo_settings,
             config::set_branch_label,
             config::load_repo_local_config,
             config::save_repo_local_config,
@@ -1905,24 +2673,24 @@ pub fn run() {
             mcp_upstream_config::set_project_mcp_upstreams,
             mcp_upstream_config::reconnect_mcp_upstream,
             mcp_upstream_config::get_mcp_upstream_status,
-            mcp_upstream_credentials::save_mcp_upstream_credential,
-            mcp_upstream_credentials::delete_mcp_upstream_credential,
+            mcp_upstream_credentials::commands::save_mcp_upstream_credential,
+            mcp_upstream_credentials::commands::delete_mcp_upstream_credential,
             mcp_oauth::commands::start_mcp_upstream_oauth,
             mcp_oauth::commands::mcp_oauth_callback,
             mcp_oauth::commands::cancel_mcp_upstream_oauth,
             config::check_has_custom_settings,
             boot_commands::load_repo_defaults_async,
-            config::save_repo_defaults,
+            settings::legacy::save_repo_defaults,
             boot_commands::load_repositories_async,
             config::save_repositories,
+            config::list_stale_temp_repository_candidates,
+            config::repair_stale_temp_repositories,
             config::load_pane_layout,
-            config::save_pane_layout,
+            settings::legacy::save_pane_layout,
             boot_commands::load_prompt_library_async,
-            config::save_prompt_library,
-            config::load_ai_prompts,
-            config::save_ai_prompts,
+            settings::legacy::save_prompt_library,
             boot_commands::load_notes_async,
-            config::save_notes,
+            save_notes,
             config::save_note_image,
             config::delete_note_assets,
             config::delete_note_assets_batch,
@@ -1930,11 +2698,14 @@ pub fn run() {
             boot_commands::load_activity_async,
             config::save_activity,
             boot_commands::load_keybindings_async,
-            config::save_keybindings,
+            settings::legacy::save_keybindings,
             boot_commands::load_agents_config_async,
-            config::save_agents_config,
+            settings::legacy::save_agents_config,
+            config::get_config_defaults,
             agent_hook_commands::set_agent_hook_instrumentation,
             agent_hook_commands::get_agent_hook_state,
+            agent_hook_commands::get_agent_native_status_signals,
+            agent_hook_commands::set_agent_native_status_signals,
             agent_mcp::get_agent_mcp_status,
             agent_mcp::install_agent_mcp,
             agent_mcp::remove_agent_mcp,
@@ -1949,6 +2720,7 @@ pub fn run() {
             prompt::resolve_prompt_variables,
             smart_prompt::execute_headless_prompt,
             smart_prompt::execute_shell_script,
+            // FastAF's built-in AI engine (upstream 2.0 removed it).
             boot_commands::load_provider_registry_async,
             provider_registry::save_provider_registry,
             provider_registry::get_provider_api_key_exists,
@@ -1969,8 +2741,6 @@ pub fn run() {
             ai_chat::save_conversation,
             ai_chat::delete_conversation,
             ai_chat::new_conversation_id,
-            ai_chat_registry::chat_subscribe,
-            ai_chat_registry::chat_unsubscribe,
             ai_agent::commands::start_conversation,
             ai_agent::commands::cancel_conversation,
             ai_agent::commands::pause_conversation,
@@ -1979,18 +2749,9 @@ pub fn run() {
             ai_agent::commands::agent_loop_status,
             ai_agent::commands::get_session_knowledge,
             ai_agent::commands::toggle_ai_suggestions,
-            ai_agent::commands::get_ai_suggestions_enabled,
-            ai_agent::commands::list_knowledge_sessions,
-            ai_agent::commands::get_knowledge_session_detail,
             ai_agent::commands::load_scheduler_config,
             ai_agent::commands::save_scheduler_config,
-            ai_agent::commands::watcher_create,
-            ai_agent::commands::watcher_list,
-            ai_agent::commands::watcher_delete,
-            ai_agent::commands::watcher_toggle,
-            ai_agent::commands::watcher_attach,
-            ai_agent::commands::watcher_detach,
-            ai_agent::commands::watcher_update,
+            ai_agent::commands::add_scheduled_job,
             repo_watcher::start_repo_watcher,
             repo_watcher::stop_repo_watcher,
             repo_watcher::set_hot_repos,
@@ -2000,15 +2761,21 @@ pub fn run() {
             sleep_prevention::unblock_sleep,
             fs::resolve_terminal_path,
             fs::resolve_terminal_paths,
+            fs::resolve_markdown_link,
             fs::list_directory,
+            fs::get_home_directory,
             fs::stat_path,
             fs::search_files,
             fs::warm_content_index,
             fs::search_content,
             fs::search_content_all,
             fs::fs_read_file,
+            work_items::start_work_prompt::build_start_work_prompt,
+            work_items::local_query::project_work_items,
+            work_items::notices::compare_work_item_comments,
             fs::write_file,
             fs::create_file,
+            fs::write_file_if_unchanged,
             fs::create_directory,
             fs::delete_path,
             fs::delete_paths,
@@ -2018,6 +2785,7 @@ pub fn run() {
             fs::move_path_abs,
             fs::paste_paths,
             fs::fs_transfer_paths,
+            remote_transfer::fs_transfer_remote_paths,
             fs::add_to_gitignore,
             plugins::list_user_plugins,
             plugins::get_plugin_readme_path,
@@ -2027,13 +2795,18 @@ pub fn run() {
             plugins::install_plugin_from_zip,
             plugins::install_plugin_from_folder,
             plugins::install_plugin_from_url,
+            plugins::install_bundled_plugin,
+            plugins::list_bundled_plugins,
             plugins::uninstall_plugin,
             plugins::register_loaded_plugin,
+            plugin_settings::plugin_settings_action,
+            settings::api::settings_action,
             plugins::unregister_loaded_plugin,
             plugins::set_plugin_output_watchers,
             plugin_fs::plugin_read_file,
             plugin_fs::plugin_read_files,
             plugin_fs::plugin_read_file_base64,
+            plugin_fs::plugin_write_file_base64,
             plugin_fs::plugin_list_directory,
             plugin_fs::plugin_read_file_tail,
             plugin_fs::plugin_write_file,
@@ -2044,6 +2817,8 @@ pub fn run() {
             plugin_fs::delete_build_artifact,
             plugin_fs::trim_build_artifact,
             plugin_http::plugin_http_fetch,
+            plugin_http::plugin_http_cancel,
+            plugin_github::plugin_github_action,
             plugin_pty::plugin_read_session_output,
             plugin_exec::plugin_exec_cli,
             plugin_credentials::plugin_read_credential,
@@ -2052,14 +2827,23 @@ pub fn run() {
             claude_usage::get_claude_usage_timeline,
             claude_usage::get_claude_session_stats,
             claude_usage::get_claude_project_list,
+            session_usage::get_session_usage,
+            codex_usage::get_codex_usage_api,
+            codex_usage::get_codex_usage_stats,
+            grok_usage::get_grok_usage_api,
+            terminal_grid_commands::set_terminal_theme_colors,
             screenshot_response,
+            secrets::forms::secret_form_bootstrap,
+            secrets::forms::secret_form_submit,
             mcp_confirm_response,
+            mcp_http::suspended_routes::suspended_session_action,
+            mcp_http::suspended_routes::resume_session,
             app_logger::push_log,
             app_logger::get_logs,
             app_logger::clear_logs,
             notification_sound::play_notification_sound,
             notification_sound::list_audio_output_devices,
-            git_graph::get_commit_graph,
+            git::get_commit_graph,
             fastaf_cli::get_cli_status,
             fastaf_cli::install_cli,
             fastaf_cli::uninstall_cli,
@@ -2074,19 +2858,78 @@ pub fn run() {
             tunnels::tauri_commands::list_active_tunnels,
             tunnels::tauri_commands::get_tunnel_status,
             tunnels::tauri_commands::list_ssh_config_hosts,
+            tunnels::tauri_commands::list_discovered_ssh_hosts,
+            tunnels::tauri_commands::probe_discovered_ssh_host,
+            tunnels::tauri_commands::probe_ssh_config_hosts,
             tunnels::tauri_commands::list_ssh_agent_keys,
-            tunnels::tauri_commands::get_tunnel_audit
+            tunnels::tauri_commands::get_tunnel_audit,
+            design_mode::tauri_commands::start_design_mode,
+            design_mode::tauri_commands::stop_design_mode,
+            design_mode::tauri_commands::reload_design_mode,
+            design_mode::tauri_commands::navigate_design_mode,
+            design_mode::tauri_commands::design_mode_browser_command,
+            design_mode::tauri_commands::get_design_mode_status,
+            acp_commands::acp_workspace_root,
+            acp_commands::acp_connect,
+            acp_chat::acp_chat_open,
+            acp_commands::acp_reconnect,
+            acp_commands::acp_disconnect,
+            acp_commands::acp_kill,
+            acp_commands::acp_connection_snapshot,
+            acp_commands::acp_subscribe,
+            acp_commands::acp_session_new,
+            acp_commands::acp_session_list,
+            acp_commands::acp_session_load,
+            acp_commands::acp_session_resume,
+            acp_commands::acp_session_fork,
+            acp_commands::acp_session_delete,
+            acp_commands::acp_session_close,
+            acp_commands::acp_session_prompt,
+            acp_commands::acp_session_set_viewed_repo,
+            acp_commands::acp_session_cancel,
+            acp_commands::acp_queued_prompt_cancel,
+            acp_commands::acp_queued_prompt_recall,
+            acp_commands::acp_session_set_config_option,
+            acp_commands::acp_turn_pause,
+            acp_commands::acp_turn_resume,
+            acp_commands::acp_session_compact,
+            acp_commands::acp_pending_interactions,
+            acp_commands::acp_respond_permission,
+            acp_commands::acp_respond_elicitation,
+            acp_commands::acp_one_shot_prompt,
+            acp_commands::acp_one_shot_prepare,
+            acp_commands::acp_one_shot_cancel,
+            story_generate_draft,
+            ego_cli::ego_providers,
+            ego_cli::usage::get_ego_usage,
+            ego_cli::perimeter::ego_perimeter,
+            ego_cli::perimeter::ego_set_perimeter_roots,
+            ego_cli::perimeter::ego_set_perimeter_network,
+            ego_cli::ego_set_default_model
         ])
-        .build(tauri::generate_context!())
+        .build(context)
+        .map(agent_test::without_launch_activation)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             match &event {
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    if background_mode::prevent_exit(*code, background_mode::desktop::is_hidden(app_handle)) {
+                        api.prevent_exit();
+                    }
+                }
                 // Guard against corrupted window-state applied by tauri-plugin-window-state.
                 // Must run at Ready (after plugins have restored persisted position/size),
                 // not in setup() which fires before the plugin applies its state.
                 tauri::RunEvent::Ready => {
                     if let Some(window) = app_handle.get_webview_window("main") {
-                        ensure_window_visible(&window);
+                        if agent_test::active() {
+                            #[cfg(target_os = "macos")]
+                            if let Err(error) = agent_test::present_without_focus(&window) {
+                                tracing::warn!(%error, "Failed to present agent-test window");
+                            }
+                        } else {
+                            ensure_window_visible(&window);
+                        }
                     }
                 }
                 // Dock-icon click (applicationShouldHandleReopen). macOS suppresses
@@ -2095,11 +2938,7 @@ pub fn run() {
                 // hidden. Explicitly restore main on every reopen.
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { .. } => {
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    background_mode::desktop::leave_background(app_handle);
                 }
                 // Forward file-open events (macOS file associations) to the frontend
                 #[cfg(target_os = "macos")]
@@ -2128,24 +2967,47 @@ pub fn run() {
                 // streaming thread (which holds an Arc<WhisperContext>), then drops
                 // the transcriber while the process is still alive.
                 tauri::RunEvent::Exit => {
+                    app_handle.state::<native_clipboard::NativeClipboard>().clear();
+                    workflows::shutdown_checks();
                     // Before dictation: the voice session thread transcribes
                     // through the same WhisperContext, so it has to be joined
                     // while that context is still alive.
+                    #[cfg(feature = "dictation")]
                     if let Some(voice) = app_handle.try_state::<voice::VoiceState>() {
                         voice.shutdown();
                     }
+                    #[cfg(feature = "dictation")]
                     if let Some(dictation) = app_handle.try_state::<dictation::DictationState>() {
                         dictation.shutdown();
                     }
+                    // Kill all SSH tunnel processes so ports are freed for restart.
+                    // Waited (bounded by GRACEFUL_SHUTDOWN_TIMEOUT), not
+                    // fire-and-forget: shutdown_all() only sends each
+                    // supervisor a signal and returns immediately, and since
+                    // this process is about to exit, nothing would otherwise
+                    // be left running long enough to confirm the SSH child
+                    // processes are actually gone before we do.
                     if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                         // Before anything else: an agent left running outlives the
                         // app entirely (see kill_all_sessions_on_exit), so it holds
                         // its RAM until the machine reboots.
                         crate::pty::kill_all_sessions_on_exit(state.inner());
-                        // Kill all SSH tunnel processes so ports are freed for restart
-                        state.tunnel_manager.shutdown_all();
                         crate::ai_agent::knowledge::flush_dirty(state.inner());
+                        state.secrets.clear();
+                        tauri::async_runtime::block_on(
+                            state.tunnel_manager.shutdown_all_and_wait(),
+                        );
+                        if let Some(manager) = state.design_mode.get() {
+                            tauri::async_runtime::block_on(manager.stop_all());
+                        }
+                        // End every ego AI Chat started: `std::process::exit`
+                        // skips the destructors that would kill them.
+                        tauri::async_runtime::block_on(state.acp.shutdown_all());
                     }
+                    // Flush the last buffered log lines to disk before the
+                    // process exits (story #672-c1a3) — the lines a shutdown
+                    // bug needs most.
+                    app_logger::flush_logs_on_exit();
                 }
                 _ => {}
             }
@@ -2155,42 +3017,47 @@ pub fn run() {
 /// Build a connect URL for QR-code authentication.
 /// Brackets IPv6 addresses for valid URL syntax.
 fn build_connect_url(scheme: &str, host: &str, port: u16, token: &str) -> String {
+    format!(
+        "{}?token={token}",
+        build_remote_base_url(scheme, host, port)
+    )
+}
+
+fn build_remote_base_url(scheme: &str, host: &str, port: u16) -> String {
     let host = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]")
     } else {
         host.to_string()
     };
-    format!("{scheme}://{host}:{port}/?token={token}")
+    format!("{scheme}://{host}:{port}/")
 }
 
 /// Spawn background tasks shared by both desktop and headless modes.
 fn spawn_background_tasks(state: &Arc<AppState>) {
+    stories::ingest::spawn();
+    workflows::WorkflowRuntime::spawn(state);
+    automations::runtime::AutomationRuntime::spawn(state);
     AppState::spawn_session_state_accumulator(state.clone());
-    drop(state.oauth_flow_manager.spawn_cleanup_task());
+    idle_close::spawn(state.clone());
+    AppState::spawn_acp_notice_pump(state.clone());
+    drop(
+        state
+            .mcp
+            .oauth_flow_manager
+            .spawn_cleanup_task(state.mcp.upstream_registry.clone()),
+    );
     mcp_http::mcp_transport::spawn_tool_search_index_updater(state.clone());
     pty::spawn_tombstone_sweeper(state.clone());
     content_index::spawn_content_index_updater(state.clone());
     cpu_watchdog::spawn(state.clone());
+    // FastAF's engine: loads persisted session knowledge, then flushes it.
     ai_agent::knowledge::spawn_persist_task(state.clone());
-    {
-        let sched_state = state.clone();
-        tokio::spawn(async move {
-            let scheduler = ai_agent::scheduler::Scheduler::new(sched_state);
-            scheduler.run().await;
-        });
-    }
-    {
-        let watcher_state = state.clone();
-        let engine = Arc::new(ai_agent::watcher::WatcherEngine::new(watcher_state));
-        if state.watcher_engine.set(Arc::clone(&engine)).is_err() {
-            tracing::error!(
-                "WatcherEngine already initialized — duplicate spawn_background_tasks call"
-            );
-        }
-        tokio::spawn(async move {
-            engine.run().await;
-        });
-    }
+    // FastAF's scheduled tasks (`ai-cron.json`, Settings › AI Chat).
+    ai_agent::scheduler::spawn(state.clone());
+    // Its own thread on purpose: probing the webview URL blocks on the event
+    // loop, and the CPU watchdog must not be able to hang behind it.
+    #[cfg(feature = "desktop")]
+    webview_recovery::spawn(state.clone());
 }
 
 /// Interactive CLI to set username + password for headless auth.
@@ -2237,25 +3104,207 @@ pub fn set_password_interactive() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the headless (non-desktop) server.
-/// Called by the `tuic-remote` binary.
+/// Background tasks the `tuic-remote` daemon runs.
+///
+/// The daemon is a whole machine, not a session server: it holds the repos, the
+/// PTYs and the agents, so nearly everything `spawn_background_tasks` gives the
+/// desktop it needs too. What it deliberately does not run is named below with
+/// the reason, and `the_daemon_decides_on_every_desktop_background_task` fails
+/// if a task is added to `spawn_background_tasks` and not decided on here
+/// (#793-23a5).
 #[cfg(not(feature = "desktop"))]
-pub async fn run_headless(port: u16) -> anyhow::Result<()> {
+fn spawn_daemon_background_tasks(state: &Arc<AppState>) {
+    stories::ingest::spawn();
+    workflows::WorkflowRuntime::spawn(state);
+    automations::runtime::AutomationRuntime::spawn(state);
+    AppState::spawn_session_state_accumulator(state.clone());
+    idle_close::spawn(state.clone());
+    AppState::spawn_acp_notice_pump(state.clone());
+    pty::spawn_tombstone_sweeper(state.clone());
+    // The agents run here, so the argv/env snapshot session discovery reads is
+    // this process's to keep — no snapshot, no resume after a restart.
+    pty::spawn_process_snapshot_refresher(state.clone());
+    // A remote client reports tab visibility over `/sessions/{id}/visible`, so
+    // parking an idle hidden session is as correct here as on the desktop.
+    #[cfg(unix)]
+    pty::spawn_standby_checker(state.clone());
+    content_index::spawn_content_index_updater(state.clone());
+    mcp_http::mcp_transport::spawn_tool_search_index_updater(state.clone());
+    crate::mcp_proxy::registry::UpstreamRegistry::spawn_health_checker(Arc::clone(
+        &state.mcp.upstream_registry,
+    ));
+    drop(
+        state
+            .mcp
+            .oauth_flow_manager
+            .spawn_cleanup_task(state.mcp.upstream_registry.clone()),
+    );
+    // The daemon is precisely where nobody can watch a CPU spike happen.
+    cpu_watchdog::spawn(state.clone());
+    // FastAF's engine runs conversations here too, so its knowledge persists.
+    ai_agent::knowledge::spawn_persist_task(state.clone());
+    // Jobs a browser client saves to this machine's `ai-cron.json` run on
+    // this machine; without the loop they would be stored and never fire.
+    ai_agent::scheduler::spawn(state.clone());
+    mcp_http::acp_mcp::install(state);
+    mcp_http::spawn_maintenance_sweep(state);
+
+    // Deliberately NOT started on the daemon:
+    //
+    // - `sleep_prevention::spawn` — desktop setup owns the machine's native
+    //   power assertion. Remote daemon lifetime is not a desktop sleep policy.
+    //
+    // - `webview_recovery::spawn` — `#[cfg(feature = "desktop")]`, so it does
+    //   not exist in this build. There is no WebView whose document can be lost.
+}
+
+/// Run the tuic-remote server.
+///
+/// - Uses `build_remote_router()` (no config, MCP, plugins, push, static files).
+/// - Spawns only the two essential background tasks: session state accumulator
+///   and tombstone sweeper.
+/// - Logs "Starting tuic-remote" with the `protocol_version` field.
+/// - Binds TCP directly without spawning an IPC socket.
+///
+/// Runtime options for the standalone remote daemon.
+pub struct RemoteOptions {
+    /// TCP port exposed by the daemon.
+    pub port: u16,
+    /// IP address the daemon binds.
+    pub bind: std::net::IpAddr,
+    /// Idle lifetime in seconds, or no automatic expiry.
+    pub survive_secs: Option<u64>,
+    /// Whether startup writes MCP configuration for local agents.
+    pub agent_configs: bool,
+    /// Exit with failure after an update so the installed service restarts us.
+    pub supervised: bool,
+    /// Allow the old process a short grace period to release its TCP port.
+    pub wait_for_restart: bool,
+    pairing_token: Option<String>,
+}
+
+/// Select a mounted, read-once credential seed before headless startup.
+#[cfg(not(feature = "desktop"))]
+pub fn select_remote_credential_file(path: &std::path::Path) -> Result<(), String> {
+    credentials::select_credential_file(path)
+}
+
+/// Read-only metadata for selecting a locally built daemon binary.
+pub fn remote_build_info_json() -> Result<String, String> {
+    let build = remote_deploy::assets::running_build_identity()?;
+    serde_json::to_string(build).map_err(|error| error.to_string())
+}
+
+impl Default for RemoteOptions {
+    fn default() -> Self {
+        Self {
+            port: 9877,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            survive_secs: None,
+            agent_configs: true,
+            supervised: false,
+            wait_for_restart: false,
+            pairing_token: None,
+        }
+    }
+}
+
+impl RemoteOptions {
+    /// Return the complete TCP bind address.
+    pub fn bind_addr(&self) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(self.bind, self.port)
+    }
+
+    /// Apply the remote boot policy before touching host agent configuration.
+    #[cfg(any(not(feature = "desktop"), test))]
+    pub(crate) fn configure_agent_mcp(&self, disabled: &[String]) {
+        if self.agent_configs {
+            agent_mcp::ensure_mcp_configs(disabled);
+        }
+    }
+
+    /// Set the one-shot pairing token supplied by the launcher.
+    pub fn set_pairing_token(&mut self, token: Option<String>) {
+        self.pairing_token = token;
+    }
+}
+
+#[cfg(any(not(feature = "desktop"), test))]
+struct RemotePidFile(std::path::PathBuf);
+
+#[cfg(any(not(feature = "desktop"), test))]
+impl RemotePidFile {
+    fn create(config_dir: &std::path::Path) -> std::io::Result<Self> {
+        let path = config_dir.join("tuic-remote.pid");
+        std::fs::write(&path, std::process::id().to_string())?;
+        Ok(Self(path))
+    }
+}
+
+#[cfg(any(not(feature = "desktop"), test))]
+impl Drop for RemotePidFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.0).ok().as_deref() != Some(&std::process::id().to_string())
+        {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(source = "remote", path = %self.0.display(), "Failed to remove pid file: {error}");
+        }
+    }
+}
+
+#[cfg(all(unix, not(feature = "desktop")))]
+async fn remote_shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+    }
+}
+
+#[cfg(all(not(unix), not(feature = "desktop")))]
+async fn remote_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+#[cfg(not(feature = "desktop"))]
+pub async fn run_remote(mut options: RemoteOptions) -> anyhow::Result<()> {
+    crate::remote_deploy::assets::running_build_identity().map_err(anyhow::Error::msg)?;
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("Failed to install rustls CryptoProvider"))?;
+
+    credentials::probe_named_vault_read().map_err(anyhow::Error::msg)?;
+
     let log_buffer = Arc::new(parking_lot::Mutex::new(app_logger::LogRingBuffer::new(
         app_logger::LOG_RING_CAPACITY,
     )));
     app_logger::init_tracing(log_buffer.clone());
 
     let mut app_config = config::load_app_config();
+    if credentials::credential_file_selected() {
+        // A first boot has no config.json, so the config reader returns defaults
+        // without hydration. Mounted credentials still apply to that first boot.
+        let _ = config::hydrate_app_config_secrets(&mut app_config);
+    }
+    // Reject invalid key material before starting either IPC or TCP listeners.
+    let tls_config = load_remote_tls(&app_config.services.tls).await?;
     app_config.services.server.enabled = true;
-    if app_config.services.server.port != port {
+    if app_config.services.server.port != options.port {
         tracing::info!(
             source = "remote",
             config_port = app_config.services.server.port,
-            override_port = port,
+            override_port = options.port,
             "Port overridden by TUIC_PORT / CLI argument"
         );
-        app_config.services.server.port = port;
+        app_config.services.server.port = options.port;
     }
     if app_config.services.auth.lan_auth_bypass {
         tracing::warn!(
@@ -2264,69 +3313,108 @@ pub async fn run_headless(port: u16) -> anyhow::Result<()> {
         );
         app_config.services.auth.lan_auth_bypass = false;
     }
-    if app_config.services.auth.session_token.is_empty() {
+    if let Some(token) = options.pairing_token.take() {
+        app_config.services.auth.session_token = token;
+        app_config.services.auth.session_token_exists = true;
+    } else if app_config.services.auth.session_token.is_empty() {
         app_config.services.auth.session_token = uuid::Uuid::new_v4().to_string();
         app_config.services.auth.session_token_exists = true;
+        // Keep it across restarts so paired phones stay logged in. A host with
+        // no usable vault falls back to a token that lives for this run only.
+        if let Err(e) = config::persist_session_token(&app_config.services.auth.session_token) {
+            tracing::warn!(
+                source = "remote",
+                error = %e,
+                "Could not persist the session token; it changes on every restart"
+            );
+        }
     }
 
     let data_dir = config::config_dir();
     let worktrees_dir = data_dir.join("worktrees");
     std::fs::create_dir_all(&worktrees_dir)?;
+    let _pid_file = RemotePidFile::create(&data_dir)?;
 
-    let (github_token, github_token_source) = crate::github_auth::resolve_token_without_keychain();
+    // Env only, for the same reason the desktop boot does it: the rest of the
+    // chain spawns `gh` or reads the credential store, and this runs before the
+    // HTTP server binds. No window here, but a wedged `gh` would still keep the
+    // server unreachable.
+    let (github_token, github_token_source) = crate::github_auth::resolve_token_from_env();
+
+    agent_hook_launch::regenerate_launch_assets_at_boot(&data_dir);
 
     let mut app_state = AppState::new(data_dir, worktrees_dir, app_config.clone(), log_buffer);
-    *app_state.github_token.get_mut() = github_token;
-    *app_state.github_token_source.get_mut() = github_token_source;
+    app_state.remote_survive_secs = options.survive_secs;
+    let restart = Arc::new(tokio::sync::Notify::new());
+    let executable = std::env::current_exe()?;
+    app_state.remote_update = Some(remote_update::RemoteUpdateState {
+        executable: executable.clone(),
+        restart: restart.clone(),
+        in_progress: tokio::sync::Mutex::new(()),
+        installed: std::sync::atomic::AtomicBool::new(false),
+    });
+    *app_state.github.token.get_mut() = github_token;
+    *app_state.github.token_source.get_mut() = github_token_source;
 
     let state = Arc::new(app_state);
+    // The Host guard trusts the Tailscale FQDN only while the state is Running, so
+    // the daemon must detect it like the desktop boot does (#1535).
+    let detected = detect_tailscale_bounded(async {
+        tokio::task::spawn_blocking(tailscale::detect)
+            .await
+            .unwrap_or(tailscale::TailscaleState::NotInstalled)
+    })
+    .await;
+    apply_tailscale_status(&state, detected);
+    tokio::spawn(maintain_tailscale_status(state.clone(), || async {
+        tokio::task::spawn_blocking(tailscale::detect)
+            .await
+            .unwrap_or(tailscale::TailscaleState::NotInstalled)
+    }));
     state.wire_event_bus();
+    crate::github_auth::spawn_deferred_token_resolution(state.clone());
 
-    spawn_background_tasks(&state);
+    spawn_daemon_background_tasks(&state);
+    telegram::start(&state);
 
-    agent_mcp::ensure_mcp_configs(&app_config.disabled_mcp_agents);
+    // The bridge reaches this process over the local IPC socket, and an agent on
+    // this machine can only find the socket if it is listening. Awaited: the
+    // configs written below name a bridge that must have something to connect to.
+    mcp_http::spawn_ipc_listener(&state, true).await;
+    options.configure_agent_mcp(&app_config.disabled_mcp_agents);
 
-    let tls_config = match &app_config.services.tls {
-        config::TlsConfig::Manual {
-            cert_path,
-            key_path,
-        } => {
-            let cert_pem = std::fs::read(cert_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read TLS cert at {cert_path}: {e}"))?;
-            let key_pem = std::fs::read(key_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read TLS key at {key_path}: {e}"))?;
-            let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem)
-                .await
-                .map_err(|e| anyhow::anyhow!("Invalid TLS cert/key: {e}"))?;
-            tracing::info!(
-                source = "remote",
-                cert_path,
-                key_path,
-                "TLS loaded (manual mode)"
-            );
-            Some(tls)
+    // Watch and pre-warm the repos this machine holds. Cross-repo content search
+    // never starts a build of its own, so without this the daemon answers every
+    // such query with "pending" for as long as it runs.
+    let repos_json = config::load_repositories();
+    let known_repo_paths = boot_repo_paths(&repos_json);
+    for repo_path in &known_repo_paths {
+        if let Err(e) = repo_watcher::start_watching(repo_path, &state) {
+            tracing::warn!(source = "remote", repo = %repo_path, "Failed to watch repo: {e}");
         }
-        config::TlsConfig::Off => None,
-    };
-
-    tracing::info!(
-        source = "remote",
-        port,
-        tls = tls_config.is_some(),
-        "Starting tuic-remote"
+    }
+    let repos_to_warm = repos_to_prewarm(
+        known_repo_paths,
+        repos_json
+            .get("activeRepoPath")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        &app_config.index_strategy,
     );
+    if !repos_to_warm.is_empty() {
+        tokio::spawn(prewarm_content_indices(state.clone(), repos_to_warm));
+    }
 
-    // Auto-connect saved upstream MCP servers. Spawned (not awaited) for the
-    // same reason as the desktop boot path: `start_server` below parks on the
-    // shutdown signal and never returns, so any auto-connect after it would be
-    // dead code. Registration is fast (async init is spawned), so it does not
-    // delay socket binding.
+    // Upstream MCP servers are per-machine configuration (#792-c255), so the
+    // machine that holds them is the one that must connect them. Spawned, not
+    // awaited: registration is fast but a dead upstream must not delay the bind.
     let auto_state = state.clone();
     let settle_guard = auto_state.clone();
     let auto_handle = tokio::spawn(async move {
         crate::mcp_upstream_config::auto_connect_saved_upstreams(&auto_state).await;
     });
-    // Recover the settle latch if the auto-connect task panics (see desktop path).
+    // Recover the settle latch if the auto-connect task panics: nothing else
+    // releases it, and a waiter would park for the life of the daemon.
     tokio::spawn(async move {
         if let Err(e) = auto_handle.await {
             tracing::error!(
@@ -2334,90 +3422,140 @@ pub async fn run_headless(port: u16) -> anyhow::Result<()> {
                 "auto_connect_saved_upstreams task failed: {e}"
             );
             settle_guard
-                .mcp_upstream_registry
+                .mcp
+                .upstream_registry
                 .mark_initial_connect_complete();
         }
     });
 
-    // Run server until SIGINT/SIGTERM, then shut down gracefully.
-    tokio::select! {
-        tcp_bound = mcp_http::start_server(state.clone(), true, true, tls_config) => {
-            if !tcp_bound {
-                anyhow::bail!("Fatal: failed to bind TCP on port {port} — cannot serve in headless mode");
+    let protocol_version = remote_runtime::REMOTE_PROTOCOL_VERSION as u32;
+    tracing::info!(
+        source = "remote",
+        port = options.port,
+        tls = tls_config.is_some(),
+        protocol_version,
+        "Starting tuic-remote"
+    );
+
+    let bind_addr = options.bind_addr();
+    let listener = if options.wait_for_restart {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match std::net::TcpListener::bind(bind_addr) {
+                Ok(listener) => break listener,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(error) => anyhow::bail!("Fatal: failed to bind TCP on {bind_addr}: {error}"),
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!(source = "remote", "Received shutdown signal");
-            if let Some(tx) = state.server_shutdown.lock().take() {
-                let _ = tx.send(());
-            }
+    } else {
+        std::net::TcpListener::bind(bind_addr)
+            .map_err(|e| anyhow::anyhow!("Fatal: failed to bind TCP on {bind_addr}: {e}"))?
+    };
+    listener.set_nonblocking(true)?;
+
+    // Outbound registration with the relay, when `--relay-pair` has stored a
+    // pairing. The agent can only reach this daemon's own loopback listener.
+    let relay_shutdown = Arc::new(tokio::sync::Notify::new());
+    let upstream = std::net::SocketAddr::new(
+        if options.bind.is_unspecified() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            options.bind
+        },
+        options.port,
+    );
+    match relay_tunnel::service::load_agent(upstream, &app_config.services.auth.session_token) {
+        Ok(Some(agent)) => {
+            let stop = relay_shutdown.clone();
+            tokio::spawn(relay_tunnel::daemon::run(agent, async move {
+                stop.notified().await;
+            }));
         }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(source = "remote", "Relay tunnel not started: {e}"),
     }
 
+    // TUIC_REMOTE_FULL_API=1 serves the desktop API (config, plugins, …) instead of
+    // the trimmed remote router, so the full web UI can run against a headless
+    // backend (dev previews, end-to-end checks). Auth is enforced either way.
+    let router = if std::env::var_os("TUIC_REMOTE_FULL_API").is_some() {
+        tracing::info!(
+            source = "remote",
+            "Serving the full desktop API (TUIC_REMOTE_FULL_API)"
+        );
+        mcp_http::build_router(state.clone(), true, false)
+    } else {
+        mcp_http::build_remote_router(state.clone())
+    };
+    let lifetime = remote_lifetime::expired(
+        state.clone(),
+        options.survive_secs.map(std::time::Duration::from_secs),
+    );
+    tokio::pin!(lifetime);
+
+    let mut updated = false;
+    let shutdown_result: anyhow::Result<()> = tokio::select! {
+        result = serve_remote_listener(listener, router, tls_config, state.clone()) => {
+            result.map_err(|e| anyhow::anyhow!("TCP server error: {e}"))
+        }
+        signal = remote_shutdown_signal() => {
+            signal.map_err(anyhow::Error::from).map(|()| {
+                tracing::info!(source = "remote", "Received shutdown signal");
+            })
+        }
+        () = &mut lifetime => {
+            tracing::info!(source = "remote", "Remote daemon survive time expired");
+            Ok(())
+        }
+        () = restart.notified() => {
+            updated = true;
+            tracing::info!(source = "remote", "Restarting after remote binary update");
+            Ok(())
+        }
+    };
+
+    relay_shutdown.notify_one();
+    workflows::shutdown_checks();
+    shutdown_result?;
+    // Flush the last buffered log lines to disk before the process exits
+    // (story #672-c1a3) — the lines a shutdown bug needs most.
+    app_logger::flush_logs_on_exit();
+    if updated {
+        if options.supervised {
+            anyhow::bail!("Remote update installed; exiting for supervisor restart");
+        }
+        // Linux current_exe() refers to the deleted inode after replacement.
+        // Relaunch the same startup path that the updater installed into.
+        let mut child = std::process::Command::new(executable);
+        child.args(
+            std::env::args()
+                .skip(1)
+                .filter(|arg| arg != "--wait-for-restart"),
+        );
+        child.arg("--wait-for-restart");
+        if !credentials::credential_file_selected() {
+            child.env(
+                "TUIC_PAIRING_TOKEN",
+                &app_config.services.auth.session_token,
+            );
+        }
+        child
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Updated remote failed to restart: {e}"))?;
+    }
     Ok(())
 }
 
-/// Run the tuic-remote server — a slim variant of `run_headless()`.
-///
-/// Differences from `run_headless()`:
-/// - Uses `build_remote_router()` (no config, MCP, plugins, push, static files).
-/// - Spawns only the two essential background tasks: session state accumulator
-///   and tombstone sweeper.
-/// - Logs "Starting tuic-remote" with the `protocol_version` field.
-/// - Binds TCP directly without spawning an IPC socket.
-#[cfg(not(feature = "desktop"))]
-pub async fn run_remote(port: u16) -> anyhow::Result<()> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|_| anyhow::anyhow!("Failed to install rustls CryptoProvider"))?;
-
-    let log_buffer = Arc::new(parking_lot::Mutex::new(app_logger::LogRingBuffer::new(
-        app_logger::LOG_RING_CAPACITY,
-    )));
-    app_logger::init_tracing(log_buffer.clone());
-
-    let mut app_config = config::load_app_config();
-    app_config.services.server.enabled = true;
-    if app_config.services.server.port != port {
-        tracing::info!(
-            source = "remote",
-            config_port = app_config.services.server.port,
-            override_port = port,
-            "Port overridden by TUIC_PORT / CLI argument"
-        );
-        app_config.services.server.port = port;
-    }
-    if app_config.services.auth.lan_auth_bypass {
-        tracing::warn!(
-            source = "remote",
-            "lan_auth_bypass is not supported in headless mode — forcing off"
-        );
-        app_config.services.auth.lan_auth_bypass = false;
-    }
-    if app_config.services.auth.session_token.is_empty() {
-        app_config.services.auth.session_token = uuid::Uuid::new_v4().to_string();
-        app_config.services.auth.session_token_exists = true;
-    }
-
-    let data_dir = config::config_dir();
-    let worktrees_dir = data_dir.join("worktrees");
-    std::fs::create_dir_all(&worktrees_dir)?;
-
-    let (github_token, github_token_source) = crate::github_auth::resolve_token_without_keychain();
-
-    let mut app_state = AppState::new(data_dir, worktrees_dir, app_config.clone(), log_buffer);
-    *app_state.github_token.get_mut() = github_token;
-    *app_state.github_token_source.get_mut() = github_token_source;
-
-    let state = Arc::new(app_state);
-    state.wire_event_bus();
-
-    // Only the two tasks required for session management — no scheduler,
-    // watcher engine, content index, knowledge persist, or tool search index.
-    AppState::spawn_session_state_accumulator(state.clone());
-    pty::spawn_tombstone_sweeper(state.clone());
-
-    let tls_config = match &app_config.services.tls {
+#[cfg(any(not(feature = "desktop"), test))]
+async fn load_remote_tls(
+    tls: &config::TlsConfig,
+) -> anyhow::Result<Option<axum_server::tls_rustls::RustlsConfig>> {
+    match tls {
         config::TlsConfig::Manual {
             cert_path,
             key_path,
@@ -2435,54 +3573,536 @@ pub async fn run_remote(port: u16) -> anyhow::Result<()> {
                 key_path,
                 "TLS loaded (manual mode)"
             );
-            Some(tls)
+            Ok(Some(tls))
         }
-        config::TlsConfig::Off => None,
-    };
-
-    const PROTOCOL_VERSION: u32 = 1;
-    tracing::info!(
-        source = "remote",
-        port,
-        tls = tls_config.is_some(),
-        protocol_version = PROTOCOL_VERSION,
-        "Starting tuic-remote"
-    );
-
-    let bind_addr = format!("0.0.0.0:{port}");
-    let listener = std::net::TcpListener::bind(&bind_addr)
-        .map_err(|e| anyhow::anyhow!("Fatal: failed to bind TCP on port {port}: {e}"))?;
-    listener.set_nonblocking(true)?;
-    let listener = tokio::net::TcpListener::from_std(listener)?;
-
-    // TUIC_REMOTE_FULL_API=1 serves the desktop API (config, plugins, …) instead of
-    // the trimmed remote router, so the full web UI can run against a headless
-    // backend (dev previews, end-to-end checks). Auth is enforced either way.
-    let router = if std::env::var_os("TUIC_REMOTE_FULL_API").is_some() {
-        tracing::info!(source = "remote", "Serving the full desktop API (TUIC_REMOTE_FULL_API)");
-        mcp_http::build_router(state.clone(), true, false)
-    } else {
-        mcp_http::build_remote_router(state.clone())
-    };
-    let svc = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
-
-    tokio::select! {
-        result = axum::serve(listener, svc) => {
-            if let Err(e) = result {
-                anyhow::bail!("TCP server error: {e}");
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!(source = "remote", "Received shutdown signal");
-        }
+        config::TlsConfig::Off => Ok(None),
     }
-
-    Ok(())
 }
+
+// The daemon has one TCP listener for HTTP, SSE and WebSocket upgrades.
+#[cfg(any(not(feature = "desktop"), test))]
+async fn serve_remote_listener(
+    listener: std::net::TcpListener,
+    router: axum::Router,
+    tls: Option<axum_server::tls_rustls::RustlsConfig>,
+    state: Arc<AppState>,
+) -> std::io::Result<()> {
+    let addr = listener.local_addr()?;
+    let svc = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    if let Some(tls) = tls {
+        // Match desktop remote access: relay and SSH clients still use HTTP on
+        // this listener. TLS negotiation errors must never retry as plaintext.
+        use axum_server_dual_protocol::ServerExt;
+        let server = axum_server_dual_protocol::from_tcp_dual_protocol(listener, tls)?;
+        let tls_lifetime = Arc::new(());
+        *state.tls_listener.write() = Arc::downgrade(&tls_lifetime);
+        tracing::info!(source = "remote", %addr, tls = true, "TCP listening (HTTP+HTTPS)");
+        let result = server.set_upgrade(false).serve(svc).await;
+        drop(tls_lifetime);
+        result
+    } else {
+        let server = axum_server::from_tcp(listener)?;
+        tracing::info!(source = "remote", %addr, tls = false, "TCP listening (HTTP only)");
+        server.serve(svc).await
+    }
+}
+
+#[cfg(test)]
+mod remote_listener_tests;
+
+#[cfg(test)]
+mod github_http_guard_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "desktop")]
+    fn register_document_grid(state: &AppState, session_id: &str, webview_label: &str) -> u64 {
+        let gate = Arc::new(crate::grid_gate::GridGate::new());
+        let epoch = gate.epoch();
+        state.grid.gates.insert(session_id.to_string(), gate);
+        state.grid.channels.insert(
+            session_id.to_string(),
+            crate::state::DesktopGridChannel {
+                channel: tauri::ipc::Channel::new(|_| Ok(())),
+                webview_label: webview_label.to_string(),
+                epoch,
+                visible: std::sync::atomic::AtomicBool::new(true),
+            },
+        );
+        epoch
+    }
+
+    #[cfg(feature = "desktop")]
+    fn watcher(id: &str, pattern: &str) -> output_watchers::WatcherSpec {
+        output_watchers::WatcherSpec {
+            id: id.to_string(),
+            pattern: pattern.to_string(),
+            flags: String::new(),
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn reload_releases_every_old_grid_channel_and_watcher() {
+        let state = crate::state::tests_support::make_test_app_state();
+        register_document_grid(&state, "one", "main");
+        register_document_grid(&state, "two", "main");
+        state.plugin_output_watchers.write().sync_for_webview(
+            "main",
+            "old-document",
+            1,
+            &[watcher("w", "old document")],
+        );
+
+        release_webview_document_resources(&state, "main");
+
+        assert!(state.grid.channels.is_empty());
+        assert!(state.grid.gates.is_empty());
+        assert!(!crate::pty::grid_has_subscriber(&state, "one"));
+        assert!(!crate::pty::grid_has_subscriber(&state, "two"));
+        assert_eq!(
+            state
+                .plugin_output_watchers
+                .read()
+                .matching_ids("old document"),
+            [] as [std::string::String; 0]
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn closing_a_panel_releases_only_its_watcher_set() {
+        let state = crate::state::tests_support::make_test_app_state();
+        register_document_grid(&state, "main-terminal", "main");
+        state.plugin_output_watchers.write().sync_for_webview(
+            "main",
+            "main-client",
+            1,
+            &[watcher("w", "main line")],
+        );
+        state.plugin_output_watchers.write().sync_for_webview(
+            "panel-activity",
+            "panel-client",
+            1,
+            &[watcher("w", "panel line")],
+        );
+
+        release_webview_document_resources(&state, "panel-activity");
+
+        assert!(crate::pty::grid_has_subscriber(&state, "main-terminal"));
+        let watchers = state.plugin_output_watchers.read();
+        assert_eq!(watchers.matching_ids("main line"), vec!["main-client/w"]);
+        assert_eq!(
+            watchers.matching_ids("panel line"),
+            [] as [std::string::String; 0]
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn main_reload_preserves_a_floating_terminals_grid_subscription() {
+        let state = crate::state::tests_support::make_test_app_state();
+        register_document_grid(&state, "main-terminal", "main");
+        let floating_epoch = register_document_grid(&state, "floating-terminal", "floating-tab-1");
+
+        release_webview_document_resources(&state, "main");
+
+        assert!(!crate::pty::grid_has_subscriber(&state, "main-terminal"));
+        assert!(crate::pty::grid_has_subscriber(&state, "floating-terminal"));
+        assert_eq!(
+            state.grid.gates.get("floating-terminal").unwrap().epoch(),
+            floating_epoch
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn destroying_a_floating_window_releases_only_its_grid_subscription() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let main_epoch = register_document_grid(&state, "main-terminal", "main");
+        register_document_grid(&state, "floating-terminal", "floating-tab-1");
+
+        release_webview_document_resources(&state, "floating-tab-1");
+
+        assert!(crate::pty::grid_has_subscriber(&state, "main-terminal"));
+        assert_eq!(
+            state.grid.gates.get("main-terminal").unwrap().epoch(),
+            main_epoch
+        );
+        assert!(!crate::pty::grid_has_subscriber(
+            &state,
+            "floating-terminal"
+        ));
+        assert!(!state.grid.gates.contains_key("floating-terminal"));
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn reload_keeps_browser_watchers_and_accepts_fresh_document() {
+        let state = crate::state::tests_support::make_test_app_state();
+        state
+            .plugin_output_watchers
+            .write()
+            .sync("browser", 1, &[watcher("w", "browser line")]);
+        state.plugin_output_watchers.write().sync_for_webview(
+            "main",
+            "old-document",
+            1,
+            &[watcher("w", "old line")],
+        );
+        release_webview_document_resources(&state, "main");
+
+        let new_epoch = register_document_grid(&state, "one", "main");
+        state.plugin_output_watchers.write().sync_for_webview(
+            "main",
+            "new-document",
+            1,
+            &[watcher("w", "new line")],
+        );
+
+        assert_eq!(state.grid.gates.get("one").unwrap().epoch(), new_epoch);
+        let watchers = state.plugin_output_watchers.read();
+        assert_eq!(watchers.matching_ids("browser line"), vec!["browser/w"]);
+        assert_eq!(watchers.matching_ids("new line"), vec!["new-document/w"]);
+        assert_eq!(
+            watchers.matching_ids("old line"),
+            [] as [std::string::String; 0]
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn repeated_reloads_leave_only_the_latest_document_watchers() {
+        let state = crate::state::tests_support::make_test_app_state();
+        for i in 0..10 {
+            release_webview_document_resources(&state, "main");
+            let client = format!("document-{i}");
+            state.plugin_output_watchers.write().sync_for_webview(
+                "main",
+                &client,
+                1,
+                &[watcher("w", &format!("line-{i}"))],
+            );
+        }
+        let watchers = state.plugin_output_watchers.read();
+        for i in 0..9 {
+            assert_eq!(
+                watchers.matching_ids(&format!("line-{i}")),
+                [] as [std::string::String; 0]
+            );
+        }
+        assert_eq!(watchers.matching_ids("line-9"), vec!["document-9/w"]);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn navigation_guard_preserves_internal_frames_and_blocks_external_targets() {
+        let dev = tauri::Url::parse("http://dev.example:1421/").unwrap();
+        for allowed in [
+            "tauri://localhost/index.html",
+            "asset://localhost/file.pdf",
+            "http://asset.localhost/file.pdf",
+            "plugin://localhost/panel",
+            "plugin://custom/panel",
+            "http://plugin.localhost/panel",
+            "about:blank",
+            "about:srcdoc#/3",
+            "data:text/html,hello",
+            "blob:tauri://localhost/id",
+            "http://localhost:9877/panel",
+            "http://127.0.0.1:14319/",
+            "http://[::1]:9877/",
+        ] {
+            assert!(
+                is_app_navigation(&tauri::Url::parse(allowed).unwrap(), Some(&dev)),
+                "{allowed}"
+            );
+        }
+        assert_eq!(
+            is_app_navigation(
+                &tauri::Url::parse("http://dev.example:1421/docs").unwrap(),
+                Some(&dev)
+            ),
+            cfg!(debug_assertions)
+        );
+        for blocked in [
+            "http://dev.example:1422/docs",
+            "https://example.com/",
+            "http://localhost@evil.com/",
+            "tauri://localhost.evil/",
+            "file:///tmp/secret",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !is_app_navigation(&tauri::Url::parse(blocked).unwrap(), Some(&dev)),
+                "{blocked}"
+            );
+        }
+        assert_eq!(
+            is_app_navigation(&tauri::Url::parse("http://tauri.localhost/").unwrap(), None),
+            cfg!(windows)
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[tokio::test]
+    async fn story_action_ipc_shared_path_creates_a_plan() {
+        let config = tempfile::tempdir().expect("config directory");
+        let _guard = crate::config::set_config_dir_override(config.path().to_path_buf());
+        let project = tempfile::tempdir().expect("project directory");
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let reply = story_action_command_for_state(
+            state,
+            project.path().to_string_lossy().into_owned(),
+            stories::StoryAction::CreatePlan {
+                title: "IPC plan".into(),
+                source: "plan.md".into(),
+            },
+            None,
+        )
+        .await
+        .expect("IPC story action");
+        let stories::StoryReply::Plan(plan) = reply else {
+            panic!("expected created plan");
+        };
+        assert_eq!(plan.title, "IPC plan");
+    }
+
+    /// The body of one function, read out of this file's own source.
+    fn fn_body(source: &str, signature: &str) -> String {
+        source
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} must exist"))
+            .split("\n}\n")
+            .next()
+            .expect("function body")
+            .to_string()
+    }
+
+    /// Names of the background tasks a function body starts.
+    ///
+    /// Derived from the source rather than listed, so a task added tomorrow is
+    /// picked up without anyone remembering to update a list here. Three shapes
+    /// are counted: a `spawn_*` call, a bare `module::spawn(` (the module names
+    /// the task), and the engine types that are spawned by hand. Nothing
+    /// matches the third shape today — `WatcherEngine` was its only case and it
+    /// went with the embedded AI engine (#784-0aec) — so it is kept for the
+    /// next hand-spawned engine rather than dropped, which is why the test
+    /// anchors on one name per shape it can still see.
+    fn background_task_names(body: &str) -> Vec<String> {
+        let tokens: Vec<String> = body
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect();
+        let mut names = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            let name = if token.starts_with("spawn_") {
+                token.clone()
+            } else if token == "spawn" {
+                match tokens.get(index.wrapping_sub(1)) {
+                    // `tokio::spawn` is the spawner, not a task.
+                    Some(module) if module != "tokio" && index > 0 => module.clone(),
+                    _ => continue,
+                }
+            } else if token == "ensure_running" || token.ends_with("Engine") {
+                token.clone()
+            } else {
+                continue;
+            };
+            // The spawner functions name themselves in their own log lines.
+            if name.ends_with("_background_tasks") {
+                continue;
+            }
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// Every background task the desktop spawns must be decided on for the
+    /// daemon: started there, or named in the "Deliberately NOT started" block
+    /// with the reason it must not be. Before #793-23a5 the daemon ran three of
+    /// twelve and said so only in a comment that listed no names, so content
+    /// indexing, the tool search index and scheduling were missing with nothing
+    /// to notice it.
+    #[test]
+    fn the_daemon_decides_on_every_desktop_background_task() {
+        let source = include_str!("lib.rs");
+        let desktop = fn_body(source, "fn spawn_background_tasks(state: &Arc<AppState>) {");
+        let daemon = fn_body(
+            source,
+            "fn spawn_daemon_background_tasks(state: &Arc<AppState>) {",
+        );
+
+        let expected = background_task_names(&desktop);
+        // Anchors, not a count. The scanner failing open makes this test pass
+        // by finding nothing, so it has to prove it still matches — but the
+        // number of tasks is not a durable fact: it was twelve before
+        // #784-0aec deleted the scheduler and the watcher engine, and a count
+        // pinned here breaks on the next legitimate add or remove while
+        // asserting nothing about whether the scanner works. One name per
+        // shape the scanner recognises does assert that.
+        for (name, shape) in [
+            ("spawn_cleanup_task", "a `spawn_*` call"),
+            ("cpu_watchdog", "a bare `module::spawn(`"),
+        ] {
+            assert!(
+                expected.iter().any(|n| n == name),
+                "the scanner no longer matches {shape} — `{name}` is in \
+                 spawn_background_tasks but not in {expected:?}"
+            );
+        }
+        for name in expected {
+            assert!(
+                daemon.contains(&name),
+                "`{name}` runs on the desktop but the daemon neither starts it nor says why not"
+            );
+        }
+    }
+
+    /// The daemon must actually serve MCP, not merely write configs that point
+    /// at it. `tuic-bridge` speaks HTTP over the local IPC socket and has no
+    /// other transport, so an agent on a daemon without that listener finds a
+    /// configured server it can never reach.
+    #[test]
+    fn the_daemon_listens_on_ipc_before_it_writes_bridge_configs() {
+        let source = include_str!("lib.rs");
+        let body = fn_body(
+            source,
+            "pub async fn run_remote(mut options: RemoteOptions)",
+        );
+        let listener = body
+            .find("spawn_ipc_listener")
+            .expect("run_remote must start the IPC listener the bridge connects to");
+        let configs = body
+            .find("configure_agent_mcp")
+            .expect("run_remote must install the bridge configs for this machine's agents");
+        assert!(
+            listener < configs,
+            "the socket must be listening before a config names the bridge that connects to it"
+        );
+    }
+
+    /// Cross-repo content search skips a repo whose index does not exist and
+    /// deliberately starts no build — the warm strategy owns that. The daemon
+    /// ran neither, so `/fs/search-content-all` answered "pending" for every
+    /// repo for as long as the process lived: empty results that never resolve.
+    #[test]
+    fn the_daemon_warms_and_watches_the_repos_it_holds() {
+        let body = fn_body(
+            include_str!("lib.rs"),
+            "pub async fn run_remote(mut options: RemoteOptions)",
+        );
+        for call in [
+            "repo_watcher::start_watching",
+            "repos_to_prewarm",
+            "prewarm_content_indices",
+        ] {
+            assert!(
+                body.contains(call),
+                "run_remote must call {call} — without it the machine's repos have no index"
+            );
+        }
+    }
+
+    /// The remote boot path enters a Tokio runtime before registering its
+    /// repositories. Registering a real watcher here exercises the same
+    /// runtime-dependent path that panicked in synchronous headless tests.
+    #[cfg(not(feature = "desktop"))]
+    #[tokio::test]
+    async fn remote_boot_can_register_a_repository_watcher() {
+        let repo = tempfile::tempdir().expect("repository directory");
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        let path = repo.path().to_str().expect("UTF-8 test path");
+
+        crate::repo_watcher::start_watching(path, &state)
+            .expect("remote boot must register a watcher inside its Tokio runtime");
+        assert!(state.repo_watchers.contains_key(path));
+        crate::repo_watcher::stop_watching(path, &state);
+    }
+
+    #[test]
+    fn remote_options_control_binding_and_agent_config_installation() {
+        let options = RemoteOptions {
+            port: 4545,
+            bind: "127.0.0.1".parse().expect("loopback"),
+            survive_secs: Some(30),
+            agent_configs: false,
+            ..RemoteOptions::default()
+        };
+        assert_eq!(options.bind_addr(), "127.0.0.1:4545".parse().unwrap());
+
+        let body = fn_body(
+            include_str!("lib.rs"),
+            "pub async fn run_remote(mut options: RemoteOptions)",
+        );
+        assert!(
+            body.contains("options.configure_agent_mcp(&app_config.disabled_mcp_agents)"),
+            "run_remote must gate agent config writes behind the explicit option"
+        );
+    }
+
+    #[test]
+    fn remote_pid_file_is_removed_when_its_guard_drops() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("tuic-remote.pid");
+        {
+            let _guard = RemotePidFile::create(dir.path()).expect("pid file");
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("pid contents"),
+                std::process::id().to_string()
+            );
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remote_restart_old_pid_guard_preserves_successor_pid() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("tuic-remote.pid");
+        let old = RemotePidFile::create(dir.path()).expect("old pid file");
+        std::fs::write(&path, "424242").expect("successor pid");
+        drop(old);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "424242");
+    }
+
+    #[test]
+    fn prewarm_follows_the_index_strategy() {
+        let known = || vec!["/a".to_string(), "/b".to_string(), "/c".to_string()];
+
+        // Default strategies warm the active repo and nothing else.
+        assert_eq!(
+            repos_to_prewarm(known(), Some("/b".to_string()), "active_and_switch"),
+            vec!["/b".to_string()]
+        );
+        assert_eq!(
+            repos_to_prewarm(known(), Some("/b".to_string()), "active_only"),
+            vec!["/b".to_string()]
+        );
+        // An active repo that is not registered (or parked) warms nothing.
+        assert_eq!(
+            repos_to_prewarm(known(), Some("/gone".to_string()), "active_only"),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            repos_to_prewarm(known(), None, "active_and_switch"),
+            [] as [std::string::String; 0]
+        );
+        // `all_sequential` warms every repo, active first so it is ready first.
+        assert_eq!(
+            repos_to_prewarm(known(), Some("/c".to_string()), "all_sequential"),
+            vec!["/c".to_string(), "/b".to_string(), "/a".to_string()]
+        );
+        assert_eq!(
+            repos_to_prewarm(Vec::new(), Some("/a".to_string()), "all_sequential"),
+            [] as [std::string::String; 0]
+        );
+    }
 
     #[test]
     fn relay_does_not_own_a_second_tokio_runtime() {
@@ -2542,7 +4162,6 @@ mod tests {
             "load_activity",
             "load_keybindings",
             "load_agents_config",
-            "load_provider_registry",
         ] {
             assert!(
                 source.contains(&format!("pub(super) async fn {command}_async(")),
@@ -2561,11 +4180,80 @@ mod tests {
         );
     }
 
+    /// The OS credential store can hang. Reading it synchronously before the
+    /// window was built meant no window at all. Boot now takes only the env vars — which cost nothing and
+    /// outrank every other source — and `setup()` finishes the chain.
+    #[test]
+    fn boot_takes_only_the_env_github_token_and_defers_the_rest() {
+        let source = include_str!("lib.rs");
+        let desktop_run = source
+            .split("pub fn run(")
+            .nth(1)
+            .expect("desktop run function")
+            .split("fn build_connect_url")
+            .next()
+            .expect("desktop run body");
+
+        assert!(
+            desktop_run.contains("github_auth::resolve_token_from_env()"),
+            "boot must take only the env token — every other source spawns `gh`"
+        );
+        assert!(
+            !desktop_run.contains("github_auth::resolve_token_without_keychain()"),
+            "that chain still spawns `gh`; it must not run before the window exists"
+        );
+        assert!(
+            desktop_run.contains("github_auth::spawn_deferred_token_resolution("),
+            "the rest of the chain must still run, or GitHub panels silently see no token"
+        );
+
+        // The daemon has no window, but the chain still ran before its HTTP
+        // server bound its socket — a wedged `gh` kept the server unreachable
+        // instead of the window unpainted. Same treatment.
+        let entry = "pub async fn run_remote(";
+        let body = source
+            .split(entry)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{entry} must exist"))
+            .split("\n}\n")
+            .next()
+            .expect("entry body");
+        assert!(
+            body.contains("github_auth::resolve_token_from_env()")
+                && body.contains("github_auth::spawn_deferred_token_resolution("),
+            "{entry} must take the env token and defer the rest, like the desktop boot"
+        );
+        assert!(
+            !body.contains("github_auth::resolve_token_without_keychain()"),
+            "{entry} must not run the `gh`-spawning chain before its server binds"
+        );
+    }
+
+    /// Catches: a headless daemon that never writes `agent-hooks/claude.json`, so
+    /// a `claude` spawn fails with "Settings file not found".
+    #[test]
+    fn every_boot_path_writes_the_launch_assets_through_the_shared_helper() {
+        let source = include_str!("lib.rs");
+        for entry in ["pub fn run(", "pub async fn run_remote("] {
+            let body = source
+                .split(entry)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{entry} must exist"))
+                .split("\n}\n")
+                .next()
+                .expect("entry body");
+            assert!(
+                body.contains("agent_hook_launch::regenerate_launch_assets_at_boot("),
+                "{entry} must write the launch assets before spawning agents"
+            );
+        }
+    }
+
     #[test]
     fn desktop_setup_reuses_the_config_loaded_at_process_start() {
         let source = include_str!("lib.rs");
         let desktop_run = source
-            .split("pub fn run()")
+            .split("pub fn run(")
             .nth(1)
             .expect("desktop run function")
             .split("fn build_connect_url")
@@ -2593,6 +4281,168 @@ mod tests {
             "the runtime owner must remain parked after start_server returns"
         );
         owner.abort();
+    }
+
+    // Catches: an enumerated bridge winning over a later usable Tailscale HTTPS address.
+    #[test]
+    fn phone_entry_prefers_tailscale_https_over_first_bridge_ip() {
+        let state = crate::state::tests_support::make_test_app_state();
+        state.config.write().services.server.port = 9876;
+        *state.tailscale_state.write() = tailscale::TailscaleState::Running {
+            fqdn: "host.tail.example".into(),
+            https_enabled: true,
+        };
+        let tls = Arc::new(());
+        *state.tls_listener.write() = Arc::downgrade(&tls);
+        for candidates in [
+            [
+                ("172.18.0.1", "Network (bridge0)"),
+                ("192.168.1.42", "Wi-Fi / LAN (en0)"),
+                ("100.64.1.2", "Tailscale (utun0)"),
+            ],
+            [
+                ("100.64.1.2", "Tailscale (utun0)"),
+                ("172.18.0.1", "Network (bridge0)"),
+                ("192.168.1.42", "Wi-Fi / LAN (en0)"),
+            ],
+        ] {
+            let ips = order_remote_access_ips(&state, local_ip_candidates(&candidates));
+            // Both phone entry and the pairing UI consume the first backend candidate.
+            assert_eq!(
+                remote_access_base_url(&state, &ips[0].ip),
+                "https://host.tail.example:9876/"
+            );
+            assert_eq!(pick_preferred_ip(ips).as_deref(), Some("100.64.1.2"));
+        }
+    }
+
+    fn local_ip_candidates(entries: &[(&str, &str)]) -> Vec<LocalIpEntry> {
+        entries
+            .iter()
+            .map(|(ip, label)| LocalIpEntry {
+                ip: (*ip).into(),
+                label: (*label).into(),
+            })
+            .collect()
+    }
+
+    // Catches: daemon HTTPS eligibility outranking LAN when no TLS listener is usable.
+    #[test]
+    fn remote_address_prefers_lan_without_usable_tailscale_https() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let tls = Arc::new(());
+        for (https_enabled, listener_active) in [(true, false), (false, true)] {
+            *state.tailscale_state.write() = tailscale::TailscaleState::Running {
+                fqdn: "host.tail.example".into(),
+                https_enabled,
+            };
+            *state.tls_listener.write() = if listener_active {
+                Arc::downgrade(&tls)
+            } else {
+                Default::default()
+            };
+            let ips = order_remote_access_ips(
+                &state,
+                local_ip_candidates(&[
+                    ("172.18.0.1", "Network (bridge0)"),
+                    ("100.64.1.2", "Tailscale (utun0)"),
+                    ("192.168.1.42", "LAN (en0)"),
+                ]),
+            );
+            assert_eq!(
+                remote_access_base_url(&state, &ips[0].ip),
+                "http://192.168.1.42:9876/"
+            );
+            assert_eq!(pick_preferred_ip(ips).as_deref(), Some("192.168.1.42"));
+        }
+    }
+
+    // Catches: IPv6 Tailscale not receiving the HTTPS preference, or a LAN literal lacking brackets.
+    #[test]
+    fn remote_address_ipv6_uses_the_same_preference_and_url_policy() {
+        let state = crate::state::tests_support::make_test_app_state();
+        *state.tailscale_state.write() = tailscale::TailscaleState::Running {
+            fqdn: "host.tail.example".into(),
+            https_enabled: true,
+        };
+        let tls = Arc::new(());
+        *state.tls_listener.write() = Arc::downgrade(&tls);
+        let candidates = [
+            ("fd00::1", "LAN (en0)"),
+            ("fd7a:115c:a1e0::1", "Tailscale (utun0)"),
+        ];
+        let ips = order_remote_access_ips(&state, local_ip_candidates(&candidates));
+        assert_eq!(
+            remote_access_base_url(&state, &ips[0].ip),
+            "https://host.tail.example:9876/"
+        );
+        drop(tls);
+        let ips = order_remote_access_ips(&state, local_ip_candidates(&candidates));
+        assert_eq!(
+            remote_access_base_url(&state, &ips[0].ip),
+            "http://[fd00::1]:9876/"
+        );
+    }
+
+    // Catches: losing the HTTP-only tailnet/other-network fallback or inventing an empty-list address.
+    #[test]
+    fn remote_address_fallback_preserves_candidates_and_empty_result() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let ips = order_remote_access_ips(
+            &state,
+            local_ip_candidates(&[
+                ("172.18.0.1", "Network (bridge0)"),
+                ("100.64.1.2", "Tailscale (utun0)"),
+            ]),
+        );
+        assert_eq!(ips.len(), 2);
+        assert_eq!(
+            remote_access_base_url(&state, &ips[0].ip),
+            "http://100.64.1.2:9876/"
+        );
+        let ips = order_remote_access_ips(
+            &state,
+            local_ip_candidates(&[
+                ("192.0.2.1", "Network (en0)"),
+                ("192.0.2.2", "Network (en1)"),
+            ]),
+        );
+        assert_eq!(ips[0].ip, "192.0.2.1");
+        assert_eq!(ips[1].ip, "192.0.2.2");
+        assert!(pick_preferred_ip(order_remote_access_ips(&state, vec![])).is_none());
+    }
+
+    // Catches: secret-entry links choosing a different scheme/host from pairing,
+    // exposing the pairing token, or failing to bracket IPv6.
+    #[test]
+    fn phone_and_pairing_share_remote_address_policy() {
+        let state = crate::state::tests_support::make_test_app_state();
+        state.config.write().services.server.port = 9876;
+        *state.tailscale_state.write() = tailscale::TailscaleState::Running {
+            fqdn: "host.tail.example".into(),
+            https_enabled: true,
+        };
+        let tls = std::sync::Arc::new(());
+        *state.tls_listener.write() = std::sync::Arc::downgrade(&tls);
+        for (ip, expected) in [
+            ("100.64.1.2", "https://host.tail.example:9876/"),
+            ("192.168.1.42", "http://192.168.1.42:9876/"),
+            ("fd00::1", "http://[fd00::1]:9876/"),
+        ] {
+            let base = remote_access_base_url(&state, ip);
+            assert_eq!(base, expected);
+            let (scheme, host, port) = remote_access_address(&state, ip);
+            assert_eq!(
+                build_connect_url(scheme, &host, port, "pairing-token"),
+                format!("{base}?token=pairing-token")
+            );
+            assert!(!base.contains("token"));
+        }
+        drop(tls);
+        assert_eq!(
+            remote_access_base_url(&state, "100.64.1.2"),
+            "http://100.64.1.2:9876/"
+        );
     }
 
     #[test]

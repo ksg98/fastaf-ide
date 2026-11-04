@@ -73,7 +73,7 @@ export function useTerminalCompletionNotifications(options: TerminalCompletionNo
 			terminalsStore.update(id, { activity: true, unseen: true, completionNotified: true });
 			if (
 				shouldPlayCompletionSound({
-					isRemoteSession: terminal.isRemote,
+					isRemoteSession: terminal.isExternallyCreated,
 					silenceRemoteCompletions: notificationsStore.state.config.silence_remote_completions,
 				})
 			) {

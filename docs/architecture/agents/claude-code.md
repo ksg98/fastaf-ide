@@ -7,6 +7,14 @@ See [agent-ui-analysis.md](../agent-ui-analysis.md) for shared concepts.
 **Rendering engine**: Ink (React for terminals)
 **Rendering approach**: ANSI relative cursor positioning (`\033[NA`, `\033[1B`)
 
+**AskUserQuestion update (Claude 2.1.280, 2026-09-29):** The captured Ink dialog
+shows `Which color do you prefer?`, numbered Red/Green/Blue choices, description
+rows, `Type something.`, `Chat about this`, and a column-zero `Enter to select`
+footer. The highlighted `❯ 1. Red` is an option, not the composer. Selection
+uses arrows then Enter; the digit labels are not direct submit keys. The raw
+capture and replay test live at
+`src-tauri/src/fixtures/agent_prompts/claude-askuser-esc-20260929.tcap`.
+
 ---
 
 ## Layout Anatomy (bottom → top)

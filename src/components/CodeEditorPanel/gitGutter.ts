@@ -9,7 +9,7 @@
  * the gutter (a RangeSet of markers) and the overview ruler (the raw change list).
  */
 
-import { type Extension, RangeSet, StateEffect, StateField } from "@codemirror/state";
+import { type Extension, RangeSet, StateEffect, StateField, type Transaction } from "@codemirror/state";
 import { EditorView, GutterMarker, gutter, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 
 export type ChangeType = "added" | "modified" | "deleted";
@@ -131,13 +131,35 @@ const changeGutter = gutter({
 /** Holds the raw change list (fed by the same `setChanges` effect as the gutter)
  * so the overview ruler can render ticks without re-parsing. Exported so the
  * inline-blame widget can reuse it to mark uncommitted (added/modified) lines. */
+/**
+ * True when a transaction swaps the whole document — what loading another file
+ * into the same editor does. Line-indexed data (gutter markers, blame) belongs
+ * to the old document and must not survive it.
+ *
+ * The alternative, clearing from the component when the content signal changes,
+ * dispatches into the view in the same tick as the replacement and crashed
+ * CodeMirror's height map on a 720k-line document (measured 2026-09-06:
+ * "Cannot read properties of undefined" in `scrollAnchorAt`). Clearing inside
+ * the transaction that replaces the document has no such ordering.
+ */
+export function replacesWholeDoc(tr: Transaction): boolean {
+	if (!tr.docChanged) return false;
+	let whole = false;
+	let count = 0;
+	tr.changes.iterChanges((fromA, toA) => {
+		count += 1;
+		whole = fromA === 0 && toA === tr.startState.doc.length;
+	});
+	return count === 1 && whole;
+}
+
 export const changesField = StateField.define<GutterChange[]>({
 	create: () => [],
 	update(value, tr) {
 		for (const e of tr.effects) {
 			if (e.is(setChanges)) return e.value;
 		}
-		return value;
+		return replacesWholeDoc(tr) ? [] : value;
 	},
 });
 

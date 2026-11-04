@@ -1,0 +1,8 @@
+// The same pause wording without ego's pause code is an ordinary failure.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"error","to":"prompt","code":-32603,"message":"session held at a boundary"}
+{"step":"await_stdin_eof"}

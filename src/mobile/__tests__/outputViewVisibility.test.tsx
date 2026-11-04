@@ -2,6 +2,9 @@ import { render } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PtySubscription, SubscribePtyOptions } from "../../transport";
 
+const { recordSocket } = vi.hoisted(() => ({ recordSocket: vi.fn() }));
+vi.mock("../resumeTrail", () => ({ recordMobileSocketState: recordSocket }));
+
 let captured: SubscribePtyOptions | undefined;
 const pause = vi.fn();
 const resume = vi.fn();
@@ -38,6 +41,7 @@ describe("OutputView page-visibility gating", () => {
 
 	beforeEach(() => {
 		captured = undefined;
+		recordSocket.mockClear();
 		pause.mockClear();
 		resume.mockClear();
 		visibility = "visible";
@@ -101,6 +105,30 @@ describe("OutputView page-visibility gating", () => {
 		// visibilitychange — which, for a tab restored in the background, may
 		// never arrive.
 		await vi.waitFor(() => expect(pause).toHaveBeenCalledTimes(1));
+	});
+
+	// Catches: mobile lifecycle reports show no stream state, so intentional
+	// background pauses cannot be distinguished from failed reconnects.
+	it("records stream phases without changing pause or reconnect behavior", async () => {
+		const { unmount } = await mountView();
+		expect(recordSocket.mock.calls).toEqual([
+			["sess-1", "connecting"],
+			["sess-1", "open"],
+		]);
+		setVisibility("hidden");
+		setVisibility("visible");
+		captured?.onReconnecting?.(1, 10);
+		captured?.onReconnected?.();
+		unmount();
+		expect(recordSocket.mock.calls.slice(2)).toEqual([
+			["sess-1", "paused"],
+			["sess-1", "connecting"],
+			["sess-1", "reconnecting"],
+			["sess-1", "open"],
+			["sess-1", "closed"],
+		]);
+		expect(pause).toHaveBeenCalledTimes(1);
+		expect(resume).toHaveBeenCalledTimes(1);
 	});
 
 	it("stops listening once the view is disposed", async () => {

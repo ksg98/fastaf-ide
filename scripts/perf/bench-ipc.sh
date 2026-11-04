@@ -4,7 +4,6 @@
 #
 # Measures:
 #   - repo_info (cached vs cold)
-#   - git_panel_context (cached vs cold)
 #   - diff_stats
 #   - changed_files
 #   - branches
@@ -122,7 +121,6 @@ echo "# IPC Benchmark — $(date) — repo: $REPO — iterations: $ITERATIONS" >
 echo "" >> "$RESULTS"
 
 bench "repo_info"         "http://localhost/repo/info?path=$ENCODED_REPO"
-bench "panel_context"     "http://localhost/repo/panel-context?path=$ENCODED_REPO"
 bench "diff_stats"        "http://localhost/repo/diff-stats?path=$ENCODED_REPO"
 bench "changed_files"     "http://localhost/repo/files?path=$ENCODED_REPO"
 bench "branches"          "http://localhost/repo/branches?path=$ENCODED_REPO"

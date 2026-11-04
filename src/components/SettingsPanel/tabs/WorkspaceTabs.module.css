@@ -1,0 +1,45 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.typography { min-width: 0; }
+
+.shortcuts { width: 100%; border-collapse: collapse; }
+.shortcuts tr { border-bottom: 1px solid var(--border); }
+.shortcuts td { padding: 12px 0 !important; }
+.shortcuts td:last-child { width: 260px; text-align: right; }
+.shortcuts td:first-child { font-weight: 600; color: var(--fg-primary); }
+.shortcutCategory { padding: 16px 0; border-bottom: 1px solid var(--border); background: var(--bg-primary); }
+.shortcutCategory > label { font-size: 15px; font-weight: 600; }
+.shortcutCategory button { opacity: 1 !important; }
+.shortcutCategory table { margin-top: 12px; }
+.shortcutCategory tr { display: flex; align-items: center; gap: 16px; }
+.shortcutCategory td:last-child { order: 2; flex: 0 0 260px; }
+.shortcutCategory td:first-child { order: 1; flex: 1; min-width: 0; }
+
+@media (max-width: 700px) {
+  .shortcutCategory tr { align-items: flex-start; flex-direction: column; gap: 4px; padding: 12px 0; }
+  .shortcutCategory .shortcuts td { padding: 0 !important; }
+  .shortcutCategory td:last-child { order: 2; flex-basis: auto; width: 100% !important; }
+  .shortcutCategory td:first-child { order: 1; flex: none; }
+}
+
+.shortcutHeading { margin: 0; font-size: 15px; }
+
+.page :global(canvas) { max-width: 100%; }
+.shortcuts td:last-child > div { justify-content: flex-end; flex-wrap: wrap; }
+
+.shortcutSearch { display: flex; flex-direction: column; gap: 8px; }
+.shortcutSearch p { margin: 0; }
+.shortcuts td:first-child { color: var(--fg-primary) !important; }
+.binding { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.binding button:first-of-type, .rebindSlot { width: 72px; flex-shrink: 0; }
+.binding kbd { color: var(--fg-secondary); white-space: nowrap; }
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.secondaryButton { align-self: center; }
+
+.page > [data-settings-page-header] { margin-bottom: 8px; }

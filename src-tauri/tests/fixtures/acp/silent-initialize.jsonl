@@ -1,0 +1,7 @@
+// An agent that starts, reads `initialize`, and then says nothing at all.
+// Alive and silent is the one failure a client cannot detect by watching for
+// the pipe to close: there is no EOF, no error frame and no exit code, so a
+// connect with no deadline of its own waits for the life of the process.
+// `await_stdin_eof` is the hang — it blocks on stdin until the client hangs up.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"await_stdin_eof"}

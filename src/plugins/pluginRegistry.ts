@@ -1,3 +1,6 @@
+import { urlResolverRegistry } from "../components/CommandPalette/urlPaste";
+import type { ReviewThreadsPage } from "../components/PrDiffTab/reviewThreads";
+import { startWork } from "../hooks/git/startWork";
 import { invoke, listen } from "../invoke";
 import { activityStore } from "../stores/activityStore";
 import { agentConfigsStore } from "../stores/agentConfigs";
@@ -14,7 +17,10 @@ import { locateFile, repositoriesStore } from "../stores/repositories";
 import { sidebarPluginStore } from "../stores/sidebarPluginStore";
 import { statusBarTicker } from "../stores/statusBarTicker";
 import { terminalsStore } from "../stores/terminals";
-import { randomId } from "../utils/randomId";
+import { workItemLinksStore } from "../stores/workItemLinks";
+import type { WorkItemRef } from "../types/work-items.gen";
+import type { GitRemote } from "../types/workItemLinks";
+import { randomId, randomUuid } from "../utils/randomId";
 import { sanitizeSvgIcon } from "../utils/sanitizeSvg";
 import { getShellFamily, sendCommand } from "../utils/sendCommand";
 import { dashboardRegistry } from "./dashboardRegistry";
@@ -28,6 +34,7 @@ import type {
 	Disposable,
 	FileIconProvider,
 	FsChangeEvent,
+	GitHubPrRequest,
 	HttpFetchOptions,
 	HttpResponse,
 	MarkdownProvider,
@@ -47,6 +54,7 @@ import type {
 	TuiPlugin,
 } from "./types";
 import { INVOKE_WHITELIST, NOTIFICATION_SOUNDS, PluginCapabilityError } from "./types";
+import { workItemProviderRegistry } from "./workItemProviderRegistry";
 
 /**
  * Central plugin lifecycle manager.
@@ -60,7 +68,19 @@ import { INVOKE_WHITELIST, NOTIFICATION_SOUNDS, PluginCapabilityError } from "./
  */
 function createPluginRegistry() {
 	// Active plugin → its aggregated Disposable (wraps all sub-registrations)
-	const plugins = new Map<string, { plugin: TuiPlugin; disposable: Disposable; agentTypes: readonly string[] }>();
+	const plugins = new Map<
+		string,
+		{
+			plugin: TuiPlugin;
+			disposable: Disposable;
+			agentTypes: readonly string[];
+			controller: AbortController;
+			started: boolean;
+			backendReady?: Promise<unknown>;
+		}
+	>();
+	// A replacement cannot acquire backend ownership before prior teardown finishes.
+	const teardowns = new Map<string, Promise<void>>();
 
 	// Plugin command handlers: action name (`plugin:<id>:<cmd>`) → run callback.
 	// Populated via host.registerCommand(), consulted by the global keydown
@@ -70,7 +90,7 @@ function createPluginRegistry() {
 	// Panel message bridge: tabId → onMessage callback from plugin
 	const panelMessageHandlers = new Map<string, (data: unknown) => void>();
 	// Panel message bridge: tabId → send function (set by PluginPanel component)
-	const panelSendChannels = new Map<string, (data: unknown) => void>();
+	const panelSendChannels = new Map<string, (data: unknown, transfer?: Transferable[]) => void>();
 	// Panel visibility: tabId → is its tab the one on screen (set by PluginPanel).
 	// A plugin that rebuilds its board on a filesystem event has no other way to
 	// tell that it is rendering into a tab behind display:none.
@@ -251,6 +271,7 @@ function createPluginRegistry() {
 		pluginId: string,
 		disposables: Disposable[],
 		capabilities: ReadonlySet<string> | null = null,
+		isActive: () => boolean = () => true,
 	): PluginHost {
 		function track(d: Disposable): Disposable {
 			// Wrap in idempotent guard: plugins may manually dispose() and then the
@@ -263,10 +284,18 @@ function createPluginRegistry() {
 					d.dispose();
 				},
 			};
-			disposables.push(safe);
+			if (isActive()) disposables.push(safe);
+			else safe.dispose();
 			return safe;
 		}
 
+		const httpCancels = new Set<() => void>();
+		track({
+			dispose: () => {
+				for (const cancel of httpCancels) cancel();
+				httpCancels.clear();
+			},
+		});
 		const logger = pluginStore.getLogger(pluginId);
 		const wrapActivityItemCallbacks = <T extends Partial<ActivityItem>>(item: T): T => {
 			const wrapped = { ...item };
@@ -285,6 +314,36 @@ function createPluginRegistry() {
 			},
 
 			// -- Tier 1: Activity Center + watchers + providers --
+
+			registerWorkItemProvider(provider) {
+				return track(workItemProviderRegistry.register(provider));
+			},
+
+			settings(action) {
+				return invoke("plugin_settings_action", { pluginId, action });
+			},
+
+			linkItem(repoPath, branch, link) {
+				return workItemLinksStore.link(repoPath, branch, link);
+			},
+
+			unlinkItem(repoPath, branch) {
+				return workItemLinksStore.unlink(repoPath, branch);
+			},
+
+			async startWork(request) {
+				requireCapability(pluginId, capabilities, "pty:write");
+				if (isPluginPaused(pluginId)) throw new Error(`Plugin ${pluginId} is paused`);
+				return startWork(request);
+			},
+
+			registerUrlResolver(resolver) {
+				return track(
+					urlResolverRegistry.register(pluginId, (url, signal) =>
+						isPluginPaused(pluginId) ? Promise.resolve(null) : resolver(url, signal),
+					),
+				);
+			},
 
 			registerSection(section) {
 				return track(activityStore.registerSection({ ...section, pluginId }));
@@ -355,12 +414,16 @@ function createPluginRegistry() {
 			getActiveRepo(): RepoSnapshot | null {
 				const repo = repositoriesStore.getActive();
 				if (!repo) return null;
-				const branch = repo.activeBranch ? repo.branches[repo.activeBranch] : null;
+				const workspace = repo.activeWorkspaceId ? repo.workspaces[repo.activeWorkspaceId] : null;
 				return {
 					path: repo.path,
 					displayName: repo.displayName,
-					activeBranch: repo.activeBranch,
-					worktreePath: branch?.worktreePath ?? null,
+					// The plugin contract is the BRANCH, and it stays that — a plugin
+					// renders a branch name, it never indexes our workspace map. Reading
+					// it off the workspace rather than inferring it from the id preserves
+					// the plugin contract if workspace identity changes independently.
+					activeBranch: workspace?.branchName ?? null,
+					worktreePath: workspace?.worktreePath ?? null,
 				};
 			},
 
@@ -474,6 +537,11 @@ function createPluginRegistry() {
 				return raw ?? "";
 			},
 
+			async getRemotes(repoPath: string): Promise<GitRemote[]> {
+				requireCapability(pluginId, capabilities, "git:read");
+				return (await invoke<GitRemote[]>("get_git_remotes", { path: repoPath })) ?? [];
+			},
+
 			// -- Tier 3: Write actions (capability-gated) --
 
 			registerTerminalAction(action: TerminalAction): Disposable {
@@ -518,6 +586,12 @@ function createPluginRegistry() {
 				await invoke("write_pty", { sessionId, data });
 			},
 
+			async sendAgentInputIfEmpty(sessionId: string, text: string): Promise<boolean> {
+				if (isPluginPaused(pluginId)) return false;
+				requireCapability(pluginId, capabilities, "pty:write");
+				return invoke<boolean>("send_agent_input_if_empty", { sessionId, text });
+			},
+
 			async sendAgentInput(sessionId: string, text: string): Promise<void> {
 				if (isPluginPaused(pluginId)) return;
 				requireCapability(pluginId, capabilities, "pty:write");
@@ -530,7 +604,14 @@ function createPluginRegistry() {
 					return;
 				}
 				const shellFamily = await getShellFamily(sessionId);
-				await sendCommand((data) => invoke("write_pty", { sessionId, data }), text, agentType, shellFamily);
+				await sendCommand(
+					(data) => invoke("write_pty", { sessionId, data }),
+					text,
+					agentType,
+					shellFamily,
+					true,
+					sessionId,
+				);
 			},
 
 			async readSessionOutput(sessionId: string, maxLines?: number): Promise<string> {
@@ -584,6 +665,14 @@ function createPluginRegistry() {
 				mdTabsStore.add(repoPath, filePath, fsRoot || undefined);
 			},
 
+			openMarkdownFileBackground(absolutePath: string): boolean {
+				requireCapability(pluginId, capabilities, "ui:markdown");
+				const { repoPath, fsRoot, filePath } = locateFile(absolutePath);
+				if (!repoPath) return false;
+				mdTabsStore.addFileBackground(repoPath, filePath, fsRoot || undefined);
+				return true;
+			},
+
 			async playNotificationSound(sound?: NotificationSound): Promise<void> {
 				requireCapability(pluginId, capabilities, "ui:sound");
 				const resolved: NotificationSound = NOTIFICATION_SOUNDS.includes(sound as NotificationSound)
@@ -611,9 +700,13 @@ function createPluginRegistry() {
 				return invoke<(string | null)[]>("plugin_read_files", { paths: absolutePaths, pluginId });
 			},
 
-			async readFileBase64(absolutePath: string): Promise<string> {
+			async readFileBase64(absolutePath: string, options?: { maxBytes?: number }): Promise<string> {
 				requireCapability(pluginId, capabilities, "fs:read");
-				return invoke<string>("plugin_read_file_base64", { path: absolutePath, pluginId });
+				return invoke<string>("plugin_read_file_base64", {
+					path: absolutePath,
+					maxBytes: options?.maxBytes,
+					pluginId,
+				});
 			},
 
 			async readFileTail(absolutePath: string, maxBytes: number): Promise<string> {
@@ -634,6 +727,16 @@ function createPluginRegistry() {
 			async writeFile(absolutePath: string, content: string): Promise<void> {
 				requireCapability(pluginId, capabilities, "fs:write");
 				await invoke("plugin_write_file", { path: absolutePath, content, pluginId });
+			},
+
+			async writeFileBase64(absolutePath: string, content: string, options?: { maxBytes?: number }): Promise<void> {
+				requireCapability(pluginId, capabilities, "fs:write");
+				await invoke("plugin_write_file_base64", {
+					path: absolutePath,
+					content,
+					maxBytes: options?.maxBytes,
+					pluginId,
+				});
 			},
 
 			async renamePath(from: string, to: string): Promise<void> {
@@ -721,6 +824,7 @@ function createPluginRegistry() {
 			openPanel(options: OpenPanelOptions): PanelHandle {
 				requireCapability(pluginId, capabilities, "ui:panel");
 				const tabId = mdTabsStore.addPluginPanel(pluginId, options.id, options.title, options.html);
+				track({ dispose: () => mdTabsStore.remove(tabId) });
 				// Register message handler for this panel
 				if (options.onMessage) {
 					panelMessageHandlers.set(tabId, options.onMessage);
@@ -749,9 +853,9 @@ function createPluginRegistry() {
 					close() {
 						mdTabsStore.remove(tabId);
 					},
-					send(data: unknown) {
+					send(data: unknown, transfer?: Transferable[]) {
 						const sender = panelSendChannels.get(tabId);
-						if (sender) sender(data);
+						if (sender) sender(data, transfer);
 					},
 				};
 			},
@@ -801,13 +905,56 @@ function createPluginRegistry() {
 
 			async httpFetch(url: string, options?: HttpFetchOptions): Promise<HttpResponse> {
 				requireCapability(pluginId, capabilities, "net:http");
-				return invoke<HttpResponse>("plugin_http_fetch", {
-					url,
-					method: options?.method ?? null,
-					headers: options?.headers ?? null,
-					body: options?.body ?? null,
+				const signal = options?.signal;
+				if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+				const requestId = randomUuid();
+				const cancel = () => {
+					void invoke("plugin_http_cancel", { pluginId, requestId }).catch(() => {});
+				};
+				httpCancels.add(cancel);
+				signal?.addEventListener("abort", cancel, { once: true });
+				try {
+					const response = await invoke<HttpResponse>("plugin_http_fetch", {
+						url,
+						method: options?.method ?? null,
+						headers: options?.headers ?? null,
+						body: options?.body ?? null,
+						account: options?.account ?? null,
+						pluginId,
+						requestId,
+					});
+					if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+					return response;
+				} catch (error) {
+					if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+					throw error;
+				} finally {
+					httpCancels.delete(cancel);
+					signal?.removeEventListener("abort", cancel);
+				}
+			},
+
+			async githubReviewThreads(
+				account: string,
+				reference: WorkItemRef,
+				after: string | null,
+			): Promise<ReviewThreadsPage> {
+				requireCapability(pluginId, capabilities, "net:http");
+				if (reference.providerId !== "github" || reference.accountId !== account)
+					throw new Error("GitHub account mismatch");
+				return invoke<ReviewThreadsPage>("plugin_github_action", {
 					pluginId,
+					account,
+					reference,
+					request: { action: "threads", after },
 				});
+			},
+
+			async githubPrAction(account: string, reference: WorkItemRef, request: GitHubPrRequest): Promise<unknown> {
+				requireCapability(pluginId, capabilities, "net:http");
+				if (reference.providerId !== "github" || reference.accountId !== account)
+					throw new Error("GitHub account mismatch");
+				return invoke("plugin_github_action", { pluginId, account, reference, request });
 			},
 
 			// -- Tier 3g: CLI execution --
@@ -854,93 +1001,125 @@ function createPluginRegistry() {
 	 * @param agentTypes - Optional list of agent types this plugin targets.
 	 *   Empty or omit for universal plugins.
 	 */
-	async function register(plugin: TuiPlugin, capabilities?: string[], agentTypes?: string[]): Promise<void> {
-		// Replace existing registration for same id
-		if (plugins.has(plugin.id)) {
-			unregister(plugin.id);
-		}
-
+	async function register(plugin: TuiPlugin, capabilities?: string[], agentTypes?: string[]): Promise<boolean> {
+		const previous = plugins.has(plugin.id) ? unregister(plugin.id) : teardowns.get(plugin.id);
 		const disposables: Disposable[] = [];
-		const capSet = capabilities ? new Set(capabilities) : null;
-		const host = buildHost(plugin.id, disposables, capSet);
-
-		const pluginLogger = pluginStore.getLogger(plugin.id);
-
-		// Register capabilities on the Rust side before calling onload,
-		// so Rust-gated commands (exec:cli, fs:read, etc.) work immediately.
-		if (capabilities) {
-			try {
-				await invoke("register_loaded_plugin", {
-					pluginId: plugin.id,
-					capabilities: [...capabilities],
-				});
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				appLogger.error("plugin", `Plugin "${plugin.id}" Rust registration failed: ${msg}`, err);
-				pluginLogger.error(`Rust registration failed: ${msg}`, err);
-				pluginStore.updatePlugin(plugin.id, { loaded: false, error: msg });
-				return;
-			}
-		}
-
-		try {
-			plugin.onload(host);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			appLogger.error("plugin", `Plugin "${plugin.id}" onload failed: ${msg}`, err);
-			pluginLogger.error(`onload failed: ${msg}`, err);
-			pluginStore.updatePlugin(plugin.id, { loaded: false, error: msg });
-			if (capabilities) {
-				invoke("unregister_loaded_plugin", { pluginId: plugin.id }).catch((e) =>
-					appLogger.debug("plugin", `unregister_loaded_plugin cleanup failed for "${plugin.id}": ${e}`),
-				);
-			}
-			for (const d of disposables) {
-				try {
-					d.dispose();
-				} catch {
-					/* cleanup best-effort */
-				}
-			}
-			return;
-		}
-
-		plugins.set(plugin.id, {
+		const controller = new AbortController();
+		const entry = {
 			plugin,
+			controller,
+			started: false,
+			agentTypes: agentTypes ?? [],
+			backendReady: undefined as Promise<unknown> | undefined,
 			disposable: {
 				dispose() {
-					for (const d of disposables) {
+					for (const d of disposables.splice(0)) {
 						try {
 							d.dispose();
 						} catch {
-							/* ignore */
+							/* cleanup best-effort */
 						}
 					}
 				},
 			},
-			agentTypes: agentTypes ?? [],
+		};
+		// Install ownership before the first await, including backend registration.
+		plugins.set(plugin.id, entry);
+		pluginStore.updatePlugin(plugin.id, { loaded: false, error: null });
+		const current = () => plugins.get(plugin.id) === entry && !controller.signal.aborted;
+		const rawHost = buildHost(plugin.id, disposables, capabilities ? new Set(capabilities) : null, current);
+		// Check BEFORE calling the real host: disposing a late registration afterward
+		// could already have replaced a current panel, command or provider.
+		const host = new Proxy(rawHost, {
+			get(target, property: keyof PluginHost) {
+				const method = target[property];
+				if (typeof method !== "function") return method;
+				return (...args: unknown[]) => {
+					controller.signal.throwIfAborted();
+					return Reflect.apply(method, target, args);
+				};
+			},
 		});
+		const pluginLogger = pluginStore.getLogger(plugin.id);
+		if (previous) await previous;
+		if (!current()) return false;
 
-		pluginStore.updatePlugin(plugin.id, { loaded: true, error: null });
+		let phase = "Rust registration";
+		try {
+			if (capabilities) {
+				entry.backendReady = invoke("register_loaded_plugin", {
+					pluginId: plugin.id,
+					capabilities: [...capabilities],
+				});
+				await entry.backendReady;
+				entry.backendReady = undefined;
+				if (!current()) return false;
+			}
+			phase = "onload";
+			entry.started = true;
+			const startup = plugin.onload(host, controller.signal);
+			if (startup) {
+				if (!current()) {
+					void startup.catch(() => {});
+					return false;
+				}
+				// Stop waiting for obsolete plugin work; the guarded host rejects late
+				// calls even when the plugin ignores the cooperative abort signal.
+				let cancel!: () => void;
+				const cancelled = new Promise<void>((resolve) => {
+					cancel = resolve;
+				});
+				controller.signal.addEventListener("abort", cancel, { once: true });
+				try {
+					await Promise.race([startup, cancelled]);
+				} finally {
+					controller.signal.removeEventListener("abort", cancel);
+					cancel();
+				}
+			}
+			if (!current()) return false;
+			pluginStore.updatePlugin(plugin.id, { loaded: true, error: null });
+			return true;
+		} catch (err) {
+			if (!current()) return false;
+			const msg = err instanceof Error ? err.message : String(err);
+			appLogger.error("plugin", `Plugin "${plugin.id}" ${phase} failed: ${msg}`, err);
+			pluginLogger.error(`${phase} failed: ${msg}`, err);
+			pluginStore.updatePlugin(plugin.id, { loaded: false, error: msg });
+			await unregister(plugin.id);
+			return false;
+		}
 	}
 
-	function unregister(id: string): void {
+	function unregister(id: string): Promise<void> {
 		const entry = plugins.get(id);
-		if (!entry) return;
+		if (!entry) return teardowns.get(id) ?? Promise.resolve();
 		plugins.delete(id);
 		try {
-			entry.plugin.onunload();
+			if (entry.started) entry.plugin.onunload();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.error("plugin", `Plugin "${id}" onunload failed: ${msg}`, err);
 			pluginStore.getLogger(id).error(`onunload failed: ${msg}`, err);
 		}
+		entry.controller.abort();
 		entry.disposable.dispose();
 		statusBarTicker.removeAllForPlugin(id);
-		invoke("unregister_loaded_plugin", { pluginId: id }).catch((e) =>
-			appLogger.debug("plugin", `unregister_loaded_plugin cleanup failed for "${id}": ${e}`),
-		);
+		const previous = teardowns.get(id);
+		const removeBackend = () => invoke<void>("unregister_loaded_plugin", { pluginId: id });
+		const disposed = (
+			previous || entry.backendReady
+				? Promise.all([previous, entry.backendReady])
+						.catch(() => {})
+						.then(removeBackend)
+				: removeBackend()
+		).catch((e) => appLogger.debug("plugin", `unregister_loaded_plugin cleanup failed for "${id}": ${e}`));
+		teardowns.set(id, disposed);
+		void disposed.then(() => {
+			if (teardowns.get(id) === disposed) teardowns.delete(id);
+		});
 		pluginStore.updatePlugin(id, { loaded: false });
+		return disposed;
 	}
 
 	// -------------------------------------------------------------------------
@@ -1088,16 +1267,15 @@ function createPluginRegistry() {
 	}
 
 	/** Remove all plugins and registrations (for testing). */
-	function clear(): void {
-		for (const id of [...plugins.keys()]) {
-			unregister(id);
-		}
+	async function clear(): Promise<void> {
+		const pending = [...plugins.keys()].map((id) => unregister(id));
 		stateChangeListeners.length = 0;
 		panelMessageHandlers.clear();
 		panelSendChannels.clear();
 		panelVisibility.clear();
 		panelVisibilityHandlers.clear();
 		panelCloseHandlers.clear();
+		await Promise.all([...pending, ...teardowns.values()]);
 	}
 
 	// -------------------------------------------------------------------------
@@ -1118,7 +1296,7 @@ function createPluginRegistry() {
 	}
 
 	/** Register a send channel for a panel (called by PluginPanel component on mount) */
-	function registerPanelSendChannel(tabId: string, sender: (data: unknown) => void): void {
+	function registerPanelSendChannel(tabId: string, sender: (data: unknown, transfer?: Transferable[]) => void): void {
 		panelSendChannels.set(tabId, sender);
 	}
 

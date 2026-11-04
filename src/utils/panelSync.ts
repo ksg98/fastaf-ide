@@ -1,7 +1,7 @@
 import { emitTo } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { createSignal, onCleanup } from "solid-js";
-import { listen } from "../invoke";
+import { guardTauriUnlisten, listen } from "../invoke";
 import { appLogger } from "../stores/appLogger";
 
 export interface PanelSnapshot<T = unknown> {
@@ -32,7 +32,7 @@ export function createPanelSyncReceiver<T>(panelId: string) {
 			lastTs = event.payload.ts;
 			setState(() => event.payload.snapshot);
 		})
-		.then((fn) => cleanups.push(fn))
+		.then((fn) => cleanups.push(guardTauriUnlisten(fn)))
 		.catch((e) => appLogger.error("panel-sync", `Failed to register panel-sync listener for ${panelId}`, e));
 
 	const onVisChange = () => {

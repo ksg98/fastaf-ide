@@ -29,6 +29,10 @@ export interface PtyConfig {
 	/** Pre-set agent type for sessions launched from a run config. Enables intent
 	 *  parsing from the start even when the binary name doesn't match classify_agent. */
 	agent_type?: string | null;
+	/** Terminal alias this tab held before the restart (e.g. `tu-3`). Reserved by
+	 *  Rust so a restored tab keeps the address other agents already know; a
+	 *  malformed or taken value is ignored and a fresh alias is generated. */
+	alias?: string | null;
 	/** Client-provided PTY session id (browser mode only). Generated and locally
 	 *  registered before the create RPC so the `session-created` SSE echo is
 	 *  recognized as locally-created and does not spawn a duplicate "PTY:" tab. */
@@ -146,6 +150,10 @@ export interface BranchPrStatus {
 	merge_commit_allowed: boolean;
 	squash_merge_allowed: boolean;
 	rebase_merge_allowed: boolean;
+	/** Unresolved review threads (first 50 per PR). Counts only; the bot/human split is fetched on demand. */
+	unresolved_threads: number;
+	/** More than 50 threads exist: `unresolved_threads` is a lower bound, 0 does not mean none open. */
+	unresolved_threads_truncated: boolean;
 }
 
 /** A single match from cross-terminal buffer search */
@@ -180,6 +188,10 @@ export interface SessionState {
 
 /** Saved terminal for session restore */
 export interface SavedTerminal {
+	/** Presentation identity for reconnecting pane layouts after WebView recreation. */
+	frontendId?: string;
+	/** Live backend PTY at snapshot time, used only for same-process reconnect. */
+	sessionId?: string | null;
 	name: string;
 	cwd: string | null;
 	fontSize: number;
@@ -190,10 +202,21 @@ export interface SavedTerminal {
 	tuicSession?: string | null;
 	/** Run-config command used to launch (e.g. "c"), ensures resume uses the same binary */
 	agentLaunchCommand?: string | null;
+	/** Terminal alias (e.g. `tu-3`) — the address other agents already hold, so a
+	 *  restore reserves it instead of taking a fresh number */
+	alias?: string | null;
+	/** Last `intent:` the agent declared — restored so the resume banner can say what
+	 *  the session was doing, not just that it existed */
+	agentIntent?: string | null;
+	/** Last user prompt seen before the snapshot, truncated at persist time */
+	lastPrompt?: string | null;
+	/** Ended on purpose (Suspend): restored without a PTY, resumed by the user */
+	suspended?: boolean;
 }
 
 /** GitHub Issue from GraphQL API */
 export interface GitHubIssue {
+	author_association?: string;
 	number: number;
 	title: string;
 	state: string; // OPEN, CLOSED
@@ -207,6 +230,7 @@ export interface GitHubIssue {
 	updated_at: string;
 }
 
+/** Issue filter mode for the GitHub panel */
 export interface CreatedIssue {
 	number: number;
 	url: string;
@@ -232,7 +256,50 @@ export interface ImprovementScanResult {
 	proposals: ImprovementProposal[];
 }
 
-/** Issue filter mode for the GitHub panel */
+/** How bad the reviewing model said it is. */
+export type FindingSeverity = "bug" | "risk" | "nit";
+
+export interface ReviewFinding {
+	path: string;
+	line: number | null;
+	hunk: string | null;
+	severity: FindingSeverity;
+	/** How sure the reviewing model said it was. Under the backend's gate it is never sent at all. */
+	confidence: number;
+	message: string;
+}
+
+export interface ReviewedFile {
+	path: string;
+	summary: string;
+	findings: ReviewFinding[];
+}
+
+/**
+ * One AI PR review, run on FastAF's Headless slot.
+ *
+ * `head_sha` is a hash of the diff that was reviewed, not a git sha — it exists
+ * to tell a stale review from a current one. There is deliberately no model
+ * field: the Headless slot picks the model and the result does not name it.
+ */
+export interface PrReviewResult {
+	repo_path: string;
+	pr_number: number;
+	head_sha: string;
+	summary: string | null;
+	files: ReviewedFile[];
+}
+
+export interface ChangelogResult {
+	markdown: string;
+	/**
+	 * The structured half of the split, `null` when the model answered in prose only.
+	 * The modal renders the markdown and never reads this — it is here because
+	 * it is on the wire for HTTP and MCP callers, which do consume it.
+	 */
+	json: unknown;
+}
+
 export type IssueFilterMode = "assigned" | "created" | "mentioned" | "all" | "disabled";
 
 /** Orchestrator stats from backend */

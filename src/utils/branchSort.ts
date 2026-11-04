@@ -11,7 +11,7 @@
  */
 
 export interface SortableBranch {
-	name: string;
+	branchName: string;
 	isMain: boolean;
 }
 
@@ -35,5 +35,5 @@ export function compareBranches(
 	if (aMerged && !bMerged) return 1;
 	if (!aMerged && bMerged) return -1;
 
-	return a.name.localeCompare(b.name);
+	return a.branchName.localeCompare(b.branchName);
 }

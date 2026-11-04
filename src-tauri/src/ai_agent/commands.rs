@@ -1,4 +1,9 @@
-//! Tauri IPC commands for the agent loop API.
+//! Tauri IPC commands for the agent loop API (FastAF's built-in engine).
+//!
+//! Upstream 2.0 deleted this engine. FastAF keeps the conversation commands,
+//! the session-knowledge read its chat panel uses and the scheduled-task config;
+//! the knowledge-history and watcher commands went with the features upstream
+//! removed.
 
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
@@ -77,13 +82,20 @@ pub(crate) fn resume_conversation(session_id: String) -> Result<String, String> 
     Ok(format!("Conversation resumed on session {session_id}"))
 }
 
-/// Approve or reject a tool action in an active conversation.
+/// Approve or reject a tool action in an active conversation. `approval_id`
+/// is the one from the `needs_approval` event being answered; any other id is
+/// refused (see `conversation_engine::approve_conversation_action`).
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn approve_conversation_action(
     session_id: String,
     approved: bool,
+    approval_id: Option<String>,
 ) -> Result<(), String> {
-    super::conversation_engine::approve_conversation_action(&session_id, approved)
+    super::conversation_engine::approve_conversation_action(
+        &session_id,
+        approved,
+        approval_id.as_deref(),
+    )
 }
 
 /// Get the status of an agent loop.
@@ -192,428 +204,6 @@ fn outcome_summary(c: &super::knowledge::CommandOutcome) -> OutcomeSummary {
     }
 }
 
-/// One row of the knowledge history list. Compact enough to paginate hundreds
-/// without loading every session's full command list.
-#[derive(serde::Serialize, Clone, Debug)]
-pub(crate) struct SessionListEntry {
-    pub session_id: String,
-    /// Timestamp of the most recent recorded outcome (or file mtime if the
-    /// session never ran a command).
-    pub last_activity: u64,
-    pub commands_count: usize,
-    pub errors_count: usize,
-    pub last_cwd: Option<String>,
-    pub tui_apps_seen: Vec<String>,
-}
-
-#[derive(serde::Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct KnowledgeListFilter {
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub has_errors: Option<bool>,
-    /// UNIX seconds — lower bound on last_activity (inclusive).
-    #[serde(default)]
-    pub since: Option<u64>,
-}
-
-/// List persisted sessions sorted by most recent activity. Scans
-/// `ai-sessions/` on every call (no in-memory index yet) — acceptable up
-/// to a few hundred files; upgrade path is a sidecar index if this becomes
-/// a bottleneck.
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) async fn list_knowledge_sessions(
-    filter: Option<KnowledgeListFilter>,
-    limit: Option<usize>,
-) -> Result<Vec<SessionListEntry>, String> {
-    let filter = filter.unwrap_or_default();
-    let limit = limit.unwrap_or(100).min(500);
-    let rows = tokio::task::spawn_blocking(move || scan_sessions(&filter, limit))
-        .await
-        .map_err(|e| format!("list task join error: {e}"))??;
-    Ok(rows)
-}
-
-fn scan_sessions(
-    filter: &KnowledgeListFilter,
-    limit: usize,
-) -> Result<Vec<SessionListEntry>, String> {
-    use crate::ai_agent::knowledge as kb;
-    let dir = crate::config::config_dir().join("ai-sessions");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(Vec::new());
-    };
-    let needle = filter
-        .text
-        .as_deref()
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty());
-    let mut rows: Vec<SessionListEntry> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(sid) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Some(k) = kb::load(sid) else { continue };
-        let commands_count = k.commands.len();
-        let errors_count = k
-            .commands
-            .iter()
-            .filter(|c| matches!(c.classification, OutcomeClass::Error { .. }))
-            .count();
-        if filter.has_errors == Some(true) && errors_count == 0 {
-            continue;
-        }
-        let last_activity = k
-            .commands
-            .iter()
-            .map(|c| c.timestamp)
-            .max()
-            .unwrap_or_else(|| {
-                entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            });
-        if let Some(since) = filter.since
-            && last_activity < since
-        {
-            continue;
-        }
-        if let Some(n) = &needle {
-            let hit = k.commands.iter().any(|c| {
-                c.command.to_lowercase().contains(n)
-                    || c.output_snippet.to_lowercase().contains(n)
-                    || match &c.classification {
-                        OutcomeClass::Error { error_type } => error_type.to_lowercase().contains(n),
-                        _ => false,
-                    }
-            });
-            if !hit {
-                continue;
-            }
-        }
-        let last_cwd = k.cwd_history.front().map(|(p, _)| p.clone());
-        let mut apps: Vec<String> = k.tui_apps_seen.iter().cloned().collect();
-        apps.sort();
-        rows.push(SessionListEntry {
-            session_id: sid.to_string(),
-            last_activity,
-            commands_count,
-            errors_count,
-            last_cwd,
-            tui_apps_seen: apps,
-        });
-    }
-    rows.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
-    rows.truncate(limit);
-    Ok(rows)
-}
-
-/// Detail of one command in the full-history view. Mirrors `CommandOutcome`
-/// but with `kind`/`error_type` pre-extracted so the frontend does not need
-/// to pattern-match on the tagged enum.
-#[derive(serde::Serialize, Clone, Debug)]
-pub(crate) struct HistoryCommand {
-    pub id: u64,
-    pub timestamp: u64,
-    pub command: String,
-    pub cwd: String,
-    pub exit_code: Option<i32>,
-    pub output_snippet: String,
-    pub duration_ms: u64,
-    pub kind: String,
-    pub error_type: Option<String>,
-}
-
-#[derive(serde::Serialize, Clone, Debug)]
-pub(crate) struct SessionDetail {
-    pub session_id: String,
-    pub commands: Vec<HistoryCommand>,
-    pub tui_apps_seen: Vec<String>,
-    pub cwd_history: Vec<(String, u64)>,
-}
-
-/// Load the full command history for one session. Reads from disk if the
-/// session is not currently active — covers the "inspect last week's
-/// session" case from the story.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn get_knowledge_session_detail(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<Option<SessionDetail>, String> {
-    get_knowledge_session_detail_impl(state.inner(), session_id).await
-}
-
-/// Non-gated core for HTTP parity (browser/PWA). See `get_knowledge_session_detail`.
-pub(crate) async fn get_knowledge_session_detail_impl(
-    state: &Arc<AppState>,
-    session_id: String,
-) -> Result<Option<SessionDetail>, String> {
-    if let Some(entry) = state.session_knowledge.get(&session_id) {
-        let k = entry.lock();
-        return Ok(Some(to_detail(&session_id, &k)));
-    }
-    let sid_load = session_id.clone();
-    let loaded = tokio::task::spawn_blocking(move || crate::ai_agent::knowledge::load(&sid_load))
-        .await
-        .map_err(|e| format!("load task join error: {e}"))?;
-    Ok(loaded.map(|k| to_detail(&session_id, &k)))
-}
-
-fn to_detail(session_id: &str, k: &SessionKnowledge) -> SessionDetail {
-    let commands = k.commands.iter().map(history_command).collect();
-    let mut apps: Vec<String> = k.tui_apps_seen.iter().cloned().collect();
-    apps.sort();
-    SessionDetail {
-        session_id: session_id.to_string(),
-        commands,
-        tui_apps_seen: apps,
-        cwd_history: k.cwd_history.iter().cloned().collect(),
-    }
-}
-
-fn history_command(c: &super::knowledge::CommandOutcome) -> HistoryCommand {
-    let (kind, error_type) = classify_kind(&c.classification);
-    HistoryCommand {
-        id: c.id,
-        timestamp: c.timestamp,
-        command: c.command.clone(),
-        cwd: c.cwd.clone(),
-        exit_code: c.exit_code,
-        output_snippet: c.output_snippet.clone(),
-        duration_ms: c.duration_ms,
-        kind: kind.to_string(),
-        error_type,
-    }
-}
-
-// ── Scheduler commands ──────────────────────────────────────────
-
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn load_scheduler_config() -> super::scheduler::SchedulerConfig {
-    super::scheduler::load_config()
-}
-
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn save_scheduler_config(
-    config: super::scheduler::SchedulerConfig,
-) -> Result<(), String> {
-    super::scheduler::save_config(&config)
-}
-
-// ── Watcher commands ────────────────────────────────────────────
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-#[allow(clippy::too_many_arguments)] // Tauri command: args are deserialized from a JS object.
-pub(crate) async fn watcher_create(
-    state: State<'_, Arc<AppState>>,
-    name: String,
-    session_id: Option<String>,
-    trigger: super::watcher::WatcherTrigger,
-    instructions: Option<String>,
-    prompt_id: Option<String>,
-    repo_path: Option<String>,
-    max_fires: Option<u32>,
-    cooldown_secs: Option<u32>,
-) -> Result<String, String> {
-    watcher_create_impl(
-        state.inner(),
-        name,
-        session_id,
-        trigger,
-        instructions,
-        prompt_id,
-        repo_path,
-        max_fires,
-        cooldown_secs,
-    )
-}
-
-/// Non-gated core for HTTP parity (browser/PWA). See `watcher_create`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn watcher_create_impl(
-    state: &Arc<AppState>,
-    name: String,
-    session_id: Option<String>,
-    trigger: super::watcher::WatcherTrigger,
-    instructions: Option<String>,
-    prompt_id: Option<String>,
-    repo_path: Option<String>,
-    max_fires: Option<u32>,
-    cooldown_secs: Option<u32>,
-) -> Result<String, String> {
-    let rule = super::watcher::WatcherRule {
-        id: String::new(),
-        name,
-        session_id,
-        template_id: None,
-        prompt_id,
-        repo_path,
-        trigger,
-        instructions,
-        max_fires: max_fires.unwrap_or(super::watcher::default_max_fires()),
-        fire_count: 0,
-        cooldown_secs: cooldown_secs.unwrap_or(super::watcher::default_cooldown()),
-        burst_threshold: super::watcher::default_burst_threshold(),
-        burst_window_secs: super::watcher::default_burst_window(),
-        status: super::watcher::WatcherStatus::Active,
-        created_at: 0,
-    };
-
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    super::watcher::create_rule(&mut config, rule)
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn watcher_list(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<super::watcher::WatcherRule>, String> {
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let config = cfg.read();
-    Ok(config.rules.clone())
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn watcher_delete(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    super::watcher::delete_rule(&mut config, &id)
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn watcher_toggle(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-    enabled: bool,
-) -> Result<(), String> {
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    super::watcher::toggle_rule(&mut config, &id, enabled)
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn watcher_attach(
-    state: State<'_, Arc<AppState>>,
-    template_id: String,
-    session_id: String,
-) -> Result<String, String> {
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    super::watcher::attach_rule(&mut config, &template_id, session_id)
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) async fn watcher_detach(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    super::watcher::detach_rule(&mut config, &id)
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-#[allow(clippy::too_many_arguments)] // Tauri command: args are deserialized from a JS object.
-pub(crate) async fn watcher_update(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-    name: Option<String>,
-    trigger: Option<super::watcher::WatcherTrigger>,
-    instructions: Option<String>,
-    prompt_id: Option<String>,
-    repo_path: Option<String>,
-    max_fires: Option<u32>,
-    cooldown_secs: Option<u32>,
-) -> Result<(), String> {
-    watcher_update_impl(
-        state.inner(),
-        id,
-        name,
-        trigger,
-        instructions,
-        prompt_id,
-        repo_path,
-        max_fires,
-        cooldown_secs,
-    )
-}
-
-/// Non-gated core for HTTP parity (browser/PWA). See `watcher_update`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn watcher_update_impl(
-    state: &Arc<AppState>,
-    id: String,
-    name: Option<String>,
-    trigger: Option<super::watcher::WatcherTrigger>,
-    instructions: Option<String>,
-    prompt_id: Option<String>,
-    repo_path: Option<String>,
-    max_fires: Option<u32>,
-    cooldown_secs: Option<u32>,
-) -> Result<(), String> {
-    let engine = state
-        .watcher_engine
-        .get()
-        .ok_or("Watcher engine not initialized")?;
-    let cfg = engine.config();
-    let mut config = cfg.write();
-    super::watcher::update_rule(
-        &mut config,
-        &id,
-        name,
-        trigger,
-        instructions,
-        prompt_id,
-        repo_path,
-        max_fires,
-        cooldown_secs,
-    )
-}
-
 /// Return a frontend-friendly summary of the session's accumulated knowledge.
 /// Returns an empty summary if no commands have been recorded yet.
 #[cfg(feature = "desktop")]
@@ -630,7 +220,7 @@ pub(crate) fn get_session_knowledge_impl(
     state: &Arc<AppState>,
     session_id: String,
 ) -> Result<SessionKnowledgeSummary, String> {
-    let entry = state.session_knowledge.get(&session_id);
+    let entry = state.engine.session_knowledge.get(&session_id);
     let summary = match entry {
         Some(e) => SessionKnowledgeSummary::from_knowledge(&session_id, &e.lock()),
         None => SessionKnowledgeSummary {
@@ -645,6 +235,10 @@ pub(crate) fn get_session_knowledge_impl(
     Ok(summary)
 }
 
+// ── AI suggestions toggle ───────────────────────────────────────
+
+/// Flip AI suggestions for one session (terminal menu › Toggle AI
+/// Suggestions). Returns the new state.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub(crate) fn toggle_ai_suggestions(state: State<'_, Arc<AppState>>, session_id: String) -> bool {
@@ -653,46 +247,120 @@ pub(crate) fn toggle_ai_suggestions(state: State<'_, Arc<AppState>>, session_id:
 
 /// Non-gated core for HTTP parity (browser/PWA). See `toggle_ai_suggestions`.
 pub(crate) fn toggle_ai_suggestions_impl(state: &Arc<AppState>, session_id: String) -> bool {
-    let current = state
+    let new_val = !super::triggers::suggestions_enabled(state, &session_id);
+    state
+        .engine
         .ai_suggestions_enabled
-        .get(&session_id)
-        .map(|v| *v)
-        .unwrap_or_else(|| {
-            state
-                .session_states
-                .get(&session_id)
-                .map(|s| s.agent_type.is_some())
-                .unwrap_or(false)
-        });
-    let new_val = !current;
-    state.ai_suggestions_enabled.insert(session_id, new_val);
+        .insert(session_id, new_val);
     new_val
 }
 
-// DEFERRED (2026-05-14) — wire to frontend alongside toggle_ai_suggestions.
-// Getter needed so UI can restore suggestion toggle state on mount.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn get_ai_suggestions_enabled(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> bool {
-    state
-        .ai_suggestions_enabled
-        .get(&session_id)
-        .map(|v| *v)
-        .unwrap_or_else(|| {
-            state
-                .session_states
-                .get(&session_id)
-                .map(|s| s.agent_type.is_some())
-                .unwrap_or(false)
-        })
+// ── Scheduler commands ──────────────────────────────────────────
+
+/// The scheduled tasks in `ai-cron.json` (Settings › AI Chat), each with its
+/// next run time.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn load_scheduler_config() -> super::scheduler::SchedulerView {
+    super::scheduler::view(super::scheduler::load_config(), chrono::Utc::now())
+}
+
+/// Settings' "Add task": a goal and an even interval (`every` minutes or hours
+/// from the view's `choices`, or `day`). The backend builds the id and the cron
+/// string, and returns the updated list.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn add_scheduled_job(
+    goal: String,
+    every: u32,
+    unit: super::scheduler::IntervalUnit,
+    one_shot: Option<bool>,
+) -> Result<super::scheduler::SchedulerView, String> {
+    super::scheduler::add_settings_job(&goal, every, unit, one_shot.unwrap_or(false))?;
+    Ok(load_scheduler_config())
+}
+
+/// Replace the scheduled tasks. Rejects the whole save if any cron expression
+/// is invalid.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn save_scheduler_config(
+    config: super::scheduler::SchedulerConfig,
+) -> Result<(), String> {
+    super::scheduler::save_config(&config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failed(command: &str) -> super::super::knowledge::CommandOutcome {
+        super::super::knowledge::CommandOutcome {
+            timestamp: 0,
+            command: command.into(),
+            cwd: "/tmp".into(),
+            exit_code: Some(1),
+            output_snippet: String::new(),
+            classification: OutcomeClass::Error {
+                error_type: "test".into(),
+            },
+            duration_ms: 10,
+            id: 0,
+        }
+    }
+
+    fn suggestions(rx: &mut tokio::sync::broadcast::Receiver<crate::state::AppEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, crate::state::AppEvent::AiSuggestion { .. }) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// A plain shell starts with suggestions off; the toggle turns them on and
+    /// off again, and only while on does a failed command raise one.
+    #[test]
+    fn toggle_ai_suggestions_gates_the_suggestion_for_a_failed_command() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut rx = state.event_bus.subscribe();
+
+        state.record_outcome("shell-1", failed("cargo test"));
+        assert_eq!(suggestions(&mut rx), 0, "off by default for a plain shell");
+
+        assert!(toggle_ai_suggestions_impl(&state, "shell-1".into()));
+        state.record_outcome("shell-1", failed("cargo build"));
+        assert_eq!(suggestions(&mut rx), 1);
+
+        assert!(!toggle_ai_suggestions_impl(&state, "shell-1".into()));
+        state.record_outcome("shell-1", failed("cargo clippy"));
+        assert_eq!(suggestions(&mut rx), 0);
+    }
+
+    #[test]
+    fn ai_suggestion_payload_names_the_session_and_a_goal() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut rx = state.event_bus.subscribe();
+        toggle_ai_suggestions_impl(&state, "s9".into());
+        state.record_outcome("s9", failed("pytest"));
+        let payload = loop {
+            match rx.try_recv().expect("an ai-suggestion event") {
+                crate::state::AppEvent::AiSuggestion { payload } => break payload,
+                _ => continue,
+            }
+        };
+        assert_eq!(payload["session_id"], "s9");
+        assert!(
+            payload["trigger_reason"]
+                .as_str()
+                .unwrap()
+                .contains("pytest")
+        );
+        assert!(
+            payload["proposed_goal"]
+                .as_str()
+                .unwrap()
+                .contains("exit code 1")
+        );
+    }
 
     #[tokio::test]
     async fn status_nonexistent_returns_inactive() {
@@ -772,13 +440,16 @@ mod tests {
         // Simulate what start_agent_loop does: create and insert sandbox for cwd.
         let root = std::env::temp_dir();
         let sandbox = FileSandbox::new(&root).expect("temp_dir should be a valid sandbox root");
-        state.file_sandboxes.insert(sid.to_string(), sandbox);
-        assert!(state.file_sandboxes.contains_key(sid), "sandbox inserted");
+        state.engine.file_sandboxes.insert(sid.to_string(), sandbox);
+        assert!(
+            state.engine.file_sandboxes.contains_key(sid),
+            "sandbox inserted"
+        );
 
         // Simulate what engine cleanup does at loop end.
-        state.file_sandboxes.remove(sid);
+        state.engine.file_sandboxes.remove(sid);
         assert!(
-            !state.file_sandboxes.contains_key(sid),
+            !state.engine.file_sandboxes.contains_key(sid),
             "sandbox removed after loop"
         );
     }

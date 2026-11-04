@@ -7,6 +7,25 @@
   },
   "scenarios": [
     {
+      "id": "claude-hooked-dialog-after-busy-clears-awaiting",
+      "agent": "claude",
+      "source": "raw-fixture",
+      "fixture": "claude-hooked-missing-question-20260921.raw",
+      "set": "awaiting_input-confident",
+      "clear": ["dialog-closed-and-protocol-busy", "submitted-answer"],
+      "note": "Binary PTY flight-recorder suffix; observed geometry 63x236. Awaiting followed by busy hooks must recover from the still-open dialog."
+    },
+    {
+      "id": "codex-idle-animation-after-protocol-completion",
+      "agent": "codex",
+      "source": "raw-fixture",
+      "fixture": "codex-idle-animation-20260921.tcap",
+      "set": "none",
+      "clear": [],
+      "must_not_set_after": ["protocol-completion", "ready-timer"],
+      "note": "Capture starts after the observed hook-idle. Replay seeds that boundary, preserves idle through the animation, then verifies a new submission starts working."
+    },
+    {
       "id": "claude-ask-user-single-select",
       "agent": "claude",
       "source": "history-template",
@@ -71,6 +90,23 @@
       "source": "capture-template",
       "set": "awaiting_input",
       "clear": ["bare-enter"]
+    },
+    {
+      "id": "goose-long-lived-command-working",
+      "agent": "goose",
+      "source": "raw-fixture",
+      "fixture": "goose-1.49.0-mid-turn.tcap",
+      "set": "working",
+      "clear": ["ready-screen", "interrupt", "pty-exit"],
+      "note": "OSC 133 marks `goose session` busy once. Only the ready screen clears it, so a missing adapter latches the tab busy for the whole process."
+    },
+    {
+      "id": "goose-composer-ready-screen",
+      "agent": "goose",
+      "source": "raw-fixture",
+      "fixture": "goose-1.49.0-idle.tcap",
+      "set": "none",
+      "clear": []
     },
     {
       "id": "turn-timer-input-race",

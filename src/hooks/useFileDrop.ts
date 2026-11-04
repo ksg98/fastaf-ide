@@ -15,6 +15,7 @@ import { toastsStore } from "../stores/toasts";
 import { isTauri, rpc } from "../transport";
 import { classifyFile, openFileAction } from "../utils/filePreview";
 import { pathStartsWith, pathStripPrefix } from "../utils/pathUtils";
+import { dispatchNativeFileDropTarget } from "./nativeFileDropTargets";
 
 // Re-export for existing callsites that import from useFileDrop
 export { isInternalDrag, markInternalDragEnd, markInternalDragStart };
@@ -82,14 +83,20 @@ function elementAtDropPoint(rawX: number, rawY: number): Element | null {
  * Walk up from `el` looking for an ancestor declaring `data-drop-target`.
  * Returns the element and its associated data (absolute path for folder drops).
  */
-type DropTargetInfo = { kind: "folder"; absPath: string } | { kind: "tab-bar" } | { kind: "pane" };
+type DropTargetInfo =
+	| { kind: "folder"; absPath: string; connectionId?: string }
+	| { kind: "tab-bar" }
+	| { kind: "pane" };
 function findDropTarget(el: Element | null): DropTargetInfo | null {
 	let cur: Element | null = el;
 	while (cur) {
 		const target = (cur as HTMLElement).dataset?.dropTarget;
 		if (target === "folder") {
 			const absPath = (cur as HTMLElement).dataset.absPath;
-			if (absPath) return { kind: "folder", absPath };
+			if (absPath) {
+				const owner = cur.closest<HTMLElement>("[data-drop-connection-id]");
+				return { kind: "folder", absPath, connectionId: owner?.dataset.dropConnectionId };
+			}
 		}
 		if (target === "tab-bar") return { kind: "tab-bar" };
 		if (target === "pane") return { kind: "pane" };
@@ -102,6 +109,15 @@ export interface FolderDropRequest {
 	destDir: string;
 	paths: string[];
 	mode: "move" | "copy";
+	connectionId?: string;
+}
+
+const folderDropListeners = new Set<(request: FolderDropRequest) => void>();
+
+/** Observe completed transfers; panels reuse their normal mutation refresh path. */
+export function onFolderDropComplete(listener: (request: FolderDropRequest) => void): () => void {
+	folderDropListeners.add(listener);
+	return () => folderDropListeners.delete(listener);
 }
 
 interface FolderDropOpts {
@@ -122,10 +138,10 @@ async function executeFolderDrop(req: FolderDropRequest, opts: FolderDropOpts): 
 			skipped: number;
 			errors: string[];
 			needs_confirm: boolean;
-		}>("fs_transfer_paths", {
+		}>(req.connectionId ? "fs_transfer_remote_paths" : "fs_transfer_paths", {
 			destDir: req.destDir,
 			paths: req.paths,
-			mode: req.mode,
+			...(req.connectionId ? { connectionId: req.connectionId } : { mode: req.mode }),
 			allowRecursive: opts.allowRecursive,
 		});
 
@@ -134,11 +150,16 @@ async function executeFolderDrop(req: FolderDropRequest, opts: FolderDropOpts): 
 			return false;
 		}
 
+		if (result.moved > 0) {
+			for (const listener of folderDropListeners) listener(req);
+		}
+
 		const verb = req.mode === "move" ? "Moved" : "Copied";
 		const parts: string[] = [];
 		if (result.moved > 0) parts.push(`${verb} ${result.moved}`);
 		if (result.skipped > 0) parts.push(`skipped ${result.skipped}`);
 		if (result.errors.length > 0) parts.push(`${result.errors.length} error(s)`);
+		if (req.connectionId && result.errors[0]) parts.push(result.errors[0]);
 		const level: "info" | "warn" | "error" = result.errors.length > 0 ? "warn" : "info";
 		toastsStore.add(verb, parts.join(" · ") || "Nothing to do", level);
 		if (result.errors.length > 0) {
@@ -146,7 +167,7 @@ async function executeFolderDrop(req: FolderDropRequest, opts: FolderDropOpts): 
 		}
 		return true;
 	} catch (err) {
-		appLogger.error("app", "fs_transfer_paths failed", err);
+		appLogger.error("app", "Drop transfer failed", err);
 		toastsStore.add("Transfer failed", String(err), "error");
 		return true;
 	}
@@ -161,15 +182,16 @@ export function setFolderDropConfirmHandler(handler: PendingConfirmHandler | nul
 }
 
 /** Dispatch a Tauri drop payload: either folder transfer, terminal paste, or tabs. */
-async function dispatchTauriDrop(paths: string[], x: number, y: number): Promise<void> {
+export async function dispatchTauriDrop(paths: string[], x: number, y: number): Promise<void> {
 	if (!paths.length) return;
 
 	const el = elementAtDropPoint(x, y);
+	if (dispatchNativeFileDropTarget(el, paths, tauriPhysicalToCss(x, y))) return;
 	const target = findDropTarget(el);
 	if (target?.kind === "folder") {
-		const mode: "move" | "copy" = dragDropStore.copyModifierHeld() ? "copy" : "move";
+		const mode: "move" | "copy" = target.connectionId || dragDropStore.copyModifierHeld() ? "copy" : "move";
 		await executeFolderDrop(
-			{ destDir: target.absPath, paths, mode },
+			{ destDir: target.absPath, paths, mode, connectionId: target.connectionId },
 			{
 				allowRecursive: false,
 				onNeedsConfirm: (req) => {

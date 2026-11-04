@@ -1,0 +1,16 @@
+// A paused session refuses prompt traffic until ego accepts resume.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","params":{"prompt":[{"type":"text","text":"desktop"}]},"capture":"desktop"}
+{"step":"expect","method":"_ego/pause","capture":"pause"}
+{"step":"respond","to":"pause","result":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f1","state":"pending"}}
+{"step":"error","to":"desktop","code":-32011,"message":"session held at a boundary"}
+{"step":"expect","method":"_ego/resume","capture":"resume"}
+{"step":"respond","to":"resume","result":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f1","state":"running"}}
+{"step":"expect","method":"session/prompt","params":{"prompt":[{"type":"text","text":"kept"}]},"capture":"kept"}
+{"step":"respond","to":"kept","result":{"stopReason":"end_turn"}}
+{"step":"expect","method":"session/prompt","params":{"prompt":[{"type":"text","text":"added while paused"}]},"capture":"added"}
+{"step":"respond","to":"added","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

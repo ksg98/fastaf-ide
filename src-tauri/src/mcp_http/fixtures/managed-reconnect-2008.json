@@ -1,0 +1,902 @@
+{
+  "source_commit": "e3f23c54f4",
+  "port": 57248,
+  "instance": "fixture-2008",
+  "exchanges": [
+    {
+      "label": "version-before",
+      "path": "/api/version",
+      "method": "GET",
+      "headers": {},
+      "request": null,
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "version": "2.0.0",
+        "git_hash": "e3f23c54f4"
+      }
+    },
+    {
+      "label": "create-tab",
+      "path": "/sessions",
+      "method": "POST",
+      "headers": {},
+      "request": {
+        "shell": "/bin/sh",
+        "cwd": "/Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures",
+        "rows": 24,
+        "cols": 80
+      },
+      "status": 201,
+      "response_headers": {},
+      "response": {
+        "session_id": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      }
+    },
+    {
+      "label": "ego-discover-before",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "ego",
+              "version": "0.1.0"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "elicitation": {
+                "form": {
+                  "schemaValidation": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "resultType": "complete",
+          "supportedVersions": [
+            "2026-07-28",
+            "2025-11-25",
+            "2025-03-26"
+          ],
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            },
+            "experimental": {
+              "claude/channel": {}
+            }
+          },
+          "instructions": "# TUICommander v2.0.0\n\n## What TUIC gives you\n\nNames below are `call_tool` targets; use a complete search `top_schema` or load one with `get_tool_schema` first.\n\n- **Reach the user:** `ui` (toast \u2014 `urgency=urgent` shows it on screen, not only in the bell; confirm; tab), `progress`, `secret`\n- **Drive the platform:** `session`, `agent`, `repo`, `story`, `workflow`, `task`, `automations`, `workflow_run`, `workflow_launch`, `workflow_report`, `workflow_story_create`\n- **Also:** `design_mode`, `plugin_dev_guide`\n\n## Tools\n\nDiscover/invoke via `search_tools` / `get_tool_schema` / `call_tool`; read their descriptions.\n\n## Multi-Agent Work\n\n- **Isolated branches:** `repo action=worktree_create spawn_session=true`.\n- **Mail:** default normal; `agent send urgency=urgent` requests a course change before the next step.\n\n## Sessions\n\n- `650ef537` /Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures (\u2014)\n\n",
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "tuicommander",
+              "version": "2.0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "managed-inbox-before",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "inbox"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"messages\":[],\"count\":0,\"next_since\":0,\"has_more\":false}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "subscribe-before-restart",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "subscribe",
+            "subscription_id": "fixture-2008"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"subscription_id\":\"fixture-2008\",\"filter\":\"actionable\",\"retained_messages\":1000,\"acknowledgement\":\"explicit\"}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "send-retained-mail",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "send",
+            "to": "650ef537-ceba-4199-b6f1-537f8f19aedd",
+            "message": "fixture-2008 retained restart mail"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"message_id\":\"7c72d6d2-303a-4ef3-a992-04f2b2b6a209\",\"delivered\":false,\"delivery_path\":\"inbox_only\",\"warning\":\"No supported agent has been detected in this PTY; foreground process: bash. Start a supported agent and wait for backend detection, or launch a custom wrapper through an agent run configuration. TUIC_SESSION identifies the terminal, not an agent. Mail remains in the inbox; the recipient can read it with agent action=inbox or wait.\",\"recipient_state\":{}}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "suspend-tab",
+      "path": "/sessions/suspended",
+      "method": "POST",
+      "headers": {},
+      "request": {
+        "action": "suspend",
+        "sessionId": "650ef537-ceba-4199-b6f1-537f8f19aedd",
+        "metadata": {}
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "ok": true
+      }
+    },
+    {
+      "label": "version-after",
+      "path": "/api/version",
+      "method": "GET",
+      "headers": {},
+      "request": null,
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "version": "2.0.0",
+        "git_hash": "e3f23c54f4"
+      }
+    },
+    {
+      "label": "resume-tab",
+      "path": "/sessions/suspended",
+      "method": "POST",
+      "headers": {},
+      "request": {
+        "action": "resume",
+        "tuicSession": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "ok": true,
+        "session_id": "bd01b909-4692-4a7c-b52b-0ba63082aff9"
+      }
+    },
+    {
+      "label": "restored-sessions",
+      "path": "/sessions",
+      "method": "GET",
+      "headers": {},
+      "request": null,
+      "status": 200,
+      "response_headers": {},
+      "response": [
+        {
+          "session_id": "bd01b909-4692-4a7c-b52b-0ba63082aff9",
+          "cwd": "/Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures",
+          "worktree_path": null,
+          "worktree_branch": null,
+          "display_name_is_custom": false,
+          "display_name_from_spawn": false,
+          "is_remote": true,
+          "alias": "f2rf-1",
+          "tuic_session": "650ef537-ceba-4199-b6f1-537f8f19aedd",
+          "state": {
+            "awaiting_input": false,
+            "rate_limited": false,
+            "last_activity_ms": 1792438282690
+          }
+        }
+      ]
+    },
+    {
+      "label": "ego-discover-after",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "ego",
+              "version": "0.1.0"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "elicitation": {
+                "form": {
+                  "schemaValidation": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "resultType": "complete",
+          "supportedVersions": [
+            "2026-07-28",
+            "2025-11-25",
+            "2025-03-26"
+          ],
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            },
+            "experimental": {
+              "claude/channel": {}
+            }
+          },
+          "instructions": "# TUICommander v2.0.0\n\n## What TUIC gives you\n\nNames below are `call_tool` targets; use a complete search `top_schema` or load one with `get_tool_schema` first.\n\n- **Reach the user:** `ui` (toast \u2014 `urgency=urgent` shows it on screen, not only in the bell; confirm; tab), `progress`, `secret`\n- **Drive the platform:** `session`, `agent`, `repo`, `story`, `workflow`, `task`, `automations`, `workflow_run`, `workflow_launch`, `workflow_report`, `workflow_story_create`\n- **Also:** `design_mode`, `plugin_dev_guide`\n\n## Tools\n\nDiscover/invoke via `search_tools` / `get_tool_schema` / `call_tool`; read their descriptions.\n\n## Multi-Agent Work\n\n- **Isolated branches:** `repo action=worktree_create spawn_session=true`.\n- **Mail:** default normal; `agent send urgency=urgent` requests a course change before the next step.\n\n## Sessions\n\n- `bd01b909` /Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures (\u2014)\n\n",
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "tuicommander",
+              "version": "2.0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "managed-inbox-after-restart",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "inbox",
+            "subscription_id": "fixture-2008"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"subscription_id\":\"fixture-2008\",\"messages\":[{\"id\":\"7c72d6d2-303a-4ef3-a992-04f2b2b6a209\",\"from_tuic_session\":\"650ef537-ceba-4199-b6f1-537f8f19aedd\",\"from_name\":\"f2rf-1\",\"content\":\"fixture-2008 retained restart mail\",\"timestamp\":1792438281519}],\"count\":1,\"cursor\":1,\"acknowledged_cursor\":0,\"missed_count\":0,\"has_more\":false}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "managed-project-after-restart",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "tools/call",
+        "params": {
+          "name": "progress",
+          "arguments": {
+            "type": "done",
+            "text": "fixture-2008 recovered project"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 13,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"id\":2}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "external-headerless-inbox",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "inbox"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"error\":\"You are not registered. Managed callers must reconnect with their host-issued identity; external callers must initialize then register with that protocol session.\",\"code\":\"identity_context_required\",\"effect\":\"not_started\",\"retryable\":false,\"context\":{\"protocol_session_present\":false},\"repair\":{\"retry_after_context_change\":true,\"max_attempts\":1,\"managed\":\"Reconnect with the host-issued x-tuic-session; do not invent an identity or project.\",\"external\":\"Initialize, then register on that protocol session; supply an authoritative path only when known.\"}}"
+            }
+          ],
+          "isError": true,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "external-missing-project",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 15,
+        "method": "tools/call",
+        "params": {
+          "name": "progress",
+          "arguments": {
+            "type": "done",
+            "text": "fixture-2008 no guessed project"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 15,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"error\":\"project_required: register an authoritative project before reporting progress\"}"
+            }
+          ],
+          "isError": true,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "legacy-initialize-old",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 16,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "fixture-2008",
+            "version": "1"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "e21803b4-892d-4e6e-b354-40e57731c54e"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 16,
+        "result": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            },
+            "experimental": {
+              "claude/channel": {}
+            }
+          },
+          "serverInfo": {
+            "name": "tuicommander",
+            "version": "2.0.0"
+          },
+          "instructions": "# TUICommander v2.0.0\n\n## TUIC Protocol \u2014 Required Output Markers\n\nRequired for the UI.\n\n- `ack` \u2014 once per MCP connection/reconnect: start your first message with `TUICommander v2.0.0 is connected.` Never repeat per turn.\n- `intent: <desc> (<title>)` on its own line, at the start of every user task and on each material work-phase change. Describe the work currently in progress in present tense; `<title>` \u22643 words, spaces not hyphens.\n- `suggest:` \u2014 after task done: `suggest: [ A | B | C ]` \u2014 bracket the WHOLE list; EXACTLY 3 items separated by `|`, each \u226440 chars.\n- `\ud83d\udcac ` \u2014 prefix every sentence that directly answers the user's question at row start or list-item text start (marker + space). Exclude status, tool and hook/task notices.\n\n## What TUIC gives you\n\nRead a tool's description before the first call.\n\n- **Reach the user:** `ui` (toast \u2014 `urgency=urgent` shows it on screen, not only in the bell; confirm; tab), `progress`, `secret`\n- **Drive the platform:** `session`, `agent`, `repo`, `story`, `workflow`, `task`, `automations`, `workflow_run`, `workflow_launch`, `workflow_report`, `workflow_story_create`\n- **Also:** `design_mode`, `plugin_dev_guide`\n\n## Tools\n\nRead each tool's description for actions and rules.\n\n**Worktrees:** use `repo action=worktree_create`/`worktree_remove` for TUIC tracking/PTY spawn; never `git worktree add/remove`.\n\n**Submit:** `session action=submit session_id=<id> input=<text>` once; never split text/Enter; never poll.\n\n## Progress \u2014 mandatory\n\nCall `progress` to record finished or blocked work; the user reads it later. `type=done` for finished `intent:` work or work continuing alongside user action; `type=blocked` only when you stop and wait because you need the user.\n\n## Multi-Agent Work\n\n**1** peer agent(s) connected. Orchestrate them with the `agent` tool; read its description first.\n- **Isolated branches:** `repo action=worktree_create spawn_session=true`.\n- **Mail:** default normal; `agent send urgency=urgent` requests a course change before the next step.\n\n## Sessions\n\n- `bd01b909` /Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures (\u2014)\n\n"
+        }
+      }
+    },
+    {
+      "label": "legacy-register-old",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25",
+        "mcp-session-id": "e21803b4-892d-4e6e-b354-40e57731c54e"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "register",
+            "tuic_session": "b9a0345b-6ac7-444b-acbd-c7d4693e1533",
+            "name": "fixture-old"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "e21803b4-892d-4e6e-b354-40e57731c54e"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"ok\":true,\"tuic_session\":\"b9a0345b-6ac7-444b-acbd-c7d4693e1533\",\"name\":\"fixture-old\",\"linked_children\":0,\"identity_generated\":false,\"terminal\":false,\"orchestrator\":false,\"mail_wake\":\"none\",\"identity\":\"This identity has NO terminal behind it: nothing can be typed into it and no message can wake it. Incoming mail only lands in your inbox, so you MUST consume it yourself \u2014 `agent action=wait` (blocking) or `agent action=inbox`. To be reachable through a terminal, run inside a TUIC-managed PTY so the bridge asserts its $TUIC_SESSION, or let TUIC spawn you with agent action=spawn.\",\"workflow\":{\"spawn_same_repo\":\"agent action=spawn prompt=<task> cwd=<repo_path> \u2014 returns {session_id, name, task_id}. As orchestrator, prefer wait/inbox over raw session output to avoid token burn.\",\"spawn_isolated\":\"repo action=worktree_create path=<repo> branch=<name> spawn_session=true \u2014 worktree + PTY in one call.\",\"monitor\":\"Use blocking waits instead of polling: agent action=wait (wakes on new mail; the cursor is kept server-side) or session action=wait session_id=<id> until=idle|exited. Task results arrive through agent send/inbox. Use session output only as an anomaly fallback when a child failed to send.\",\"auto_state_change\":\"Spawned peers auto-post state only: {type:state_change, state:idle|completed|exited|awaiting_input, session_id, exit_code?, prompt?}. This is not task output. awaiting_input means the child hit an interactive prompt and is parked with nobody at its keyboard \u2014 it will NOT progress until you answer it with session action=input (the `prompt` field carries the question). Every child must report its result or blocker with agent action=send; use session output only when a child anomalously failed to send.\",\"send\":\"agent action=send to=<peer tuic_session | its registered name | its PTY id | that terminal's alias, e.g. tu-1> message=<text, max 64KB> [urgency=normal|urgent]. Normal is the default; urgent writes only a payload-free inbox notice to a safe busy Claude/Codex/ego composer for its next tool boundary and returns urgent_delivered or urgent_fallback_reason. The message is always buffered in the inbox. A peer explicitly registered with orchestrator=true keeps payloads out of its active turn and composer; managed idle/completed lifecycle, or a confirmed-ready empty composer held working only by background work, may submit one coalesced, payload-free wake instructing `agent action=inbox`. Busy, questioning, partially typed, external without a subscribed ACP inbox, or unknown state stays inbox-only. An active agent wait owns delivery and suppresses that wake. Check `delivered` and `delivery_path` (the only route field); a message reaching the inbox is not delivery.\",\"list_peers\":\"agent action=list_peers path=<optional filter> \u2014 see who else is connected.\",\"conflict_control\":\"Use send/inbox to serialize shared-file edits: child sends 'claim <path>', orchestrator replies 'ack'/'deny'; child sends 'release <path>' on commit. Orchestrator is the arbiter \u2014 children never ack each other directly.\",\"cleanup\":\"On MCP session close, peer routes and inbox are drained. Managed PTY lifecycle remains separate; an MCP-scoped external identity has no PTY to reap.\"}}"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "label": "send-orphan-mail",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 18,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "send",
+            "to": "b9a0345b-6ac7-444b-acbd-c7d4693e1533",
+            "message": "fixture-554 orphan mail"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 18,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"message_id\":\"7a437292-8600-4780-8224-0915bed1ce39\",\"delivered\":false,\"delivery_path\":\"inbox_only\",\"warning\":\"Recipient has NO terminal and no active wait: nothing will wake it. The message stays in its inbox until it calls agent action=wait/inbox. If you need an answer, do not block on it.\"}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "legacy-initialize-replacement",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 19,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "fixture-2008",
+            "version": "1"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "bf459379-8c77-4a88-8558-bd0d1b0f02d2"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 19,
+        "result": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            },
+            "experimental": {
+              "claude/channel": {}
+            }
+          },
+          "serverInfo": {
+            "name": "tuicommander",
+            "version": "2.0.0"
+          },
+          "instructions": "# TUICommander v2.0.0\n\n## TUIC Protocol \u2014 Required Output Markers\n\nRequired for the UI.\n\n- `ack` \u2014 once per MCP connection/reconnect: start your first message with `TUICommander v2.0.0 is connected.` Never repeat per turn.\n- `intent: <desc> (<title>)` on its own line, at the start of every user task and on each material work-phase change. Describe the work currently in progress in present tense; `<title>` \u22643 words, spaces not hyphens.\n- `suggest:` \u2014 after task done: `suggest: [ A | B | C ]` \u2014 bracket the WHOLE list; EXACTLY 3 items separated by `|`, each \u226440 chars.\n- `\ud83d\udcac ` \u2014 prefix every sentence that directly answers the user's question at row start or list-item text start (marker + space). Exclude status, tool and hook/task notices.\n\n## What TUIC gives you\n\nRead a tool's description before the first call.\n\n- **Reach the user:** `ui` (toast \u2014 `urgency=urgent` shows it on screen, not only in the bell; confirm; tab), `progress`, `secret`\n- **Drive the platform:** `session`, `agent`, `repo`, `story`, `workflow`, `task`, `automations`, `workflow_run`, `workflow_launch`, `workflow_report`, `workflow_story_create`\n- **Also:** `design_mode`, `plugin_dev_guide`\n\n## Tools\n\nRead each tool's description for actions and rules.\n\n**Worktrees:** use `repo action=worktree_create`/`worktree_remove` for TUIC tracking/PTY spawn; never `git worktree add/remove`.\n\n**Submit:** `session action=submit session_id=<id> input=<text>` once; never split text/Enter; never poll.\n\n## Progress \u2014 mandatory\n\nCall `progress` to record finished or blocked work; the user reads it later. `type=done` for finished `intent:` work or work continuing alongside user action; `type=blocked` only when you stop and wait because you need the user.\n\n## Multi-Agent Work\n\n**2** peer agent(s) connected. Orchestrate them with the `agent` tool; read its description first.\n- **Isolated branches:** `repo action=worktree_create spawn_session=true`.\n- **Mail:** default normal; `agent send urgency=urgent` requests a course change before the next step.\n\n## Sessions\n\n- `bd01b909` /Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures (\u2014)\n\n"
+        }
+      }
+    },
+    {
+      "label": "legacy-replace-orphan",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25",
+        "mcp-session-id": "bf459379-8c77-4a88-8558-bd0d1b0f02d2"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 20,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "register",
+            "tuic_session": "35e536d3-6242-4351-8e3c-ba315cff55ea",
+            "name": "fixture-new",
+            "replaces": "b9a0345b-6ac7-444b-acbd-c7d4693e1533"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "bf459379-8c77-4a88-8558-bd0d1b0f02d2"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 20,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"ok\":true,\"tuic_session\":\"35e536d3-6242-4351-8e3c-ba315cff55ea\",\"name\":\"fixture-new\",\"linked_children\":0,\"identity_generated\":false,\"terminal\":false,\"orchestrator\":false,\"mail_wake\":\"none\",\"identity\":\"This identity has NO terminal behind it: nothing can be typed into it and no message can wake it. Incoming mail only lands in your inbox, so you MUST consume it yourself \u2014 `agent action=wait` (blocking) or `agent action=inbox`. To be reachable through a terminal, run inside a TUIC-managed PTY so the bridge asserts its $TUIC_SESSION, or let TUIC spawn you with agent action=spawn.\",\"workflow\":{\"spawn_same_repo\":\"agent action=spawn prompt=<task> cwd=<repo_path> \u2014 returns {session_id, name, task_id}. As orchestrator, prefer wait/inbox over raw session output to avoid token burn.\",\"spawn_isolated\":\"repo action=worktree_create path=<repo> branch=<name> spawn_session=true \u2014 worktree + PTY in one call.\",\"monitor\":\"Use blocking waits instead of polling: agent action=wait (wakes on new mail; the cursor is kept server-side) or session action=wait session_id=<id> until=idle|exited. Task results arrive through agent send/inbox. Use session output only as an anomaly fallback when a child failed to send.\",\"auto_state_change\":\"Spawned peers auto-post state only: {type:state_change, state:idle|completed|exited|awaiting_input, session_id, exit_code?, prompt?}. This is not task output. awaiting_input means the child hit an interactive prompt and is parked with nobody at its keyboard \u2014 it will NOT progress until you answer it with session action=input (the `prompt` field carries the question). Every child must report its result or blocker with agent action=send; use session output only when a child anomalously failed to send.\",\"send\":\"agent action=send to=<peer tuic_session | its registered name | its PTY id | that terminal's alias, e.g. tu-1> message=<text, max 64KB> [urgency=normal|urgent]. Normal is the default; urgent writes only a payload-free inbox notice to a safe busy Claude/Codex/ego composer for its next tool boundary and returns urgent_delivered or urgent_fallback_reason. The message is always buffered in the inbox. A peer explicitly registered with orchestrator=true keeps payloads out of its active turn and composer; managed idle/completed lifecycle, or a confirmed-ready empty composer held working only by background work, may submit one coalesced, payload-free wake instructing `agent action=inbox`. Busy, questioning, partially typed, external without a subscribed ACP inbox, or unknown state stays inbox-only. An active agent wait owns delivery and suppresses that wake. Check `delivered` and `delivery_path` (the only route field); a message reaching the inbox is not delivery.\",\"list_peers\":\"agent action=list_peers path=<optional filter> \u2014 see who else is connected.\",\"conflict_control\":\"Use send/inbox to serialize shared-file edits: child sends 'claim <path>', orchestrator replies 'ack'/'deny'; child sends 'release <path>' on commit. Orchestrator is the arbiter \u2014 children never ack each other directly.\",\"cleanup\":\"On MCP session close, peer routes and inbox are drained. Managed PTY lifecycle remains separate; an MCP-scoped external identity has no PTY to reap.\"},\"superseded_identity\":\"b9a0345b-6ac7-444b-acbd-c7d4693e1533\",\"mail_migrated\":1}"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "label": "legacy-migrated-inbox",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25",
+        "mcp-session-id": "bf459379-8c77-4a88-8558-bd0d1b0f02d2"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "inbox"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "bf459379-8c77-4a88-8558-bd0d1b0f02d2"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 21,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"messages\":[{\"id\":\"7a437292-8600-4780-8224-0915bed1ce39\",\"from_tuic_session\":\"650ef537-ceba-4199-b6f1-537f8f19aedd\",\"from_name\":\"f2rf-1\",\"content\":\"fixture-554 orphan mail\",\"timestamp\":1792438282724}],\"count\":1,\"next_since\":1792438282724,\"has_more\":false}"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "label": "send-live-owner-mail",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "send",
+            "to": "650ef537-ceba-4199-b6f1-537f8f19aedd",
+            "message": "fixture-554 live-owner mail"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 22,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"message_id\":\"29cd74fe-fbb7-41f1-bf69-acced7cedf5f\",\"delivered\":false,\"delivery_path\":\"inbox_only\",\"warning\":\"No supported agent has been detected in this PTY; foreground process: bash. Start a supported agent and wait for backend detection, or launch a custom wrapper through an agent run configuration. TUIC_SESSION identifies the terminal, not an agent. Mail remains in the inbox; the recipient can read it with agent action=inbox or wait.\",\"recipient_state\":{\"shell_state\":\"busy\"}}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "legacy-initialize-claimant",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 23,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "fixture-2008",
+            "version": "1"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "f830b84d-1eec-49f7-b343-aad3c2a89ffd"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 23,
+        "result": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            },
+            "experimental": {
+              "claude/channel": {}
+            }
+          },
+          "serverInfo": {
+            "name": "tuicommander",
+            "version": "2.0.0"
+          },
+          "instructions": "# TUICommander v2.0.0\n\n## TUIC Protocol \u2014 Required Output Markers\n\nRequired for the UI.\n\n- `ack` \u2014 once per MCP connection/reconnect: start your first message with `TUICommander v2.0.0 is connected.` Never repeat per turn.\n- `intent: <desc> (<title>)` on its own line, at the start of every user task and on each material work-phase change. Describe the work currently in progress in present tense; `<title>` \u22643 words, spaces not hyphens.\n- `suggest:` \u2014 after task done: `suggest: [ A | B | C ]` \u2014 bracket the WHOLE list; EXACTLY 3 items separated by `|`, each \u226440 chars.\n- `\ud83d\udcac ` \u2014 prefix every sentence that directly answers the user's question at row start or list-item text start (marker + space). Exclude status, tool and hook/task notices.\n\n## What TUIC gives you\n\nRead a tool's description before the first call.\n\n- **Reach the user:** `ui` (toast \u2014 `urgency=urgent` shows it on screen, not only in the bell; confirm; tab), `progress`, `secret`\n- **Drive the platform:** `session`, `agent`, `repo`, `story`, `workflow`, `task`, `automations`, `workflow_run`, `workflow_launch`, `workflow_report`, `workflow_story_create`\n- **Also:** `design_mode`, `plugin_dev_guide`\n\n## Tools\n\nRead each tool's description for actions and rules.\n\n**Worktrees:** use `repo action=worktree_create`/`worktree_remove` for TUIC tracking/PTY spawn; never `git worktree add/remove`.\n\n**Submit:** `session action=submit session_id=<id> input=<text>` once; never split text/Enter; never poll.\n\n## Progress \u2014 mandatory\n\nCall `progress` to record finished or blocked work; the user reads it later. `type=done` for finished `intent:` work or work continuing alongside user action; `type=blocked` only when you stop and wait because you need the user.\n\n## Multi-Agent Work\n\n**2** peer agent(s) connected. Orchestrate them with the `agent` tool; read its description first.\n- **Isolated branches:** `repo action=worktree_create spawn_session=true`.\n- **Mail:** default normal; `agent send urgency=urgent` requests a course change before the next step.\n\n## Sessions\n\n- `bd01b909` /Users/stefano.straus/Gits/personal/tuicommander__wt/fix-2008-reconnect-fixtures (\u2014)\n\n"
+        }
+      }
+    },
+    {
+      "label": "legacy-replace-live-owner",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2025-11-25",
+        "mcp-session-id": "f830b84d-1eec-49f7-b343-aad3c2a89ffd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "register",
+            "tuic_session": "3d61718e-8513-4de8-8ceb-a28eb7c89201",
+            "name": "fixture-claimant",
+            "replaces": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {
+        "mcp-session-id": "f830b84d-1eec-49f7-b343-aad3c2a89ffd"
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"ok\":true,\"tuic_session\":\"3d61718e-8513-4de8-8ceb-a28eb7c89201\",\"name\":\"fixture-claimant\",\"linked_children\":0,\"identity_generated\":false,\"terminal\":false,\"orchestrator\":false,\"mail_wake\":\"none\",\"identity\":\"This identity has NO terminal behind it: nothing can be typed into it and no message can wake it. Incoming mail only lands in your inbox, so you MUST consume it yourself \u2014 `agent action=wait` (blocking) or `agent action=inbox`. To be reachable through a terminal, run inside a TUIC-managed PTY so the bridge asserts its $TUIC_SESSION, or let TUIC spawn you with agent action=spawn.\",\"workflow\":{\"spawn_same_repo\":\"agent action=spawn prompt=<task> cwd=<repo_path> \u2014 returns {session_id, name, task_id}. As orchestrator, prefer wait/inbox over raw session output to avoid token burn.\",\"spawn_isolated\":\"repo action=worktree_create path=<repo> branch=<name> spawn_session=true \u2014 worktree + PTY in one call.\",\"monitor\":\"Use blocking waits instead of polling: agent action=wait (wakes on new mail; the cursor is kept server-side) or session action=wait session_id=<id> until=idle|exited. Task results arrive through agent send/inbox. Use session output only as an anomaly fallback when a child failed to send.\",\"auto_state_change\":\"Spawned peers auto-post state only: {type:state_change, state:idle|completed|exited|awaiting_input, session_id, exit_code?, prompt?}. This is not task output. awaiting_input means the child hit an interactive prompt and is parked with nobody at its keyboard \u2014 it will NOT progress until you answer it with session action=input (the `prompt` field carries the question). Every child must report its result or blocker with agent action=send; use session output only when a child anomalously failed to send.\",\"send\":\"agent action=send to=<peer tuic_session | its registered name | its PTY id | that terminal's alias, e.g. tu-1> message=<text, max 64KB> [urgency=normal|urgent]. Normal is the default; urgent writes only a payload-free inbox notice to a safe busy Claude/Codex/ego composer for its next tool boundary and returns urgent_delivered or urgent_fallback_reason. The message is always buffered in the inbox. A peer explicitly registered with orchestrator=true keeps payloads out of its active turn and composer; managed idle/completed lifecycle, or a confirmed-ready empty composer held working only by background work, may submit one coalesced, payload-free wake instructing `agent action=inbox`. Busy, questioning, partially typed, external without a subscribed ACP inbox, or unknown state stays inbox-only. An active agent wait owns delivery and suppresses that wake. Check `delivered` and `delivery_path` (the only route field); a message reaching the inbox is not delivery.\",\"list_peers\":\"agent action=list_peers path=<optional filter> \u2014 see who else is connected.\",\"conflict_control\":\"Use send/inbox to serialize shared-file edits: child sends 'claim <path>', orchestrator replies 'ack'/'deny'; child sends 'release <path>' on commit. Orchestrator is the arbiter \u2014 children never ack each other directly.\",\"cleanup\":\"On MCP session close, peer routes and inbox are drained. Managed PTY lifecycle remains separate; an MCP-scoped external identity has no PTY to reap.\"},\"superseded_identity\":\"650ef537-ceba-4199-b6f1-537f8f19aedd\",\"mail_migrated\":0,\"mail_stranded\":1,\"identity_warning\":\"'650ef537-ceba-4199-b6f1-537f8f19aedd' still owns a live PTY, so it is a reachable peer and its mail was NOT moved: 1 message(s) remain addressed to it. Taking them would strand a working agent. Read them as that identity, or have it hand over by registering from its own session.\"}"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "label": "live-owner-retains-mail",
+      "path": "/mcp",
+      "method": "POST",
+      "headers": {
+        "MCP-Protocol-Version": "2026-07-28",
+        "x-tuic-session": "650ef537-ceba-4199-b6f1-537f8f19aedd"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 25,
+        "method": "tools/call",
+        "params": {
+          "name": "agent",
+          "arguments": {
+            "action": "inbox"
+          }
+        }
+      },
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 25,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"messages\":[{\"id\":\"29cd74fe-fbb7-41f1-bf69-acced7cedf5f\",\"from_tuic_session\":\"650ef537-ceba-4199-b6f1-537f8f19aedd\",\"from_name\":\"f2rf-1\",\"content\":\"fixture-554 live-owner mail\",\"timestamp\":1792438282729}],\"count\":1,\"next_since\":1792438282729,\"has_more\":false}"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "label": "delete-restored-tab",
+      "path": "/sessions/bd01b909-4692-4a7c-b52b-0ba63082aff9",
+      "method": "DELETE",
+      "headers": {},
+      "request": null,
+      "status": 200,
+      "response_headers": {},
+      "response": {
+        "ok": true
+      }
+    }
+  ]
+}

@@ -3,6 +3,7 @@ use std::error::Error;
 use std::mem;
 use std::ops::RangeInclusive;
 
+use arrayvec::ArrayVec;
 use log::{debug, warn};
 pub use regex_automata::hybrid::BuildError;
 use regex_automata::hybrid::dfa::{Builder, Cache, Config, DFA};
@@ -325,7 +326,9 @@ impl<T> Term<T> {
 
         let mut cell = iter.cell();
         self.skip_fullwidth(&mut iter, &mut cell, regex.direction);
-        let mut c = cell.c;
+        let mut cell_chars = Self::search_cell_chars(cell, regex.direction);
+        let mut cell_char_index = 0;
+        let mut c = cell_chars[cell_char_index];
         let mut last_wrapped = iter.cell().flags.contains(Flags::WRAPLINE);
 
         let mut point = iter.point();
@@ -396,6 +399,14 @@ impl<T> Term<T> {
                 }
             }
 
+            cell_char_index += 1;
+            if let Some(&next_char) = cell_chars.get(cell_char_index) {
+                last_point = point;
+                c = next_char;
+                continue;
+            }
+            cell_char_index = 0;
+
             // Stop once we've reached the target point.
             if point == end || done {
                 // When reaching the end-of-input, we need to notify the parser that no look-ahead
@@ -428,7 +439,8 @@ impl<T> Term<T> {
 
             self.skip_fullwidth(&mut iter, &mut cell, regex.direction);
 
-            c = cell.c;
+            cell_chars = Self::search_cell_chars(cell, regex.direction);
+            c = cell_chars[cell_char_index];
             let wrapped = iter.cell().flags.contains(Flags::WRAPLINE);
 
             last_point = mem::replace(&mut point, iter.point());
@@ -457,6 +469,26 @@ impl<T> Term<T> {
         }
 
         Ok(regex_match)
+    }
+
+    /// Return a cell's codepoints in the DFA's traversal order. A reverse
+    /// DFA must see the cell extension before its base, and multiple extension
+    /// codepoints in reverse order, so the complete text stream is reversed
+    /// rather than merely the grid-cell order.
+    fn search_cell_chars(cell: &Cell, direction: Direction) -> ArrayVec<char, 10> {
+        let zerowidth = cell.zerowidth().unwrap_or_default();
+        let mut chars = ArrayVec::new();
+        match direction {
+            Direction::Right => {
+                chars.push(cell.c);
+                chars.extend(zerowidth.iter().copied());
+            }
+            Direction::Left => {
+                chars.extend(zerowidth.iter().rev().copied());
+                chars.push(cell.c);
+            }
+        }
+        chars
     }
 
     /// Advance a grid iterator over fullwidth characters.
@@ -931,6 +963,48 @@ mod tests {
         assert_eq!(
             term.regex_search_left(&mut regex, start, end),
             Some(end..=start)
+        );
+    }
+
+    #[test]
+    fn decomposed_unicode_matches_exact_codepoint_sequence() {
+        let mut term = mock_term("cafe noir");
+        let match_point = Point::new(Line(0), Column(3));
+        term.grid_mut()[match_point].push_zerowidth('\u{0301}');
+        assert_eq!(
+            term.grid()[match_point].zerowidth(),
+            Some(&['\u{0301}'][..])
+        );
+
+        let mut regex = RegexSearch::new("e\u{0301}").unwrap();
+        assert_eq!(
+            term.regex_search_right(
+                &mut regex,
+                Point::new(Line(0), Column(0)),
+                Point::new(Line(0), Column(8)),
+            ),
+            Some(match_point..=match_point)
+        );
+
+        let mut regex = RegexSearch::new("e\u{0301}").unwrap();
+        assert_eq!(
+            term.regex_search_left(
+                &mut regex,
+                Point::new(Line(0), Column(8)),
+                Point::new(Line(0), Column(0)),
+            ),
+            Some(match_point..=match_point)
+        );
+
+        let mut precomposed = RegexSearch::new("é").unwrap();
+        assert_eq!(
+            term.regex_search_right(
+                &mut precomposed,
+                Point::new(Line(0), Column(0)),
+                Point::new(Line(0), Column(8)),
+            ),
+            None,
+            "search is exact-codepoint and does not normalize to NFC"
         );
     }
 

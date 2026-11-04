@@ -1,0 +1,436 @@
+{
+  "v": 3,
+  "sessions": [
+    {
+      "session": "01a158f3-2878-7373-a912-83cdca86822d",
+      "model": "openai-codex/gpt-6-astra",
+      "context": {
+        "used_tokens": 63151,
+        "provenance": "generation_boundary"
+      },
+      "lines": {
+        "main": {
+          "usage": {
+            "uncached_input_tokens": 65111,
+            "cache_read_tokens": 533888,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 1531
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "1.261548",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": []
+          },
+          "cache_hit": 0.8913003193661425
+        },
+        "judge": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "goal_check": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "compaction": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "subagent": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "hook": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "total": {
+          "usage": {
+            "uncached_input_tokens": 65111,
+            "cache_read_tokens": 533888,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 1531
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "1.261548",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": []
+          },
+          "cache_hit": 0.8913003193661425
+        }
+      }
+    },
+    {
+      "session": "01a1780d-ae67-74ff-a371-4c6bf003946d",
+      "model": "openai-codex/gpt-6.1-sol",
+      "context": {
+        "used_tokens": 247682,
+        "provenance": "generation_boundary"
+      },
+      "lines": {
+        "main": {
+          "usage": {
+            "uncached_input_tokens": 232359,
+            "cache_read_tokens": 22676864,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 33383
+          },
+          "cost": {
+            "known": [
+              {
+                "amount": "0",
+                "currency": "USD"
+              }
+            ],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "3.0662344",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": []
+          },
+          "cache_hit": 0.9898574037190174
+        },
+        "judge": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "goal_check": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "compaction": {
+          "usage": {
+            "uncached_input_tokens": 30764,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 4495
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "0.106478",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": []
+          },
+          "cache_hit": 0.0
+        },
+        "subagent": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "hook": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "total": {
+          "usage": {
+            "uncached_input_tokens": 263123,
+            "cache_read_tokens": 22676864,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 37878
+          },
+          "cost": {
+            "known": [
+              {
+                "amount": "0",
+                "currency": "USD"
+              }
+            ],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "3.1727124",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": []
+          },
+          "cache_hit": 0.9885299411895918
+        }
+      }
+    },
+    {
+      "session": "d2c92a03-27ea-574a-ad3b-f482ef41491a",
+      "model": "openai-codex/gpt-6.1-sol",
+      "lineage": {
+        "kind": "compaction",
+        "source": "01a16e9e-9ad7-75ab-b19c-f6ff9ab1abef",
+        "source_seq": 1723,
+        "prompt_revision": 2
+      },
+      "context": {
+        "used_tokens": 137126,
+        "provenance": "generation_boundary"
+      },
+      "lines": {
+        "main": {
+          "usage": {
+            "uncached_input_tokens": 106045,
+            "cache_read_tokens": 6204672,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 12278
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "0.9553372",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": [
+              {
+                "reason": "no_pricing_quote"
+              },
+              {
+                "reason": "no_pricing_quote"
+              }
+            ]
+          },
+          "cache_hit": 0.9831960457108122
+        },
+        "judge": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "goal_check": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "compaction": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "subagent": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "hook": {
+          "usage": {
+            "uncached_input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [],
+            "subscription_unknown": []
+          }
+        },
+        "total": {
+          "usage": {
+            "uncached_input_tokens": 106045,
+            "cache_read_tokens": 6204672,
+            "cache_write_tokens": 0,
+            "cache_write_extended_tokens": 0,
+            "output_tokens": 12278
+          },
+          "cost": {
+            "known": [],
+            "unknown": [],
+            "subscription_equivalent": [
+              {
+                "amount": "0.9553372",
+                "currency": "USD"
+              }
+            ],
+            "subscription_unknown": [
+              {
+                "reason": "no_pricing_quote"
+              },
+              {
+                "reason": "no_pricing_quote"
+              }
+            ]
+          },
+          "cache_hit": 0.9831960457108122
+        }
+      }
+    }
+  ]
+}

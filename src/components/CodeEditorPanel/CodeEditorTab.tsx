@@ -20,31 +20,37 @@ import {
 	scrollPastEnd,
 } from "@codemirror/view";
 import { colorPicker } from "@replit/codemirror-css-color-picker";
-import { createCodeMirror, createEditorControlledValue, createEditorReadonly } from "solid-codemirror";
-import { type Component, createEffect, createSignal, Match, on, onCleanup, Show, Switch } from "solid-js";
+import { createCodeMirror, createEditorReadonly } from "solid-codemirror";
+import { type Component, createEffect, createMemo, createSignal, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { useFileBrowser } from "../../hooks/useFileBrowser";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
-import { isMacOS, shortenHomePath } from "../../platform";
+import { isMacOS } from "../../platform";
 import { appLogger } from "../../stores/appLogger";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { editorTabsStore } from "../../stores/editorTabs";
 import { referencesStore } from "../../stores/references";
-import { repositoriesStore } from "../../stores/repositories";
+import { locateFile, repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
+import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
-import { writeClipboard } from "../../utils/clipboard";
+import { copyPathToClipboard } from "../../utils/clipboard";
 import { openFileAction } from "../../utils/filePreview";
 import { passThroughMacSystemKeys } from "../../utils/macSystemKeys";
-import { isAbsolutePath } from "../../utils/pathUtils";
+import { handleOpenUrl } from "../../utils/openUrl";
+import { isAbsolutePath, joinPath, pathDirname } from "../../utils/pathUtils";
+import { markPerf } from "../../utils/perfTrace";
 import { ContextMenu, createContextMenu } from "../ContextMenu";
 import e from "../shared/editor-header.module.css";
 import { createSearchVisibility } from "../shared/SearchBar";
+import { Button } from "../ui/Button";
 import s from "./CodeEditorTab.module.css";
 import { EditorSearch } from "./EditorSearch";
+import { editorLinkAt } from "./editorLinks";
+import { navigateEditorTo } from "./editorNavigation";
 import { type GutterChange, gitChangeGutter, setChangesEffect } from "./gitGutter";
 import { type BlameLine, inlineBlame, setBlameEffect, setBlameEnabledEffect } from "./inlineBlame";
-import { detectLanguage } from "./languageDetection";
+import { detectLanguage, editorWrapKind } from "./languageDetection";
 import { searchOverview } from "./searchOverview";
 import { codeEditorTheme } from "./theme";
 
@@ -54,7 +60,8 @@ export interface CodeEditorTabProps {
 	/** On-disk root for file I/O (worktree path when active, otherwise repoPath). */
 	fsRoot?: string;
 	filePath: string;
-	initialLine?: number; // Line to scroll to on first mount (1-based)
+	initialLine?: number; // Line to select on first mount (1-based)
+	initialCol?: number; // Column to select on first mount (1-based)
 	externalEditable?: boolean; // External files start unlocked when true, locked (but unlockable) when false
 	onClose?: () => void;
 }
@@ -65,8 +72,53 @@ function wordAtCursor(view: EditorView): string | null {
 	return view.state.doc.sliceString(range.from, range.to) || null;
 }
 
-/** Large file threshold — skip syntax highlighting above this size */
+/** Large document threshold: above it the editor shows plain text — no syntax
+ *  highlighting, no git gutter, no inline blame. Each of those is per-line work
+ *  on the main thread (a 23 MB JSON is 409k lines: 409k gutter markers, a Lezer
+ *  parse of the whole document), which is what froze the webview for over a
+ *  minute. Compared against the content's string length as a byte proxy. */
 const LARGE_FILE_BYTES = 500 * 1024;
+
+/** True when a document of `length` characters gets the plain-text treatment. */
+export function isLargeDocument(length: number): boolean {
+	return length > LARGE_FILE_BYTES;
+}
+
+/**
+ * The file whose language support to load, or null when there is nothing to
+ * highlight: no file, content not loaded yet, or a document too large to parse.
+ * Keyed on the loaded content on purpose — deciding from the previous file's
+ * content (what the editor held before the read resolved) let a 23 MB JSON
+ * open with JSON highlighting because the guard saw an empty string.
+ */
+export function languageTarget(filePath: string, loading: boolean, length: number): string | null {
+	if (!filePath || loading || isLargeDocument(length)) return null;
+	return filePath;
+}
+
+/**
+ * Install an externally loaded document (disk read, reload, agent edit) into a
+ * live editor.
+ *
+ * NEVER dispatch the replacement as a transaction instead. `mapViewport` carries
+ * the old viewport across the change, so the `{0, 0}` viewport of the empty
+ * document the tab starts with becomes `{0, doc.length}`, and
+ * `viewportIsAppropriate` accepts any viewport while the editor has not measured
+ * as visible — which it has not, because the "Loading..." placeholder hides it
+ * until the read resolves. CodeMirror then renders every line of the document:
+ * 720k line elements and a minute-long main-thread block on a 23 MB file.
+ *
+ * `setState` builds a fresh ViewState whose viewport starts as the first screen
+ * of the document. The new state is derived from the live one, so the extension
+ * configuration — every compartment solid-codemirror appended, the gutter and
+ * blame fields, the undo history — survives the swap.
+ */
+export function installDocument(view: EditorView, value: string): void {
+	const doc = view.state.doc;
+	// Length first: comparing a 23 MB document to itself must not stringify it.
+	if (doc.length === value.length && doc.toString() === value) return;
+	view.setState(view.state.update({ changes: { from: 0, to: doc.length, insert: value } }).state);
+}
 
 /** Past this size the editor still opens, but shows a non-blocking "may be slow"
  *  warning. Mirrors the backend's MAX_EDITOR_LARGE_FILE_SIZE hard cap (250 MB),
@@ -74,16 +126,19 @@ const LARGE_FILE_BYTES = 500 * 1024;
  *  string length as a byte proxy — same approximation as LARGE_FILE_BYTES. */
 const WARN_FILE_BYTES = 100 * 1024 * 1024;
 
+/** On-disk (mtime, size) of an open file, as last seen. */
+export interface DiskStat {
+	modifiedAt: number;
+	size: number;
+}
+
 /**
  * True when a file is unchanged on disk versus the last seen stat. Both mtime
  * AND size must match — size guards against truncate-rewrite saves that can
  * land within the same mtime tick.
  */
-export function diskStatUnchanged(
-	last: { modifiedAt: number; size: number } | null,
-	next: { modified_at: number; size: number },
-): boolean {
-	return last !== null && next.modified_at === last.modifiedAt && next.size === last.size;
+export function diskStatUnchanged(last: DiskStat | null, next: DiskStat): boolean {
+	return last !== null && next.modifiedAt === last.modifiedAt && next.size === last.size;
 }
 
 // --- Cmd+Hover underline (VS Code-style go-to-definition hint) ---
@@ -144,7 +199,9 @@ function hoverLinkHandlers(): Extension {
 				view.dispatch({ effects: setHoverLink.of(null) });
 				return false;
 			}
-			const range = wordRangeAt(view, pos);
+			const line = view.state.doc.lineAt(pos);
+			const link = editorLinkAt(line.text, pos - line.from);
+			const range = link ? { from: line.from + link.from, to: line.from + link.to } : wordRangeAt(view, pos);
 			view.dispatch({ effects: setHoverLink.of(range) });
 			return false;
 		},
@@ -169,8 +226,10 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 	/** Mutable ref tracking live editor value without triggering reactivity on every keystroke */
 	let currentCode = "";
 	/** Last seen on-disk (mtime, size) — lets checkDiskContent skip the full read when unchanged */
-	let lastStat: { modifiedAt: number; size: number } | null = null;
+	let lastStat: DiskStat | null = null;
 	const [savedContent, setSavedContent] = createSignal("");
+	/** Plain-text mode for the loaded document (see LARGE_FILE_BYTES). */
+	const largeDoc = createMemo(() => isLargeDocument(savedContent().length));
 	const [loading, setLoading] = createSignal(true);
 	const [error, setError] = createSignal<string | null>(null);
 	/** True when the read failed because the file isn't valid UTF-8 text (binary/non-text file) */
@@ -182,6 +241,11 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 	 *  Non-blocking: the file is loaded normally; this only drives a warning banner. */
 	const [largeFile, setLargeFile] = createSignal(false);
 	const [isReadOnly, setIsReadOnly] = createSignal(false);
+	const wrapKind = createMemo(() => editorWrapKind(props.filePath));
+	const wrapEnabled = createMemo(() =>
+		wrapKind() === "text" ? uiStore.state.editorWrapText : uiStore.state.editorWrapCode,
+	);
+	const toggleWrap = () => uiStore.setEditorWrap(wrapKind(), !wrapEnabled());
 	/** True when the file changed on disk while editor has unsaved changes */
 	const [diskConflict, setDiskConflict] = createSignal(false);
 	/** Reactive dirty flag — only transitions on save/load, not every keystroke */
@@ -203,6 +267,10 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 		openSearch: () => openSearchBar(),
 		save: () => handleSave(),
 		isDirty: () => dirty(),
+		goToPosition: (line: number, col?: number) => {
+			const view = editorView();
+			if (view) navigateEditorTo(view, line, col);
+		},
 	});
 	onCleanup(() => editorTabsStore.clearHandle(props.id));
 	/** Current symbol under cursor (for breadcrumb) */
@@ -221,7 +289,14 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 	/** Absolute path on disk — external files are already absolute, internal ones join fsRoot. */
 	const absPath = () => (isExternal() ? props.filePath : `${fsRoot()}/${props.filePath}`);
 
-	/** Guard: scroll to initialLine only once on first file load */
+	/** On-disk (mtime, size) of the open file; null when it cannot be read (TCC-protected
+	 *  path, deleted file, network mount), which makes the next disk check a full read. */
+	const readStat = (): Promise<DiskStat | null> =>
+		invoke<{ exists: boolean; modified_at: number; size: number }>("stat_path", { path: absPath() })
+			.then((stat) => (stat.exists ? { modifiedAt: stat.modified_at, size: stat.size } : null))
+			.catch(() => null);
+
+	/** Guard: select initialLine only once on first file load */
 	let didScrollToInitialLine = false;
 
 	/**
@@ -249,8 +324,7 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 			async ([_fsRoot, filePath]) => {
 				if (!filePath) return;
 
-				// New file → drop the previous file's stat baseline so the first
-				// disk check re-establishes it instead of comparing against the old file.
+				// Drop the previous file's baseline until the new one is read below.
 				lastStat = null;
 				setLoading(true);
 				setError(null);
@@ -260,7 +334,13 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 				if (isExternal() && !props.externalEditable) setIsReadOnly(true);
 
 				try {
+					// Baseline the disk stat BEFORE the read: a write landing between the
+					// two makes the content newer than the stat, so the next poll re-reads
+					// and finds it equal. The other order would miss that write, and no
+					// baseline at all re-read the whole file on the first 5s poll.
+					lastStat = await readStat();
 					const content = await readContent();
+					markPerf("editor.load", { file: filePath, length: content.length });
 					currentCode = content;
 					setCode(content);
 					setSavedContent(content);
@@ -268,15 +348,14 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 					// Large but under the hard cap: open as normal, warn it may be slow.
 					setLargeFile(content.length > WARN_FILE_BYTES);
 
-					// Scroll to initialLine on the very first load only
+					// Select the requested position on the very first load only.
 					if (props.initialLine !== undefined && !didScrollToInitialLine) {
 						didScrollToInitialLine = true;
 						const targetLine = props.initialLine;
 						requestAnimationFrame(() => {
 							const view = editorView();
 							if (!view) return;
-							const line = view.state.doc.line(Math.max(1, Math.min(targetLine, view.state.doc.lines)));
-							view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: "center" }) });
+							navigateEditorTo(view, targetLine, props.initialCol);
 						});
 					}
 				} catch (err) {
@@ -328,14 +407,12 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 		try {
 			// Cheap metadata probe first: if (mtime,size) is unchanged since the last
 			// check there's nothing to do — avoids re-reading the whole file over IPC
-			// on every 5s poll / git-revision bump. A null/missing stat (TCC-protected
-			// path, deleted file, network mount) falls through to a full read.
-			const stat = await invoke<{ exists: boolean; modified_at: number; size: number }>("stat_path", {
-				path: absPath(),
-			}).catch(() => null);
-			if (stat?.exists) {
+			// on every 5s poll / git-revision bump. A null stat falls through to a
+			// full read.
+			const stat = await readStat();
+			if (stat) {
 				if (diskStatUnchanged(lastStat, stat)) return;
-				lastStat = { modifiedAt: stat.modified_at, size: stat.size };
+				lastStat = stat;
 			}
 
 			const diskContent = await readContent();
@@ -402,8 +479,15 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 		},
 	});
 
-	// Controlled value — sync external changes into editor
-	createEditorControlledValue(editorView, code);
+	// Controlled value — sync external changes into the editor. Deliberately not
+	// solid-codemirror's createEditorControlledValue: it dispatches the whole-document
+	// replacement into the live view, which is the freeze installDocument avoids.
+	createEffect(
+		on(editorView, (view) => {
+			if (!view) return;
+			createEffect(on(code, (value) => installDocument(view, value)));
+		}),
+	);
 
 	// Read-only mode
 	createEditorReadonly(editorView, isReadOnly);
@@ -444,6 +528,7 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 				});
 				// The tab may have been swapped/closed during the await.
 				if (editorView() !== view) return;
+				markPerf("editor.gutter", { file: props.filePath, changes: changes.length });
 				view.dispatch({ effects: setChangesEffect(changes) });
 			} catch (err) {
 				appLogger.debug("editor", "git gutter diff failed", { error: String(err) });
@@ -470,10 +555,13 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 		const enabled = settingsStore.state.inlineBlameEnabled;
 		void rev;
 		if (!view) return;
-		if (!enabled || !repoPath || isExternal() || !saved) {
+		// Turning the feature off must drop what is on screen; the other paths
+		// clear themselves with the document (see the gutter effect).
+		if (!enabled) {
 			view.dispatch({ effects: setBlameEffect([]) });
 			return;
 		}
+		if (!repoPath || isExternal() || !saved || largeDoc()) return;
 		void (async () => {
 			try {
 				const lines = await invoke<BlameLine[]>("get_file_blame", {
@@ -482,6 +570,7 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 				});
 				// The tab may have been swapped/closed during the await.
 				if (editorView() !== view) return;
+				markPerf("editor.blame", { file: props.filePath, lines: lines.length });
 				view.dispatch({ effects: setBlameEffect(lines) });
 			} catch (err) {
 				appLogger.debug("editor", "inline blame fetch failed", { error: String(err) });
@@ -490,6 +579,7 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 	});
 
 	// Base extensions
+	createExtension((): Extension => (wrapEnabled() ? EditorView.lineWrapping : []));
 	createExtension(codeEditorTheme);
 	createExtension(lineNumbers());
 	createExtension(history());
@@ -521,6 +611,21 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 	createExtension(search());
 	createExtension(highlightSelectionMatches());
 	createExtension(searchOverview());
+	createExtension(
+		Prec.high(
+			EditorView.domEventHandlers({
+				keydown(event) {
+					if (event.code !== "KeyZ" || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+						return false;
+					}
+					event.preventDefault();
+					event.stopPropagation();
+					toggleWrap();
+					return true;
+				},
+			}),
+		),
+	);
 	// Open the shared <SearchBar> overlay instead of CodeMirror's built-in panel.
 	// High precedence so these win over searchKeymap's Mod-f (openSearchPanel).
 	createExtension(
@@ -558,7 +663,7 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 	createExtension(hoverLinkTheme);
 	createExtension(hoverLinkHandlers());
 
-	// Cmd+Click (Mac) / Ctrl+Click (other) → go to definition via mdkb
+	// Cmd+Click (Mac) / Ctrl+Click (other) opens links, then falls back to definitions.
 	createExtension(
 		EditorView.domEventHandlers({
 			click(event: MouseEvent, view: EditorView) {
@@ -568,6 +673,40 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 				if (pos === null) return false;
 				const line = view.state.doc.lineAt(pos);
 				const col = pos - line.from;
+				const link = editorLinkAt(line.text, col);
+				if (link) {
+					if (link.web) {
+						handleOpenUrl(link.target);
+					} else {
+						const match = link.target.match(/:(\d+)(?::\d+)?$/);
+						const targetLine = match ? Number(match[1]) : undefined;
+						const cwd = isAbsolutePath(props.filePath)
+							? pathDirname(props.filePath)
+							: joinPath(fsRoot(), pathDirname(props.filePath));
+						const resolve = (directory: string) =>
+							invoke<{ absolute_path: string; is_directory: boolean } | null>("resolve_terminal_path", {
+								cwd: directory,
+								candidate: link.target,
+							});
+						void resolve(cwd)
+							.then((result) => result ?? (fsRoot() !== cwd ? resolve(fsRoot()) : null))
+							.then((result) => {
+								if (!result) {
+									toastsStore.add("File not found", link.target, "warn");
+									return;
+								}
+								if (result.is_directory) {
+									uiStore.setFileBrowserExternalRoot(result.absolute_path);
+									uiStore.setFileBrowserPanelVisible(true);
+									return;
+								}
+								const { repoPath, fsRoot: root, filePath } = locateFile(result.absolute_path);
+								openFileAction(filePath, repoPath, root, targetLine);
+							})
+							.catch((error) => appLogger.debug("editor", "Link lookup failed", { error: String(error) }));
+					}
+					return true;
+				}
 				invoke<{ filePath: string; line: number } | null>("mdkb_goto_definition", {
 					repoPath: props.repoPath,
 					filePath: props.filePath,
@@ -650,24 +789,22 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 		onCleanup(() => ro.disconnect());
 	});
 
-	// Load language support
+	// Load language support once the content is in: while a file loads the
+	// editor is plain text, so the content lands without a parser attached and
+	// the large-document decision is made on the document actually loaded.
+	const langTarget = createMemo(() => languageTarget(props.filePath, loading(), savedContent().length));
 	createEffect(
-		on(
-			() => props.filePath,
-			async (filePath) => {
-				if (!filePath) {
-					setLangSupport(null);
-					return;
-				}
-				// Skip syntax highlighting for large files
-				if (currentCode.length > LARGE_FILE_BYTES) {
-					setLangSupport(null);
-					return;
-				}
-				const lang = await detectLanguage(filePath);
-				setLangSupport(lang);
-			},
-		),
+		on(langTarget, async (target) => {
+			if (!target) {
+				setLangSupport(null);
+				return;
+			}
+			const lang = await detectLanguage(target);
+			// Another file may have started loading during the import.
+			if (target !== props.filePath || loading()) return;
+			markPerf("editor.language", { file: target });
+			setLangSupport(lang);
+		}),
 	);
 
 	// Save handler
@@ -730,10 +867,36 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 				<Show when={dirty()}>
 					<span class={e.dirtyDot} title={t("codeEditor.unsaved", "Unsaved changes")} />
 				</Show>
-				<button
+				<Button
+					class={e.btn}
+					variant={wrapEnabled() ? "primary" : "secondary"}
+					type="button"
+					onClick={toggleWrap}
+					aria-label={t("codeEditor.wrapLines", "Wrap lines")}
+					aria-pressed={wrapEnabled()}
+					title={`${t("codeEditor.wrapLines", "Wrap lines")} (Alt+Z)`}
+				>
+					<svg
+						width="12"
+						height="12"
+						viewBox="0 0 16 16"
+						fill="currentColor"
+						stroke="currentColor"
+						stroke-width="1.5"
+						stroke-linecap="round"
+						aria-hidden="true"
+					>
+						<path fill="none" d="M2 3h12M2 6h12M2 9h9a2 2 0 0 1 0 4H8m0 0 2-2m-2 2 2 2M2 13h3" />
+					</svg>
+					{t("codeEditor.wrapBtn", "Wrap")}
+				</Button>
+				<Button
 					class={e.btn}
 					onClick={() => setIsReadOnly((v) => !v)}
 					title={isReadOnly() ? t("codeEditor.unlock", "Unlock editing") : t("codeEditor.lock", "Lock (read-only)")}
+					aria-label={
+						isReadOnly() ? t("codeEditor.unlock", "Unlock editing") : t("codeEditor.lock", "Lock (read-only)")
+					}
 				>
 					{isReadOnly() ? (
 						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
@@ -744,15 +907,17 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 							<path d="M8 1a3 3 0 0 1 3 3v1h.5a1.5 1.5 0 0 1 1.5 1.5V14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6.5A1.5 1.5 0 0 1 4.5 5H5V4a3 3 0 0 1 3-3zm1.5 4V4a1.5 1.5 0 0 0-3 0v1h3z" />
 						</svg>
 					)}
-				</button>
+					{isReadOnly() ? t("codeEditor.unlockBtn", "Unlock") : t("codeEditor.lockBtn", "Lock")}
+				</Button>
 				<Show when={!isExternal() && props.repoPath}>
-					<button
+					<Button
 						class={e.btn}
 						// Diff against fsRoot (the worktree) where the file actually lives and is
 						// modified — props.repoPath is the canonical repo, so on a worktree git diff
 						// would run in the wrong tree and report "No changes". (#67)
 						onClick={() => diffTabsStore.add(fsRoot(), props.filePath, "M")}
 						title={t("codeEditor.viewDiff", "View diff")}
+						aria-label={t("codeEditor.viewDiff", "View diff")}
 					>
 						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
 							<path
@@ -765,35 +930,43 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 							<path d="M4 12l-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
 							<path d="M12 12l2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
 						</svg>
-					</button>
+						{t("codeEditor.diffBtn", "Diff")}
+					</Button>
 				</Show>
-				<Show when={dirty() && !isReadOnly()}>
-					<button class={e.btn} onClick={handleSave} title={`${t("codeEditor.save", "Save")} (${"\u2318"}S)`}>
+				<Show when={!isReadOnly()}>
+					<Button
+						class={e.btn}
+						onClick={handleSave}
+						disabled={!dirty()}
+						data-ready={dirty() ? "true" : undefined}
+						title={`${t("codeEditor.save", "Save")} (${"\u2318"}S)`}
+					>
 						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
 							<path d="M13.354 1.146a.5.5 0 0 1 .146.354v12a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 2.5 13.5v-11A1.5 1.5 0 0 1 4 1h8.5a.5.5 0 0 1 .354.146L13.354 1.146zM4 2.5a.5.5 0 0 0-.5.5v10.5a.5.5 0 0 0 .5.5h1V10a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4h1a.5.5 0 0 0 .5-.5V2.207L11.793 2H11v2.5A1.5 1.5 0 0 1 9.5 6h-3A1.5 1.5 0 0 1 5 4.5V2H4zm2 0v2.5a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5V2H6zm0 8v4h4v-4H6z" />
 						</svg>
-					</button>
+						{t("codeEditor.save", "Save")}
+					</Button>
 				</Show>
 			</div>
 
 			<Show when={diskConflict()}>
 				<div class={s.conflictBanner}>
 					<span>{t("codeEditor.fileChanged", "File changed on disk.")}</span>
-					<button class={e.btn} onClick={handleReloadFromDisk}>
+					<Button class={e.btn} onClick={handleReloadFromDisk}>
 						{t("codeEditor.reload", "Reload")}
-					</button>
-					<button class={e.btn} onClick={handleKeepLocal}>
+					</Button>
+					<Button class={e.btn} onClick={handleKeepLocal}>
 						{t("codeEditor.keepMine", "Keep mine")}
-					</button>
+					</Button>
 				</div>
 			</Show>
 
 			<Show when={largeFile()}>
 				<div class={s.conflictBanner}>
 					<span>{t("codeEditor.largeFileWarning", "Large file — editing may be slow.")}</span>
-					<button class={e.btn} onClick={() => setLargeFile(false)}>
+					<Button class={e.btn} onClick={() => setLargeFile(false)}>
 						{t("codeEditor.dismiss", "Dismiss")}
-					</button>
+					</Button>
 				</div>
 			</Show>
 
@@ -851,7 +1024,10 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 						onCleanup(detachSystemKeys);
 						ref(el);
 					}}
-					style={{ display: loading() || error() ? "none" : undefined }}
+					style={{
+						display: loading() || error() ? "none" : undefined,
+						"font-size": `${editorTabsStore.state.tabs[props.id]?.fontSize ?? settingsStore.state.defaultFontSize}px`,
+					}}
 				/>
 				<EditorSearch
 					visible={searchVisible()}
@@ -869,12 +1045,7 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 				items={[
 					{
 						label: t("codeEditor.copyPath", "Copy Path"),
-						action: () => {
-							const fullPath = isExternal() ? props.filePath : `${fsRoot()}/${props.filePath}`;
-							writeClipboard(shortenHomePath(fullPath)).catch((err) =>
-								appLogger.error("app", "Failed to copy path", err),
-							);
-						},
+						action: () => copyPathToClipboard(absPath()),
 					},
 					{
 						label: "Find References (Shift+F12)",

@@ -1,7 +1,9 @@
 import { type Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
 import { statusBarTicker, URGENT_PRIORITY } from "../../stores/statusBarTicker";
 import { terminalsStore } from "../../stores/terminals";
 import { cx } from "../../utils/cx";
+import { IconClose } from "../icons";
 import s from "./StatusBar.module.css";
 
 /**
@@ -12,6 +14,7 @@ import s from "./StatusBar.module.css";
 export const TickerArea: Component = () => {
 	const [popoverOpen, setPopoverOpen] = createSignal(false);
 	let tickerRef: HTMLSpanElement | undefined;
+	let popoverRef: HTMLDivElement | undefined;
 
 	// Close popover on Escape
 	const handleKeyDown = (e: KeyboardEvent) => {
@@ -20,10 +23,17 @@ export const TickerArea: Component = () => {
 		}
 	};
 
+	// The ticker itself is inside: right-click on it toggles, so it must not count as an outside press.
+	useOutsideDismiss({
+		inside: () => [popoverRef, tickerRef],
+		onClose: () => setPopoverOpen(false),
+		enabled: popoverOpen,
+	});
+
 	onMount(() => document.addEventListener("keydown", handleKeyDown));
 	onCleanup(() => document.removeEventListener("keydown", handleKeyDown));
 
-	// Rotation state — filters out claude-usage on agent tabs so the counter
+	// Rotation state — filters out the shared agent-usage slot on agent tabs so the counter
 	// doesn't show "1/2" when only one visible ticker remains.
 	const rotation = () => {
 		const state = statusBarTicker.getRotationState();
@@ -32,10 +42,11 @@ export const TickerArea: Component = () => {
 		const activeAgent = terminalsStore.getActive()?.agentType;
 		if (!activeAgent) return state;
 
-		// On agent tabs, claude-usage is irrelevant — hide it
+		// The matching Claude/Codex result is absorbed into the agent badge; a stale
+		// result for the other provider must remain hidden during the async switch.
 		if (state.message.pluginId === "claude-usage") return null;
 
-		// Adjust counter to exclude hidden claude-usage messages
+		// Adjust counter to exclude hidden agent-usage messages.
 		const hiddenCount = statusBarTicker.getAll().filter((m) => m.pluginId === "claude-usage").length;
 		if (hiddenCount > 0) {
 			const adjusted = state.total - hiddenCount;
@@ -103,12 +114,11 @@ export const TickerArea: Component = () => {
 
 			{/* Popover listing all active tickers */}
 			<Show when={popoverOpen()}>
-				<div class={s.tickerOverlay} onClick={() => setPopoverOpen(false)} />
-				<div class={s.tickerPopover}>
+				<div ref={popoverRef} class={s.tickerPopover}>
 					<div class={s.tickerPopoverHeader}>
 						Active Tickers
-						<button class={s.tickerPopoverClose} onClick={() => setPopoverOpen(false)}>
-							&times;
+						<button type="button" class={s.tickerPopoverClose} onClick={() => setPopoverOpen(false)} aria-label="Close">
+							<IconClose size={12} />
 						</button>
 					</div>
 					<div class={s.tickerPopoverList}>

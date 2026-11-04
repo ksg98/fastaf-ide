@@ -7,6 +7,16 @@
 }
 
 /* ── Status card ── */
+/* The tab renders into `.section` from Settings.module.css, which is a plain
+   block with no gap: every top-level card here stacks flush against the next,
+   so each one owns its own leading space. Without this the "Token provided
+   via environment variable" hint sits on the buttons and the STATUS heading sits on them
+   from below.
+   The three gaps are deliberately UNEQUAL. Elsewhere in Settings a `.hint` is a
+   caption hugging its control (4px above, nothing below), so giving the token
+   hint the same gap above and below made it read as a third standalone block
+   between the card and the buttons. Tight to the card, a clear break before the
+   actions, a section break before STATUS. */
 .statusCard {
   display: flex;
   align-items: center;
@@ -15,6 +25,7 @@
   background: var(--bg-tertiary);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
+  margin-bottom: 6px;
 }
 
 .avatar {
@@ -63,22 +74,9 @@
 
 /* Repository binding dropdown — matches the standard `.group select` styling
    from Settings.module.css so it aligns with the other dropdowns in the layout. */
-.bindSelect {
-  width: 100%;
-  height: 32px;
-  padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  box-sizing: border-box;
-}
+.bindSelect { width: 100%; }
 
-.bindSelect:focus {
-  outline: none;
-  border-color: var(--accent);
-}
+
 
 /* ── Device Flow code display ── */
 .codeCard {
@@ -128,18 +126,7 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.btn {
-  composes: btn from "../../shared/controls.module.css";
-}
-
-.btnPrimary {
-  composes: btnPrimary from "../../shared/controls.module.css";
-}
-
-.btnDanger {
-  composes: btnDanger from "../../shared/controls.module.css";
+  margin-top: 14px;
 }
 
 /* ── Disconnected state ── */
@@ -184,6 +171,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 22px;
 }
 
 .diagnosticsTitle {

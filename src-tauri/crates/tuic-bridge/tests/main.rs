@@ -1,0 +1,6 @@
+#[path = "cases/design_mode.rs"]
+mod design_mode;
+#[path = "cases/named_instance.rs"]
+mod named_instance;
+#[path = "cases/offline_contract.rs"]
+mod offline_contract;

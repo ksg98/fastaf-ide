@@ -1,13 +1,12 @@
-import { batch, type Setter } from "solid-js";
+import { batch } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
-import { placementBranchFor, repositoriesStore, resolveRepoOwner } from "../../stores/repositories";
+import { placementWorkspaceFor, repositoriesStore, resolveRepoOwner } from "../../stores/repositories";
+import { getDeclaredTerminalWorkspace } from "../../stores/terminalOwnership";
 import { terminalsStore } from "../../stores/terminals";
 import { pathStartsWith } from "../../utils/pathUtils";
 
 interface TerminalWorktreeCoordinatorDeps {
 	refreshBranches: () => Promise<void>;
-	setCurrentBranch: Setter<string | null>;
-	setCurrentRepoPath: Setter<string | undefined>;
 	writePty: (sessionId: string, data: string) => Promise<void>;
 }
 
@@ -15,35 +14,36 @@ interface TerminalWorktreeCoordinatorDeps {
 export function createTerminalWorktreeCoordinator(deps: TerminalWorktreeCoordinatorDeps) {
 	const cwdDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-	/** Find the repo and branch that own a CWD.
+	/** Find the repo and WORKSPACE that own a CWD.
 	 *
-	 *  A linked worktree names its branch. A match at the repo root does not — what
-	 *  is checked out there changes under the user's feet — so the root resolves
-	 *  through `activeBranch` at the moment we need it. */
-	const findBranchForCwd = (cwd: string): { repoPath: string; branchName: string } | null => {
+	 *  A linked worktree directory names its workspace. A match at the repo root
+	 *  does not — what is checked out there changes under the user's feet — so the
+	 *  root resolves at the moment we need it, through `placementWorkspaceFor`. */
+	const findWorkspaceForCwd = (cwd: string): { repoPath: string; workspaceId: string } | null => {
 		const owner = resolveRepoOwner(cwd);
 		if (!owner) return null;
-		const branchName = placementBranchFor(owner);
-		return branchName ? { repoPath: owner.repoPath, branchName } : null;
+		const workspaceId = placementWorkspaceFor(owner);
+		return workspaceId ? { repoPath: owner.repoPath, workspaceId } : null;
 	};
 
 	const performCwdReassignment = async (terminalId: string, newCwd: string) => {
 		if (!terminalsStore.get(terminalId)) return;
 
 		const currentRepoPath = repositoriesStore.getRepoPathForTerminal(terminalId);
-		const currentBranchName = repositoriesStore.findOwnerForTerminal(terminalId)?.branchName ?? null;
+		const currentWorkspaceId = repositoriesStore.findOwnerForTerminal(terminalId)?.workspaceId ?? null;
 
-		let target = findBranchForCwd(newCwd);
+		// A declaration changes display placement without moving the process.
+		let target = getDeclaredTerminalWorkspace(terminalId) ?? findWorkspaceForCwd(newCwd);
 		if (!target && currentRepoPath) {
 			const insideKnownRepo = repositoriesStore.getPaths().some((repoPath) => pathStartsWith(newCwd, repoPath));
 			if (insideKnownRepo) {
 				await deps.refreshBranches();
-				target = findBranchForCwd(newCwd);
+				target = getDeclaredTerminalWorkspace(terminalId) ?? findWorkspaceForCwd(newCwd);
 			}
 		}
 
 		if (!target) return;
-		if (target.repoPath === currentRepoPath && target.branchName === currentBranchName) return;
+		if (target.repoPath === currentRepoPath && target.workspaceId === currentWorkspaceId) return;
 
 		// A cd across repos is navigation, not a placement. The tab belongs to the repo
 		// it was opened in — `repoPath` records that owner — and this path may only move
@@ -55,22 +55,20 @@ export function createTerminalWorktreeCoordinator(deps: TerminalWorktreeCoordina
 		const owner = terminalsStore.get(terminalId)?.repoPath ?? null;
 		if (owner !== null && target.repoPath !== owner) return;
 
-		appLogger.info("terminal", `[CwdChange] ${terminalId} → ${target.repoPath}:${target.branchName} (cwd=${newCwd})`);
+		appLogger.info("terminal", `[CwdChange] ${terminalId} → ${target.repoPath}:${target.workspaceId} (cwd=${newCwd})`);
 		batch(() => {
-			if (currentRepoPath && currentBranchName) {
-				repositoriesStore.removeTerminalFromBranch(currentRepoPath, currentBranchName, terminalId);
+			if (currentRepoPath && currentWorkspaceId) {
+				repositoriesStore.removeTerminalFromWorkspace(currentRepoPath, currentWorkspaceId, terminalId);
 			}
-			// The branch arrays are the display index; the terminal's own repoPath is
-			// the record. Moving one without the other is what left ids stranded.
+			// The workspace arrays are the display index; the terminal's own repoPath
+			// is the record. Moving one without the other is what left ids stranded.
 			terminalsStore.setRepoPath(terminalId, target.repoPath);
-			repositoriesStore.addTerminalToBranch(target.repoPath, target.branchName, terminalId);
+			repositoriesStore.addTerminalToWorkspace(target.repoPath, target.workspaceId, terminalId);
 
 			if (terminalsStore.state.activeId === terminalId) {
-				repositoriesStore.setActiveBranch(target.repoPath, target.branchName);
-				deps.setCurrentBranch(target.branchName);
+				repositoriesStore.setActiveWorkspace(target.repoPath, target.workspaceId);
 				if (target.repoPath !== currentRepoPath) {
 					repositoriesStore.setActive(target.repoPath);
-					deps.setCurrentRepoPath(target.repoPath);
 				}
 			}
 		});
@@ -97,19 +95,22 @@ export function createTerminalWorktreeCoordinator(deps: TerminalWorktreeCoordina
 		}
 	};
 
-	const getWorktreeTargets = (terminalId: string): Array<{ branchName: string; path: string }> => {
+	/** Where this terminal could move to: one entry per OTHER workspace of its repo
+	 *  that has a directory. `workspaceId` identifies it, `branchName` labels it —
+	 *  two same-branch workspaces are two targets, distinguishable only by id. */
+	const getWorktreeTargets = (terminalId: string): Array<{ workspaceId: string; branchName: string; path: string }> => {
 		const repoPath = repositoriesStore.getRepoPathForTerminal(terminalId);
 		if (!repoPath) return [];
 		const repo = repositoriesStore.get(repoPath);
 		if (!repo) return [];
 
-		const currentBranchName = repositoriesStore.findOwnerForTerminal(terminalId)?.branchName ?? null;
+		const currentWorkspaceId = repositoriesStore.findOwnerForTerminal(terminalId)?.workspaceId ?? null;
 
-		const targets: Array<{ branchName: string; path: string }> = [];
-		for (const [branchName, branch] of Object.entries(repo.branches)) {
-			if (branchName === currentBranchName) continue;
-			const worktreePath = branch.worktreePath ?? (branch.isMain ? repoPath : null);
-			if (worktreePath) targets.push({ branchName, path: worktreePath });
+		const targets: Array<{ workspaceId: string; branchName: string; path: string }> = [];
+		for (const [workspaceId, workspace] of Object.entries(repo.workspaces)) {
+			if (workspaceId === currentWorkspaceId) continue;
+			const worktreePath = workspace.worktreePath ?? (workspace.isMain ? repoPath : null);
+			if (worktreePath) targets.push({ workspaceId, branchName: workspace.branchName, path: worktreePath });
 		}
 		return targets;
 	};
@@ -117,10 +118,16 @@ export function createTerminalWorktreeCoordinator(deps: TerminalWorktreeCoordina
 	const moveTerminalToWorktree = async (terminalId: string, worktreePath: string): Promise<void> => {
 		const terminal = terminalsStore.get(terminalId);
 		if (!terminal?.sessionId) return;
-		const escapedPath = `'${worktreePath.replace(/'/g, "'\\''")}'`;
+		const escapedPath = `'${worktreePath.replaceAll("'", "'\\''")}'`;
 		await deps.writePty(terminal.sessionId, `cd ${escapedPath}\n`);
 		appLogger.info("terminal", `[MoveToWorktree] ${terminalId} → cd ${worktreePath}`);
 	};
 
-	return { cancelCwdTracking, findBranchForCwd, getWorktreeTargets, handleTerminalCwdChange, moveTerminalToWorktree };
+	return {
+		cancelCwdTracking,
+		findWorkspaceForCwd,
+		getWorktreeTargets,
+		handleTerminalCwdChange,
+		moveTerminalToWorktree,
+	};
 }

@@ -649,9 +649,9 @@ mod tests {
 
     #[test]
     fn test_cursor_paths_from_json_garbage_returns_empty() {
-        assert!(cursor_paths_from_json("not json").is_empty());
-        assert!(cursor_paths_from_json(r#"{"entries": 42}"#).is_empty());
-        assert!(cursor_paths_from_json(r#"{}"#).is_empty());
+        assert_eq!(cursor_paths_from_json("not json").len(), 0);
+        assert_eq!(cursor_paths_from_json(r#"{"entries": 42}"#).len(), 0);
+        assert_eq!(cursor_paths_from_json(r#"{}"#).len(), 0);
     }
 
     // ── scan_cursor ──
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_scan_cursor_missing_db_returns_empty() {
-        assert!(scan_cursor(Path::new("/nonexistent/state.vscdb")).is_empty());
+        assert_eq!(scan_cursor(Path::new("/nonexistent/state.vscdb")).len(), 0);
     }
 
     // ── scan_superset ──

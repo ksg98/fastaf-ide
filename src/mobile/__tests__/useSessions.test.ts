@@ -6,11 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // only faking the network/event layer it depends on.
 // ---------------------------------------------------------------------------
 
+// Keep session-poll assertions scoped to session RPCs; availability uses its own config read.
+const { sessionRpc } = vi.hoisted(() => ({ sessionRpc: vi.fn() }));
 /** Event handlers the hook registered with `subscribeEvents`. */
 const sseHandlers = new Map<string, (payload: unknown) => void>();
 
 vi.mock("../../transport", () => ({
-	rpc: vi.fn(),
+	rpc: (command: string, ...args: unknown[]) =>
+		command === "load_config" ? Promise.resolve({ ego_executable: "" }) : sessionRpc(command, ...args),
 	isTauri: vi.fn(() => false),
 	subscribeEvents: vi.fn((handlers: Record<string, (payload: unknown) => void>) => {
 		for (const [event, handler] of Object.entries(handlers)) sseHandlers.set(event, handler);
@@ -22,11 +25,11 @@ vi.mock("../../stores/appLogger", () => ({
 	appLogger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-import { rpc, subscribeEvents } from "../../transport";
+import { subscribeEvents } from "../../transport";
 import type { SessionInfo } from "../useSessions";
-import { useSessions } from "../useSessions";
+import { isAuthError, pollDelayMs, useSessions } from "../useSessions";
 
-const mockRpc = vi.mocked(rpc);
+const mockRpc = sessionRpc;
 const mockSubscribeEvents = vi.mocked(subscribeEvents);
 
 // ---------------------------------------------------------------------------
@@ -43,6 +46,35 @@ function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionI
 		...overrides,
 	};
 }
+
+describe("mobile completion visibility", () => {
+	it("opening a working session does not hide its later completion", async () => {
+		const working = makeSession("agent", {
+			state: { awaiting_input: false, rate_limited: false, last_activity_ms: 1, agent_state: "working" },
+		});
+		const completed = makeSession("agent", {
+			state: { awaiting_input: false, rate_limited: false, last_activity_ms: 2, agent_state: "completed" },
+		});
+		mockRpc
+			.mockReset()
+			.mockResolvedValueOnce([working] as never)
+			.mockResolvedValueOnce([completed] as never);
+		let hook!: ReturnType<typeof useSessions>;
+		const dispose = createRoot((dispose) => {
+			hook = useSessions();
+			return dispose;
+		});
+		try {
+			await vi.waitFor(() => expect(hook.sessions()).toHaveLength(1));
+			hook.markSeen("agent");
+			hook.refresh();
+			await vi.waitFor(() => expect(hook.sessions()[0].state?.agent_state).toBe("completed"));
+			expect(hook.sessions()[0].unseen).toBe(true);
+		} finally {
+			dispose();
+		}
+	});
+});
 
 /**
  * Create a deferred promise we can resolve/reject manually.
@@ -265,7 +297,7 @@ describe("useSessions — refreshing signal", () => {
 		await failD.promise.catch(() => {});
 		await Promise.resolve();
 
-		expect(error()).toBe("server error");
+		expect(error()).toBe("Could not connect to the server.");
 
 		// Trigger a successful refresh — should clear the error
 		const successD = deferred<SessionInfo[]>();
@@ -302,65 +334,6 @@ describe("useSessions — refreshing signal", () => {
 
 		// loading is false after initial fetch completes
 		expect(loading()).toBe(false);
-
-		dispose();
-	});
-
-	it("questionCount reflects sessions with awaiting_input", async () => {
-		const initialD = deferred<SessionInfo[]>();
-		mockRpc.mockReturnValue(initialD.promise as Promise<never>);
-
-		let questionCount: () => number = () => 0;
-		let refresh: () => void = () => {};
-
-		const dispose = createRoot((dispose) => {
-			const hook = useSessions();
-			questionCount = hook.questionCount;
-			refresh = hook.refresh;
-			return dispose;
-		});
-
-		initialD.resolve([]);
-		await initialD.promise;
-		await Promise.resolve();
-		expect(questionCount()).toBe(0);
-
-		// Refresh with sessions that have questions
-		const refreshD = deferred<SessionInfo[]>();
-		mockRpc.mockReturnValue(refreshD.promise as Promise<never>);
-		refresh();
-
-		refreshD.resolve([
-			makeSession("s1", {
-				state: {
-					awaiting_input: true,
-					rate_limited: false,
-					shell_state: "idle",
-					last_activity_ms: Date.now(),
-				},
-			}),
-			makeSession("s2", {
-				state: {
-					awaiting_input: false,
-					rate_limited: false,
-					shell_state: "busy",
-					last_activity_ms: Date.now(),
-				},
-			}),
-			makeSession("s3", {
-				state: {
-					awaiting_input: true,
-					question_text: "Continue?",
-					rate_limited: false,
-					shell_state: "idle",
-					last_activity_ms: Date.now(),
-				},
-			}),
-		]);
-		await refreshD.promise;
-		await Promise.resolve();
-
-		expect(questionCount()).toBe(2);
 
 		dispose();
 	});
@@ -544,11 +517,17 @@ describe("useSessions — SSE subscription", () => {
 		await vi.advanceTimersByTimeAsync(0);
 
 		// `subscribeEvents` derives the `?types=` query from the handler keys, so
-		// one call with exactly these three keys is what keeps the client from
+		// one call with exactly these keys is what keeps the client from
 		// receiving and parsing every event kind the backend publishes.
 		expect(mockSubscribeEvents).toHaveBeenCalledTimes(1);
 		const handlers = mockSubscribeEvents.mock.calls[0][0];
-		expect(Object.keys(handlers).sort()).toEqual(["pty-parsed", "session-closed", "session-created"]);
+		expect(Object.keys(handlers).sort()).toEqual([
+			"chat-view-changed",
+			"pty-parsed",
+			"session-closed",
+			"session-created",
+			"settings-changed",
+		]);
 
 		dispose();
 	});
@@ -740,6 +719,82 @@ describe("useSessions — visibility gating", () => {
 		await vi.advanceTimersByTimeAsync(30_000);
 		expect(mockRpc).toHaveBeenCalledTimes(1);
 
+		dispose();
+	});
+});
+
+describe("offline polling", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	/** Plausible bug: a dead server is polled every 3s forever, draining the phone battery. */
+	it("backs off while polls fail and a manual refresh retries at once", async () => {
+		mockRpc.mockReset().mockRejectedValue(new Error("offline"));
+		let hook!: ReturnType<typeof useSessions>;
+		const dispose = createRoot((dispose) => {
+			hook = useSessions();
+			return dispose;
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockRpc).toHaveBeenCalledTimes(1);
+		// failure 1 waits 3s, failure 2 waits 6s: the 6s mark polls once, the 9s mark does not
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(mockRpc).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(mockRpc).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(mockRpc).toHaveBeenCalledTimes(3);
+		hook.refresh();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockRpc).toHaveBeenCalledTimes(4);
+		dispose();
+	});
+
+	/** Plausible bug: 401/403 counted as an outage, so the UI says "retrying" instead of "sign in". */
+	it("flags an auth failure and clears it on success", async () => {
+		mockRpc.mockReset().mockRejectedValueOnce(Object.assign(new Error("RPC failed: 401"), { status: 401 }));
+		let hook!: ReturnType<typeof useSessions>;
+		const dispose = createRoot((dispose) => {
+			hook = useSessions();
+			return dispose;
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hook.authError()).toBe(true);
+		mockRpc.mockResolvedValue([] as never);
+		hook.refresh();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hook.authError()).toBe(false);
+		dispose();
+	});
+
+	it("pollDelayMs doubles from 3s and caps at 30s; only 401/403 are auth errors", () => {
+		expect([0, 1, 2, 3, 4, 9].map(pollDelayMs)).toEqual([3000, 6000, 12000, 24000, 30000, 30000]);
+		expect(isAuthError(Object.assign(new Error("x"), { status: 403 }))).toBe(true);
+		expect(isAuthError(Object.assign(new Error("x"), { status: 500 }))).toBe(false);
+		expect(isAuthError(new Error("offline"))).toBe(false);
+	});
+});
+
+// Catches: mobile Chat opens another EventSource or refreshes unrelated PTYs.
+describe("shared mobile chat wake", () => {
+	it("routes only the watched session through the existing SSE subscription and releases it", async () => {
+		mockRpc.mockResolvedValue([] as never);
+		mockSubscribeEvents.mockClear();
+		let hook!: ReturnType<typeof useSessions>;
+		const dispose = createRoot((dispose) => {
+			hook = useSessions();
+			return dispose;
+		});
+		const wake = vi.fn();
+		const unwatch = await hook.subscribeChatWake("watched", wake);
+		expect(mockSubscribeEvents).toHaveBeenCalledTimes(1);
+		sseHandlers.get("chat-view-changed")?.({ session_id: "other" });
+		expect(wake).not.toHaveBeenCalled();
+		sseHandlers.get("chat-view-changed")?.({ session_id: "watched" });
+		expect(wake).toHaveBeenCalledTimes(1);
+		unwatch();
+		sseHandlers.get("chat-view-changed")?.({ session_id: "watched" });
+		expect(wake).toHaveBeenCalledTimes(1);
 		dispose();
 	});
 });

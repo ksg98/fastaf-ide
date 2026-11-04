@@ -69,6 +69,16 @@ describe("resolveTuicPath", () => {
 			const result = resolveTuicPath("../../etc/passwd", ["/repo"], "/repo");
 			expect(result).toBeNull();
 		});
+
+		it("rejects mid-path traversal that escapes repo root", () => {
+			const result = resolveTuicPath("src/../../secret.txt", ["/repo"], "/repo");
+			expect(result).toBeNull();
+		});
+
+		it("drops the trailing slash of a directory path", () => {
+			const result = resolveTuicPath("src/", ["/repo"], "/repo");
+			expect(result).toEqual({ repoPath: "/repo", relPath: "src" });
+		});
 	});
 
 	// -------------------------------------------------------------------------

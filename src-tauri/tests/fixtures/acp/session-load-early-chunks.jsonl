@@ -1,0 +1,12 @@
+// Ego replays history before replying to session/load. The reverse request is
+// a barrier proving the host read the first chunks before the load response.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/load","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"load"}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"TUICommander v1"}}}}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000bb","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"unrelated session"}}}}
+{"step":"request","id":7,"method":"session/request_permission","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","toolCall":{"toolCallId":"call-1","title":"Read state"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}
+{"step":"expect_response","id":7,"result":{"outcome":{"outcome":"cancelled"}}}
+{"step":"respond","to":"load","result":{"configOptions":[]}}
+{"step":"notify","method":"session/update","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":".7.7 is connected.\nintent: Checking active agents (Agents)"}}}}
+{"step":"await_stdin_eof"}

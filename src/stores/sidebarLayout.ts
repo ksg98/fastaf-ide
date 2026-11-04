@@ -14,7 +14,7 @@ import { uiStore } from "./ui";
 
 /** True when a repo has at least one open terminal (the "active only" filter). */
 function repoIsActive(repo: RepositoryState): boolean {
-	return Object.values(repo.branches).some((b) => b.terminals.length > 0);
+	return Object.values(repo.workspaces).some((b) => b.terminals.length > 0);
 }
 
 /** Apply a repo predicate to a layout, dropping groups it empties entirely so
@@ -29,13 +29,13 @@ function filterLayout(layout: GroupedLayout, keep: (repo: RepositoryState) => bo
 }
 
 /** Grouped layout after the full visibility pipeline:
- *  raw layout → workspace filter → active-only filter → search filter → sort. */
+ *  raw layout → named-workspace filter → active-only filter → search filter → sort. */
 export function getVisibleLayout(): GroupedLayout {
 	let layout = repositoriesStore.getGroupedLayout();
 
-	// Workspace filter — membership-only; hidden repos stay fully alive
+	// Named-workspace filter — membership-only; hidden repos stay fully alive
 	// (watchers, terminals), this is just a view filter.
-	const workspace = repositoriesStore.getActiveWorkspace();
+	const workspace = repositoriesStore.getActiveNamedWorkspace();
 	if (workspace) {
 		const members = new Set(workspace.repoPaths);
 		layout = filterLayout(layout, (repo) => members.has(repo.path));
@@ -66,7 +66,7 @@ export function getVisibleLayout(): GroupedLayout {
 
 /** Visible repos flattened in display order for shortcut numbering: grouped
  *  repos first (skipping collapsed groups), then ungrouped — skipping
- *  collapsed/non-expanded repos whose branch rows are hidden. */
+ *  collapsed/non-expanded repos whose workspace rows are hidden. */
 export function getVisibleRepoSequence(): RepositoryState[] {
 	const layout = getVisibleLayout();
 	const sequence: RepositoryState[] = [];

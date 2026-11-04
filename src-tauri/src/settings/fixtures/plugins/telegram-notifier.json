@@ -1,0 +1,30 @@
+{
+  "botToken": "",
+  "chatId": "",
+  "events": {
+    "question": {
+      "enabled": true,
+      "silent": false
+    },
+    "rate-limit": {
+      "enabled": true,
+      "silent": false
+    },
+    "usage-limit": {
+      "enabled": true,
+      "silent": true
+    },
+    "ci-failure": {
+      "enabled": true,
+      "silent": false
+    },
+    "agent-stopped": {
+      "enabled": true,
+      "silent": false
+    },
+    "pr-url": {
+      "enabled": true,
+      "silent": true
+    }
+  }
+}

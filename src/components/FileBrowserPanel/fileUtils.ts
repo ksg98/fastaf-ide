@@ -8,11 +8,15 @@ import g from "../shared/git-status.module.css";
  * `src/App.tsx\n3.4 KB · modified 3h ago`.
  */
 export function fileTooltip(entry: DirEntry): string {
-	const size = entry.is_dir ? "" : formatSize(entry.size);
+	const path = entry.symlink_target_kind
+		? `${entry.path}\n${entry.symlink_target_kind} link → ${entry.symlink_target ?? "Target unavailable"}`
+		: entry.path;
+	// A link's size is the link's own, not its target's: leave it out.
+	const size = entry.is_dir || entry.symlink_target_kind ? "" : formatSize(entry.size);
 	// modified_at is seconds since the epoch (see DirEntry); formatRelativeTime wants ms.
 	const age = entry.modified_at ? formatRelativeTime(entry.modified_at * 1000) : "";
 	const meta = size && age ? `${size} · modified ${age}` : size || (age ? `Modified ${age}` : "");
-	return meta ? `${entry.path}\n${meta}` : entry.path;
+	return meta ? `${path}\n${meta}` : path;
 }
 
 /** Map git_status string to CSS class for status dot */

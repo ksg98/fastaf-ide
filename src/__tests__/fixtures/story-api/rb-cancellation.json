@@ -1,0 +1,165 @@
+{
+  "plan": {
+    "type": "plan",
+    "value": {
+      "id": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+      "project": "/home/rb/Gits/.tmp/to-test-1014-3ud_rbtc/repo",
+      "title": "Cancellation verification",
+      "source": "plan.md"
+    }
+  },
+  "after_cancel": {
+    "type": "plan_view",
+    "value": {
+      "stories": [
+        {
+          "id": "01a1386a-b6eb-7261-97e2-c08738eff432",
+          "planId": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+          "title": "A prerequisite",
+          "criteria": [
+            "Owned cancellation check"
+          ],
+          "checked": [
+            false
+          ],
+          "dependencies": [],
+          "priority": 2,
+          "origin": {
+            "type": "native"
+          },
+          "fileScope": [],
+          "status": "wont_fix",
+          "revision": 2,
+          "claimSession": null,
+          "abandoned": true
+        },
+        {
+          "id": "01a1386a-b70e-7525-a86e-bf5da5d30d54",
+          "planId": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+          "title": "B direct",
+          "criteria": [
+            "Owned cancellation check"
+          ],
+          "checked": [
+            false
+          ],
+          "dependencies": [
+            "01a1386a-b6eb-7261-97e2-c08738eff432"
+          ],
+          "priority": 2,
+          "origin": {
+            "type": "native"
+          },
+          "fileScope": [],
+          "status": "backlog",
+          "revision": 2,
+          "claimSession": null,
+          "abandoned": true
+        },
+        {
+          "id": "01a1386a-b737-7500-9b73-40d5413dd54d",
+          "planId": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+          "title": "C indirect",
+          "criteria": [
+            "Owned cancellation check"
+          ],
+          "checked": [
+            false
+          ],
+          "dependencies": [
+            "01a1386a-b70e-7525-a86e-bf5da5d30d54",
+            "01a1386a-b6eb-7261-97e2-c08738eff432"
+          ],
+          "priority": 2,
+          "origin": {
+            "type": "native"
+          },
+          "fileScope": [],
+          "status": "backlog",
+          "revision": 3,
+          "claimSession": null,
+          "abandoned": true
+        }
+      ],
+      "state": "active",
+      "wontFixCount": 1,
+      "allCancelled": false
+    }
+  },
+  "after_remove": {
+    "type": "plan_view",
+    "value": {
+      "stories": [
+        {
+          "id": "01a1386a-b6eb-7261-97e2-c08738eff432",
+          "planId": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+          "title": "A prerequisite",
+          "criteria": [
+            "Owned cancellation check"
+          ],
+          "checked": [
+            false
+          ],
+          "dependencies": [],
+          "priority": 2,
+          "origin": {
+            "type": "native"
+          },
+          "fileScope": [],
+          "status": "wont_fix",
+          "revision": 2,
+          "claimSession": null,
+          "abandoned": true
+        },
+        {
+          "id": "01a1386a-b70e-7525-a86e-bf5da5d30d54",
+          "planId": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+          "title": "B direct",
+          "criteria": [
+            "Owned cancellation check"
+          ],
+          "checked": [
+            false
+          ],
+          "dependencies": [],
+          "priority": 2,
+          "origin": {
+            "type": "native"
+          },
+          "fileScope": [],
+          "status": "ready",
+          "revision": 3,
+          "claimSession": null,
+          "abandoned": false
+        },
+        {
+          "id": "01a1386a-b737-7500-9b73-40d5413dd54d",
+          "planId": "01a1386a-b6bd-753f-a1a8-c9a3713d7ad0",
+          "title": "C indirect",
+          "criteria": [
+            "Owned cancellation check"
+          ],
+          "checked": [
+            false
+          ],
+          "dependencies": [
+            "01a1386a-b70e-7525-a86e-bf5da5d30d54",
+            "01a1386a-b6eb-7261-97e2-c08738eff432"
+          ],
+          "priority": 2,
+          "origin": {
+            "type": "native"
+          },
+          "fileScope": [],
+          "status": "backlog",
+          "revision": 3,
+          "claimSession": null,
+          "abandoned": true
+        }
+      ],
+      "state": "active",
+      "wontFixCount": 1,
+      "allCancelled": false
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "source": "synthetic-smoke-not-stall-red",
+  "wall_time_origin_ms": 0,
+  "reason": "synthetic smoke only; not captured from an agent or stall",
+  "dropped": 0,
+  "events": [
+    {
+      "kind": "paint",
+      "session": "smoke",
+      "at": 0,
+      "state": {
+        "metrics": {
+          "cellWidth": 8,
+          "cellHeight": 16,
+          "baseline": 12,
+          "fontSize": 14,
+          "dpr": 2,
+          "scaledCellWidth": 16,
+          "scaledCellHeight": 32
+        },
+        "fontFamily": "monospace",
+        "fontWeight": 400,
+        "width": 640,
+        "height": 128,
+        "background": "#000000",
+        "foreground": "#ffffff",
+        "neutral": "#000000",
+        "hidden": false,
+        "fullRepaint": true,
+        "projectionChanged": false,
+        "hiddenRows": [],
+        "answerMarkers": []
+      },
+      "rows": [
+        {
+          "index": 0,
+          "count": 3,
+          "wrapped": false,
+          "codepoints": "QQAAAEEAAABBAAAA",
+          "fg": "////AP///wD///8A",
+          "bg": "AAAAAAAAAAAAAAAA",
+          "attrs": "AAAA",
+          "cellExtras": [
+            [
+              0,
+              "\u0301"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

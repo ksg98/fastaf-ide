@@ -7,20 +7,49 @@
  *   Mount once inside MarkdownTab. Pass `contentRef` (the rendered markdown
  *   container) and callbacks for save/delete that operate on the raw source.
  */
+import { marked, type Token, type TokensList } from "marked";
 import { type Component, createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { generateTweakCommentId, normalizeForMatch, type TweakComment } from "../../utils/tweakComments";
+import {
+	findSourceMatch,
+	generateTweakCommentId,
+	normalizeForMatch,
+	type TweakComment,
+} from "../../utils/tweakComments";
+import { Button } from "../ui/Button";
+import { Textarea } from "../ui/Textarea";
 import s from "./MarkdownTab.module.css";
 
+export interface MarkdownChatReference {
+	source: string;
+	path: string;
+	insert: (reference: string) => void;
+}
+
 export interface CommentOverlayProps {
+	/** Present only when a chat can receive this document selection. */
+	chatReference?: MarkdownChatReference;
+	/** Mobile owns block comments; this overlay supplies selection actions only. */
+	selectionOnly?: boolean;
+	/** Native mobile selection handles do not reliably dispatch content mouseup. */
+	observeSelection?: boolean;
 	/** The rendered markdown container — used to scope selection and click events. */
 	contentRef: HTMLDivElement;
 	/** Called with the new or updated comment when the user saves. `occurrenceIndex`
 	 *  is the 0-based ordinal of the selected text among identical rendered
 	 *  occurrences, used to anchor the correct instance in the source. */
-	onSave: (comment: TweakComment, occurrenceIndex: number) => void;
+	onSave: (comment: TweakComment, occurrenceIndex: number) => Promise<boolean> | boolean | undefined;
+	/** Save a whole rendered Markdown block using its exact raw-source range.
+	 *  `comment.highlighted` is the raw source `blockSource` returned when the
+	 *  popover opened, so the caller can refuse a range the file moved under. */
+	onSaveBlock?: (
+		comment: TweakComment,
+		range: { start: number; end: number },
+	) => Promise<boolean> | boolean | undefined;
+	/** Raw source of a block range in the document currently rendered. */
+	blockSource?: (range: { start: number; end: number }) => string;
 	/** Called with the comment id when the user deletes a comment. */
-	onDelete: (id: string) => void;
+	onDelete: (id: string) => Promise<boolean> | boolean | undefined;
 }
 
 interface PopoverState {
@@ -32,6 +61,10 @@ interface PopoverState {
 	existingComment?: string;
 	existingCreatedAt?: string;
 	selectionText?: string;
+	sourceStart?: number;
+	sourceEnd?: number;
+	/** Raw block source captured when the popover opened. */
+	sourceSnapshot?: string;
 }
 
 interface TooltipState {
@@ -40,11 +73,68 @@ interface TooltipState {
 	text: string;
 }
 
+/**
+ * The top-level block whose comment gutter (36px left of it to 8px inside it)
+ * contains the point. Top-level blocks stack in document order, so a binary
+ * search on their vertical extent reads O(log n) layouts instead of all of them.
+ */
+function blockInGutter(blocks: ArrayLike<HTMLElement>, clientX: number, clientY: number): HTMLElement | null {
+	let low = 0;
+	let high = blocks.length - 1;
+	while (low <= high) {
+		const mid = (low + high) >> 1;
+		const rect = blocks[mid].getBoundingClientRect();
+		if (clientY < rect.top) high = mid - 1;
+		else if (clientY > rect.bottom) low = mid + 1;
+		else return clientX >= rect.left - 36 && clientX <= rect.left + 8 ? blocks[mid] : null;
+	}
+	return null;
+}
+
+/** Find the deepest list item under the pointer; ancestor items may overlap it. */
+function listItemInGutter(items: HTMLElement[], clientX: number, clientY: number): HTMLElement | null {
+	let low = 0;
+	let high = items.length;
+	while (low < high) {
+		const mid = (low + high) >> 1;
+		if (items[mid].getBoundingClientRect().top <= clientY) low = mid + 1;
+		else high = mid;
+	}
+	for (let item: HTMLElement | null = items[low - 1] ?? null; item; item = item.parentElement?.closest("li") ?? null) {
+		const rect = item.getBoundingClientRect();
+		const listLeft = outerList(item).getBoundingClientRect().left;
+		if (clientY <= rect.bottom && clientX >= listLeft - 60 && clientX <= rect.left + 8) return item;
+	}
+	return null;
+}
+
+/** List markers live outside each item's box; keep the action outside the entire list. */
+function outerList(item: HTMLElement): HTMLElement {
+	let list = item.parentElement!;
+	for (
+		let parent = list.parentElement?.closest<HTMLElement>("ul, ol");
+		parent;
+		parent = parent.parentElement?.closest<HTMLElement>("ul, ol")
+	) {
+		list = parent;
+	}
+	return list;
+}
+
 export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	const [btnPos, setBtnPos] = createSignal<{ x: number; y: number } | null>(null);
+	const [blockBtn, setBlockBtn] = createSignal<{
+		x: number;
+		y: number;
+		start: number;
+		end: number;
+		text: string;
+		listItem: boolean;
+	} | null>(null);
 	const [popover, setPopover] = createSignal<PopoverState | null>(null);
 	const [tooltip, setTooltip] = createSignal<TooltipState | null>(null);
 	const [draft, setDraft] = createSignal("");
+	const [selectionReference, setSelectionReference] = createSignal<string | null>(null);
 
 	// The selected text captured at "add comment" button time.
 	// We must snapshot it immediately because the selection may clear on click.
@@ -52,16 +142,35 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	// 0-based ordinal of the selection among identical rendered occurrences,
 	// captured alongside the text so the correct source instance is anchored.
 	let pendingOccurrence = 0;
+	let hoveredBlock: HTMLElement | null = null;
+	// Keep only the current document's definitions; selection events lex just their block.
+	let referenceDefinitions: { source: string; links: TokensList["links"] } | undefined;
+	const linksForSource = (source: string) => {
+		if (referenceDefinitions?.source !== source) {
+			referenceDefinitions = { source, links: marked.lexer(source).links };
+		}
+		return referenceDefinitions.links;
+	};
+
+	const clearBlockTarget = () => {
+		hoveredBlock?.classList.remove("tweak-block-target");
+		hoveredBlock = null;
+		setBlockBtn(null);
+	};
+
+	createEffect(() => {
+		props.chatReference?.source;
+		props.chatReference?.path;
+		setBtnPos(null);
+		setSelectionReference(null);
+	});
 
 	// ── Selection detection ──
 	//
-	// We deliberately do NOT listen to `selectionchange` on document: that event
-	// fires on every cursor movement and DOM selection update anywhere in the
-	// app (including xterm buffers repainting), which caused noticeable UI lag.
-	//
-	// Instead we listen to `mouseup` and `keyup` scoped to the markdown content
-	// element. These fire only when the user actively interacts with the
-	// markdown, which is the only time a new selection can be created.
+	// Desktop uses content-scoped mouseup/keyup: document selectionchange also
+	// fires for terminal repaints and previously caused UI lag. The mobile-only
+	// observeSelection opt-in follows native selection handles; its listener is
+	// removed when the Markdown review unmounts.
 
 	const checkSelectionAndUpdateButton = () => {
 		if (popover()) return;
@@ -80,6 +189,8 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		}
 
 		// Single-block only: skip selections that cross block boundaries.
+		// DEFERRED (2026-10-26) — chat inherits this comment guard; multi-block references
+		// need separate action eligibility and source-span matching (critic R2-3).
 		if (crossesBlockBoundary(range, props.contentRef)) {
 			setBtnPos(null);
 			return;
@@ -97,8 +208,23 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		// Use the last client rect so multi-line selections anchor the icon
 		// at the true end of the selection (not the bounding box corner).
 		const rects = range.getClientRects();
+		// biome-ignore lint/style/useAtIndex: DOMRectList has indexed access but no at method.
 		const rect = rects.length > 0 ? rects[rects.length - 1] : range.getBoundingClientRect();
+		const chat = props.chatReference;
+		const text = sel.toString().trim();
+		const match = chat && selectionSourceMatch(chat.source, props.contentRef, range, text, linksForSource(chat.source));
+		if (chat && match) {
+			const first = chat.source.slice(0, match.start).split("\n").length;
+			const last = chat.source.slice(0, match.end).split("\n").length;
+			setSelectionReference(
+				`${chat.path}:${first}-${last}\n\n${text
+					.split("\n")
+					.map((line) => `> ${line}`)
+					.join("\n")}`,
+			);
+		} else setSelectionReference(null);
 		const BTN_SIZE = 28;
+		clearBlockTarget();
 		setBtnPos({
 			x: rect.right + 4,
 			y: rect.top + rect.height / 2 - BTN_SIZE / 2,
@@ -106,6 +232,7 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	};
 
 	const handleMouseUp = () => checkSelectionAndUpdateButton();
+	const handleTouchEnd = () => checkSelectionAndUpdateButton();
 	const handleKeyUp = (e: KeyboardEvent) => {
 		// Only handle shift+arrow-style keyboard selection.
 		if (e.shiftKey || e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") {
@@ -116,10 +243,15 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	// ── Click listener — open view/edit popover on existing highlights ──
 
 	const handleClick = (e: MouseEvent) => {
+		if (props.selectionOnly) return;
 		// Ignore if click is inside an open popover (handled by popover itself).
 		const target = e.target as HTMLElement;
-		const span = target.closest(".tweak-highlight") as HTMLElement | null;
+		if (target.closest("a, button, input, select, textarea, label")) return;
+		const span = target.closest(".tweak-highlight, .tweak-block-highlight") as HTMLElement | null;
 		if (!span) return;
+		if (span.tagName === "LI" && target.closest("li") !== span) return;
+		// The click that ends a drag-select must leave the selection to the inline comment button.
+		if (window.getSelection()?.isCollapsed === false) return;
 
 		const id = span.dataset["tweakId"];
 		const comment = span.dataset["tweakComment"];
@@ -145,8 +277,12 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	// Hover tooltip: uses mouseover/mouseout (delegated) so no per-span listener.
 	const handleMouseOver = (e: MouseEvent) => {
 		const target = e.target as HTMLElement;
-		const span = target.closest(".tweak-highlight") as HTMLElement | null;
+		const span = target.closest(".tweak-highlight, .tweak-block-highlight") as HTMLElement | null;
 		if (!span) return;
+		if (span.tagName === "LI" && target.closest("li") !== span) {
+			setTooltip(null);
+			return;
+		}
 		const comment = span.dataset["tweakComment"];
 		if (!comment) return;
 		const rect = span.getBoundingClientRect();
@@ -159,25 +295,76 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	const handleMouseOut = (e: MouseEvent) => {
 		const target = e.target as HTMLElement;
 		const related = e.relatedTarget as HTMLElement | null;
-		const leavingSpan = target.closest(".tweak-highlight");
+		const leavingSpan = target.closest(".tweak-highlight, .tweak-block-highlight");
 		if (!leavingSpan) return;
 		// Still inside the same highlight span — don't clear.
 		if (related && leavingSpan.contains(related)) return;
 		setTooltip(null);
 	};
 
+	const handleBlockGutterMove = (e: MouseEvent) => {
+		if (props.selectionOnly || popover() || btnPos()) return;
+		const targets = props.contentRef.querySelectorAll<HTMLElement>(
+			"[data-comment-source-start][data-comment-source-end]",
+		);
+		const listItems = Array.from(targets).filter((target) => target.tagName === "LI");
+		let block = blockInGutter(
+			listItems.length ? Array.from(targets).filter((target) => target.tagName !== "LI") : targets,
+			e.clientX,
+			e.clientY,
+		);
+		block = listItemInGutter(listItems, e.clientX, e.clientY) ?? block;
+		const inlineCommentInBlock =
+			block &&
+			Array.from(block.querySelectorAll(".tweak-highlight")).some(
+				(span) => block!.tagName !== "LI" || span.closest("li") === block,
+			);
+		if (!block || block.classList.contains("tweak-block-highlight") || inlineCommentInBlock) {
+			clearBlockTarget();
+			return;
+		}
+		const start = Number(block.dataset.commentSourceStart);
+		const end = Number(block.dataset.commentSourceEnd);
+		if (!Number.isFinite(start) || !Number.isFinite(end)) {
+			clearBlockTarget();
+			return;
+		}
+		if (hoveredBlock !== block) {
+			hoveredBlock?.classList.remove("tweak-block-target");
+			hoveredBlock = block;
+			block.classList.add("tweak-block-target");
+		}
+		const rect = block.getBoundingClientRect();
+		const listItem = block.tagName === "LI";
+		const x = listItem ? outerList(block).getBoundingClientRect().left - 4 : Math.max(4, rect.left - 30);
+		const y = rect.top + 2;
+		const current = blockBtn();
+		if (current && current.x === x && current.y === y && current.start === start && current.end === end) return;
+		setBlockBtn({ x, y, start, end, text: (block.textContent ?? "").trim(), listItem });
+	};
+
 	onMount(() => {
+		const scrollHost = props.contentRef.parentElement ?? props.contentRef;
 		props.contentRef.addEventListener("mouseup", handleMouseUp);
+		props.contentRef.addEventListener("touchend", handleTouchEnd, { passive: true });
+		if (props.observeSelection) document.addEventListener("selectionchange", checkSelectionAndUpdateButton);
 		props.contentRef.addEventListener("keyup", handleKeyUp);
 		props.contentRef.addEventListener("click", handleClick);
 		props.contentRef.addEventListener("mouseover", handleMouseOver);
 		props.contentRef.addEventListener("mouseout", handleMouseOut);
+		scrollHost.addEventListener("mousemove", handleBlockGutterMove);
+		scrollHost.addEventListener("scroll", clearBlockTarget, { passive: true });
 		onCleanup(() => {
 			props.contentRef.removeEventListener("mouseup", handleMouseUp);
+			props.contentRef.removeEventListener("touchend", handleTouchEnd);
+			document.removeEventListener("selectionchange", checkSelectionAndUpdateButton);
 			props.contentRef.removeEventListener("keyup", handleKeyUp);
 			props.contentRef.removeEventListener("click", handleClick);
 			props.contentRef.removeEventListener("mouseover", handleMouseOver);
 			props.contentRef.removeEventListener("mouseout", handleMouseOut);
+			scrollHost.removeEventListener("mousemove", handleBlockGutterMove);
+			scrollHost.removeEventListener("scroll", clearBlockTarget);
+			clearBlockTarget();
 		});
 	});
 
@@ -193,6 +380,7 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		const range = sel.getRangeAt(0);
 		const rects = range.getClientRects();
 		const firstRect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+		// biome-ignore lint/style/useAtIndex: DOMRectList has indexed access but no at method.
 		const lastRect = rects.length > 0 ? rects[rects.length - 1] : firstRect;
 
 		// Snapshot the selection text + its occurrence ordinal before clearing.
@@ -211,14 +399,45 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		});
 	};
 
-	const handleSave = () => {
+	const openBlockCommentPopover = () => {
+		const block = blockBtn();
+		if (!block) return;
+		clearBlockTarget();
+		setDraft("");
+		setPopover({
+			x: block.x + 30,
+			y: block.y + 28,
+			mode: "new",
+			selectionText: block.text,
+			sourceStart: block.start,
+			sourceEnd: block.end,
+			sourceSnapshot: props.blockSource?.({ start: block.start, end: block.end }),
+		});
+	};
+
+	const handleSave = async () => {
 		const state = popover();
 		if (!state) return;
 
 		if (state.mode === "new") {
+			if (state.sourceStart !== undefined && state.sourceEnd !== undefined) {
+				if (!draft().trim()) return;
+				const saved = await props.onSaveBlock?.(
+					{
+						id: generateTweakCommentId(),
+						highlighted: state.sourceSnapshot ?? "",
+						comment: draft().trim(),
+						createdAt: new Date().toISOString(),
+						anchor: "block",
+					},
+					{ start: state.sourceStart, end: state.sourceEnd },
+				);
+				if (saved !== false) closePopover();
+				return;
+			}
 			const highlighted = pendingSelection;
 			if (!highlighted || !draft().trim()) return;
-			props.onSave(
+			const saved = await props.onSave(
 				{
 					id: generateTweakCommentId(),
 					highlighted,
@@ -227,11 +446,12 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 				},
 				pendingOccurrence,
 			);
+			if (saved !== false) closePopover();
 		} else {
 			// Edit existing — preserve original createdAt, update only the comment text.
 			// Occurrence ordinal is irrelevant for edits (matched by id).
 			if (!state.existingId || !state.existingHighlighted) return;
-			props.onSave(
+			const saved = await props.onSave(
 				{
 					id: state.existingId,
 					highlighted: state.existingHighlighted,
@@ -240,15 +460,14 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 				},
 				0,
 			);
+			if (saved !== false) closePopover();
 		}
-		closePopover();
 	};
 
-	const handleDelete = () => {
+	const handleDelete = async () => {
 		const state = popover();
 		if (!state?.existingId) return;
-		props.onDelete(state.existingId);
-		closePopover();
+		if ((await props.onDelete(state.existingId)) !== false) closePopover();
 	};
 
 	const closePopover = () => {
@@ -288,21 +507,66 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 
 			{/* Floating "Comment" button near selection */}
 			<Show when={btnPos() && !popover()}>
-				<button
+				<div
+					class={s.selectionActions}
+					style={{
+						left: `${Math.max(4, Math.min(btnPos()!.x, window.innerWidth - (props.chatReference ? 240 : 48)))}px`,
+						top: `${Math.max(4, Math.min(btnPos()!.y, window.innerHeight - 48))}px`,
+					}}
+				>
+					<Button
+						shape="icon"
+						onMouseDown={(e) => {
+							e.preventDefault();
+							openNewCommentPopover();
+						}}
+						title="Add inline comment"
+						aria-label="Add inline comment"
+					>
+						<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+							<path d="M2 2h12v9H9.5l-1.5 2-1.5-2H2V2zm1 1v7h4.17l.83 1.11L8.83 10H13V3H3z" />
+							<path d="M5 6h6v1H5zm0 2h4v1H5z" opacity="0.6" />
+						</svg>
+					</Button>
+					<Show when={props.chatReference && selectionReference()}>
+						<Button
+							aria-label="Send to AI Chat"
+							onMouseDown={(event) => event.preventDefault()}
+							onClick={() => {
+								const reference = selectionReference();
+								if (!reference) return;
+								props.chatReference?.insert(reference);
+								setBtnPos(null);
+								window.getSelection()?.removeAllRanges();
+							}}
+						>
+							Send to AI Chat
+						</Button>
+					</Show>
+				</div>
+			</Show>
+
+			<Show when={blockBtn() && !btnPos() && !popover()}>
+				<Button
+					shape="icon"
 					class={s.commentBtn}
-					style={{ left: `${btnPos()!.x}px`, top: `${btnPos()!.y}px` }}
+					style={{
+						left: `${blockBtn()!.x}px`,
+						top: `${blockBtn()!.y}px`,
+						transform: blockBtn()!.listItem ? "translateX(-100%)" : undefined,
+					}}
 					onMouseDown={(e) => {
 						e.preventDefault();
-						openNewCommentPopover();
+						openBlockCommentPopover();
 					}}
-					title="Add inline comment"
-					aria-label="Add inline comment"
+					title="Comment on this block"
+					aria-label="Comment on this block"
 				>
 					<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
 						<path d="M2 2h12v9H9.5l-1.5 2-1.5-2H2V2zm1 1v7h4.17l.83 1.11L8.83 10H13V3H3z" />
 						<path d="M5 6h6v1H5zm0 2h4v1H5z" opacity="0.6" />
 					</svg>
-				</button>
+				</Button>
 			</Show>
 
 			{/* Popover (new comment or view/edit) */}
@@ -330,7 +594,7 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 								"{(state().existingHighlighted ?? state().selectionText ?? "").slice(0, 60)}"
 							</div>
 
-							<textarea
+							<Textarea
 								class={s.popoverTextarea}
 								placeholder="Add your comment… (Ctrl+Enter to save)"
 								value={draft()}
@@ -341,20 +605,14 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 
 							<div class={s.popoverActions}>
 								<Show when={state().mode === "view"}>
-									<button class={`${s.popoverBtn} ${s.popoverBtnDanger}`} onClick={handleDelete}>
+									<Button variant="danger" onClick={handleDelete}>
 										Delete
-									</button>
+									</Button>
 								</Show>
-								<button class={s.popoverBtn} onClick={closePopover}>
-									Cancel
-								</button>
-								<button
-									class={`${s.popoverBtn} ${s.popoverBtnPrimary}`}
-									onClick={handleSave}
-									disabled={!draft().trim()}
-								>
+								<Button onClick={closePopover}>Cancel</Button>
+								<Button variant="primary" onClick={handleSave} disabled={!draft().trim()}>
 									Save
-								</button>
+								</Button>
 							</div>
 						</div>
 					);
@@ -367,6 +625,59 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 // ── Helpers ──
 
 const BLOCK_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "BLOCKQUOTE", "PRE", "TD", "TH"]);
+
+/** Keep source coordinates, but exclude link syntax that has no rendered text. */
+function visibleLinkSource(source: string, links: TokensList["links"]): string {
+	const chars = source.split("");
+	const hide = (start: number, end: number) => {
+		for (let i = start; i < end; i++) {
+			// The matcher ignores underscores: hidden syntax must not insert visible spaces.
+			if (chars[i] !== "\n" && chars[i] !== "\r") chars[i] = "_";
+		}
+	};
+	const visit = (tokens: Token[], offset: number) => {
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const labelStart = token.raw.indexOf(token.text);
+				hide(offset, offset + labelStart);
+				hide(offset + labelStart + token.text.length, offset + token.raw.length);
+				visit(token.tokens!, offset + labelStart);
+			} else if (token.type === "image" || token.type === "html") {
+				hide(offset, offset + token.raw.length);
+			} else if ("tokens" in token && token.tokens) {
+				const childStart = token.raw.indexOf(token.tokens.map((child: Token) => child.raw).join(""));
+				if (childStart >= 0) visit(token.tokens, offset + childStart);
+			}
+			offset += token.raw.length;
+		}
+	};
+	const lexer = new marked.Lexer();
+	lexer.tokens.links = links;
+	visit(lexer.inlineTokens(source), 0);
+	return chars.join("");
+}
+
+function selectionSourceMatch(
+	source: string,
+	root: HTMLElement,
+	range: Range,
+	text: string,
+	links: TokensList["links"],
+) {
+	const element =
+		range.startContainer.nodeType === Node.ELEMENT_NODE
+			? (range.startContainer as Element)
+			: range.startContainer.parentElement;
+	const block = element?.closest<HTMLElement>("[data-comment-source-start][data-comment-source-end]");
+	const start = block && root.contains(block) ? Number(block.dataset.commentSourceStart) : 0;
+	const end = block && root.contains(block) ? Number(block.dataset.commentSourceEnd) : source.length;
+	const match = findSourceMatch(
+		visibleLinkSource(source.slice(start, end), links),
+		text,
+		occurrenceOrdinal(block ?? root, range, text),
+	);
+	return match ? { start: start + match.start, end: start + match.end } : null;
+}
 
 /**
  * 0-based ordinal of `selectionText` among identical rendered occurrences: the

@@ -24,11 +24,11 @@ When modifying PluginHost API, capabilities, manifest schema, Tauri commands use
 | `src/plugins/pluginRegistry.ts` | Implementation in `buildHost()` |
 | `src/components/PluginPanel/pluginBaseStyles.ts` | Base CSS classes available to all plugin panels |
 | `src-tauri/src/plugins.rs` | `KNOWN_CAPABILITIES` list (new capabilities); `set_plugin_output_watchers` sync |
-| `src-tauri/src/output_watchers.rs` | Rust-side OutputWatcher matching: `WatcherSpec`, `OutputWatcherRegistry::sync` (per-client sets; which patterns are rejected back to the frontend), `to_portable_pattern` (ECMAScript class escapes — Rust may over-match, never under-match), `clean_line` — a **port** of `src/utils/stripAnsi.ts` + the backtick strip — and `StreamLines`, the **only** line assembler. Changing `stripAnsi.ts` requires changing `clean_line`, or the two sides match on different text |
+| `src-tauri/crates/tuic-terminal/src/output_watchers.rs` | Rust-side OutputWatcher matching: `WatcherSpec`, `OutputWatcherRegistry::sync` (per-client sets; which patterns are rejected back to the frontend), `to_portable_pattern` (ECMAScript class escapes — Rust may over-match, never under-match), `clean_line` — a **port** of `src/utils/stripAnsi.ts` + the backtick strip — and `StreamLines`, the **only** line assembler. Changing `stripAnsi.ts` requires changing `clean_line`, or the two sides match on different text |
 | `src-tauri/src/lib.rs` | Register new Tauri commands in `invoke_handler` |
 | `docs/backend/command-threading.md` | Where a new command runs (`fn` = macOS main thread). Update the audit when a command changes placement |
 | `docs/plugins.md` | Plugin developer guide (API reference, capabilities table, **Panel CSS Design Strategy** section, examples) |
-| `src-tauri/src/mcp_http/plugin_docs.rs` | AI-optimized plugin reference (`PLUGIN_DOCS` const — **must stay in sync with `docs/plugins.md`**) |
+| `src-tauri/src/mcp_http/plugin_docs.rs` | AI-optimized plugin reference (`PLUGIN_DOCS` const — **must stay in sync with `docs/plugins.md`**); `cargo nextest run -E 'test(plugin_docs)'` checks source-derived capability, host method, base CSS and manifest/core UX inventories. Extend the UX check when adding settings schema field kinds or Tasks views. |
 | `docs/api/tauri-commands.md` | Tauri commands reference table |
 | `docs/api/http-api.md` | HTTP API reference (if new HTTP endpoints) |
 | `docs/backend/mcp-http.md` | MCP/HTTP server docs (if new routes) |
@@ -43,6 +43,7 @@ When modifying PTY behavior, output parsing, shell state, or terminal UI:
 | `docs/backend/pty.md` | PTY session lifecycle, reader threads, output handling |
 | `docs/backend/output-parser.md` | Rate limits, structured events, parsing rules |
 | `docs/frontend/canvas-terminal-audit.md` | CanvasTerminal feature completeness audit |
+| `docs/frontend/terminal-features.md` | Consolidated terminal behaviors, shortcuts, configurable features |
 | `docs/FEATURES.md` | Section 1 (Terminal Management) |
 | `docs/user-guide/terminals.md` | User-facing terminal features |
 | `docs/api/tauri-commands.md` | PTY commands (create_pty, write_pty, resize_pty, etc.) |
@@ -67,6 +68,8 @@ When adding or changing Tauri commands:
 | File | What to update |
 |------|----------------|
 | `src-tauri/src/lib.rs` | `invoke_handler!` macro registration |
+| `src/transport.ts` | `COMMAND_TABLE` entry, or `INTENTIONALLY_UNMAPPED` if host-only |
+| `src-tauri/src/mcp_http/command_table_paths.txt` | **Generated** — regenerate with `pnpm vitest run src/__tests__/transport.test.ts -u`. The Rust route probe reads it; never hand-edit |
 | `docs/api/tauri-commands.md` | Command signature + description |
 | `docs/api/http-api.md` | HTTP endpoint mapping (if browser/remote mode) |
 | Domain backend doc | e.g. `docs/backend/pty.md`, `docs/backend/git.md` |
@@ -76,26 +79,51 @@ When adding a new `app.emit(event_name, payload)` call, document it here and lis
 
 | Event | Payload | Emitted from | Frontend listener |
 |-------|---------|-------------|-------------------|
+| `ideas-changed` | `{}` | Planner and UI notes mutations after persistence; desktop plus `/events` SSE | `ideasStore.hydrate()` reloads after local writes; reconnect also reloads |
+| `ai-chat-selection-changed` | `{}` | Config transaction after shared AI Chat selection changes; desktop plus `/events` SSE | `createAiChatSelectionSync` rereads the host selection on invalidation and reconnect; `useAcpChat` adopts without echo writes |
+| `open-markdown-tabs-changed` | `{}` | `open_markdown_tabs::publish`: desktop IPC and `/events` SSE after a changed metadata snapshot | `createOpenMarkdownTabs` refetches one session-owned list shared by the mobile menu and wide-screen dropdown |
+| `background-mode-changed` | `{ state: "hidden" \| "unloaded" \| "visible" }` | Rust background lifecycle, desktop + `/events` SSE | `useAppInit.ts` logs desktop state; remote clients may display it |
+| `close-dialog` | `{ kind: "ask" \| "confirm_quit", sessions: number, background_available: boolean }` | Rust background close policy; dual-emit to desktop and `/events` SSE | `useAppInit.ts` presents it on desktop only |
+| `native-notification-click` | `{ kind: "terminal", id }`, `{ kind: "progress", project, ptyId? }`, `{ kind: "aichat", id }`, `{ kind: "automation", id }` or `{ kind: "pr", url }` | `native_notification.rs` when a macOS Notification Center alert is clicked; desktop window only | `useAppInit.ts` → `navigateFromNativeNotice` → terminal, Progress dialog, AI Chat, saved automation run or the PR conversation in Tasks (GitHub fallback without a loaded provider) |
+| `session-created` | `{ session_id, tuic_session: string \| null, cwd, agent_type, display_name, parent_session }` | Generic HTTP sessions and MCP/HTTP agent spawns use `session.rs emit_native_agent_session_created` for desktop; `register_pty_session` publishes SSE with the same live identity binding | `useAppInit.ts` retains `tuic_session` for live caller-bound worktree placement |
 | `session-standby` | `{ session_id: string, standby: bool }` | `pty.rs emit_standby_event()` | `useAppInit.ts` → `terminalsStore.update(termId, { standby })` |
-| `worktree-created` | `{ repo_path: string, branch: string, worktree_path: string }` | `mcp_transport.rs`, `session.rs`, `worktree_routes.rs` | TBD — frontend switch prompt |
-| `worktree-removed` | `{ repo_path: string, branch: string }` | `state.rs notify_worktree_removed()` — called by EVERY removal path: `worktree.rs` (`remove_worktree`, `finalize_merged_worktree`, `merge_and_archive_worktree`, `delete_local_branch`), `worktree_routes.rs` (`remove_worktree_http`, `finalize_merged_worktree_http`), `mcp_transport.rs` (`repo worktree_remove`) | `useWorktreeSwitchPrompt.ts` → `pruneRemovedWorktree()` closes the branch terminals and drops the sidebar row |
+| `design-mode-changed` | `{ repo_path: string, session_id: string, status: "armed" \| "stopped" }` | `design_mode` lifecycle, dual-emitted to the desktop window and `event_bus` → `/events` SSE when inspection starts, rebinds or stops | Design Mode status listener → bound agent tab indicator; reads the repository and session from the event, not the currently focused tab |
+| `worktree-created` | `state.rs WorktreeCreatedPayload` — `{ repo_path: string, workspace_id: string, branch: string, worktree_path: string, kind: "worktree", creator_session: string | null, spawn_session: boolean }`. `workspace_id` identifies the linked-worktree row; `branch` remains display and Git-ref data. | `state.rs notify_worktree_created()` — the only producer; called by `session.rs` (`/sessions/worktree`) and `worktree_routes.rs create_worktree_shared` (HTTP route + MCP `repo worktree_create`). Dual-emits: desktop `emit` plus `event_bus` → `/events` SSE, both serializing the same struct. | `useWorktreeSwitchPrompt.ts` → `setWorkspace(repo, workspace_id, { branchName, worktreePath, kind, parentRepoPath })` + cwd-based caller reconciliation when `spawn_session=false` + Worktrees bell item with an explicit switch action; no toast |
+| `session-worktree-declared` | Same `WorktreeCreatedPayload` shape; `creator_session` is the declaring live PTY and `spawn_session=false`. | `state.rs notify_session_worktree_declared()` after caller validation and the locked repository delta; desktop emit plus SSE bus. | `useWorktreeSwitchPrompt.ts` registers/discovers the existing row and adopts the caller-bound declaration for display placement without changing cwd; no creation bell item. |
+| `worktree-removed` | `state.rs WorktreeRemovedPayload` — `{ repo_path: string, workspace_id: string, branch: string }`. Addressed by the stable workspace id; `branch` is display data captured before the checkout goes away. | `state.rs notify_worktree_removed()` — called by every removal path: `worktree.rs` (`remove_worktree`, `finalize_merged_worktree`, `merge_and_archive_worktree`, `delete_local_branch` — all addressed by `workspace_id`), `worktree_routes.rs` (`remove_worktree_http`, `finalize_merged_worktree_http`), `mcp_transport.rs` (`repo worktree_remove`). Also drops the branch's work-item link (`workitem_links::drop_link_of_removed_worktree`) | `useWorktreeSwitchPrompt.ts` → `pruneRemovedWorktree()` closes only terminals whose current cwd is inside the removed checkout, re-homes surviving tabs and drops the sidebar row |
+| `settings-changed` | `{ section, generation, persisted, applied }` — no values or credential-derived hashes; process-local generation | `settings/api.rs` after durable facade outcomes (including partial persistence), plus state-bearing legacy save adapters; dual-emitted by `AppState::publish_settings_changed` to desktop and `/events` SSE | `services/settingsRefresh.ts`, activated by `useAppInit.ts` and mounted Settings pages; non-saving owner read/apply, dirty-edit preservation, per-owner/section deduplication and reconnect resync |
 | `repositories-changed` | `{}` — payload-free on purpose. One backend serves the desktop WebView, the browser and the PWA, and each keeps its own compare-and-swap baseline; the receiver only needs "disk moved, re-read it". Shipping the document would copy the whole repository set to every client on every save, including the one that just wrote it. | `state.rs notify_repositories_changed()` — called by both save paths, `config.rs save_repositories` (IPC) and `config_routes.rs put_repositories` (HTTP), and **only when `save_repositories_request` returns `Ok(true)`**, i.e. the delta actually moved the document. Also on `event_bus` for `/events` SSE | `repositories.ts` `startRemoteSync()` (registered by `hydrate`) → re-reads `load_repositories` → `adoptRemoteRepositories()`, which moves the store **and** the persisted baseline together for every key this client has no unsaved intent for. `activeRepoPath` is never adopted — focus is per-window |
-| `repo-changed` (git-state) | `{ repo_path: string, kind: "git-state" }` | `repo_watcher.rs` — **only when the git-state fingerprint changed** (index size + resolved HEAD + porcelain status + the sorted `.git/worktrees/*` set; skips no-op `.git` touches). The worktree set is an input because add/remove touches nothing else, so worktree-only changes used to be swallowed and left ghost sidebar rows. Last fingerprint in `AppState.repo_git_fingerprints`. | `useAppInit.ts` → coalesced one bump/repo/frame via `revisionCoalescer` → `repositoriesStore.bumpGitRevision`, which bumps **both** the general and the git revision |
+| `repo-changed` (git-state) | `{ repo_path: string, kind: "git-state" }` | `repo_watcher.rs` — **when the git-state fingerprint changed, or a shared ref/configuration or linked-HEAD event is pending** (the fingerprint covers index size + resolved HEAD + porcelain status + the sorted `.git/worktrees/*` set; the path-driven exception observes sibling commits without scanning sibling HEADs). The worktree set is an input because add/remove touches nothing else, so worktree-only changes used to be swallowed and left ghost sidebar rows. Last fingerprint in `AppState.repo_git_fingerprints`. | `useAppInit.ts` → coalesced one bump/repo/frame via `revisionCoalescer` → `repositoriesStore.bumpGitRevision`, which bumps **both** the general and the git revision |
 | `repo-changed` (working-tree) | `{ repo_path: string, kind: "working-tree" }` | `repo_watcher.rs` — non-`.git`, non-ignored file changes, debounced 1.5s when the repo is hot (has ≥1 open terminal, `set_hot_repos`) and 15s when cold. Ignore coverage is the **full git set**: the global `core.excludesFile`, the root `.gitignore` plus `.git/info/exclude`, and nested `.gitignore` files. `ALWAYS_EXCLUDED_DIRS` matches on **any path component**, so a nested git repo's `.git/` is treated as noise rather than a working-tree change. No fingerprint guard, but a firing git-state emit **cancels the pending working-tree emit** as a duplicate. Covers the main checkout **and every linked worktree** (`sync_worktree_watches`), which is what keeps a branch's sidebar diff badge live while an agent works in its worktree; the payload always names the parent repo. | `useAppInit.ts` → `revisionCoalescer` → `bumpRevision` (general revision **only**) + debounced `refreshAllBranchStats` |
 | `head-changed` | `{ repo_path: string, branch: string }` | `repo_watcher.rs` — **only when the resolved HEAD target changed** (`resolve_head_target`); skips the Linux inotify storm where `.git/HEAD` events recur without HEAD moving (issue #82). Last target in `AppState.repo_head_targets`; suppressed-emit count in `AppState.repo_head_emits_suppressed`. | `useAppInit.ts` → branch rename/activate (also dedupes on `activeBranch === branch`) |
-| `review-progress` | `{ repo_path: string, payload: { pr_number, summary, files (COUNT, not the vector — the only consumer reads its length), phase, done, llm_used, llm_model } }` | `diff_triage.rs` `ProgressSink::PrReview` during `run_pr_review`; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener updates per-PR review progress |
-| `conflict-assist-status` | `{ repo_path: string, payload: { pr_number, status, conflicted_files } }` | `conflict_assist.rs` `emit_conflict_assist_status()` lifecycle; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener updates conflict-assist state |
-| `proposals-ready` | `{ repo_path: string, payload: ImprovementScanResult }` | `improvement_scan.rs` after `run_improvement_scan` completes; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener accumulates proposals for the GitHub Ops dashboard — the sole publisher, since it reaches every window on both transports while the invoke's return value reaches only the caller |
+| `conflict-assist-status` | `{ repo_path: string, payload: { pr_number, status, conflicted_files } }` | `conflict_assist.rs` `emit_conflict_assist_status()` lifecycle; also sent on `event_bus` for `/events` SSE. Only the window emit is gated on `feature = "desktop"` — the bus send runs on every build, because `POST /repo/conflict-assist` is mounted unconditionally (#808-84e1) | `githubOpsStore` listener updates conflict-assist state; remote window forwarding accepts only the registered repository owner (#1443-e2fd) |
+| `review-progress` | `{ repo_path: string, payload: { pr_number, done, findings_count?, error? } }` | `pr_review.rs` `emit_review_progress()` — once with `done: false` when the turn starts, once with `done: true` carrying either `findings_count` or ego's `error`; also sent on `event_bus` for `/events` SSE, on every build — only the window emit is desktop-gated (#808-84e1) | `githubOpsStore` listener → Review findings column; remote notices are gated by repository owner. `pr_number` must be a JSON **number**: `Number(null)` is `0`, so a missing one would file as PR #0 |
+| `scheduled-job-needs-approval` | `{ job_id: string, goal: string, session_id: string, command: string, reason: string, approval_id?: string }` — `approval_id` only in the **window** copy | `ai_agent/scheduler.rs notify_needs_approval()` (payloads split by `needs_approval_payloads()`) when a scheduled run's Assisted conversation emits `NeedsApproval`; dual-emitted (window + `/events` bus `AppEvent::ScheduledJobNeedsApproval`). The bus copy omits `approval_id` on purpose: any local process can read `/events` | `useAiEngineEvents.ts` → sticky toast with **Approve** / **Deny** → `approve_conversation_action {sessionId, approved, approvalId}`; without an id, a notice with no buttons |
+| `scheduled-job-completed` | `{ job_id: string, goal: string, timed_out: boolean }` | `ai_agent/scheduler.rs notify_completed()` when a scheduled task's run ends or hits `max_duration_secs`; dual-emitted (window + `/events` bus `AppEvent::ScheduledJobCompleted`) | `useAiEngineEvents.ts` → completed / timed-out toast |
+| `ai-suggestion` | `{ session_id: string, trigger_reason: string, proposed_goal: string }` | `ai_agent/knowledge.rs notify_suggestion()` when `triggers.rs` classifies a failed or timed-out command in a session with suggestions on (30 s per-session debounce); dual-emitted (window + `/events` bus `AppEvent::AiSuggestion`) | `useAiEngineEvents.ts` → toast with **Investigate** |
+| `proposals-ready` | `{ repo_path: string, payload: { focus, proposals[] } }` | `improvement_scan.rs` `emit_proposals_ready()` just before the command returns; also sent on `event_bus` for `/events` SSE, on every build — only the window emit is desktop-gated (#808-84e1). It, not the return value, is the path that reaches every window and every transport | `githubOpsStore` listener accepts the repository owner and replaces the repo's proposals and clears the running flag |
 | `ctrl-tab` | `"next"` \| `"prev"` | `native_keys.rs` — macOS only; the `NSEvent` is swallowed so AppKit cannot also cycle tabs | `useNativeMenuBridge.ts` → tab switch |
 | `native-key-down` | `{ key: "F13".."F20", cmd, ctrl, alt, shift }` | `native_keys.rs` — macOS only, scoped to the `main` window; the event is passed through (nothing native to suppress) | `useNativeKeyCombo.ts`, attached only while a shortcut recorder is open |
-| `mcp-toast` | `{ title, message, level, sound, origin_repo_path?, origin_session_id? }` | `mcp_transport.rs` — `ui action=toast`; derives origin from the calling MCP session rather than accepting caller-supplied scope. `origin_session_id` is the caller's TUIC session, absent for an unbound caller | `useAppInit.ts` → repository-scoped toast + Messages item; the repo is carried as `repoPath`, NOT glued into the message text — `ToastContainer.tsx` renders it as its own badge and uses `origin_session_id` to navigate to the originating terminal on click |
-| `mcp-confirm` | `{ request_id, title, message, origin_repo_path?, origin_session_id? }` | `mcp_transport.rs` — `ui action=confirm`, dual-emitted, plus a mobile push. It used to be a native OS dialog, which no remote human could answer; every client now gets the request and the first answer wins | `McpConfirmHost.tsx` (mounted by BOTH `ApplicationOverlays.tsx` and `MobileApp.tsx`) → `stores/mcpConfirm.ts` queue → `ConfirmDialog` |
+| `mcp-toast` | `{ title, message, level, sound, urgency, origin_repo_path?, origin_session_id?, __tuic_origin?: { connection, name } }` | `mcp_transport.rs` — `ui action=toast`; derives origin from the calling MCP session rather than accepting caller-supplied scope. `origin_session_id` is the caller's TUIC session, absent for an unbound caller | `useAppInit.ts` → repository-scoped Messages bell item, even when transient mirroring is disabled; `urgency=urgent` additionally shows a transient card (upper-right container, never over the composer), `normal` or an absent urgency also shows a card when an origin session is present and not being viewed (inactive terminal or unfocused document), controlled by the default-on per-client **Show cards from other terminals** setting; no origin stays bell only, and a mirrored urgent notice keeps its `[connection]` label on the card; consecutive identical notices from the same origin and connection id within five seconds deduplicate both the item and requested sound; mirrored titles/messages must be string/string-or-null or the notice is discarded with a content-free debug log. The explicit Open terminal action resolves `origin_session_id` at click time. `remote_mirror.rs` forwards connected remote toasts on both transports, adds the locally saved connection name to the origin marker, and resolves the remote peer to its PTY UUID. Mirrored notices are labelled with that name and navigate only within the owning connection; disconnected frames are dropped |
+| `progress-recorded` | `{ repo_path, payload: { entry: { id, project, ptyId?, type, text, ... } } }` | `mcp_transport.rs emit_progress_entry()` after the SQLite transaction commits; dual-emitted to the desktop window and `event_bus` → `/events` SSE | `progressStore` refreshes the selected PTY or aggregate and routes the toast to that source |
+| `workflow-run-changed` | `{ repo_path, payload: { runId, sequence } }` | `workflows/run/api.rs emit_run_changed()` after operator mutations (also wakes the daemon actor), daemon transitions and deadline expiry, MCP agent launch/report, and bound PTY exit; dual-emitted to the desktop window and `event_bus` → `/events` SSE. It is a cursor wake hint, not a replacement for event replay | `useAppInit.ts` → `workflowRunSignals` keeps the highest sequence per project/run; reconnect increments a resync revision so run views can replay from their cursor |
+| `ui-tab` | `{id,title,html,url?,pinned,focus,origin_repo_path?,opener_tuic_session?}` | MCP UI tab handler; desktop emit plus SSE with the same optional stable caller identity | `useAppInit.ts` stores the opener on native Markdown tabs; desktop publication carries it to mobile Markdown menu metadata |
+| `mcp-confirm` | `{ request_id, title, message, origin_repo_path?, origin_session_id? }` | `mcp_transport.rs` — `ui action=confirm`, dual-emitted, plus a mobile push. It used to be a native OS dialog, which no remote human could answer; every client now gets the request and the first answer wins | `McpConfirmHost.tsx` (mounted by BOTH `ApplicationOverlays.tsx` and `MobileApp.tsx`) → `stores/mcpConfirm.ts` queue → `ConfirmDialog`; remote confirmations retain the origin connection, show its locally saved host name, route answers to that daemon, and clear on disconnect. Resolution is scoped by connection and request id |
 | `mcp-confirm-resolved` | `{ request_id, confirmed }` | `mcp_http/mod.rs` `resolve_mcp_confirm()` on an answer, and `mcp_transport.rs` when the 300 s wait expires | `McpConfirmHost.tsx` → drops that request from the queue, so the clients that lost the race take the dialog down |
 | `pty-description-changed` | `{ session_id: string, description: string | null }` | `state.rs` — MCP `agent spawn` / `session submit` / `session input` updates the orchestrator-owned PTY description | `useAppInit.ts` → `terminalsStore.ptyDescription` → Context bar |
+| `chat-view-changed` | `{ session_id: string, seq: number }` | `state.rs notify_chat_view_changed()` — called by the chat view ticker (`chat_view/mod.rs`) when the tailed transcript produced new entries; dual-emitted to the desktop window and `event_bus` → `/events` SSE. Wake only: entries come from `chat_view_snapshot` | `stores/chatView.ts` `watch()` → `refresh()` for the terminal named by `session_id` |
+| `session-renamed` | `{ session_id: string, name: string, is_custom: boolean }` | `state.rs` `rename_session_from_backend` — MCP `session rename` only (IPC/HTTP renames start in the frontend and do not emit) | `useAppInit.ts` → `terminalsStore.update(name, nameIsCustom)` → tab bar and sidebar |
+| `session-suspend-requested` | `{ session_id: string, request_id: string }` | `state.rs` `request_session_suspend` — MCP `session action=suspend` after the busy check | `useAppInit.ts` → `suspendTerminal` → closes the PTY, tab stays with `suspended`; answers via `session_suspend_response` |
+| `term-alias-assigned` | `{ session_id: string, alias: string }` | `state.rs` `record_term_alias` — every alias assignment; dual-emitted (window + `/events` bus, after `session-created`) | `useAppInit.ts` → `terminalsStore.applyAlias` → tab tooltip / context menu |
+| `pty-title-{session_id}` | Title string; empty string resets the title. HTTP/WS: `pty-title` SSE `{session_id,title}`, raw/text/log WS `{type:"title",title}` | `pty.rs` OSC 0/2 handler dual-emits; presentation only, bypasses the lossless state queue | `Terminal.tsx` → `subscribePty` `onTitle` applies existing custom/spawn-name protection on local IPC and the owner daemon WS |
 | `pty-activity-{session_id}` | `{ session_id: string }` | `pty.rs emit_pty_activity()` via `ActivityPulse`, throttled to one pulse per `ACTIVITY_PULSE_WINDOW` (1 s). Payload-free and idempotent, so dropping pulses inside the window loses nothing — do NOT convert this throttle into a coalescer. Dual-emitted on `event_bus` as `PtyActivity` (`activity` WS frame on `/sessions/:id/stream`, plus `pty-activity` SSE); deliberately NOT forwarded on the `?format=grid` WS, which has no activity consumer. Ignored by `apply_event_to_session_state` — it must not restamp `SessionState.last_activity_ms`, which answers a different question | `Terminal.tsx` → `subscribePty(…, { onActivity })` → `terminalsStore.touchLastDataAt` + background-tab `activity` flag. **Not** in `useAppInit.ts` — per-session |
 | `pty-osc133-{session_id}` | `{ marker: string, line: number, exit_code: number \| null }` | `pty.rs` OSC 133 handler — serialised from `terminal_grid.rs Osc133Event`, so the field name is `exit_code`, NOT `exitCode`. Dual-emitted on `event_bus` as `PtyOsc133` (`osc133` frame on the `?format=grid` WS via `grid_ws_frame()`, plus `pty-osc133` SSE); the grid WS is the right lane because `CanvasTerminal` is the only consumer and it already holds that socket. Ignored by `apply_event_to_session_state` | `CanvasTerminal.tsx` → `transport.onEvent("osc133", …)` → `terminalsStore.handleOsc133()` → command blocks, gutter marks, Cmd+Up/Down. **Not** in `useAppInit.ts` — per-session |
 | `pty-cwd-{session_id}` | `{ cwd: string }` | `pty.rs` OSC 7 handler. The desktop payload is the `{ cwd }` object, not a bare string — both transports carry the same shape so the handler needs no branch. Dual-emitted on `event_bus` as `PtyCwd` (`cwd` frame on the `?format=grid` WS, plus `pty-cwd` SSE). Ignored by `apply_event_to_session_state` | `CanvasTerminal.tsx` → `transport.onEvent("cwd", …)` → `terminalsStore.update({ cwd })` + `onCwdChange`. **Not** in `useAppInit.ts` — per-session |
 | `pty-watcher-lines-{session_id}` | `{ session_id: string, lines: [{ text: string, matched_ids: string[] }] }` | `pty.rs emit_watcher_lines()` — one emit per 100 ms batch of assembled lines; `text` is the CLEANED text Rust matched on, `matched_ids` are qualified `client_id/watcher_id`. Rust ships every line only while a registered pattern could not be compiled, otherwise the matched ones alone. Dual-emitted on `event_bus` as `PluginWatcherLines` (`watcher-lines` WS frame on `/sessions/:id/stream` in both `?format=grid` and raw mode — **not** `?format=log|text`, which returns before the event loop — plus `plugin-watcher-lines` SSE) | `CanvasTerminal.tsx` → `transport.onEvent("watcher-lines", …)` → `pluginRegistry.handleWatcherLines()`, which re-runs the JS `RegExp` on each line. The listener is installed BEFORE the grid subscription — a line that lands while it is being attached is lost. **Not** in `useAppInit.ts` — the listener is per-session |
+| `shell-abandoned` | `{ session_id, since_ms: number \| null }` | `idle_close.rs` fresh OS sweep → lossless session-state accumulator | Internal state input; clients render the resulting `session-state-changed.state.abandoned_since_ms` through `useAgentPolling` and mobile `/sessions`, not a second raw-event listener |
+| `session-state-changed` | `{ session_id: string, state: SessionState }` — `state` is exactly the object `list_active_sessions` returns per session, snake_case, with serde skipping the zero-valued fields. Both transports build it from `state.rs session_state_payload()`, one function on purpose | `state.rs publish_session_state_change()`, called only from the session-state accumulator — the sole writer of `session_states` and therefore the only place that can see a transition. Deduped by `SessionState`'s `PartialEq` (which excludes `last_activity_ms`), so a repaint that changes nothing a client renders emits nothing. Dual-emitted on `event_bus` as `SessionStateChanged` (`session-state-changed` SSE on `/events`). Ignored by `apply_event_to_session_state` — it is the accumulator's output, never its input | `useAgentPolling.ts` → `subscribeEvents({"session-state-changed"})` → `applySessionState()` → tab awaiting/busy badges + Activity Dashboard. Replaced a 1 Hz `list_active_sessions` poll; the only remaining reads are a single mount-time catch-up, for sessions already idle and silent, and the same catch-up re-run from `subscribeEvents`' `onResync` when the SSE stream reconnects or reports `lagged` (browser only — Tauri `listen()` cannot drop) |
+| `acp-notice` | `{ connectionId, generation, sessionId?, requestId?, sequence, kind }` — `kind` is `ready` \| `settled` \| `interaction_pending` \| `interaction_settled` | `card`. camelCase, unlike the PTY rows above: it is the same object the `/acp` routes and the `acp_*` commands return, and a second spelling would be a second thing to keep in sync | `state.rs spawn_acp_notice_pump()`, fed by `acp/events.rs` `AcpEventJournal::append` — the one place every ACP event is stamped, so a notice cannot be forgotten by a new producer. Dual-emitted on `event_bus` as `AcpNotice` (`acp-notice` SSE on `/events`) | TBD — no ACP frontend yet. It is a wake signal: react by reading `acp_connection_snapshot`, `acp_pending_interactions`, or the stream from the `sequence` it names. The ordered turn frames stay on `acp_subscribe` / the `/acp/connections/:id/stream` WebSocket and never ride this bus |
+| `remote-connection-status` | `{ id, status, base_url?, token?, protocol_version?, build?, out_of_date?, live_sessions?, update_notice?, update_in_progress?, error? }` — `status` is `disconnected` \| `connecting` \| `connected` \| `unauthenticated` \| `error`. snake_case: it is the `RemoteConnectionStatus` struct as `/config/remote-connections/status` returns it, and the push is the whole client view rather than a delta, so a missed event cannot leave a client holding a route the backend has retracted. `base_url`, `token`, `live_sessions`, and `update_notice` are present only while connected; diagnostic `build` and `out_of_date` remain visible in retained failed/reconnecting states | `remote_runtime.rs publish()` — dual-emitted on every real change (dedup is on the snapshot, so a poll that keeps answering 200 emits nothing) | `stores/remoteConnections.ts` `applyStatus()` → store state + the SSE bridge, which exists exactly while the connection is connected |
 
 ### HTTP & MCP Server
 When adding routes or changing server behavior:
@@ -106,6 +134,7 @@ When adding routes or changing server behavior:
 | `docs/backend/mcp-http.md` | Server architecture, routing, lazy tool discovery (`collapse_tools` / meta-tools) |
 | `docs/user-guide/remote-access.md` | User setup guide |
 | `src-tauri/src/mcp_http/plugin_docs.rs` | PLUGIN_DOCS (if plugin-facing) |
+| `src-tauri/src/mcp_http/fixtures/` | A client's exact captured handshake, when the change touches a lifecycle. `/mcp` serves two — legacy `initialize` (2025-11-25) and stateless `server/discover` (2026-07-28) — and a client that speaks only one is proven by its own request, not by a hand-written approximation |
 
 ### Diagnostics
 When modifying `cpu_watchdog.rs` or the `/diagnostics` HTTP endpoint:
@@ -122,15 +151,27 @@ When changing an awaiting/idle/busy signal — a parser, the hook suppression, o
 
 | File | What to update |
 |------|----------------|
-| `src-tauri/src/output_parser.rs` | The parser itself (`parse_question`, `parse_osc777_notify`, …) |
-| `src-tauri/src/chrome.rs` | Bottom-zone cutoff — anything at or below the input box must stay unparsed |
+| `src-tauri/crates/tuic-terminal/src/output_parser.rs` | The parser itself (`parse_question`, `parse_osc777_notify`, …) |
+| `src-tauri/crates/tuic-terminal/src/chrome.rs` | Bottom-zone cutoff — anything at or below the input box must stay unparsed |
 | `src-tauri/src/pty.rs` | `raw_stream_events` composition + `suppress_heuristic_question` gating |
 | `src-tauri/src/state.rs` | `apply_event_to_session_state` — the arms that SET and CLEAR `awaiting_input`. A signal nothing retracts latches the badge |
 | `src/components/Terminal/Terminal.tsx` | The frontend twin of those arms (`terminalsStore` awaiting flags) |
 | `src-tauri/src/fixtures/agent_prompts/` | A framed `.tcap` capture of the failure, recorded via `/diagnostics/capture` (`.raw` remains legacy-readable) |
-| `src-tauri/src/pty.rs` tests | A case in the `Awaiting-signal fixtures` block replaying that capture |
+| `src-tauri/src/pty/tests.rs` | A case in the `Awaiting-signal fixtures` block replaying that capture |
 | `src-tauri/src/pty.rs` tests | A case in the `Awaiting RETRACTION` block when the failure is a state that never clears — fixtures assert emitted events and cannot express a MISSING one |
+| `scripts/hooks/pre-commit` | The fixture gate's symbol/file lists — a new detection symbol or a new detection-carrying file must be added, or the gate silently stops covering it |
+
 | `AGENTS.md` | "Agent state detection" section (signal table, capture workflow, retraction) |
+
+The fixture gate compares the indexed and committed production scopes, excluding
+`#[cfg(test)]` modules and `#[test]`/`#[tokio::test]` functions. Test-only
+changes may reuse existing captures. Production detection changes require a staged,
+framed TCAP v2 capture with nonzero geometry, complete records and a matching
+provenance Markdown file (capture source and SHA-256). New raw/text external
+fixtures are rejected; legacy captures remain readable. Framing and provenance
+checks do not authenticate where bytes came from: the author must record them
+from the real system.
+
 
 ### MCP Tool Surface (native tools, upstream proxy, meta-tools)
 When changing the tool list, tool handlers, `disabled_native_tools`, upstream allow/deny filters, or the Speakeasy meta-tools:
@@ -141,19 +182,25 @@ When changing the tool list, tool handlers, `disabled_native_tools`, upstream al
 | `src-tauri/src/mcp_proxy/registry.rs` | `aggregated_tools`, `proxy_tool_call` (filter is enforced on BOTH — discovery no longer gates dispatch under `collapse_tools`) |
 | `src-tauri/src/tool_search.rs` | BM25 `ToolSearchIndex` backing `search_tools` / `get_tool_schema` |
 | `docs/backend/mcp-http.md` | Lazy Tool Discovery section, meta-tool table, filter-enforcement note |
+| `src-tauri/src/mcp_http/plugin_docs.rs` | AI plugin guide references to MCP worktree inputs |
+| `src-tauri/crates/tuic-cli/` | CLI callers of renamed or removed native actions |
+| `docs/user-guide/cli.md`, `CHANGELOG.md` | Public CLI examples and BREAKING migration instructions |
 | `docs/backend/config.md` | `collapse_tools` field in `AppConfig` table |
-| `docs/user-guide/settings.md` | Services Tab — "Collapse tools" checkbox description |
+| `docs/user-guide/settings.md` | MCP page → TUIC Tools — "Collapse tools" checkbox description |
 
 #### Session tool actions added (swarm Layer 3–4)
 - `session action=submit` — submits one command to a confirmed-idle managed agent and returns a bounded terminal-movement receipt in the same response. It never queues or overwrites a partial composer; `session action=input` remains raw and write-only.
 - `session action=status` — returns `{shell_state, idle_since_ms, busy_duration_ms, exit_code, agent_type}`. Useful for polling agent progress without streaming output.
-- `session action=list` response now includes `shell_state` per entry.
+- `session action=list` response now includes `shell_state` per entry, plus `tuic_session` (the identity the tab persists) and `alias`. It no longer includes `child_pid` or `foreground_pgid` — no action accepts a raw pid.
+- `session_id` on every action accepts the PTY id, `tuic_session`, alias, unique short PTY-id prefix, or unique display name; `to` on `agent action=send` uses the same resolver and also accepts a peer's registered `name` (the one `list_peers` prints); two peers sharing a name are refused with the candidates. Ambiguous prefixes or names return an error. Resolution lives in `AppState::resolve_session_ref_checked` / `resolve_peer_ref_checked`; an unresolvable reference falls through unchanged so a tombstoned session can still be read.
+- `session action=create` (and `POST /sessions`) accept an optional `alias`, which the frontend replays from persisted tab state so an alias survives a restart.
 
 #### Agent tool actions added (swarm inbox)
-- `agent action=inbox` response now includes `missed_count` — number of messages evicted from the FIFO inbox since last read. Non-zero means the orchestrator missed messages and should increase polling frequency.
-- `agent action=send` response includes **`delivered`** (bool) plus, when false, `warning` and `recipient_has_terminal`. `delivered` is false exactly when `delivery_path == "inbox_only"`: no waiter, channel, direct terminal delivery, or already-pending coalesced orchestrator wake will surface it, so it stays unread until the recipient polls. Registered orchestrators add `wake_notification_and_inbox`, `coalesced_wake_and_inbox` and `lifecycle_summary_and_inbox`; none of them exposes a peer payload — the last one is reachable only for a window made entirely of server-authored `tuic-auto-*` lifecycle notifications, which it prints inline and acknowledges itself. A payload-free wake gets at most one retry after an uncertain PTY write per unread-mail group; coalesced mail does not reset that budget, and inbox/wait observation does. `accepted`/`ok` only mean "buffered". Keep these distinct in every client and in the tool descriptions — reporting `inbox_only` as success is how a reply to an agent with no PTY silently vanished.
+- `agent action=inbox` response now includes `missed_count` — number of unread messages evicted at capacity since last read. Same-child, same-kind lifecycle notice replacement does not increase it. Non-zero means the orchestrator missed messages and should increase polling frequency.
+- Reading `agent action=inbox` settles delivery for the returned messages, including queued terminal wakes. A queued generic wake is removed once no pending terminal-owned mail remains, so read mail can be reclaimed at the 100-message inbox limit.
+- `agent action=send` response includes **`delivered`** (bool) plus, when false, `warning` and `recipient_has_terminal`. `delivered` is false exactly when `delivery_path == "inbox_only"`: no waiter, channel, direct terminal delivery, or already-pending coalesced orchestrator wake will surface it, so it stays unread until the recipient polls. Registered orchestrators add `wake_notification_and_inbox`, `coalesced_wake_and_inbox` and `lifecycle_summary_and_inbox`; none of them exposes a peer payload — the last one is reachable only for a window made entirely of server-authored `tuic-auto-*` lifecycle notifications, which it prints inline and acknowledges itself. Canonical idle/completed state may claim the wake; derived `working` may also claim it only through the stricter composer gate (idle shell, confirmed readiness, no question, no partial input), so background work cannot strand a result while active work remains protected. Ordinary Claude recipients use that same gate before selecting their SSE channel: a ready composer held `working` by background work receives a PTY wake instead. A payload-free wake gets at most one retry after an uncertain PTY write per unread-mail group; coalesced mail does not reset that budget, and inbox/wait observation does. `delivered` plus `delivery_path` are the whole verdict: `ok`, `accepted`, `buffered_in_inbox` and `recipient_has_terminal` were removed because they answered "buffered" to a question about delivery. Keep these distinct in every client and in the tool descriptions — reporting `inbox_only` as success is how a reply to an agent with no PTY silently vanished.
 - `agent action=register` response includes **`terminal`** (bool): false means the identity resolves to no live PTY (`live_pty_for_peer` → `None`), so it can never be typed into or woken, and the peer must consume its own inbox via `wait`/`inbox`. Identities without a PTY arise from a bridge that sent no `x-tuic-session` header (agent launched outside a TUIC PTY) — the server then mints an MCP-scoped UUID.
-- `agent action=register` accepts **`orchestrator`** (bool) as the only role declaration seam; omission preserves the current role and child spawn never infers it. Register/list responses surface `orchestrator` plus **`mail_wake`** (`managed_pty_lifecycle` or `none`). External/headerless orchestrators are inbox/wait-only because MCP/SSE activity is not an authoritative idle or wake surface.
+- `agent action=register` accepts **`orchestrator`** (bool) as the only role declaration seam; omission preserves the current role and child spawn never infers it. The `register` response surfaces `orchestrator` plus **`mail_wake`** (`managed_pty_lifecycle` or `none`); `list_peers` reports `orchestrator` but not `mail_wake`, which is a property of the caller's own identity rather than of every peer in a listing. External/headerless orchestrators are inbox/wait-only because MCP/SSE activity is not an authoritative idle or wake surface.
 
 ### Provider Registry
 When modifying provider types, slot names, credential storage, or the ProvidersTab UI:
@@ -214,58 +261,58 @@ When modifying reasoning effort, the thinking stream, or its gating:
 | `src/components/AIChatPanel/AIChatPanel.tsx` | "Thinking" disclosure render |
 | `src/components/SettingsPanel/tabs/AiChatTab.tsx` | Extended-thinking effort dropdown |
 
-### AI Agent (ReAct loop, knowledge store, MCP terminal tools)
+### AI Agent (ReAct loop, knowledge store)
 When modifying the AI agent loop engine, tool dispatch, session knowledge store,
-OSC 133 outcome capture, or the `ai_terminal_*` MCP tools:
+or OSC 133 outcome capture:
 
 | File | What to update |
 |------|----------------|
 | `src-tauri/src/ai_agent/engine.rs` | ReAct loop, approval flow, ACTIVE_AGENTS registry, system prompt |
-| `src-tauri/src/ai_agent/tools.rs` | Tool dispatch: 31 tools (terminal observe incl. get_command_history/explain_last_failure/get_error_fixes/search_scrollback/get_hyperlinks/get_semantic_zones, reactive watches watch_for/list_watches/cancel_watch, filesystem, drive_agent, search, list_sessions). Tool count assertions live in tools.rs `#[cfg(test)]` — bump them on add/remove |
+| `src-tauri/src/ai_agent/tools.rs` | Tool dispatch (terminal observe incl. get_command_history/explain_last_failure/get_error_fixes/search_scrollback/get_hyperlinks/get_semantic_zones, filesystem, drive_agent, search, list_sessions, and the schedule_task/list_schedules/cancel_schedule scheduler tools; no watch tools). Tool count assertions live in tools.rs `#[cfg(test)]` — bump them on add/remove |
 | `src-tauri/src/terminal_grid.rs` | Grid reader methods backing agent tools: `search_buffer`, `enumerate_visible_hyperlinks` (get_hyperlinks), `extract_semantic_zones` (get_semantic_zones); `VtLogBuffer` delegates in `state.rs` |
 | `src-tauri/src/ai_agent/safety.rs` | SafetyChecker: command safety + file-write sensitive path rules |
 | `src-tauri/src/ai_agent/sandbox.rs` | FileSandbox: path jail for filesystem tools (canonicalize + starts_with) |
-| `src-tauri/src/mcp_http/ai_terminal.rs` | MCP exposure of all 13 `ai_terminal_*` tools; write-tool confirmation |
 | `src-tauri/src/ai_agent/knowledge.rs` | CommandOutcome, SessionKnowledge, OSC 133 scanner, persist/load/spawn_persist_task |
 | `src-tauri/src/ai_agent/context.rs` | Session-knowledge injection into agent system prompt |
 | `src-tauri/src/ai_agent/tui_detect.rs` | TerminalMode heuristics (Shell vs FullscreenTui) |
-| `src-tauri/src/ai_agent/commands.rs` | Tauri commands: start/cancel/pause/resume/status/approve/get_session_knowledge |
+| `src-tauri/src/ai_agent/commands.rs` | Tauri commands: start/cancel/pause/resume/status/approve/get_session_knowledge, toggle_ai_suggestions, load/save_scheduler_config, add_scheduled_job |
+| `src-tauri/src/ai_agent/scheduler.rs` | Scheduled tasks (`ai-cron.json`; the even-interval authority `MINUTE_STEPS`/`HOUR_STEPS`/`DAILY_MINUTES`/`cron_for`/`interval_cron`, daily at 09:00 UTC; `add_settings_job` behind `add_scheduled_job` / `POST /ai/scheduler/jobs`; one terminal per job via `engine.job_sessions`; Assisted runs via `job_conversation_config()`; `scheduled-job-needs-approval`, `scheduled-job-completed`). Keep `schedule_task`'s `interval_minutes` enum in `tools.rs` in step with these lists. Docs: FEATURES 6.15a, `docs/user-guide/ai-chat.md` Scheduled tasks, `docs/user-guide/settings.md` AI Chat, http-api `/ai/scheduler/config` + SSE table |
+| `src-tauri/src/ai_agent/triggers.rs` | AI suggestions (`ai-suggestion`, per-session toggle default). Docs: FEATURES 6.15a, `docs/user-guide/ai-chat.md` AI suggestions, http-api SSE table |
 | `src-tauri/src/pty.rs` | ChunkProcessor.record_osc133_outcomes + Inferred fallback in silence timer |
 | `src-tauri/src/state.rs` | session_knowledge DashMap, knowledge_dirty set, has_osc133_integration, record_outcome helper |
 | `src-tauri/src/lib.rs` | Register new commands in `invoke_handler`; spawn_persist_task at boot |
-| `src-tauri/src/mcp_http/mcp_transport.rs` | `ai_terminal_*` MCP tool defs + dispatch |
 | `src/stores/aiAgentStore.ts` | Frontend agent state (running/paused), tool-call log, approvals |
 | `src/components/AIChatPanel/AIChatPanel.tsx` | Agent banner, approval card, tool-call cards |
 | `src/components/AIChatPanel/SessionKnowledgeBar.tsx` | Collapsible footer summarising the session's knowledge store |
-| `docs/api/tauri-commands.md` | `start_agent_loop`, `cancel_agent_loop`, `pause_agent_loop`, `resume_agent_loop`, `agent_loop_status`, `approve_agent_action`, `get_session_knowledge` |
-| `docs/backend/mcp-http.md` | `ai_terminal_*` MCP tools table |
+| `docs/api/tauri-commands.md` | `start_conversation`, `cancel_conversation`, `pause_conversation`, `resume_conversation`, `agent_loop_status`, `approve_conversation_action`, `get_session_knowledge` |
 | `docs/FEATURES.md` | AI Agent section (Level 2/3 of the AI-assisted terminal roadmap) |
 | `ideas/ai-assisted-terminal.md` | Status updates as capability levels ship |
 
-### Terminal Watcher (event-driven autonomous actions)
-When modifying the watcher engine, trigger evaluation, or watcher UI:
+### TUI detection
+The embedded agent's write-only command knowledge store was removed in #2115-1333. Terminal-mode classification remains live.
 
 | File | What to update |
 |------|----------------|
-| `src-tauri/src/ai_agent/watcher.rs` | WatcherRule model, WatcherEngine event loop, trigger evaluation, burst guard, fire_rule |
-| `src-tauri/src/ai_agent/commands.rs` | Tauri commands: watcher_create, watcher_list, watcher_delete, watcher_toggle, watcher_attach, watcher_detach, watcher_update |
-| `src-tauri/src/state.rs` | `watcher_engine` OnceLock in AppState, `session_visibility` DashMap |
-| `src-tauri/src/lib.rs` | Command registration + WatcherEngine spawn |
-| `src/components/WatcherManager/WatcherManager.tsx` | Template CRUD, attach/detach, edit form (toolbar popover) |
-| `src/components/WatcherManager/WatcherManager.module.css` | Popover styles |
-| `docs/backend/ai-watchers.md` | Architecture doc: data model, trigger paths, safety guards |
-| Config: `ai-watchers.json` | Persisted watcher rules (app config dir) |
+| `src-tauri/src/ai_agent/tui_detect.rs` | TerminalMode heuristics (Shell vs FullscreenTui) |
+| `src-tauri/src/pty.rs` | Alternate-screen and inline-TUI mode tracking; OSC 133 activity transitions |
+| `src-tauri/src/state.rs` | SessionState terminal_mode and has_osc133_integration |
+| `src-tauri/crates/tuic-core/src/redaction.rs` | `redact_secrets`, applied by session output |
+| `src-tauri/crates/tuic-terminal/src/terminal_grid.rs` | Grid search, hyperlinks and semantic zones; VtLogBuffer delegates |
 
 ### Remote Daemon (`tuic-remote`)
-When modifying the remote daemon binary, `run_headless`, or standalone server behavior:
+When modifying the remote daemon binary or standalone server behavior:
 
 | File | What to update |
 |------|----------------|
 | `src-tauri/src/bin/tuic_remote.rs` | Binary entry point |
-| `src-tauri/src/lib.rs` | `run_headless()` function |
-| `docs/user-guide/remote-access.md` | `tuic-remote (Beta)` section |
+| `src-tauri/src/lib.rs` | `run_remote()` — the daemon |
+| `src-tauri/src/lib.rs` | `spawn_daemon_background_tasks()` — every task is started or refused with a reason; the guard test is `the_daemon_decides_on_every_desktop_background_task` |
+| `src-tauri/src/mcp_http/mod.rs` | `spawn_ipc_listener()` / `spawn_maintenance_sweep()` — shared by the desktop and the daemon |
+| `src-tauri/src/remote_lifetime.rs` | Optional idle lifetime driven by SSE and WebSocket client counts; `/health.survive_secs` must stay in sync |
+| `src-tauri/src/remote_deploy/{mod,assets,service}.rs` | SSH asset resolution/cache, ephemeral launch, and systemd/launchd install lifecycle; keep Sections 22/24 and the remote-access guide aligned |
+| `docs/user-guide/remote-access.md` | `tuic-remote (Beta)` section, incl. "What the daemon runs" |
 | `docs/FEATURES.md` | Section 22 (Remote Daemon) |
-| `.github/workflows/release.yml` | Release artifact build job |
+| `.github/workflows/remote-daemon.yml` | Daemon build job shared by `release.yml` and `nightly.yml` — publishes **both** `tuic-remote` and `tuic-bridge` per target |
 
 ### SSH Tunnel Management
 When modifying tunnel profiles, supervisor, audit logging, backoff, or tunnel UI:
@@ -297,13 +344,108 @@ When modifying remote connection config, storage, or transport routing:
 
 | File | What to update |
 |------|----------------|
-| `src-tauri/src/remote_connection.rs` | RemoteConnection, RemoteTransport, RemoteConnectionStore |
-| `src/stores/remoteConnections.ts` | Frontend remote connections store |
-| `src/utils/remoteEventBridge.ts` | SSE event bridge for remote daemons |
-| `src/utils/transport.ts` | connectionId-based routing in COMMAND_TABLE |
-| `src/utils/canvasTerminalTransport.ts` | baseUrl support for remote WebSocket |
+| `src-tauri/src/remote_connection.rs` | RemoteConnection, RemoteTransport, RemoteConnectionStore, the password/token commands |
+| `src-tauri/src/remote_runtime.rs` | The live half: status, base URL, session token, the status poll and the SSH tunnel. Every status change is dual-emitted as `remote-connection-status`. **`teardown()` is the one way a connection goes down** — poll, mirror task, mirrored rows, tunnel and token, in that order, idempotent and safe on an id nothing knows. Disconnect and delete both call it, over IPC and over HTTP alike; a second stop path is how the tunnel came to outlive the delete that removed its profile |
+| `src-tauri/src/remote_deploy/{mod,assets,service}.rs` | On-connect deployment, cached release assets, and systemd/launchd install/uninstall |
+| `src-tauri/src/remote_lifetime.rs` | Ephemeral daemon idle expiry and `/health.survive_secs` |
+| `src-tauri/crates/tuic-core/src/credentials.rs` | `Credential::RemoteConnection` — the password, keyed by the connection's UUID |
+| `src/stores/remoteConnections.ts` | Frontend remote connections store — a renderer of the backend status, plus the token it holds in memory for the transport |
+| `src/transportRuntime.ts` | `withRemoteToken` — the one place a credential is put on a URL; `resolveOwningConnection` — the one place a call's machine is decided |
+| `src/stores/repositories.ts` / `src/stores/terminals.ts` | the registered path→connection and session→connection lookups |
+| `src-tauri/src/remote_mirror.rs` | Mirrors a connected daemon's sessions and events onto the local bus. The `/events` read carries an idle deadline (3× the daemon's 15 s keep-alive): a silent stream is a dead stream, and it re-seeds rather than waiting forever |
+| `src/transport.ts` | `owningConnectionFor` + connectionId-based routing in COMMAND_TABLE |
+| `src/invoke.ts` | the desktop IPC path's diversion to `rpc()` for a remotely-owned call |
+| `src/components/Terminal/canvasTerminalTransport.ts` | connectionId support for the remote WebSocket |
 | `docs/FEATURES.md` | Section 24 (Remote Connection Manager) |
 | `docs/user-guide/remote-access.md` | Remote Connection Manager section |
+
+### Terminal stream compression
+
+When changing what a remote WebSocket puts on the wire, or which peers pay for it:
+
+| File | What to update |
+|------|----------------|
+| `src-tauri/src/mcp_http/ws_compression.rs` | The negotiation, `DEFLATE_SUBPROTOCOL`, the frame tags, the level, and the measurement the level and the stateless choice were made on |
+| `src-tauri/src/mcp_http/session.rs` | `ws_stream` reads `?compress=` and the peer address, and selects the subprotocol when the mode is tagged; all three handlers send through `WsFrameSender` |
+| `src-tauri/src/mcp_http/types.rs` | `OutputQuery::compress` |
+| `src/components/Terminal/wsFrameCodec.ts` | The client half — the tag values must match `FrameTag` literal for literal, and `DEFLATE_SUBPROTOCOL` must match its Rust twin |
+| `src/components/Terminal/canvasTerminalTransport.ts` | Who asks for the encoding, who reads the acceptance off `ws.protocol` in `onopen`, and the chain keeping inflated deltas in order |
+| `src-tauri/src/tunnels/profile.rs` / `command.rs` | `ProfileOptions::compression` → `ssh -C`; the WebSocket's loopback refusal assumes this is on |
+| `docs/api/http-api.md` | "WebSocket compress=deflate" — the table of what is compressed by what |
+| `docs/user-guide/remote-access.md` | What a user is told about it |
+
+### Machine-owned configuration
+
+When changing which machine a config family belongs to, or adding a config file
+that describes a machine rather than this app:
+
+| File | What to update |
+|------|----------------|
+| `src/stores/agentConfigs.ts` | The per-machine registry: `agentConfigsFor`, `ensureAgentConfigs`, `invalidateAgentConfigs`, and the remote IO that names the connection |
+| `src/stores/remoteConnections.ts` | `applyStatus` — the connection edge that drops and refills a machine's cached config |
+| `src/components/SettingsPanel/MachineSelector.tsx` | The selector every tab in the machine family carries |
+| `src/components/SettingsPanel/tabs/AgentsTab.tsx` | Run configs, the hook toggles, and which controls stay local because they have no remote route |
+| `src/components/SettingsPanel/tabs/services/UpstreamMcpPanel.tsx` | Upstream MCP servers, and the OAuth flow that cannot follow a machine |
+| `src/__tests__/remoteRepoRouting.test.ts` | Both halves: what follows the repo, and what must never leave this machine |
+| `docs/backend/config.md` | Agents Config section — the ownership rule and the local families |
+| `docs/user-guide/remote-access.md` | "Which config follows the repo, and which stays here" |
+
+### Project Progress (storage)
+
+When modifying the project-owned Progress store, its ownership resolution, or
+its Git-exclude/watcher interaction:
+
+| File | What to update |
+|------|----------------|
+| `src-tauri/src/progress/store.rs` | Schema, migrations, recovery, and SQLite locking behavior |
+| `src-tauri/src/progress/ownership.rs` | Registered and nested workspace ownership resolution |
+| `src-tauri/src/progress/model.rs` | Entry kinds, which of them are reportable, and validation limits |
+| `src-tauri/src/progress/service.rs` | The `progress_tracking` gate and the shared record/list/delete core |
+| `src-tauri/src/progress/flow.rs` | The Flow sequence: participants, arrow joining, scope, redaction |
+| `src-tauri/src/pty.rs` | `intent:` capture — the host's half of the journal |
+| `src-tauri/src/mcp_http/mcp_transport.rs` | `journal_hand_off` at `agent action=spawn` / `send` — the `delegated` and `message` entries |
+| `src-tauri/src/repo_watcher.rs` | The journal must stay outside every repository; the test asserts the tree is byte-identical after a write |
+| `docs/backend/config.md` | Progress Storage section |
+| `docs/api/http-api.md` | Project Progress section |
+| `docs/api/tauri-commands.md` | Progress command table rows |
+| `docs/user-guide/project-progress.md` | The whole document |
+
+### Project Progress (dialog)
+
+When modifying the Progress dialog, its store, or the surfaces that open it:
+
+| File | What to update |
+|------|----------------|
+| `src/components/ProgressDialog/` | The list, the frozen divider, the blocked filter, `embedded` mobile mode, the Flow view (`ProgressFlow.tsx`) |
+| `src/stores/progress.ts` | The one-project query, the frozen divider, live presentation |
+| `src/actions/actionRegistry.ts` | The `progress` action, and the browser allowlist in `CommandPalette.tsx` |
+| `src/components/Toolbar/Toolbar.tsx` | The aggregate unread bell row |
+| `src/mobile/MobileApp.tsx` | The lazy Progress tab |
+| `docs/frontend/components.md` | ProgressDialog entry |
+| `docs/frontend/stores.md` | progressStore entry |
+| `docs/user-guide/command-palette.md` | Project Progress action |
+| `docs/user-guide/project-progress.md` | The whole guide — it describes the dialog |
+| `docs/user-guide/settings.md` | The two `progress_tracking` toggles in the Agents table |
+| `docs/FEATURES.md` | Project history row |
+
+### Native Stories (manual plans and stories)
+
+When modifying the native story store, its actions, or any of the four surfaces
+that reach them:
+
+| File | What to update |
+|------|----------------|
+| `src-tauri/src/stories/store.rs`, `store/records.rs`, `store/transitions.rs` | Schema version, claims, revisions, transitions, and the read-only claim probe on session close |
+| `src-tauri/src/stories/model.rs`, `api.rs` | The `StoryAction` / `StoryReply` wire shapes and project scoping — one shape for every transport |
+| `src-tauri/src/pty.rs` | Claim release on session teardown (`remove_live_session_state`) |
+| `src-tauri/src/lib.rs` | `story_action_command` (IPC) |
+| `src-tauri/src/mcp_http/mod.rs` | `POST /stories/action` and its auth guard |
+| `src-tauri/src/mcp_http/mcp_transport.rs` | The MCP `workflow action=story` entry (`handle_story`, bound caller only) |
+| `src-tauri/crates/tuic-cli/src/main.rs` | `tuic story` |
+| `src/transport.ts` + `src-tauri/src/mcp_http/command_table_paths.txt` | The `story_action_command` mapping; regenerate the paths file with `pnpm vitest run src/__tests__/transport.test.ts -u` |
+| `src/components/StoriesDialog/`, `src/stores/storiesUi.ts`, `src/components/Toolbar/Toolbar.tsx` | The dialog, its visibility store, and the toolbar entry point |
+| `docs/api/tauri-commands.md`, `docs/api/http-api.md`, `docs/backend/mcp-http.md` | The command, the route, and the MCP tool |
+| `docs/user-guide/native-stories.md`, `docs/FEATURES.md`, `SPEC.md` | The guide, the feature row, and the specification |
 
 ### Git & Worktree Integration
 When modifying git operations, worktree logic, or GitHub API:
@@ -311,12 +453,29 @@ When modifying git operations, worktree logic, or GitHub API:
 | File | What to update |
 |------|----------------|
 | `docs/backend/git.md` | Git command lifecycle, diff parsing, **GitReads port (gix vs CLI op split)**, moka cache |
-| `src-tauri/src/git_reads.rs` | **GitReads port**: flipping an op to gix requires a green byte-parity shootout test first |
+| `src-tauri/crates/tuic-git/src/git_reads.rs` | **GitReads port**: flipping an op to gix requires a green byte-parity shootout test first |
+| `src-tauri/crates/tuic-git/src/{github,github_account,github_auth,github_poller,circleci,pr_review,changelog,github_debug}.rs` | Pure GitHub models, parsing, and decisions; keep network, credentials, scheduling, events, and commands in the root adapters |
 | `docs/backend/github.md` | PR fetching, CI checks, GraphQL |
 | `docs/user-guide/worktrees.md` | Worktree workflow, configuration |
 | `docs/user-guide/github-integration.md` | PR monitoring, CI rings |
 | `docs/FEATURES.md` | Sections 7 (Git) and 8 (GitHub) |
 | `docs/api/tauri-commands.md` | Git/worktree commands |
+
+### Voice dictation, spoken replies and hands-free
+When modifying `src-tauri/src/dictation/**`, `src-tauri/crates/tuic-dictation/**`, or the Dictation settings page (`DictationSettings.tsx`):
+
+| File | What to update |
+|------|----------------|
+| `docs/backend/dictation.md` | Commands, hands-free runtime, the speech port and its adapters, the speech-asset catalogue, and the one-language rule |
+| `docs/api/tauri-commands.md` | The Voice Dictation command table — including which config fields drop the voice built for the previous one |
+| `docs/api/http-api.md` | The `/dictation/**` routes and the wire shapes. **`SpeechAssetInfo` is snake_case**; `SpeechStatus`, `HandsFreeStatus`, `SpokenReply` and `HandsFreeDisarmed` are camelCase |
+| `docs/frontend/stores.md` | `dictationStore` — the speech assets, the polled hands-free/speech status, and the fields `saveConfig` reads off the stored config rather than store state |
+| `docs/frontend/components.md` | `DictationSettings` — including which groups stay behind `isTauri()` now that the tab itself renders in browser mode |
+| `src/utils/browserVoice.ts` | The browser half of the hands-free audio socket. Transport only: any decision added here becomes a second segmenter that exists only in browsers |
+| `src/components/SettingsPanel/settingsSearchIndex.ts` | One row per new label, **in source order**: `extractSettings` reads the file, not the render tree |
+| `src/i18n/en.json` | Every `t("key", "double-quoted fallback")`, verbatim — `i18nKeyCollisions.test.ts` is the gate |
+| `docs/FEATURES.md` | Section 9 (Voice Dictation) |
+| `to-test.md` | Anything needing real audio, a real download or Boss's eye — a Rust change here never reaches his live `make dev` session |
 
 ### Settings & Configuration
 When adding config fields or settings UI:
@@ -324,10 +483,15 @@ When adding config fields or settings UI:
 | File | What to update |
 |------|----------------|
 | `docs/backend/config.md` | Config files, schema, platform directories |
-| `docs/user-guide/settings.md` | Settings tab breakdown |
+| `docs/user-guide/settings.md` | Settings page breakdown, by navigation group |
 | `docs/FEATURES.md` | Section 11 (Settings) |
+| `src/components/SettingsPanel/SettingsPanel.tsx` | `GLOBAL_TAB_GROUPS` — which group and page a new page belongs to |
+| `src/components/SettingsPanel/settingsSearchIndex.ts` | Search index rows for every new label; the drift test re-derives them from the JSX |
+| `src/components/SettingsPanel/ExpertSetting.tsx`, `src/stores/settingsExpert.ts` | Wrap a control in `ExpertSetting` only with a `configKey` that `get_config_defaults` can resolve; update the Expert Mode section of `docs/user-guide/settings.md` if the visibility rule changes |
 
 ### Agent Detection
+
+Launch-scoped Claude/Codex status changes must keep `agent_hook_launch.rs`, `shell_integration.rs`, direct/MCP spawn assembly, agent config types, Settings, HTTP/Tauri transport parity, the route snapshot, AI-agent/config/settings docs, FEATURES and CHANGELOG synchronized.
 When adding agents or changing detection logic:
 
 | File | What to update |
@@ -380,6 +544,28 @@ When adding or changing `tuic://` schemes:
 | `docs/plugins.md` | If affecting plugin contentUri format |
 
 ### Documentation Site (mdBook + Pagefind)
+### Mutation testing
+When changing how `make mutants` selects, builds or runs mutants:
+
+| File | What to update |
+|------|----------------|
+| `src-tauri/.cargo/mutants.toml` | Test tool, cargo test args, excluded globs |
+| `scripts/mutants.sh` | `git archive` export + `--in-place` + `--in-diff` mechanics, the `dist` copy `generate_context!` needs |
+| `Makefile` | The `mutants` target and its `RANGE` default |
+| `AGENTS.md` | "Tests" section bullet (per-change rule, who runs it, surviving-mutant policy) |
+| `CONTRIBUTING.md` | The install line and the one-paragraph mention |
+
+### Config-instance scoping (`TUIC_APP_INSTANCE`)
+When changing which make target launches against which configuration directory:
+
+| File | What to update |
+|------|----------------|
+| `Makefile` | The `dev` and `test` recipes. A `TUIC_APP_INSTANCE` default MUST be target-specific (`test: TUIC_APP_INSTANCE?=…`) — a line-start assignment is global whatever target follows it, and sends `make dev` to an empty instance |
+| `scripts/check-make-instance-scope.sh` | The expected value per target, and the structural check. It asks `make -n` what it expands rather than reading the line |
+| `scripts/hooks/pre-commit` | Gate 1 runs that script when `Makefile` is staged. Gate 2 is the agent-state fixture gate; `TUIC_SKIP_FIXTURE_GATE=1` deliberately skips only gate 2 |
+| `docs/backend/config.md` | The override forms and what each target defaults to |
+| `CHANGELOG.md` | Only when the behaviour a user sees changes |
+
 When adding, renaming or moving a docs page:
 
 | File | What to update |
@@ -422,9 +608,28 @@ When adding, renaming or moving a docs page:
 | `docs/frontend/stores.md` | SolidJS stores |
 | `docs/frontend/transport.md` | Tauri/HTTP dual-mode transport |
 | `docs/frontend/utilities.md` | Utility function reference |
+| `docs/frontend/terminal-features.md` | Consolidated terminal behaviors, shortcuts, configurable features |
 | `docs/features/ssh-tunnels.md` | SSH tunnel architecture and module map |
 | `docs/user-guide/*.md` | User-facing guides (20 files) |
 | **Code-embedded docs** | |
 | `src-tauri/src/mcp_http/plugin_docs.rs` | AI-optimized plugin reference (`PLUGIN_DOCS` const) |
 | `src/actions/actionRegistry.ts` | ACTION_META → auto-populates HelpPanel + Command Palette |
 | `examples/plugins/` | Reference plugin implementations (7 examples) |
+
+Remote upstream health (#1444-95a4): remote_mirror forwards upstream-status-changed with the locally saved host label; mcpPopupStore refreshes the originating daemon through explicit RPC into remoteStatus. Remote events never refresh or save local server configuration. App-lifetime notices remain visible while the popup is closed; disconnect invalidates in-flight snapshots.
+
+Remote ACP notices wake a separate daemon-scoped interaction queue in AI Chat. Pending questions and responses use the existing ACP HTTP routes with an explicit remote owner; settlement/disconnection remove only that daemon’s questions. Local ACP connections are not attached or changed.
+
+GitHub pollers now cold-start without a desktop AppHandle. Remote PR/issue snapshots and transitions share the notice forwarding path; repository ownership gates desktop consumers, daemon-owned URLs are fetched explicitly, and remote transitions never invoke local automation. Bell identity includes daemon ownership.
+
+### Terminal Chat view (desktop and mobile)
+
+Update desktop `TerminalChatView.tsx` and mobile `useSessionChatView.tsx` through
+`TerminalChatTranscript.tsx`. Keep their shared contract suite aligned. Mobile
+wakes must use the existing `useSessions` SSE subscription, not another stream.
+Host hints, file navigation and desktop search may differ; binding, cursor resets,
+visibility lifecycle and transcript scrolling must remain shared.
+
+### Settings startup workflows
+
+When changing published Settings startup discovery, authentication workflows or recovery, keep `docs/backend/settings-startup.md` synchronized with the action schema/owner services. Update the API/Tauri references, backend config/GitHub/MCP docs, frontend store state semantics, user Settings/GitHub/AI Chat/remote guides, plugin authority boundaries, FEATURES and SPEC. Catalogue inventory completeness must not be presented as proof of live onboarding or UI parity.

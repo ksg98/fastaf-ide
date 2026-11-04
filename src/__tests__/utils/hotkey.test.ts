@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { resetPlatformCache } from "../../platform";
 import type { ModifierState } from "../../utils/hotkey";
 import {
+	comboToDisplay,
 	isPluginModifierKey,
 	isValidHotkey,
 	modifiersMatch,
@@ -167,5 +169,71 @@ describe("updateModifierState + modifiersMatch", () => {
 		const m = freshMods();
 		updateModifierState(m, "AltLeft", true);
 		expect(modifiersMatch(parsed, m)).toBe(false);
+	});
+});
+
+describe("comboToDisplay", () => {
+	const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+	function onPlatform(value: string) {
+		Object.defineProperty(navigator, "platform", { value, writable: true, configurable: true });
+		resetPlatformCache();
+	}
+	afterEach(() => {
+		if (originalPlatform) Object.defineProperty(navigator, "platform", originalPlatform);
+		else delete (navigator as { platform?: string }).platform;
+		resetPlatformCache();
+	});
+
+	// Catches: the command palette showing raw key names ("⌘⌥ARROWLEFT") instead of the key's glyph.
+	it("draws arrows as arrows, the way macOS menus do", () => {
+		onPlatform("MacIntel");
+		expect(comboToDisplay("Cmd+Alt+ArrowLeft")).toBe("⌘⌥←");
+		expect(comboToDisplay("Cmd+Alt+ArrowRight")).toBe("⌘⌥→");
+		expect(comboToDisplay("Cmd+Alt+ArrowUp")).toBe("⌘⌥↑");
+		expect(comboToDisplay("Cmd+Alt+ArrowDown")).toBe("⌘⌥↓");
+	});
+
+	// Catches: other named keys upper-cased into words no Mac menu shows (ESCAPE, ENTER, PAGEUP).
+	it.each([
+		["Cmd+Escape", "⌘⎋"],
+		["Cmd+Enter", "⌘↩"],
+		["Cmd+Backspace", "⌘⌫"],
+		["Cmd+Delete", "⌘⌦"],
+		["Ctrl+Tab", "^⇥"],
+		["Ctrl+Space", "^Space"],
+		["Cmd+Shift+PageUp", "⌘⇧⇞"],
+		["Cmd+Shift+PageDown", "⌘⇧⇟"],
+		["Cmd+Home", "⌘↖"],
+		["Cmd+End", "⌘↘"],
+	])("shows %s as %s on macOS", (combo, shown) => {
+		onPlatform("MacIntel");
+		expect(comboToDisplay(combo)).toBe(shown);
+	});
+
+	// Catches: Windows/Linux inheriting Mac glyphs nobody there reads, or the shouted raw names.
+	it.each([
+		["Cmd+Alt+ArrowLeft", "Ctrl+Alt+←"],
+		["Cmd+Escape", "Ctrl+Esc"],
+		["Cmd+Enter", "Ctrl+Enter"],
+		["Cmd+Backspace", "Ctrl+Backspace"],
+		["Cmd+Shift+PageUp", "Ctrl+Shift+PgUp"],
+		["Cmd+Shift+PageDown", "Ctrl+Shift+PgDn"],
+		["Cmd+Home", "Ctrl+Home"],
+		["Alt+Space", "Alt+Space"],
+	])("shows %s as %s on Windows and Linux", (combo, shown) => {
+		onPlatform("Win32");
+		expect(comboToDisplay(combo)).toBe(shown);
+		onPlatform("Linux x86_64");
+		expect(comboToDisplay(combo)).toBe(shown);
+	});
+
+	// Catches: the label table swallowing ordinary keys (or inherited object names) instead of upper-casing them.
+	it("still upper-cases letters, digits and function keys", () => {
+		onPlatform("MacIntel");
+		expect(comboToDisplay("Cmd+Shift+d")).toBe("⌘⇧D");
+		expect(comboToDisplay("Cmd+1")).toBe("⌘1");
+		expect(comboToDisplay("F5")).toBe("F5");
+		expect(comboToDisplay("Cmd+constructor")).toBe("⌘CONSTRUCTOR");
+		expect(comboToDisplay("")).toBe("");
 	});
 });

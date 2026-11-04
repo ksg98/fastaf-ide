@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	groupLineBlocks,
@@ -8,6 +9,8 @@ import {
 	lineText,
 	logColorToCss,
 	normalizeLogLine,
+	reflowDisplayLines,
+	sameLine,
 	spanStyle,
 } from "../utils/logLine";
 
@@ -283,6 +286,101 @@ describe("groupLineBlocks", () => {
 // possible, and the "reads" counters prove the text is derived once per line
 // rather than once per call.
 
+describe("mobile prose reflow", () => {
+	const row = (value: string, cols = 80): LogLine => ({ spans: [{ text: value }], cols });
+
+	it("rejoins source-width prose so the mobile viewport wraps it once", () => {
+		const lines = [
+			row("  Il mio giudizio ragionato richiede ancora una misura prima di"),
+			row("  trasformarlo in un dato."),
+		];
+		const result = reflowDisplayLines(lines);
+		expect(result.map(lineText)).toEqual([
+			"  Il mio giudizio ragionato richiede ancora una misura prima di trasformarlo in un dato.",
+		]);
+	});
+
+	it("measures rows in code points, so emoji do not force a join", () => {
+		const wide = `  ${"word ".repeat(15)}abc`; // 80 code points: the run's wrap width
+		// 72 code points but 76 UTF-16 units: "hello" (5) would have fit after it
+		// (72 + 1 + 5 <= 80), so the agent ended this row on purpose.
+		const withEmoji = `  🚀🚀🚀🚀 ${"ab ".repeat(21)}xy`;
+		expect([...withEmoji].length).toBe(72);
+		const lines = [row(wide), row(withEmoji), row("  hello there")];
+		expect(reflowDisplayLines(lines).map(lineText)).toEqual([`${wide} ${withEmoji.trimStart()}`, "  hello there"]);
+	});
+
+	it("rejoins Claude's 80-column prose inside a 220-column PTY", () => {
+		const lines = [
+			row("  Ho recuperato il piano originale e l'analisi completa su Roma, che erano andati", 220),
+			row("  persi perché plans/ è in .gitignore.", 220),
+		];
+		expect(reflowDisplayLines(lines).map(lineText)).toEqual([
+			"  Ho recuperato il piano originale e l'analisi completa su Roma, che erano andati persi perché plans/ è in .gitignore.",
+		]);
+	});
+
+	it("keeps deliberate short lines and blank paragraph breaks", () => {
+		const lines = [row("First short line"), row("Second short line"), row(""), row("Third line")];
+		expect(reflowDisplayLines(lines).map(lineText)).toEqual(lines.map(lineText));
+	});
+
+	it("keeps list items and box drawing separate from prose", () => {
+		const lines = [
+			row("  A long paragraph near the terminal edge with enough words to fill"),
+			row("  - a list item"),
+			row("┌────┐"),
+			row("│ x  │"),
+		];
+		expect(reflowDisplayLines(lines).map(lineText)).toEqual(lines.map(lineText));
+	});
+
+	describe("Claude tool bullet blink (1747-ea9e)", () => {
+		// Claude repaints the leading ⏺ as a space while it pulses; the rows below
+		// are byte-identical in both frames.
+		const body = "Bash(cd ~/Gits/personal/orchestrator && B=~/Gits/.tmp/brief.md; printf x; the worktree is…)";
+		const frame = (lead: string): LogLine[] => [
+			row(`${lead} ${body}`, 120),
+			row("  ⎿  Running… (1m 21s · timeout 5m)", 120),
+			row("     (ctrl+b to run in background)", 120),
+		];
+
+		it("keeps the same rows whether the bullet is shown or blank", () => {
+			const on = reflowDisplayLines(frame("⏺")).map(lineText);
+			const off = reflowDisplayLines(frame(" ")).map(lineText);
+			expect(off).toHaveLength(on.length);
+			expect(off.map((t) => t.replace(/^[⏺ ]/, ""))).toEqual(on.map((t) => t.replace(/^[⏺ ]/, "")));
+		});
+
+		it("never folds a ⎿ result row into the tool row above", () => {
+			for (const lead of ["⏺", " "]) {
+				expect(reflowDisplayLines(frame(lead)).map(lineText)).toEqual(frame(lead).map(lineText));
+			}
+		});
+
+		it("joins a wrapped continuation of a bulleted row identically in both frames", () => {
+			const wrapped = (lead: string): LogLine[] => [
+				row(`${lead} Il mio giudizio ragionato richiede ancora una misura prima di`, 120),
+				row("  trasformarlo in un dato.", 120),
+			];
+			const on = reflowDisplayLines(wrapped("⏺")).map(lineText);
+			const off = reflowDisplayLines(wrapped(" ")).map(lineText);
+			expect(on).toHaveLength(1);
+			expect(off).toHaveLength(1);
+		});
+	});
+
+	it("reuses an unchanged joined line and keeps continuation styling", () => {
+		const lines = [
+			row("  Il mio giudizio ragionato richiede ancora una misura prima di"),
+			{ spans: [{ text: "  trasformarlo", bold: true }], cols: 80 },
+		];
+		const first = reflowDisplayLines(lines);
+		expect(reflowDisplayLines(lines)[0]).toBe(first[0]);
+		expect(first[0].spans.at(-1)).toEqual({ text: "trasformarlo", bold: true });
+	});
+});
+
 describe("line derivation cache", () => {
 	/** A LogLine whose span text counts how often it is read. */
 	function countingLine(text: string): { line: LogLine; reads: () => number } {
@@ -354,5 +452,44 @@ describe("line derivation cache", () => {
 		expect(lineText(line)).toBe("● ready");
 		normalizeLogLine(line);
 		expect(lineText(line)).toBe("●︎ ready");
+	});
+});
+
+// Catches adding a space inside a word or stripping a real margin separator.
+describe("softwrap_1977", () => {
+	it("uses recorded terminal wrap boundaries without guessing whitespace", () => {
+		for (const cols of [24, 64]) {
+			const capture = readFileSync(`src-tauri/src/fixtures/agent_prompts/softwrap-spaces-1977-${cols}.tcap`);
+			let raw = "";
+			for (let offset = 13; offset < capture.length; ) {
+				const length = capture.readUInt32LE(offset + 9);
+				raw += capture.subarray(offset + 13, offset + 13 + length).toString();
+				offset += 13 + length;
+			}
+			// These controlled ASCII recordings have no cursor controls or wide cells.
+			const lines: LogLine[] = raw.split("\r\n").flatMap((logical) => {
+				const rows: LogLine[] = [];
+				for (let start = 0; start < logical.length; start += cols) {
+					rows.push({
+						spans: [{ text: logical.slice(start, start + cols) }],
+						cols,
+						wrapped: start + cols < logical.length,
+					});
+				}
+				return rows;
+			});
+			expect(reflowDisplayLines(lines).map(lineText).join("\n")).toBe(raw.replaceAll("\r\n", "\n"));
+		}
+	});
+	it("invalidates a retained screen row when only its wrap boundary changes", () => {
+		const spans = [{ text: "same visible cells" }];
+		expect(sameLine({ spans, cols: 64, wrapped: true }, { spans, cols: 64, wrapped: false })).toBe(false);
+	});
+	it("keeps explicit hard breaks even when the old prose heuristic would join", () => {
+		const lines = [
+			{ spans: [{ text: "a".repeat(64) }], cols: 64, wrapped: false },
+			{ spans: [{ text: "second paragraph" }], cols: 64, wrapped: false },
+		];
+		expect(reflowDisplayLines(lines)).toEqual(lines);
 	});
 });

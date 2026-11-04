@@ -1,0 +1,40 @@
+.pageHeaderBlock { margin-bottom: 24px; }
+.pageHeader { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 0; }
+.pageHeader > div, .listText { min-width: 0; }
+.pageHeader h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+.pageHeader h2:last-child { margin-bottom: 0; }
+.pageHeader p, .card p, .listRow p, .empty p, .status p { margin: 4px 0 0; color: var(--fg-secondary); line-height: 1.5; overflow-wrap: anywhere; }
+.card { padding: 16px; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
+.card h3 { margin: 0 0 8px; color: var(--fg-primary); font-size: 15px; font-weight: 600; }
+.description, .source, .listRow p, .empty p { font-size: 12px; }
+.card > .description { margin-bottom: 8px; }
+.status { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 16px; margin-bottom: 16px; background: var(--bg-tertiary); border-radius: 6px; }
+.listRow { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.listRow:last-child { border-bottom: 0; }
+.listText { flex: 1; }
+.actions, .badges { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.badges { margin-top: 8px; }
+.empty { padding: 16px; border: 1px dashed var(--border); border-radius: 6px; }
+.empty > :last-child:not(p) { margin-top: 12px; }
+.danger { border-color: var(--error); }
+.danger > .actions { margin-top: 12px; }
+@media (max-width: 800px) { .pageHeader, .listRow, .status { flex-wrap: wrap; } }
+
+
+.pageHeader [data-testid="status-badge"], .listRow [data-testid="status-badge"], .status [data-testid="status-badge"] { font-family: var(--font-ui); font-size: 11px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 8px; background: var(--bg-tertiary); }
+.listText > span { font-size: 13px; font-weight: 600; }
+.breadcrumb { font-size: 12px; color: var(--fg-secondary); margin-bottom: 12px; }
+
+.pageTitle { display: flex; align-items: center; gap: 8px; }
+.pageTitle > svg { width: 20px; height: 20px; flex-shrink: 0; }
+.cardActions { margin-top: 12px; justify-content: flex-end; }
+
+.cardHeading { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; min-width: 0; }
+.card .cardHeading h3 { margin: 0; font-size: 15px; }
+
+.headingActions { flex-shrink: 0; margin-left: auto; }
+
+.status > .actions { margin-left: auto; justify-content: flex-end; }
+
+.pageHeader > .actions { flex-shrink: 0; max-width: 100%; }
+.pageHeader [data-testid="status-badge"] { display: block; max-width: 100%; text-overflow: ellipsis; }

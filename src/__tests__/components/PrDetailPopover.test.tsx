@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockInvoke } from "../mocks/tauri";
 import "../mocks/tauri";
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { agentConfigsStore } from "../../stores/agentConfigs";
 import { repoSettingsStore } from "../../stores/repoSettings";
+import { repositoriesStore } from "../../stores/repositories";
+import { terminalsStore } from "../../stores/terminals";
 
 const { mockGetBranchPrData, mockGetCheckSummary, mockGetCheckDetails } = vi.hoisted(() => ({
 	mockGetBranchPrData: vi.fn<() => unknown>(() => null),
@@ -38,8 +41,66 @@ describe("PrDetailPopover", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		vi.useRealTimers();
 	});
+
+	it.each([
+		{ env: {}, expected: "codex --no-alt-screen" },
+		{ env: { PROFILE: "work" }, expected: "codex --no-alt-screen" },
+	])("launches the PR review agent with the configured screen mode ($expected)", async ({ env, expected }) => {
+		vi.useRealTimers();
+		mockGetBranchPrData.mockReturnValue({
+			number: 42,
+			title: "Change",
+			state: "OPEN",
+			url: "https://github.com/o/r/pull/42",
+			checks: { passed: 0, failed: 0, pending: 0, total: 0 },
+		});
+		vi.spyOn(repositoriesStore, "get").mockReturnValue({ workspaces: { feature: { terminals: ["term-1"] } } } as never);
+		vi.spyOn(repositoriesStore, "workspaceIdOnBranch").mockReturnValue("feature");
+		vi.spyOn(terminalsStore, "get").mockReturnValue({ agentType: "codex" } as never);
+		vi.spyOn(agentConfigsStore, "getRunConfigs").mockReturnValue([
+			{ name: "Review", command: "codex", args: [], env },
+		] as never);
+		mockInvoke.mockImplementation(async (command: string) =>
+			command === "prepare_agent_launch_args" ? ["--no-alt-screen"] : null,
+		);
+		const onReview = vi.fn();
+		const { getByText } = render(() => <PrDetailPopover {...defaultProps} onReview={onReview} />);
+		fireEvent.click(getByText("Review"));
+		await waitFor(() => expect(onReview).toHaveBeenCalledWith("/repo", "feature/x", expected));
+	});
+
+	// Catches: the sidebar popover exposing only a count with no usable conversation route.
+	it.each(["Comments on GitHub", "2 unresolved threads"])(
+		"opens the exact PR conversation from %s without a provider",
+		async (label) => {
+			vi.useRealTimers();
+			mockGetBranchPrData.mockReturnValue({
+				branch: "remote/feature",
+				number: 42,
+				title: "Remote-only change",
+				state: "OPEN",
+				url: "https://github.com/acme/remote/pull/42",
+				unresolved_threads: 2,
+				labels: [],
+				checks: { passed: 0, failed: 0, pending: 0, total: 0 },
+			});
+			const onClose = vi.fn();
+			const { getByRole } = render(() => (
+				<PrDetailPopover {...defaultProps} branch="remote/feature" onClose={onClose} />
+			));
+			fireEvent.click(getByRole("button", { name: label }));
+			await waitFor(() =>
+				expect(mockInvoke).toHaveBeenCalledWith("open_default_app", {
+					target: "https://github.com/acme/remote/pull/42",
+					kind: "url",
+				}),
+			);
+			expect(onClose).toHaveBeenCalledOnce();
+		},
+	);
 
 	it("renders PR metadata correctly", () => {
 		mockGetBranchPrData.mockReturnValue({
@@ -145,27 +206,45 @@ describe("PrDetailPopover", () => {
 		expect(onClose).toHaveBeenCalledOnce();
 	});
 
-	it("calls onClose on overlay click", () => {
-		mockGetBranchPrData.mockReturnValue({
-			branch: "feature/x",
-			number: 1,
-			title: "Test",
-			state: "OPEN",
-			url: "",
-			additions: 0,
-			deletions: 0,
-			author: "bob",
-			commits: 1,
-			checks: { passed: 0, failed: 0, pending: 0, total: 0 },
-			check_details: [],
-		});
+	// Catches: outside dismissal requires a full-window backdrop that intercepts sidebar wheel input.
+	it("dismisses on an outside pointer press without swallowing sidebar input", () => {
 		const onClose = vi.fn();
-		const { container } = render(() => <PrDetailPopover {...defaultProps} onClose={onClose} />);
-
-		const overlay = container.querySelector(".overlay");
-		expect(overlay).not.toBeNull();
-		fireEvent.click(overlay!);
+		const onSidebarPress = vi.fn();
+		const { getByRole } = render(() => (
+			<>
+				<input aria-label="Terminal input" />
+				<aside onPointerDown={onSidebarPress}>Repositories</aside>
+				<PrDetailPopover {...defaultProps} onClose={onClose} />
+			</>
+		));
+		const input = getByRole("textbox");
+		input.focus();
+		fireEvent.wheel(getByRole("complementary"), { deltaY: 120 });
+		expect(onClose).not.toHaveBeenCalled();
+		expect(document.activeElement).toBe(input);
+		const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+		getByRole("complementary").dispatchEvent(event);
 		expect(onClose).toHaveBeenCalledOnce();
+		expect(onSidebarPress).toHaveBeenCalledOnce();
+		expect(event.defaultPrevented).toBe(false);
+		expect(document.activeElement).toBe(input);
+	});
+
+	// Catches: outside dismissal also closes the popover when a user presses one of its controls.
+	it("keeps the popover open for an inside pointer press", () => {
+		const onClose = vi.fn();
+		const { getByText } = render(() => <PrDetailPopover {...defaultProps} onClose={onClose} />);
+		fireEvent.pointerDown(getByText(/No PR data available/));
+		expect(onClose).not.toHaveBeenCalled();
+	});
+
+	// Catches: a removed popover retains an outside listener and closes newer UI on the next press.
+	it("removes outside dismissal when unmounted", () => {
+		const onClose = vi.fn();
+		const { unmount } = render(() => <PrDetailPopover {...defaultProps} onClose={onClose} />);
+		unmount();
+		fireEvent.pointerDown(document.body);
+		expect(onClose).not.toHaveBeenCalled();
 	});
 
 	it("handles no-data gracefully", () => {
@@ -816,12 +895,14 @@ describe("PrDetailPopover", () => {
 
 		beforeEach(() => {
 			repoSettingsStore.getOrCreate("/repo", "Repo");
-			repoSettingsStore.update("/repo", { prMergeStrategy: null }); // reset to global default
+			// The fallback chain starts from a preferred "merge"; the global default is squash.
+			repoSettingsStore.update("/repo", { prMergeStrategy: "merge" });
 			mockGetBranchPrData.mockReturnValue(mergeablePr);
 		});
 
 		it("falls back to squash when merge is rejected with 405", async () => {
 			mockInvoke
+				.mockResolvedValueOnce({}) // get_pr_action_state, read on mount by the PR action buttons
 				.mockRejectedValueOnce(new Error("GitHub merge failed (405): Merge commits are not allowed."))
 				.mockResolvedValueOnce("abc123sha");
 
@@ -836,11 +917,12 @@ describe("PrDetailPopover", () => {
 				);
 			});
 			// Persists the working method for future merges
-			expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("squash");
+			await waitFor(() => expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("squash"));
 		});
 
 		it("falls back to rebase when both merge and squash are rejected with 405", async () => {
 			mockInvoke
+				.mockResolvedValueOnce({}) // get_pr_action_state, read on mount by the PR action buttons
 				.mockRejectedValueOnce(new Error("GitHub merge failed (405): Merge commits are not allowed."))
 				.mockRejectedValueOnce(new Error("GitHub merge failed (405): Squash merging is not allowed."))
 				.mockResolvedValueOnce("abc123sha");
@@ -855,11 +937,12 @@ describe("PrDetailPopover", () => {
 					expect.objectContaining({ mergeMethod: "rebase" }),
 				);
 			});
-			expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("rebase");
+			await waitFor(() => expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("rebase"));
 		});
 
 		it("shows error when all merge methods are rejected", async () => {
 			mockInvoke
+				.mockResolvedValueOnce({}) // get_pr_action_state, read on mount by the PR action buttons
 				.mockRejectedValueOnce(new Error("GitHub merge failed (405): Merge commits are not allowed."))
 				.mockRejectedValueOnce(new Error("GitHub merge failed (405): Squash merging is not allowed."))
 				.mockRejectedValueOnce(new Error("GitHub merge failed (405): Rebase merging is not allowed."));
@@ -874,6 +957,7 @@ describe("PrDetailPopover", () => {
 		});
 
 		it("does not retry on non-405 errors", async () => {
+			mockInvoke.mockResolvedValueOnce({}); // get_pr_action_state, read on mount by the PR action buttons
 			mockInvoke.mockRejectedValueOnce(new Error("Network error"));
 
 			const { container } = render(() => <PrDetailPopover {...defaultProps} />);
@@ -930,7 +1014,8 @@ describe("PrDetailPopover", () => {
 				.mockResolvedValueOnce("sha123") // merge_pr_via_github
 				.mockResolvedValueOnce({ stdout: "" }); // run_git_command (git status --porcelain)
 
-			const { container } = render(() => <PrDetailPopover {...defaultProps} />);
+			const onClose = vi.fn();
+			const { container, getByText } = render(() => <PrDetailPopover {...defaultProps} onClose={onClose} />);
 			const mergeBtn = container.querySelector(".mergeBtn") as HTMLButtonElement;
 			fireEvent.click(mergeBtn);
 
@@ -939,6 +1024,9 @@ describe("PrDetailPopover", () => {
 				expect(container.textContent).toContain("feature/x");
 				expect(container.textContent).toContain("main");
 			});
+			// Catches: the popover's outside listener dismisses its replacement cleanup dialog.
+			fireEvent.pointerDown(getByText("Post-merge cleanup"));
+			expect(onClose).not.toHaveBeenCalled();
 		});
 
 		it("calls pollRepo AFTER setCleanupCtx (cleanup dialog is mounted first)", async () => {
@@ -1003,6 +1091,8 @@ describe("PrDetailPopover", () => {
 		});
 
 		it("shows Merge when preferred method is merge and repo allows it", () => {
+			repoSettingsStore.getOrCreate("/repo", "Repo");
+			repoSettingsStore.update("/repo", { prMergeStrategy: "merge" });
 			mockGetBranchPrData.mockReturnValue(makePr());
 			const { container } = render(() => <PrDetailPopover {...defaultProps} />);
 			const btn = container.querySelector(".mergeBtn");

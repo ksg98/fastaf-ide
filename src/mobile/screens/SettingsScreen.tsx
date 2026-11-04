@@ -1,17 +1,27 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onMount, Show } from "solid-js";
+import { Button, Select, Switch } from "../../components/ui";
+import { t } from "../../i18n";
 import { appLogger } from "../../stores/appLogger";
+import { transcriptPreferences } from "../../stores/transcriptPreferences";
+import { KEEP_AWAKE_KEY } from "../../utils/screenWakeLock";
+import { setDesktopUI } from "../../utils/tabletRouting";
+import { MAX_MOBILE_FONT_SIZE, MIN_MOBILE_FONT_SIZE, mobileFontSizes } from "../mobileFontSize";
+import { loadMobileTheme, mobileTheme, setMobileTheme } from "../mobileTheme";
+import { useKeyboardCorrection } from "../useKeyboardCorrection";
+import { useMobileVoice } from "../useMobileVoice";
 import styles from "./SettingsScreen.module.css";
 
 const SOUND_KEY = "tuic-mobile-sounds";
 
 interface SettingsScreenProps {
+	recoveryRevision?: number;
 	isConnected: boolean;
 }
 
 /** Convert base64url-encoded VAPID public key to Uint8Array for PushManager.subscribe. */
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
 	const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-	const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+	const base64 = (base64String + padding).replaceAll("-", "+").replaceAll("_", "/");
 	const raw = atob(base64);
 	return new Uint8Array([...raw].map((c) => c.charCodeAt(0)));
 }
@@ -19,15 +29,44 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
 type PushState = "unsupported" | "requires-https" | "requires-install" | "denied" | "default" | "subscribed";
 
 export function SettingsScreen(props: SettingsScreenProps) {
+	const keyboardCorrection = useKeyboardCorrection();
+	const voice = useMobileVoice(
+		() => "",
+		() => props.isConnected,
+	);
 	const [soundEnabled, setSoundEnabled] = createSignal(localStorage.getItem(SOUND_KEY) !== "false");
+	const [keepAwake, setKeepAwake] = createSignal(localStorage.getItem(KEEP_AWAKE_KEY) !== "false");
 	const [serverUrl, setServerUrl] = createSignal("");
+	const [serverVersion, setServerVersion] = createSignal<string | null>(null);
+	const [theme, setTheme] = createSignal(mobileTheme());
+	const [themeReady, setThemeReady] = createSignal(false);
+	const [themeError, setThemeError] = createSignal<string | null>(null);
 	const [pushState, setPushState] = createSignal<PushState>("unsupported");
 	const [pushLoading, setPushLoading] = createSignal(false);
 	const [pushError, setPushError] = createSignal<string | null>(null);
 
-	onMount(async () => {
+	onMount(() => {
 		setServerUrl(window.location.origin);
-		setPushState(await detectPushState());
+		void detectPushState().then(setPushState);
+	});
+	createEffect(() => {
+		props.recoveryRevision;
+		setThemeError(null);
+		void loadMobileTheme()
+			.then(setTheme)
+			.catch((error: unknown) => {
+				appLogger.warn("app", "Could not load mobile theme", error);
+				setThemeError("Could not load theme preference");
+			})
+			.finally(() => setThemeReady(true));
+		void fetch("/api/version")
+			.then(async (response) => {
+				if (response.ok) {
+					const data = (await response.json()) as { version?: string };
+					setServerVersion(data.version ?? null);
+				}
+			})
+			.catch((error: unknown) => appLogger.warn("network", "Could not load server version", error));
 	});
 
 	async function detectPushState(): Promise<PushState> {
@@ -152,6 +191,12 @@ export function SettingsScreen(props: SettingsScreenProps) {
 		localStorage.setItem(SOUND_KEY, String(next));
 	}
 
+	function toggleKeepAwake() {
+		const next = !keepAwake();
+		setKeepAwake(next);
+		localStorage.setItem(KEEP_AWAKE_KEY, String(next));
+	}
+
 	const pushStatusText = () => {
 		switch (pushState()) {
 			case "unsupported":
@@ -190,6 +235,119 @@ export function SettingsScreen(props: SettingsScreenProps) {
 						{props.isConnected ? "Connected" : "Disconnected"}
 					</span>
 				</div>
+				<div class={styles.row}>
+					<span class={styles.label}>App version</span>
+					<span class={styles.value}>{__APP_VERSION__}</span>
+				</div>
+				<div class={styles.row}>
+					<span class={styles.label}>Server version</span>
+					<span class={styles.value}>{serverVersion() ?? "Unavailable"}</span>
+				</div>
+			</section>
+
+			<section class={styles.section}>
+				<h3 class={styles.sectionTitle}>{t("mobile.settings.input", "INPUT")}</h3>
+				<div class={styles.row}>
+					<span class={styles.label}>{t("mobile.settings.keyboardCorrection", "Autocorrect and spellcheck")}</span>
+					<Switch
+						aria-label={t("mobile.settings.keyboardCorrection", "Autocorrect and spellcheck")}
+						checked={keyboardCorrection.enabled()}
+						onChange={keyboardCorrection.toggle}
+					/>
+				</div>
+			</section>
+
+			<Show when={voice.available()}>
+				<section class={styles.section}>
+					<h3 class={styles.sectionTitle}>VOICE</h3>
+					<label class={styles.row}>
+						<span class={styles.label}>Hands-free listening</span>
+						<Switch checked={voice.listening()} onChange={(e) => voice.setListening(e.currentTarget.checked)} />
+					</label>
+					<label class={`${styles.row} ${styles.spokenReplies}`}>
+						<span class={styles.label}>Spoken replies</span>
+						<Switch checked={voice.spokenReplies()} onChange={(e) => voice.setSpokenReplies(e.currentTarget.checked)} />
+					</label>
+				</section>
+			</Show>
+
+			<section class={styles.section}>
+				<h3 class={styles.sectionTitle}>APPEARANCE</h3>
+				<For
+					each={
+						[
+							{ surface: "terminal", label: "Terminal" },
+							{ surface: "chat", label: "Chat" },
+						] as const
+					}
+				>
+					{({ surface, label }) => (
+						<div class={styles.row}>
+							<span class={styles.label}>{label}</span>
+							<div class={styles.fontSizeControl} role="group" aria-label={`${label} font size`}>
+								<Button
+									shape="icon"
+									type="button"
+									aria-label={`Smaller ${label} font`}
+									disabled={mobileFontSizes[surface]() === MIN_MOBILE_FONT_SIZE}
+									onClick={() => mobileFontSizes.step(surface, -1)}
+								>
+									−
+								</Button>
+								<output aria-label={`${label} font size`} aria-live="polite">
+									{mobileFontSizes[surface]()} px
+								</output>
+								<Button
+									shape="icon"
+									type="button"
+									aria-label={`Larger ${label} font`}
+									disabled={mobileFontSizes[surface]() === MAX_MOBILE_FONT_SIZE}
+									onClick={() => mobileFontSizes.step(surface, 1)}
+								>
+									+
+								</Button>
+							</div>
+						</div>
+					)}
+				</For>
+				<div class={styles.row}>
+					<span class={styles.label}>New text indicator</span>
+					<Switch
+						aria-label="New text indicator"
+						checked={transcriptPreferences.enabled()}
+						onChange={() => transcriptPreferences.setEnabled(!transcriptPreferences.enabled())}
+					/>
+				</div>
+				<label class={styles.row}>
+					<span class={styles.label}>Theme</span>
+					<Select
+						aria-label="Theme"
+						value={theme()}
+						disabled={!themeReady()}
+						onChange={(event) => {
+							const next = event.currentTarget.value === "vscode-light" ? "vscode-light" : "commander";
+							const previous = theme();
+							setTheme(next);
+							setThemeReady(false);
+							setThemeError(null);
+							void setMobileTheme(next)
+								.catch((error: unknown) => {
+									setTheme(previous);
+									appLogger.warn("app", "Could not save mobile theme", error);
+									setThemeError("Could not save theme preference");
+								})
+								.finally(() => setThemeReady(true));
+						}}
+					>
+						<option value="commander">Dark</option>
+						<option value="vscode-light">Light</option>
+					</Select>
+				</label>
+				<Show when={themeError()}>
+					<div class={styles.hint} role="alert" style={{ color: "var(--error)" }}>
+						{themeError()}
+					</div>
+				</Show>
 			</section>
 
 			<section class={styles.section}>
@@ -197,15 +355,17 @@ export function SettingsScreen(props: SettingsScreenProps) {
 				<div class={styles.row}>
 					<span class={styles.label}>Push notifications</span>
 					<Show when={canTogglePush()} fallback={<span class={styles.value}>{pushStatusText()}</span>}>
-						<button
-							class={styles.toggle}
-							classList={{ [styles.toggleOn]: pushState() === "subscribed" }}
-							onClick={handleTogglePush}
+						<Switch
+							onChange={(event) => {
+								const control = event.currentTarget;
+								void handleTogglePush().finally(() => {
+									control.checked = pushState() === "subscribed";
+								});
+							}}
 							disabled={pushLoading()}
-							aria-pressed={pushState() === "subscribed"}
-						>
-							<span class={styles.toggleThumb} />
-						</button>
+							checked={pushState() === "subscribed"}
+							aria-label="Push notifications"
+						/>
 					</Show>
 				</div>
 				<Show when={pushState() === "requires-install"}>
@@ -218,20 +378,17 @@ export function SettingsScreen(props: SettingsScreenProps) {
 				</Show>
 				<div class={styles.row}>
 					<span class={styles.label}>Notification sounds</span>
-					<button
-						class={styles.toggle}
-						classList={{ [styles.toggleOn]: soundEnabled() }}
-						onClick={toggleSound}
-						aria-pressed={soundEnabled()}
-					>
-						<span class={styles.toggleThumb} />
-					</button>
+					<Switch onChange={toggleSound} checked={soundEnabled()} aria-label="Notification sounds" />
+				</div>
+				<div class={styles.row}>
+					<span class={styles.label}>Keep screen awake while dictating</span>
+					<Switch onChange={toggleKeepAwake} checked={keepAwake()} aria-label="Keep screen awake while dictating" />
 				</div>
 			</section>
 
 			<section class={styles.section}>
 				<h3 class={styles.sectionTitle}>ACTIONS</h3>
-				<a href="/" class={styles.link}>
+				<a href="/" class={styles.link} onClick={() => setDesktopUI(true)}>
 					Open Desktop UI
 				</a>
 				<a href="/process/monitor" class={styles.link} target="_blank" rel="noopener">

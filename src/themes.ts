@@ -1,7 +1,8 @@
 import { createSignal } from "solid-js";
 import { invoke, listen } from "./invoke";
 import { appLogger } from "./stores/appLogger";
-import { FONT_FAMILIES, type FontType, settingsStore } from "./stores/settings";
+import { DEFAULT_THEME, FONT_FAMILIES, type FontType, settingsStore } from "./stores/settings";
+import { syncWindowBackground } from "./utils/windowBackground";
 
 /** Terminal color theme (mirrors xterm.js ITheme keys used by CanvasTerminal) */
 export interface TerminalTheme {
@@ -214,22 +215,22 @@ export async function listenForThemeChanges(): Promise<void> {
 	});
 }
 
-/** Get a terminal theme by key, falling back to the default (codex-dark), then cursor-dark, then vscode-dark */
+/** Get a terminal theme by key, falling back to DEFAULT_THEME (codex-dark), then cursor-dark, then vscode-dark */
 export function getTerminalTheme(key: string): TerminalTheme {
 	return (
 		themes.get(key)?.terminal ??
-		themes.get("codex-dark")?.terminal ??
+		themes.get(DEFAULT_THEME)?.terminal ??
 		themes.get("cursor-dark")?.terminal ??
 		themes.get("vscode-dark")?.terminal ??
 		FALLBACK_TERMINAL
 	);
 }
 
-/** Get an app theme by key, falling back to the default (codex-dark), then cursor-dark, then vscode-dark */
+/** Get an app theme by key, falling back to DEFAULT_THEME (codex-dark), then cursor-dark, then vscode-dark */
 export function getAppTheme(key: string): IAppTheme {
 	return (
 		themes.get(key)?.appChrome ??
-		themes.get("codex-dark")?.appChrome ??
+		themes.get(DEFAULT_THEME)?.appChrome ??
 		themes.get("cursor-dark")?.appChrome ??
 		themes.get("vscode-dark")?.appChrome ??
 		FALLBACK_APP
@@ -322,17 +323,21 @@ const [themeGeneration, bumpThemeGeneration] = createSignal(0);
 export { themeGeneration };
 
 /** Apply an app theme by setting CSS custom properties on the document root */
-export function applyAppTheme(key: string): void {
+export function applyAppTheme(key: string, syncAnsi = true): void {
 	const appTheme = themes.get(key);
 	if (!appTheme) {
-		appLogger.warn("app", `Unknown theme "${key}", falling back to codex-dark`);
+		appLogger.warn("app", `Unknown theme "${key}", falling back to ${DEFAULT_THEME}`);
 	}
 	const theme = getAppTheme(key);
 	const root = document.documentElement.style;
+	syncWindowBackground(theme.bgPrimary);
 	for (const [prop, value] of Object.entries(theme)) {
 		root.setProperty(camelToKebab(prop), value);
-		// Companion -rgb triple so CSS can compose alphas: rgba(var(--bg-primary-rgb), α)
-		root.setProperty(`${camelToKebab(prop)}-rgb`, hexToRgb(value).join(", "));
+		// Companion -rgb triple so CSS can compose alphas: rgba(var(--bg-primary-rgb), α).
+		// Only for a #rrggbb value: a theme that omits a field must not throw here.
+		if (typeof value === "string" && /^#[0-9a-f]{6}/i.test(value)) {
+			root.setProperty(`${camelToKebab(prop)}-rgb`, hexToRgb(value).join(", "));
+		}
 	}
 	// Gloss borders/washes need polarity flipped on light themes (dark borders
 	// on light surfaces, white sheen stronger to stay visible).
@@ -341,7 +346,7 @@ export function applyAppTheme(key: string): void {
 	// frame goes opaque and region dividers become half-pixel light lines
 	// (html.tonal in global.css). A flat theme — one black, Cursor Dark — keeps
 	// its 1px hairlines, which are all the structure it has.
-	const tonal = theme.bgPrimary.toLowerCase() !== theme.bgSecondary.toLowerCase();
+	const tonal = theme.bgPrimary.toLowerCase() !== (theme.bgSecondary ?? theme.bgPrimary).toLowerCase();
 	document.documentElement.classList.toggle("tonal", tonal);
 	document.documentElement.classList.toggle("theme-light", light);
 	root.setProperty(
@@ -369,6 +374,11 @@ export function applyAppTheme(key: string): void {
 	root.setProperty("--wash-2", light ? "rgba(0, 0, 0, 0.09)" : "rgba(255, 255, 255, 0.12)");
 	root.setProperty("--scrollbar-thumb", light ? "rgba(0, 0, 0, 0.18)" : "rgba(255, 255, 255, 0.14)");
 	root.setProperty("--scrollbar-thumb-hover", light ? "rgba(0, 0, 0, 0.3)" : "rgba(255, 255, 255, 0.24)");
+	// rgba(var(--accent-rgb), a) consumers need the channels, not the hex.
+	root.setProperty("--accent-rgb", hexToRgb(theme.accent).join(", "));
+	// Typography that belongs to one theme (font smoothing, tracking) has no
+	// field in the theme JSON; global.css keys it on this attribute instead.
+	document.documentElement.dataset.theme = key;
 	const termTheme = getTerminalTheme(key);
 	const ansiRgb: [number, number, number][] = [];
 	for (const k of ANSI_KEYS) {
@@ -380,7 +390,7 @@ export function applyAppTheme(key: string): void {
 			ansiRgb.push([0, 0, 0]);
 		}
 	}
-	if (ansiRgb.length === 16) {
+	if (syncAnsi && ansiRgb.length === 16) {
 		invoke("set_ansi_colors", { colors: ansiRgb }).catch((e: unknown) => {
 			appLogger.warn("app", "Failed to sync ANSI colors to backend", { error: e });
 		});

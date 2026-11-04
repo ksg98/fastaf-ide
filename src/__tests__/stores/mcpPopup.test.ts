@@ -3,6 +3,7 @@ import { testInScope, testInScopeAsync } from "../helpers/store";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
 const mockListen = vi.fn().mockResolvedValue(() => {});
+const mockRemoteRpc = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
 	invoke: mockInvoke,
@@ -84,11 +85,62 @@ describe("mcpPopupStore", () => {
 			},
 		}));
 
+		mockRemoteRpc.mockReset().mockResolvedValue(undefined);
+		vi.doMock("../../transport", async (importOriginal) => ({
+			...(await importOriginal<typeof import("../../transport")>()),
+			rpc: mockRemoteRpc,
+		}));
 		store = (await import("../../stores/mcpPopup")).mcpPopupStore;
 	});
 
 	afterEach(() => {
 		vi.useRealTimers();
+	});
+
+	it("routes remote upstream refresh to its host without replacing local configuration", async () => {
+		const { setRemoteBaseUrlLookup } = await import("../../transportRuntime");
+		setRemoteBaseUrlLookup(() => "http://mint:9876");
+		mockInvoke.mockImplementation((command: string) =>
+			Promise.resolve(command === "load_mcp_upstreams" ? MOCK_CONFIG : MOCK_STATUS),
+		);
+		await store.loadConfig();
+		mockInvoke.mockClear();
+		mockRemoteRpc.mockResolvedValue({
+			upstreams: [{ name: "remote-only", status: "failed", transport: { type: "http" }, tool_count: 0 }],
+		});
+		await store.listenForStatusChanges();
+		for (const [, callback] of mockListen.mock.calls.filter(([name]) => name === "upstream-status-changed")) {
+			callback({
+				payload: { name: "remote-only", status: "failed", __tuic_origin: { connection: "mint", name: "Mint host" } },
+			});
+		}
+		await Promise.resolve();
+		expect(mockRemoteRpc).toHaveBeenCalledWith("get_mcp_upstream_status", undefined, "mint");
+		expect(mockInvoke).not.toHaveBeenCalled();
+		expect(store.state.servers).toEqual(MOCK_CONFIG.servers);
+		expect(store.state.status).toEqual(MOCK_STATUS.upstreams);
+		expect(store.state.remoteStatus.mint.upstreams[0].name).toBe("remote-only");
+		const { toastsStore } = await import("../../stores/toasts");
+		expect(toastsStore.toasts.at(-1)?.title).toBe("[Mint host] MCP upstream");
+	});
+
+	it("rejects a late remote upstream snapshot after disconnect and reconnect", async () => {
+		const { setRemoteBaseUrlLookup } = await import("../../transportRuntime");
+		setRemoteBaseUrlLookup(() => "http://mint:9876");
+		let resolveSnapshot: ((value: { upstreams: unknown[] }) => void) | undefined;
+		mockRemoteRpc.mockReturnValue(
+			new Promise((resolve) => {
+				resolveSnapshot = resolve;
+			}),
+		);
+		const statusHandler = mockListen.mock.calls.find(([name]) => name === "upstream-status-changed")![1];
+		statusHandler({ payload: { name: "remote", status: "ready", __tuic_origin: { connection: "mint" } } });
+		const disconnectHandler = mockListen.mock.calls.find(([name]) => name === "remote-connection-status")![1];
+		disconnectHandler({ payload: { id: "mint", status: "disconnected" } });
+		disconnectHandler({ payload: { id: "mint", status: "connected" } });
+		resolveSnapshot!({ upstreams: [] });
+		await Promise.resolve();
+		expect(store.state.remoteStatus.mint).toBeUndefined();
 	});
 
 	describe("open/close/toggle", () => {
@@ -212,7 +264,7 @@ describe("mcpPopupStore", () => {
 				await store.loadConfig();
 				await store.toggleServer("alpha");
 
-				const toast = toastsStore.toasts[toastsStore.toasts.length - 1]!;
+				const toast = toastsStore.toasts.at(-1)!;
 				expect(toast.title).toBe("MCP servers changed");
 				expect(toast.message).toContain("Compatible clients refresh automatically");
 				expect(toast.message).not.toContain("until restarted");

@@ -18,7 +18,7 @@ Each row shows:
 
 - **Action label** — What the action does (e.g., "Git panel", "New terminal tab")
 - **Category badge** — The action's category (Terminal, Panels, Git, Navigation, Zoom, Split Panes, File Browser)
-- **Keybinding hint** — The assigned keyboard shortcut, if any
+- **Keybinding hint** — The assigned keyboard shortcut, if any. macOS shows key glyphs as menus do (for example `⌘⌥←`); Windows and Linux show `Ctrl+Alt+←`
 
 ### Search Behavior
 
@@ -31,6 +31,15 @@ When the search box is empty, recently used actions float to the top, ordered by
 ### Mouse Support
 
 Hovering over a row highlights it (same as keyboard selection). Clicking a row executes the action immediately.
+
+### Project Progress
+
+Run **Open Terminal Progress** to open the active terminal's journal in a dialog.
+Use the selector to inspect another terminal or the whole repository.
+This action is available in desktop and browser mode. The same dialog opens from
+the always available **Terminal Progress** entry in the notification bell, or
+with `Cmd/Ctrl+Shift+P`. The bell badge counts unread outcomes. Use **Mark as read**
+in the bell’s Progress section to clear that count without opening or deleting the journal.
 
 ### Powered by the Action Registry
 
@@ -72,11 +81,22 @@ You can also access search modes via explicit commands in the palette:
 
 These appear as regular commands in the palette — type "Search" to find them.
 
+### Paste a work-item URL
+
+Paste an issue, pull request or ticket URL into the palette. When an installed work-item plugin recognises it, the palette shows one entry above the commands:
+
+- **Open worktree &lt;branch&gt; (&lt;key&gt;)** — a worktree is already linked to that item; the palette switches to it and creates nothing.
+- **Start work on &lt;key&gt;: &lt;title&gt;** — creates a worktree for the item in the active repository and opens an agent with the item as a draft brief. Review the brief and press Enter to send it.
+
+With no work-item plugin installed, a pasted URL is searched like any other text.
+
 ---
 
 ## Activity Dashboard
 
 Open with `Cmd+Shift+A`. A real-time overview of all your terminal sessions.
+The overlay stays compact in the main window and fits narrow windows; detaching
+it keeps the same list in a separate window.
 
 ### What You See
 
@@ -85,9 +105,12 @@ A compact list where each row shows:
 | Column | Description |
 |--------|-------------|
 | **Terminal name** | The tab name |
-| **Agent type** | Detected agent (Claude, Aider, etc.) with brand icon |
+| **Agent type** | Detected agent (Claude, Codex, etc.) with brand icon |
 | **Status** | Current state with color indicator |
 | **Last activity** | Relative timestamp ("2s ago", "1m ago") — auto-refreshes |
+
+Spawned agent rows include a robot-head marker. Hover it to see the parent
+terminal's name, or "external agent" when its tab is unavailable.
 
 ### Status Colors
 
@@ -107,3 +130,15 @@ long-lived background terminal, such as a development server, running.
 - **Rate limit indicators** — Show countdown timers for when the limit expires
 
 The dashboard is useful when running many agents in parallel — you can spot at a glance which ones need attention, which are stalled, and which are making progress.
+
+### Automations
+
+**Automations** opens scheduled agent runs on the connected app's machine.
+The entry is available in desktop and browser mode. See the
+[Automations guide](automations.md). It requires the Automations backend API.
+
+### Plans and Stories
+
+**Plans and Stories** opens the Plans and Stories dialog for the active repository.
+It does nothing when no repository is active. The entry is available in desktop and browser mode. See
+[Native Stories](native-stories.md).

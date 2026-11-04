@@ -249,6 +249,7 @@ describe("FileBrowserPanel empty states", () => {
 			files_skipped: 0,
 			truncated: false,
 			repos_pending: 0,
+			repos_indexing: 0,
 			repos_searched: 0,
 		};
 		emit("content-search-batch", done);
@@ -281,6 +282,7 @@ describe("FileBrowserPanel content results", () => {
 			files_skipped: 0,
 			truncated: false,
 			repos_pending: 0,
+			repos_indexing: 0,
 			repos_searched: 0,
 		} satisfies ContentSearchBatch);
 

@@ -1,0 +1,39 @@
+{
+  "source": "Installed clients' outgoing tool schema captured by a localhost-only API sink; MCP server alias tuicommander advertises agent. Dummy keys; no model execution.",
+  "clients": {
+    "claude": {
+      "exit": 1,
+      "version": "2.1.304 (Claude Code)",
+      "exposed_tool_names": [
+        "Bash",
+        "Edit",
+        "Read",
+        "mcp__tuicommander__agent"
+      ]
+    },
+    "codex": {
+      "exit": 1,
+      "version": "codex-cli 0.163.0",
+      "exposed_tool_names": [
+        "create_goal",
+        "exec_command",
+        "get_goal",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "mcp__tuicommander",
+        "mcp__tuicommander.agent",
+        "multi_agent_v1",
+        "multi_agent_v1.close_agent",
+        "multi_agent_v1.resume_agent",
+        "multi_agent_v1.send_input",
+        "multi_agent_v1.spawn_agent",
+        "multi_agent_v1.wait_agent",
+        "read_mcp_resource",
+        "request_user_input",
+        "update_goal",
+        "view_image",
+        "write_stdin"
+      ]
+    }
+  }
+}

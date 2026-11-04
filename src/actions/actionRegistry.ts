@@ -7,8 +7,14 @@
 
 import type { ShortcutHandlers } from "../hooks/useKeyboardShortcuts";
 import type { ActionName } from "../keybindingDefaults";
+import { hasWorkItemSource } from "../plugins/workItemSetup";
+import { automationsUi } from "../stores/automations";
 import { keybindingsStore } from "../stores/keybindings";
+import { progressStore } from "../stores/progress";
+import { repositoriesStore } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
+import { storiesUi } from "../stores/storiesUi";
+import { terminalsStore } from "../stores/terminals";
 import { tunnelPanelStore } from "../stores/tunnelPanel";
 import { comboToDisplay } from "../utils/hotkey";
 
@@ -16,6 +22,8 @@ export interface ActionEntry {
 	id: string; // ActionName for static entries, or dynamic IDs like "switch-repo:/path"
 	label: string;
 	category: string;
+	/** Extra search terms; never displayed as the action label. */
+	keywords?: string;
 	keybinding: string;
 	execute: () => void;
 }
@@ -36,17 +44,20 @@ const ACTION_META: Partial<Record<ActionName, ActionMeta>> = {
 	"find-in-terminal": { label: "Find in content", category: "Terminal" },
 	"run-command": { label: "Run saved command", category: "Terminal" },
 	"edit-command": { label: "Edit saved command", category: "Terminal" },
+	"reload-tab": { label: "Reload active tab", category: "Terminal" },
 	"prev-tab": { label: "Previous tab", category: "Terminal" },
 	"next-tab": { label: "Next tab", category: "Terminal" },
 	"focus-last-terminal": { label: "Return to last terminal", category: "Navigation" },
+	"history-back": { label: "Back to previous terminal in history", category: "Navigation" },
+	"history-forward": { label: "Forward to next terminal in history", category: "Navigation" },
 	"jump-waiting-terminal": { label: "Jump to waiting terminal", category: "Navigation" },
 
 	"zoom-in": { label: "Zoom in", category: "Zoom" },
 	"zoom-out": { label: "Zoom out", category: "Zoom" },
 	"zoom-reset": { label: "Reset zoom", category: "Zoom" },
-	"zoom-in-all": { label: "Zoom in all terminals", category: "Zoom" },
-	"zoom-out-all": { label: "Zoom out all terminals", category: "Zoom" },
-	"zoom-reset-all": { label: "Reset zoom all terminals", category: "Zoom" },
+	"zoom-in-all": { label: "Zoom in all tabs", category: "Zoom" },
+	"zoom-out-all": { label: "Zoom out all tabs", category: "Zoom" },
+	"zoom-reset-all": { label: "Reset zoom all tabs", category: "Zoom" },
 
 	"toggle-markdown": { label: "Toggle markdown panel", category: "Panels" },
 	"toggle-settings": { label: "Open settings", category: "Panels" },
@@ -67,6 +78,7 @@ const ACTION_META: Partial<Record<ActionName, ActionMeta>> = {
 	"toggle-sidebar": { label: "Toggle sidebar", category: "Navigation" },
 
 	"command-palette": { label: "Command palette", category: "Navigation" },
+	progress: { label: "Open Terminal Progress", category: "Navigation" },
 	"activity-dashboard": { label: "Activity dashboard", category: "Navigation" },
 	"toggle-multiview": { label: "Toggle Multiview (all terminals grid)", category: "Navigation" },
 	"worktree-manager": { label: "Worktree manager", category: "Git" },
@@ -91,7 +103,7 @@ const ACTION_META: Partial<Record<ActionName, ActionMeta>> = {
 	"copy-relative-file-path": { label: "Copy active file relative path", category: "File" },
 	"open-secondary-window": { label: "Open secondary window", category: "Navigation" },
 	"command-overview": { label: "Command overview", category: "Panels" },
-	"ai-triage": { label: "AI Triage", category: "Panels" },
+	"open-tasks": { label: "Open Tasks", category: "Panels" },
 	"detach-activity-dashboard": { label: "Open Activity Dashboard in separate window", category: "Navigation" },
 	"toggle-tunnels": { label: "SSH Tunnels", category: "Panels" },
 	"process-manager": { label: "Process Manager", category: "Navigation" },
@@ -101,7 +113,10 @@ const ACTION_META: Partial<Record<ActionName, ActionMeta>> = {
 	"block-next": { label: "Next command block", category: "Terminal" },
 	"block-fold-toggle": { label: "Toggle block fold", category: "Terminal" },
 	"block-search-toggle": { label: "Search in block", category: "Terminal" },
+	"answers-only": { label: "Toggle answers-only view", category: "Terminal" },
 	"toggle-compose-panel": { label: "Toggle compose panel", category: "Panels" },
+	// No "toggle-hands-free": FastAF's voice agent is its one hands-free mode, so
+	// upstream's dictation conversation stays out of the palette.
 };
 
 /**
@@ -111,7 +126,24 @@ const ACTION_META: Partial<Record<ActionName, ActionMeta>> = {
  * since those aren't useful in a palette.
  */
 export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
-	const entries: ActionEntry[] = [];
+	const entries: ActionEntry[] = [
+		{
+			id: "automations",
+			label: "Automations",
+			category: "Navigation",
+			keywords: "scheduler schedule",
+			keybinding: "",
+			execute: automationsUi.open,
+		},
+		{
+			id: "plans-stories",
+			label: "Plans and Stories",
+			category: "Navigation",
+			keywords: "plan story workflow designer runs",
+			keybinding: "",
+			execute: () => storiesUi.open(repositoriesStore.state.activeRepoPath),
+		},
+	];
 
 	const handlerMap: Partial<Record<ActionName, () => void>> = {
 		"new-terminal": handlers.createNewTerminal,
@@ -122,9 +154,14 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		"find-in-terminal": handlers.findInTerminal,
 		"run-command": () => handlers.handleRunCommand(false),
 		"edit-command": () => handlers.handleRunCommand(true),
+		"reload-tab": () => {
+			handlers.reloadActiveTab();
+		},
 		"prev-tab": () => handlers.navigateTab("prev"),
 		"next-tab": () => handlers.navigateTab("next"),
 		"focus-last-terminal": handlers.focusLastTerminal,
+		"history-back": handlers.historyBack,
+		"history-forward": handlers.historyForward,
 		"jump-waiting-terminal": handlers.jumpWaitingTerminal,
 		"zoom-in": handlers.zoomIn,
 		"zoom-out": handlers.zoomOut,
@@ -135,7 +172,7 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		"toggle-markdown": handlers.toggleMarkdownPanel,
 		"toggle-settings": handlers.toggleSettings,
 		"toggle-task-queue": handlers.toggleTaskQueue,
-		"toggle-notes": handlers.toggleNotesPanel,
+		"toggle-notes": handlers.toggleIdeasPanel,
 		"toggle-help": handlers.toggleHelpPanel,
 		"toggle-file-browser": handlers.toggleFileBrowserPanel,
 		"toggle-file-browser-content-search": handlers.requestFileBrowserContentSearch,
@@ -148,6 +185,7 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		"split-horizontal": () => handlers.handleSplit("horizontal"),
 		"toggle-sidebar": handlers.toggleSidebar,
 		"command-palette": handlers.toggleCommandPalette,
+		progress: progressStore.toggle,
 		"activity-dashboard": handlers.toggleActivityDashboard,
 		"toggle-multiview": handlers.toggleMultiview,
 		"worktree-manager": handlers.toggleWorktreeManager,
@@ -170,7 +208,7 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		"copy-file-path": handlers.copyFilePath,
 		"copy-relative-file-path": handlers.copyRelativeFilePath,
 		"command-overview": handlers.toggleCommandOverview,
-		"ai-triage": handlers.openAiTriage,
+		"open-tasks": handlers.openTasks,
 		"detach-activity-dashboard": handlers.detachActivityDashboard,
 		"toggle-tunnels": () => tunnelPanelStore.toggle(),
 		"process-manager": handlers.toggleProcessManager,
@@ -180,6 +218,7 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		"block-next": handlers.blockNext,
 		"block-fold-toggle": handlers.blockFoldToggle,
 		"block-search-toggle": handlers.blockSearchToggle,
+		"answers-only": () => terminalsStore.toggleAnswersOnly(),
 		"toggle-compose-panel": handlers.toggleComposePanel,
 	};
 
@@ -192,6 +231,9 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		if (seen.has(actionId)) continue;
 		if (actionId === "toggle-ai-chat" && !settingsStore.isAiChatEnabled()) continue;
 		if (actionId === "toggle-multiview" && !settingsStore.state.multiviewEnabled) continue;
+		// With no provider and no work-item plugin installed, Tasks can only offer
+		// installs this build does not bundle.
+		if (actionId === "open-tasks" && !hasWorkItemSource()) continue;
 		const handler = handlerMap[actionId as ActionName];
 		if (!handler) continue;
 

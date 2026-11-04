@@ -1,6 +1,7 @@
 import { fireEvent, render } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { BranchBadge, CiBadge, PrBadge, StatusBadge } from "../../components/ui/StatusBadge";
+import type { PrReadinessKind } from "../../utils/prReadiness";
 
 describe("StatusBadge", () => {
 	it("renders label text", () => {
@@ -78,60 +79,25 @@ describe("BranchBadge", () => {
 });
 
 describe("PrBadge", () => {
-	it("renders PR number", () => {
-		const { container } = render(() => <PrBadge number={42} title="Fix bug" state="open" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.textContent).toBe("PR #42");
-	});
+	const variantOf = (readiness: PrReadinessKind) => {
+		const { container } = render(() => <PrBadge number={1} title="PR" readiness={readiness} />);
+		return container.querySelector("[data-testid='status-badge']")!.getAttribute("data-variant");
+	};
 
-	it("uses merged variant for merged state", () => {
-		const { container } = render(() => <PrBadge number={1} title="Merged PR" state="merged" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("merged");
-	});
-
-	it("uses merged variant for MERGED state (uppercase)", () => {
-		const { container } = render(() => <PrBadge number={1} title="Merged PR" state="MERGED" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("merged");
-	});
-
-	it("uses closed variant for closed state", () => {
-		const { container } = render(() => <PrBadge number={1} title="Closed PR" state="closed" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("closed");
-	});
-
-	it("uses pr variant for open state", () => {
-		const { container } = render(() => <PrBadge number={1} title="Open PR" state="open" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("pr");
-	});
-
-	it("shows warning variant when mergeStateStatus is BEHIND", () => {
-		const { container } = render(() => <PrBadge number={1} title="Behind PR" state="open" mergeStateStatus="BEHIND" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("warning");
-	});
-
-	it("shows error variant when mergeable is CONFLICTING", () => {
-		const { container } = render(() => <PrBadge number={1} title="Conflict PR" state="open" mergeable="CONFLICTING" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("error");
-	});
-
-	it("shows warning variant when mergeStateStatus is BLOCKED", () => {
-		const { container } = render(() => (
-			<PrBadge number={1} title="Blocked PR" state="open" mergeStateStatus="BLOCKED" />
-		));
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("warning");
-	});
-
-	it("keeps pr variant when mergeStateStatus is CLEAN", () => {
-		const { container } = render(() => <PrBadge number={1} title="Clean PR" state="open" mergeStateStatus="CLEAN" />);
-		const badge = container.querySelector("[data-testid='status-badge']");
-		expect(badge!.getAttribute("data-variant")).toBe("pr");
+	// Catches: the status bar keeping its own verdict (mergeable === CONFLICTING) next to the shared one.
+	it.each([
+		["merged", "merged"],
+		["closed", "closed"],
+		["open", "pr"],
+		["ready", "success"],
+		["conflict", "error"],
+		["ci-failed", "error"],
+		["changes-requested", "error"],
+		["unresolved-comments", "warning"],
+		["ci-pending", "warning"],
+		["checking", "warning"],
+	] as const)("%s shows the %s variant", (readiness, variant) => {
+		expect(variantOf(readiness)).toBe(variant);
 	});
 });
 

@@ -1,0 +1,72 @@
+{
+  "agent": "pi",
+  "args": [
+    "--no-tools",
+    "--no-extensions",
+    "--no-skills",
+    "--no-session",
+    "--provider",
+    "google",
+    "--model",
+    "gemini-2.5-flash"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "idle",
+        "awaiting": false
+      },
+      "replay_expect": {
+        "awaiting": false
+      },
+      "timeout_secs": 20
+    },
+    {
+      "action": "prompt",
+      "text": "Ask me a yes-or-no question about continuing, then wait for my answer. Do not use any tools."
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "working"
+      },
+      "timeout_secs": 20
+    },
+    {
+      "action": "wait",
+      "text": "?",
+      "timeout_secs": 30
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "idle",
+        "awaiting": false
+      },
+      "replay_expect": {
+        "awaiting": false
+      },
+      "timeout_secs": 30
+    },
+    {
+      "action": "question",
+      "text": "Yes. Respond with the single uppercase English word meaning prepared."
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "working"
+      },
+      "timeout_secs": 20
+    },
+    {
+      "action": "wait",
+      "text": "READY",
+      "timeout_secs": 30
+    },
+    {
+      "action": "interrupt"
+    }
+  ]
+}

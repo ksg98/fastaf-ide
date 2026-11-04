@@ -6,7 +6,13 @@ const { mockDialogs, mockInvoke, mockNavigate, mockStores } = vi.hoisted(() => (
 	mockNavigate: vi.fn(),
 	mockStores: {
 		diff: { state: { activeId: null as string | null }, getHandle: vi.fn(), add: vi.fn() },
-		editor: { state: { activeId: null as string | null }, getHandle: vi.fn() },
+		editor: {
+			state: { activeId: null as string | null },
+			getHandle: vi.fn(),
+			zoomIn: vi.fn(),
+			zoomOut: vi.fn(),
+			zoomReset: vi.fn(),
+		},
 		markdown: {
 			state: { activeId: null as string | null },
 			getHandle: vi.fn(),
@@ -23,6 +29,7 @@ const { mockDialogs, mockInvoke, mockNavigate, mockStores } = vi.hoisted(() => (
 			state: { activeId: "term-1" as string | null },
 			getActive: vi.fn(),
 			getPreviousActiveId: vi.fn(),
+			stepHistory: vi.fn(),
 			getIds: vi.fn(),
 			get: vi.fn(),
 			isDetached: vi.fn(),
@@ -33,7 +40,7 @@ const { mockDialogs, mockInvoke, mockNavigate, mockStores } = vi.hoisted(() => (
 			toggleFocusMode: vi.fn(),
 			toggleMarkdownPanel: vi.fn(),
 			toggleSidebar: vi.fn(),
-			toggleNotesPanel: vi.fn(),
+			toggleIdeasPanel: vi.fn(),
 			toggleFileBrowserPanel: vi.fn(),
 			requestFileBrowserContentSearch: vi.fn(),
 			toggleOutlinePanel: vi.fn(),
@@ -63,7 +70,12 @@ vi.mock("../../stores/mdTabs", () => ({ mdTabsStore: mockStores.markdown }));
 vi.mock("../../stores/promptLibrary", () => ({ promptLibraryStore: mockStores.prompts }));
 vi.mock("../../stores/repositories", () => ({ repositoriesStore: mockStores.repositories }));
 vi.mock("../../stores/savedPaneLayouts", () => ({ paneLayoutKey: vi.fn(() => "layout-key") }));
-vi.mock("../../stores/settings", () => ({ settingsStore: { isAiTriageEnabled: vi.fn(() => true) } }));
+const mockSettings = vi.hoisted(() => ({
+	state: { defaultFontSize: 13, appZoom: 1 },
+	isAiTriageEnabled: vi.fn(() => true),
+	setAppZoom: vi.fn(),
+}));
+vi.mock("../../stores/settings", () => ({ settingsStore: mockSettings }));
 vi.mock("../../stores/terminals", () => ({ terminalsStore: mockStores.terminals }));
 vi.mock("../../stores/toasts", () => ({ toastsStore: mockStores.toasts }));
 vi.mock("../../stores/ui", () => ({ uiStore: mockStores.ui }));
@@ -76,8 +88,8 @@ import { useAppShortcutHandlers } from "../../hooks/useAppShortcutHandlers";
 
 function createOptions() {
 	const terminalLifecycle = new Proxy(
-		{},
-		{ get: (_target, key) => (key === "terminalIds" ? vi.fn(() => []) : vi.fn()) },
+		{ zoomIn: vi.fn(), zoomOut: vi.fn(), zoomReset: vi.fn() },
+		{ get: (target, key) => Reflect.get(target, key) ?? (key === "terminalIds" ? vi.fn(() => []) : vi.fn()) },
 	);
 	return {
 		terminalLifecycle,
@@ -118,6 +130,25 @@ describe("useAppShortcutHandlers", () => {
 		vi.clearAllMocks();
 	});
 
+	// FastAF: Cmd +/-/0 zoom the whole app (like Cursor and VS Code), so the
+	// active editor's own font size is left alone.
+	it("routes standard zoom actions to the app zoom, not the active code editor", () => {
+		const options = createOptions();
+		const handlers = useAppShortcutHandlers(options as never);
+		mockStores.editor.state.activeId = "editor";
+		handlers.zoomIn();
+		handlers.zoomOut();
+		handlers.zoomReset();
+		expect(mockSettings.setAppZoom).toHaveBeenCalledTimes(3);
+		expect(mockSettings.setAppZoom).toHaveBeenLastCalledWith(1);
+		expect(mockStores.editor.zoomIn).not.toHaveBeenCalled();
+		expect(mockStores.editor.zoomOut).not.toHaveBeenCalled();
+		expect(mockStores.editor.zoomReset).not.toHaveBeenCalled();
+		expect(options.terminalLifecycle.zoomIn).not.toHaveBeenCalled();
+		expect(options.terminalLifecycle.zoomOut).not.toHaveBeenCalled();
+		expect(options.terminalLifecycle.zoomReset).not.toHaveBeenCalled();
+	});
+
 	it("routes search to diff, markdown, editor, then terminal in priority order", () => {
 		const diffSearch = vi.fn();
 		const markdownSearch = vi.fn();
@@ -146,7 +177,21 @@ describe("useAppShortcutHandlers", () => {
 		expect(terminalSearch).toHaveBeenCalledOnce();
 	});
 
-	it("reloads an active preview before falling back to the run-command workflow", () => {
+	it("reloadActiveTab reloads an active preview and reports whether it did", () => {
+		const reload = vi.fn();
+		const options = createOptions();
+		const handlers = useAppShortcutHandlers(options as never);
+		mockStores.markdown.state.activeId = "preview";
+		mockStores.markdown.getHandle.mockReturnValue({ reload });
+
+		expect(handlers.reloadActiveTab()).toBe(true);
+		expect(reload).toHaveBeenCalledOnce();
+
+		mockStores.markdown.state.activeId = null;
+		expect(handlers.reloadActiveTab()).toBe(false);
+	});
+
+	it("handleRunCommand runs the command even while a preview is active", () => {
 		const reload = vi.fn();
 		const options = createOptions();
 		const handlers = useAppShortcutHandlers(options as never);
@@ -154,12 +199,8 @@ describe("useAppShortcutHandlers", () => {
 		mockStores.markdown.getHandle.mockReturnValue({ reload });
 
 		handlers.handleRunCommand(false);
-		expect(reload).toHaveBeenCalledOnce();
-		expect(options.gitOps.handleRunCommand).not.toHaveBeenCalled();
-
-		mockStores.markdown.state.activeId = null;
-		handlers.handleRunCommand(true);
-		expect(options.gitOps.handleRunCommand).toHaveBeenCalledWith(true, expect.any(Function));
+		expect(reload).not.toHaveBeenCalled();
+		expect(options.gitOps.handleRunCommand).toHaveBeenCalledWith(false, expect.any(Function));
 	});
 
 	it("routes typed paths by stat result", async () => {
@@ -192,6 +233,43 @@ describe("useAppShortcutHandlers", () => {
 
 		expect(mockNavigate).toHaveBeenNthCalledWith(1, "term-previous");
 		expect(mockNavigate).toHaveBeenNthCalledWith(2, "term-2");
+	});
+
+	it("history back/forward navigate to the terminal the store steps to, and do nothing at the ends", () => {
+		const handlers = useAppShortcutHandlers(createOptions() as never);
+		mockStores.terminals.stepHistory.mockReturnValueOnce("term-older").mockReturnValueOnce(null);
+
+		handlers.historyBack();
+		handlers.historyForward();
+
+		expect(mockStores.terminals.stepHistory).toHaveBeenNthCalledWith(1, "back");
+		expect(mockStores.terminals.stepHistory).toHaveBeenNthCalledWith(2, "forward");
+		expect(mockNavigate).toHaveBeenCalledTimes(1);
+		expect(mockNavigate).toHaveBeenCalledWith("term-older");
+	});
+
+	// This handler picks WHICH block to fold; whether folding is allowed at all
+	// is `blockFoldingEnabled`, enforced inside `toggleBlockFold` so both this
+	// path and CanvasTerminal's Cmd+Shift+. branch obey one check. The gate is
+	// covered in stores/terminalBlockFold.test.ts — asserting it here would
+	// only re-test a mock.
+	// Catches: eviction leaves the viewport centre relative while stored blocks are absolute.
+	it("folds the block nearest the viewport centre after eviction", async () => {
+		mockStores.terminals.getActive.mockReturnValue({
+			id: "term-1",
+			ref: { getSessionId: () => "session-1" },
+			historyBase: 100,
+			commandBlocks: [{ promptLine: 40 }, { promptLine: 140 }, { promptLine: 190 }],
+		});
+		// [displayOffset, historySize, screenRows] — centres the view on absolute line 190
+		mockInvoke.mockResolvedValue([0, 80, 20]);
+		const handlers = useAppShortcutHandlers(createOptions() as never);
+
+		handlers.blockFoldToggle();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(mockStores.terminals.toggleBlockFold).toHaveBeenCalledWith("term-1", 190);
 	});
 
 	it("executes and marks matching smart-prompt shortcuts", async () => {

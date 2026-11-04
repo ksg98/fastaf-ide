@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { rpc, subscribeEvents, type Unsubscribe } from "../transport";
+import { type RemoteEventPayload, remoteEventOrigin } from "../utils/remoteEventOrigin";
 import { appLogger } from "./appLogger";
 
 /** A yes/no question an MCP agent is blocked on. */
@@ -9,16 +10,17 @@ export interface McpConfirmRequest {
 	message: string;
 	/** The TUIC session that asked, when the caller is bound to one. */
 	originSessionId?: string;
+	connectionId?: string;
 }
 
-interface McpConfirmPayload {
+interface McpConfirmPayload extends RemoteEventPayload {
 	request_id: string;
 	title: string;
 	message: string;
 	origin_session_id?: string | null;
 }
 
-interface McpConfirmResolvedPayload {
+interface McpConfirmResolvedPayload extends RemoteEventPayload {
 	request_id: string;
 }
 
@@ -33,19 +35,26 @@ export function __resetMcpConfirmQueue() {
 }
 
 function enqueue(payload: McpConfirmPayload) {
+	const origin = remoteEventOrigin(payload);
+	if (payload.__tuic_origin !== undefined && !origin) return;
 	const request: McpConfirmRequest = {
 		requestId: payload.request_id,
-		title: payload.title,
+		title: origin ? `[${origin.name}] ${payload.title}` : payload.title,
 		message: payload.message,
 		originSessionId: payload.origin_session_id ?? undefined,
+		...(origin ? { connectionId: origin.connection } : {}),
 	};
 	// A reconnecting SSE client can be handed the same request twice; showing it
 	// twice would leave a dead dialog behind after the first answer resolves it.
-	setQueue((prev) => (prev.some((r) => r.requestId === request.requestId) ? prev : [...prev, request]));
+	setQueue((prev) =>
+		prev.some((r) => r.requestId === request.requestId && r.connectionId === request.connectionId)
+			? prev
+			: [...prev, request],
+	);
 }
 
-function drop(requestId: string) {
-	setQueue((prev) => prev.filter((r) => r.requestId !== requestId));
+function drop(requestId: string, connectionId?: string) {
+	setQueue((prev) => prev.filter((r) => r.requestId !== requestId || r.connectionId !== connectionId));
 }
 
 /**
@@ -57,9 +66,15 @@ function drop(requestId: string) {
  * second click on a question that is already settled.
  */
 export async function answerMcpConfirm(requestId: string, confirmed: boolean): Promise<void> {
-	drop(requestId);
+	const request = queue().find((r) => r.requestId === requestId);
+	if (!request) return;
+	drop(requestId, request.connectionId);
 	try {
-		await rpc("mcp_confirm_response", { requestId, confirmed });
+		if (request.connectionId) {
+			await rpc("mcp_confirm_response", { requestId, confirmed }, request.connectionId);
+		} else {
+			await rpc("mcp_confirm_response", { requestId, confirmed });
+		}
 	} catch (err) {
 		appLogger.warn("network", `Failed to deliver confirm answer: ${err instanceof Error ? err.message : String(err)}`);
 	}
@@ -76,6 +91,16 @@ export async function answerMcpConfirm(requestId: string, confirmed: boolean): P
 export function subscribeMcpConfirm(): Promise<Unsubscribe> {
 	return subscribeEvents({
 		"mcp-confirm": (payload) => enqueue(payload as McpConfirmPayload),
-		"mcp-confirm-resolved": (payload) => drop((payload as McpConfirmResolvedPayload).request_id),
+		"mcp-confirm-resolved": (raw) => {
+			const payload = raw as McpConfirmResolvedPayload;
+			const origin = remoteEventOrigin(payload);
+			if (payload.__tuic_origin !== undefined && !origin) return;
+			drop(payload.request_id, origin?.connection);
+		},
+		"remote-connection-status": (raw) => {
+			const payload = raw as { id: string; status: string; __tuic_origin?: unknown };
+			if (payload.__tuic_origin !== undefined || payload.status === "connected") return;
+			setQueue((prev) => prev.filter((r) => r.connectionId !== payload.id));
+		},
 	});
 }

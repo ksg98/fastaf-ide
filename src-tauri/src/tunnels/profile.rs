@@ -4,43 +4,75 @@ use std::path::PathBuf;
 /// Schema version for future migration support.
 pub const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TunnelProfile {
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates id for the current owner.","operations":["get"],"confirmationClass":"ordinary"}))]
     pub id: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates name for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub name: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates host for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub host: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates port for the current owner.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub port: u16,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates user for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub user: String,
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Updates identity file for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub identity_file: Option<PathBuf>,
+    #[schemars(extend("x-setting" = {"sensitivity":"private","apply":"live","effect":"Replaces all forwards for the current tunnel profile.","operations":["get","set"],"confirmationClass":"execution_authority"}, "x-atomic-list" = true))]
     pub forwards: Vec<ForwardSpec>,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates options for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub options: ProfileOptions,
     #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates auto connect for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub auto_connect: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ForwardSpec {
     Local {
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates bind port for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         bind_port: u16,
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates remote host for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         remote_host: String,
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates remote port for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         remote_port: u16,
     },
     Remote {
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates bind port for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         bind_port: u16,
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates local host for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         local_host: String,
+        #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates local port for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         local_port: u16,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileOptions {
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates server alive interval for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub server_alive_interval: u16,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates server alive count max for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub server_alive_count_max: u16,
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates strict host key checking for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub strict_host_key_checking: StrictHostKeyChecking,
+    /// `ssh -C`. On by default, and the reason the WebSocket layer refuses to
+    /// deflate a loopback peer: a tunnelled client reaches this machine through
+    /// the local ssh process, so its address is loopback and its link is
+    /// already compressed here. Turn it off for a link that is fast and a CPU
+    /// that is not — a tunnel to another machine on the same LAN.
+    #[serde(default = "compression_on")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates compression for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub compression: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Serde's default for a profile written before this field existed. Matching
+/// `ProfileOptions::default` so an old profile and a new one behave the same.
+fn compression_on() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum StrictHostKeyChecking {
     Yes,
     AcceptNew,
@@ -130,6 +162,7 @@ impl Default for ProfileOptions {
             server_alive_interval: 15,
             server_alive_count_max: 3,
             strict_host_key_checking: StrictHostKeyChecking::Yes,
+            compression: compression_on(),
         }
     }
 }
@@ -140,6 +173,23 @@ mod tests {
 
     fn make_profile() -> TunnelProfile {
         TunnelProfile::new("my-tunnel", "example.com", "alice")
+    }
+
+    #[test]
+    fn a_profile_written_before_compression_existed_still_compresses() {
+        // Every profile already on disk lacks the key. Deserializing it to
+        // `false` would silently stop compressing the tunnels Boss already has,
+        // which is the opposite of what adding the option was for.
+        let options: ProfileOptions = toml::from_str(
+            r#"
+            server_alive_interval = 15
+            server_alive_count_max = 3
+            strict_host_key_checking = "Yes"
+            "#,
+        )
+        .expect("an old profile must still parse");
+
+        assert!(options.compression);
     }
 
     #[test]

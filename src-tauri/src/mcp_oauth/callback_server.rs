@@ -6,8 +6,10 @@
 //! [`OAuthFlowManager::complete_flow`], and triggers
 //! [`UpstreamRegistry::on_oauth_complete`] to resume the upstream connection.
 //!
-//! The server shuts down automatically after the first successful callback
-//! or after the flow timeout (5 minutes).
+//! The server shuts down 2 s after the first successful callback, or once the
+//! caller's keep-alive task drops the handle — deliberately *later* than the
+//! flow it serves, so a browser that redirects back after the flow expired gets
+//! an explanatory page instead of a connection refusal.
 
 use std::sync::Arc;
 
@@ -42,12 +44,35 @@ const SUCCESS_HTML: &str = r#"<!DOCTYPE html>
 h1{color:#4ecca3;margin-bottom:.5rem}p{color:#a0a0b0}</style></head>
 <body><div class="card"><h1>&#10003; Authentication complete</h1><p>You can close this tab and return to FastAF.</p></div></body></html>"#;
 
-const ERROR_HTML: &str = r#"<!DOCTYPE html>
+/// Render the failure page, naming the reason. A bare "check the logs" was
+/// useless for the common case — a flow that timed out while the user was busy
+/// in the browser — so the reason is spelled out and the retry step named.
+fn error_html(reason: &str) -> String {
+    // Escape the reason: it can carry `error_description` text straight from
+    // the authorization server.
+    let reason = reason
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        r#"<!DOCTYPE html>
 <html><head><title>FastAF</title>
-<style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0}
-.card{text-align:center;padding:2rem;border-radius:12px;background:#16213e;box-shadow:0 4px 20px rgba(0,0,0,.3)}
-h1{color:#e74c3c;margin-bottom:.5rem}p{color:#a0a0b0}</style></head>
-<body><div class="card"><h1>&#10007; Authentication failed</h1><p>Check the FastAF logs for details.</p></div></body></html>"#;
+<style>body{{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0}}
+.card{{text-align:center;padding:2rem;border-radius:12px;background:#16213e;box-shadow:0 4px 20px rgba(0,0,0,.3);max-width:32rem}}
+h1{{color:#e74c3c;margin-bottom:.5rem}}p{{color:#a0a0b0}}
+code{{display:block;margin:1rem 0;padding:.75rem;border-radius:6px;background:#0f172a;color:#e5c07b;font-size:.85rem;word-break:break-word}}</style></head>
+<body><div class="card"><h1>&#10007; Authentication failed</h1>
+<code>{reason}</code>
+<p>Return to FastAF and press Authorize again.</p></div></body></html>"#
+    )
+}
+
+/// Reason shown when the redirect arrives after the flow is gone — expired or
+/// cancelled. The listener deliberately outlives the flow so this page can be
+/// served at all; before, the port was already closed and the browser showed a
+/// bare "can't connect to the server".
+const EXPIRED_REASON: &str =
+    "This authorization request expired or was cancelled before the browser redirected back.";
 
 /// Handle returned by [`spawn`] — dropping triggers graceful shutdown.
 pub(crate) struct CallbackServer {
@@ -79,13 +104,18 @@ pub(crate) async fn spawn(
             let done = done.clone();
             async move {
                 let html = match handle_callback(mgr, reg, params).await {
-                    Ok(()) => SUCCESS_HTML,
+                    Ok(()) => {
+                        // Only a success shuts the listener down early; a
+                        // failure leaves it up for the grace period so a retry
+                        // in the same browser tab still reaches a live port.
+                        done.notify_one();
+                        SUCCESS_HTML.to_string()
+                    }
                     Err(e) => {
                         tracing::error!(target: "mcp_oauth", error = %e, "OAuth callback failed");
-                        ERROR_HTML
+                        error_html(&e.to_string())
                     }
                 };
-                done.notify_one();
                 Html(html).into_response()
             }
         }),
@@ -125,9 +155,9 @@ async fn handle_callback(
 ) -> Result<()> {
     if let Some(err) = params.error {
         let desc = params.error_description.unwrap_or_default();
-        // Try to extract the upstream name from state to rollback, then
-        // cancel the pending flow — the auth semaphore has a single permit,
-        // so a flow left pending here would block every later start_flow.
+        // Extract the upstream name from state to roll back, then drop the
+        // pending flow — a denied consent is over, and leaving it pending would
+        // keep the upstream on "Awaiting authorization…" until the sweep.
         if let Some(state) = &params.state {
             if let Some(name) = manager.upstream_name_for_state(state) {
                 registry.rollback_authenticating(&name);
@@ -151,6 +181,13 @@ async fn handle_callback(
         .state
         .ok_or_else(|| anyhow!("Missing 'state' parameter in callback"))?;
 
+    // Name the expired/cancelled case explicitly — it is the one a user hits by
+    // simply taking too long at the identity provider, and "state mismatch"
+    // reads like a security failure rather than "you ran out of time".
+    if manager.upstream_name_for_state(&state).is_none() {
+        return Err(anyhow!("{EXPIRED_REASON}"));
+    }
+
     let (upstream_name, _tokens) = manager.complete_flow(&state, &code).await?;
 
     registry
@@ -169,7 +206,6 @@ mod tests {
     use crate::mcp_upstream_config::UpstreamAuth;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Semaphore;
 
     #[test]
     fn redirect_uri_format() {
@@ -179,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_binds_to_random_port() {
-        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let mgr = Arc::new(OAuthFlowManager::new());
         let reg = Arc::new(UpstreamRegistry::new());
         let server = spawn(mgr, reg).await.unwrap();
         assert!(server.port > 0);
@@ -220,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_callback_releases_pending_flow_and_permit() {
-        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let mgr = Arc::new(OAuthFlowManager::new());
         let reg = Arc::new(UpstreamRegistry::new());
         let state = start_test_flow(&mgr, "spinach").await;
 
@@ -239,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_callback_rolls_back_authenticating_status() {
-        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let mgr = Arc::new(OAuthFlowManager::new());
         let reg = Arc::new(UpstreamRegistry::new());
         reg.inject_ready_upstream("spinach", &[]);
         reg.set_authenticating("spinach");
@@ -253,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_callback_with_unknown_state_leaves_other_flows_pending() {
-        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(2))));
+        let mgr = Arc::new(OAuthFlowManager::new());
         let reg = Arc::new(UpstreamRegistry::new());
         let state = start_test_flow(&mgr, "spinach").await;
 
@@ -269,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_callback_without_state_still_errors() {
-        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let mgr = Arc::new(OAuthFlowManager::new());
         let reg = Arc::new(UpstreamRegistry::new());
         let err = handle_callback(mgr, reg, error_params(None))
             .await
@@ -278,5 +314,60 @@ mod tests {
             err.to_string().contains("Internal server error"),
             "got: {err}"
         );
+    }
+
+    // -- late redirect after the flow is gone --
+
+    /// A user who spends more than the flow timeout at the identity provider
+    /// redirects back to a flow that no longer exists. The listener now outlives
+    /// the flow so this is reachable at all; it must explain what happened
+    /// rather than read like a tampering alarm.
+    #[tokio::test]
+    async fn callback_after_expiry_names_the_timeout() {
+        let mgr = Arc::new(OAuthFlowManager::with_timeout(Duration::from_millis(1)));
+        let reg = Arc::new(UpstreamRegistry::new());
+        let state = start_test_flow(&mgr, "outlook-mail").await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(mgr.cleanup_expired(), vec!["outlook-mail"]);
+
+        let err = handle_callback(
+            mgr,
+            reg,
+            CallbackParams {
+                code: Some("late-code".into()),
+                state: Some(state),
+                error: None,
+                error_description: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("expired or was cancelled"),
+            "got: {err}"
+        );
+        assert!(
+            !err.to_string().contains("state mismatch"),
+            "an expired flow must not read as a state-mismatch attack: {err}"
+        );
+    }
+
+    // -- error page rendering --
+
+    #[test]
+    fn error_html_shows_the_reason_and_the_retry_step() {
+        let html = error_html(EXPIRED_REASON);
+        assert!(html.contains("expired or was cancelled"));
+        assert!(html.contains("press Authorize again"));
+    }
+
+    /// `error_description` comes verbatim from the authorization server, so it
+    /// is attacker-influenced text landing in a page we render.
+    #[test]
+    fn error_html_escapes_the_reason() {
+        let html = error_html("<script>alert('x')</script>");
+        assert!(!html.contains("<script>"), "unescaped markup: {html}");
+        assert!(html.contains("&lt;script&gt;"));
     }
 }

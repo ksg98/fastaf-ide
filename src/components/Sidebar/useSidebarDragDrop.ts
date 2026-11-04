@@ -1,10 +1,21 @@
 import { createSignal } from "solid-js";
-import { initMouseDrag } from "../../hooks/useMouseDrag";
+import { initMouseDrag, isHoldPointer } from "../../hooks/useMouseDrag";
 import { repositoriesStore } from "../../stores/repositories";
 
 export type DragPayload =
 	| { type: "repo"; path: string; fromGroupId: string | null }
 	| { type: "group"; groupId: string };
+
+/**
+ * A repo or group drag may start from the section background, not from a button: on
+ * touch the hold that arms the drag captures the pointer, which cancels the long
+ * press of a "+" (agent list) pressed inside the same section.
+ */
+function startsSectionDrag(e: PointerEvent): boolean {
+	const target = e.target as HTMLElement;
+	if (!target.closest("[data-sidebar-repo]") && !target.closest("[data-sidebar-group]")) return false;
+	return !(isHoldPointer(e) && target.closest("button"));
+}
 
 export function useSidebarDragDrop() {
 	const [dragPayload, setDragPayload] = createSignal<DragPayload | null>(null);
@@ -228,8 +239,7 @@ export function useSidebarDragDrop() {
 
 	// Mouse-based drag for repos
 	const handleRepoMouseDrag = (e: PointerEvent, path: string) => {
-		const target = e.target as HTMLElement;
-		if (!target.closest("[data-sidebar-repo]") && !target.closest("[data-sidebar-group]")) return;
+		if (!startsSectionDrag(e)) return;
 		const fromGroup = repositoriesStore.getGroupForRepo(path);
 		const payload: DragPayload = { type: "repo", path, fromGroupId: fromGroup?.id ?? null };
 		initMouseDrag(e, e.currentTarget as HTMLElement, {
@@ -242,8 +252,7 @@ export function useSidebarDragDrop() {
 
 	// Mouse-based drag for groups
 	const handleGroupMouseDrag = (e: PointerEvent, groupId: string) => {
-		const target = e.target as HTMLElement;
-		if (!target.closest("[data-sidebar-repo]") && !target.closest("[data-sidebar-group]")) return;
+		if (!startsSectionDrag(e)) return;
 		const payload: DragPayload = { type: "group", groupId };
 		initMouseDrag(e, e.currentTarget as HTMLElement, {
 			onStart: () => setDragPayload(payload),

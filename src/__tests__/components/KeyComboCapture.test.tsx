@@ -26,6 +26,19 @@ describe("KeyComboCapture", () => {
 		vi.useRealTimers();
 	});
 
+	// Catches: shortcut automation losing its catalogue target when capture replaces the button.
+	it("retains_catalogue_identity_on_display_and_capture_controls", () => {
+		const view = render(() => (
+			<KeyComboCapture id="shortcut-capture" settingId="app.global_hotkey" value="Cmd+K" onChange={() => {}} />
+		));
+		const button = view.container.querySelector("button")!;
+		expect(button.getAttribute("data-setting-id")).toBe("app.global_hotkey");
+		expect(button.id).toBe("shortcut-capture");
+		fireEvent.click(button);
+		expect(view.container.querySelector("input")!.getAttribute("data-setting-id")).toBe("app.global_hotkey");
+		expect(view.container.querySelector("input")!.id).toBe("shortcut-capture");
+	});
+
 	it("shows current value in display button", () => {
 		const { container } = render(() => <KeyComboCapture value="Cmd+K" onChange={() => {}} />);
 		const btn = container.querySelector(".display");

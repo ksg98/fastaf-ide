@@ -61,6 +61,8 @@ const mergeablePr: BranchPrStatus = {
 	merge_commit_allowed: true,
 	squash_merge_allowed: true,
 	rebase_merge_allowed: true,
+	unresolved_threads: 0,
+	unresolved_threads_truncated: false,
 };
 
 const defaultProps = {
@@ -88,6 +90,7 @@ describe("RemoteOnlyPrPopover — 405 merge method auto-fallback", () => {
 
 	it("falls back to squash when merge is rejected with 405", async () => {
 		mockInvoke
+			.mockResolvedValueOnce({}) // get_pr_action_state, read on mount by the PR action buttons
 			.mockRejectedValueOnce(new Error("GitHub merge failed (405): Merge commits are not allowed."))
 			.mockResolvedValueOnce("abc123sha");
 
@@ -100,11 +103,12 @@ describe("RemoteOnlyPrPopover — 405 merge method auto-fallback", () => {
 				expect.objectContaining({ mergeMethod: "squash" }),
 			);
 		});
-		expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("squash");
+		await waitFor(() => expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("squash"));
 	});
 
 	it("falls back to rebase when both merge and squash are rejected", async () => {
 		mockInvoke
+			.mockResolvedValueOnce({}) // get_pr_action_state, read on mount by the PR action buttons
 			.mockRejectedValueOnce(new Error("GitHub merge failed (405): Merge commits are not allowed."))
 			.mockRejectedValueOnce(new Error("GitHub merge failed (405): Squash merging is not allowed."))
 			.mockResolvedValueOnce("abc123sha");
@@ -118,11 +122,12 @@ describe("RemoteOnlyPrPopover — 405 merge method auto-fallback", () => {
 				expect.objectContaining({ mergeMethod: "rebase" }),
 			);
 		});
-		expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("rebase");
+		await waitFor(() => expect(repoSettingsStore.getEffective("/repo")?.prMergeStrategy).toBe("rebase"));
 	});
 
 	it("shows error when all merge methods fail", async () => {
 		mockInvoke
+			.mockResolvedValueOnce({}) // get_pr_action_state, read on mount by the PR action buttons
 			.mockRejectedValueOnce(new Error("GitHub merge failed (405): Merge commits are not allowed."))
 			.mockRejectedValueOnce(new Error("GitHub merge failed (405): Squash merging is not allowed."))
 			.mockRejectedValueOnce(new Error("GitHub merge failed (405): Rebase merging is not allowed."));
@@ -179,5 +184,33 @@ describe("RemoteOnlyPrPopover — merge button label reflects effective method",
 			["Merge", "Squash & Merge", "Rebase & Merge"].includes(b.textContent ?? ""),
 		);
 		expect(btn?.textContent).toBe("Rebase & Merge");
+	});
+});
+
+describe("RemoteOnlyPrPopover — outside dismissal", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	// Catches: an invisible fixed inset:0 backdrop swallows the press (and wheel) meant for the sidebar.
+	it("closes on an outside pointer press without swallowing it", () => {
+		const onSidebarPress = vi.fn();
+		const { container } = render(() => (
+			<>
+				<aside onPointerDown={onSidebarPress}>Repositories</aside>
+				<RemoteOnlyPrPopover {...defaultProps} />
+			</>
+		));
+		expect(container.querySelector(".remoteOnlyOverlay")).toBeNull();
+		const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+		container.querySelector("aside")!.dispatchEvent(event);
+		expect(defaultProps.onClose).toHaveBeenCalledOnce();
+		expect(onSidebarPress).toHaveBeenCalledOnce();
+		expect(event.defaultPrevented).toBe(false);
+	});
+
+	// Catches: pressing inside the popover is treated as an outside press.
+	it("stays open for a press inside the popover", () => {
+		const { container } = render(() => <RemoteOnlyPrPopover {...defaultProps} />);
+		fireEvent.pointerDown(container.querySelector(".remoteOnlyRow")!);
+		expect(defaultProps.onClose).not.toHaveBeenCalled();
 	});
 });

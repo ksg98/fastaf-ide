@@ -43,7 +43,7 @@ the terminal's live view, which cannot cross a window boundary.
 
 ## Providers
 
-AI Chat speaks to four provider families plus a custom endpoint. Switch in `Settings > AI Chat > Provider`:
+AI Chat speaks to four provider families plus a custom endpoint. Add and configure them in `Settings > Providers`; pick the chat model in the panel's composer or through the Main slot:
 
 | Provider | Default base URL | Notes |
 |----------|------------------|-------|
@@ -70,7 +70,7 @@ API keys are stored in the OS keyring under service `tuicommander-ai-chat` — n
 1. `Settings > Providers > + Add`, type **ChatGPT (sign in)**, then **Add**.
 2. On the new card, click **Sign in with ChatGPT**. Your browser opens OpenAI's sign-in page. If another program (a Codex login, a local proxy) already holds port 1455, the card shows a code instead — it is copied for you; paste it on the page that opens.
 3. When the card reads *Signed in as …*, click **+ Add model**. The list comes live from your plan, with the reasoning levels each model offers.
-4. Assign the model to a slot (Main for AI Chat and agents, Triage, or Headless for Smart Prompts in External API mode).
+4. Assign the model to a slot (Main for AI Chat and agents, or Headless for Smart Prompts in API mode, PR review, the changelog and the improvement scan).
 
 The tokens are kept in the OS keychain and refresh themselves. **Sign out** on the card forgets them. Usage counts against your ChatGPT plan's limits, and a limit reached shows up as the model's error message. This rides the same sign-in Codex uses; OpenAI can change or stop third-party access, so keep an API-key provider if you depend on it.
 
@@ -92,7 +92,7 @@ pipx install mlx-lm
 mlx_lm.server --model mlx-community/Qwen2.5-Coder-3B-Instruct-4bit --port 8899
 ```
 
-In `Settings > AI Chat > Providers`, add a **Custom** provider with base URL `http://127.0.0.1:8899/v1/` and model name `mlx-community/Qwen2.5-Coder-3B-Instruct-4bit`. Assign it to the **Triage** slot.
+In `Settings > Providers`, add a **Custom** provider with base URL `http://127.0.0.1:8899/v1/` and model name `mlx-community/Qwen2.5-Coder-3B-Instruct-4bit`. Assign it to the **Triage** slot.
 
 Benchmark (M4): ~120 tok/s generation vs ~98 tok/s for the same model via Ollama GGUF.
 
@@ -183,7 +183,7 @@ Flip the panel into agent mode via the header toggle or the command palette (`Ag
 The `SafetyChecker` trait inspects every would-be `send_input`. Three verdicts:
 
 - **Allow** — common commands, `ls`, `git status`, `cargo build`, editor launches …
-- **NeedsApproval** — destructive patterns (`rm -rf`, `git reset --hard`, `git push --force`, `DROP TABLE`, `dd of=`, package uninstall …). The panel shows a *Pending approval* card with a one-line reason. Approve / reject with a click or `approve_agent_action`.
+- **NeedsApproval** — destructive patterns (`rm -rf`, `git reset --hard`, `git push --force`, `DROP TABLE`, `dd of=`, package uninstall …). The panel shows a *Pending approval* card with a one-line reason. Approve / reject with a click or `approve_conversation_action`.
 - **Block** — hard-coded refusals (e.g. `rm -rf /`, `:(){ :|:& };:`).
 
 Pause / resume any time — the loop cleanly stops between iterations.
@@ -201,43 +201,88 @@ OSC 133 semantic prompts (`OSC 133;A/B/C/D`) feed accurate exit codes when the s
 
 Knowledge persists to `<config_dir>/ai-sessions/<session_id>.json` with a 2 s debounced background flush. Reopening a session rehydrates the store.
 
-### Knowledge history overlay
+## Scheduled tasks
 
-Click **History** next to the `SessionKnowledgeBar` to open a two-pane browser over every persisted session on disk — not just the currently active one. Useful for "find the command that fixed the build error last week":
+A scheduled task is a goal the agent works on by itself on a schedule. Manage
+them in **Settings > AI Chat > Scheduled tasks**: type a goal, choose
+**Every** <step> <minutes, hours or day>, optionally tick **Run once**, and
+click **Add task**. Each row shows the goal, its schedule ("Every 15 min",
+"Every 2 hours", "Every day") and next run (or "paused"), an on/off switch and
+Remove. **Runs once** and **Added by agent** badges mark those tasks.
 
-- **Sessions list** (left) — sorted by most recent activity, showing command count, error count, and last CWD.
-- **Detail pane** (right) — one card per command with kind badge, timestamp, exit code, duration, CWD, output snippet, and a **copy** button.
-- **Filters** — debounced full-text search (matches command, output, inferred `error_type`, and `semantic_intent`), `errors only` checkbox, date window (`24h` / `7d` / `30d` / `all`).
+Only intervals that tick evenly are offered, so a task never runs at uneven
+gaps:
 
-Esc closes. Backed by the `list_knowledge_sessions` + `get_knowledge_session_detail` Tauri commands.
+- every **5, 6, 10, 12, 15, 20 or 30 minutes**
+- every **1, 2, 3, 4, 6, 8 or 12 hours**
+- once a **day**, at **09:00 UTC** (choosing **day** hides the step)
 
-## External MCP surface (`ai_terminal_*` tools)
+An older task saved with another interval (for example every 45 minutes) keeps
+running and can still be switched off or removed, but you cannot create one or
+change a task to one.
 
-The same six ReAct tools are exposed to external MCP clients (Claude Code, Cursor, …) through the FastAF MCP server:
+The backend checks the schedule every 30 seconds, in the desktop app and in a
+`tuic-remote` daemon alike. Each task gets **one terminal**: its first run opens
+a shell named `cron:<task id>`, and later runs reuse it while it is open. Close
+it and the next run opens a new one. If the previous run is still going, that
+turn is skipped. Removing a task leaves its terminal open for you to read. A
+run stops after 5 minutes by default. A run-once task switches itself off after
+it fires. When a task finishes or times out, a toast says so.
 
-| Tool | Purpose |
-|------|---------|
-| `ai_terminal_read_screen` | Last N rows of clean text (secrets redacted). |
-| `ai_terminal_send_input` | Send a command — **always** prompts for user confirmation. |
-| `ai_terminal_send_key` | Send a single special key — **always** prompts for confirmation. |
-| `ai_terminal_wait_for` | Wait for regex match or screen stability. |
-| `ai_terminal_get_state` | Structured `SessionState`. |
-| `ai_terminal_get_context` | Cheap orientation: shell state, cwd, git branch, last exit code, agent type. |
+**Destructive commands wait for your approval.** A scheduled task runs with
+standard trust (Assisted), never unrestricted. When its agent wants to run a
+command the safety checker holds for approval (`rm -rf`, `git reset --hard`,
+`git push --force`, …), a toast that stays on screen says **Scheduled task
+wants to run:** and the command, with **Approve** and **Deny**. The task's
+conversation is not open in the AI Chat panel, so answer from the toast. Each
+answer applies to that one request only and cannot be replayed. A browser or
+phone connected to FastAF sees the notice without buttons ("Open FastAF on the
+computer running it to approve"): only the desktop app can answer. If nobody
+answers, the run ends at the task's time limit and the "Scheduled task timed
+out" toast appears. Hard-blocked commands are always refused.
 
-Input tools are refused while the internal agent loop is active on that session, so an external agent can't fight the internal one for the same PTY.
+The agent can manage tasks too, with three tools: `schedule_task` (a goal of at
+most 500 characters, an `interval_minutes` of 5, 6, 10, 12, 15, 20, 30, 60, 120,
+180, 240, 360, 480, 720 or 1440, the last meaning daily at 09:00 UTC, and
+optionally `one_shot`; any other interval is refused), `list_schedules` and
+`cancel_schedule`. It cannot add a task once 10 tasks are switched on. Tasks are
+stored in `<config_dir>/ai-cron.json`; tasks saved by FastAF 1.x keep firing.
 
-## Settings reference (`Settings > AI Chat`)
+## AI suggestions
+
+Right-click a terminal tab in a pane's own tab strip (shown when a split pane
+holds more than one tab) and choose **Toggle AI Suggestions** to turn
+suggestions on or off for that terminal. The main tab bar's menu does not have
+it. They start on for a terminal running an
+agent and off for a plain shell. While they are on, a failed or timed-out command
+shows a toast with **Investigate**: it opens AI Chat on that terminal and starts
+the agent on a goal built from the failure. AI Chat must be enabled. A terminal
+raises at most one suggestion every 30 seconds.
+
+## Settings reference
+
+**Settings > Providers** (always shown) holds the providers, their models and API
+keys (OS keyring, masked with an eye-toggle), the Main and Headless slots,
+**Test connection** and the headless agent.
+
+**Settings > AI Chat** appears only while AI Chat is enabled (Experimental
+Features on, plus its **AI Chat** sub-toggle). Below the page header come a
+**Parameters** card and a **Scheduled tasks** card (see
+[Scheduled tasks](#scheduled-tasks)). **Parameters** holds:
 
 | Field | Stored in | Notes |
 |-------|-----------|-------|
-| Provider | `ai-chat-config.json` | `ollama` / `anthropic` / `openai` / `openrouter` / `custom` |
-| Model | `ai-chat-config.json` | Free-text; settings tab populates suggestions per provider |
-| Base URL | `ai-chat-config.json` | Pre-filled per provider, editable |
 | Temperature | `ai-chat-config.json` | Default `0.7` |
-| Agent model overrides | `ai-chat-config.json` (`agent_model_overrides`) | Per-task-phase model routing. Keys: `plan`, `search`, `read`, `write` (matching `ToolPhase`). Values: model name strings. When set, the agent loop selects the model based on the current tool phase instead of using a single model for all iterations. |
-| Context lines | `ai-chat-config.json` | Default `150`. Raise for richer context, lower for smaller prompts. |
-| API key | OS keyring (`tuicommander-ai-chat` / `api-key`) | Masked with eye-toggle. "Test connection" validates the key + base URL. |
-| Experimental: enrich command blocks | `ai-chat-config.json` (`experimental_ai_block_enrichment`) | Default off. When on, each completed OSC 133 block is sent to the provider for a one-line `semantic_intent`. Rate-limited to ~10/min, silent on failure. |
+| Extended thinking | `ai-chat-config.json` (`reasoning_effort`) | The reasoning-effort levels the Main slot's model advertises |
+
+These `ai-chat-config.json` fields have no Settings control; edit the file to
+change them:
+
+| Field | Notes |
+|-------|-------|
+| `context_lines` | Default `150`. Raise for richer context, lower for smaller prompts. |
+| `agent_model_overrides` | Per-task-phase model routing. Keys: `plan`, `search`, `read`, `write` (matching `ToolPhase`). When set, the agent loop selects the model by tool phase. |
+| `experimental_ai_block_enrichment` | Default off. When on, each completed OSC 133 block is sent to the provider for a one-line `semantic_intent`. Rate-limited to ~10/min, silent on failure. |
 
 ## Keyboard shortcuts
 
@@ -254,12 +299,13 @@ Input tools are refused while the internal agent loop is active on that session,
 |------|---------|
 | `<config_dir>/ai-chat-config.json` | Provider, model, base URL, temperature, context budget |
 | `<config_dir>/ai-chat-conversations/<id>.json` | Saved conversation bodies |
-| `<config_dir>/ai-sessions/<session_id>.json` | Per-session knowledge store (browsable from the History overlay) |
+| `<config_dir>/ai-sessions/<session_id>.json` | Per-session knowledge store |
+| `<config_dir>/ai-cron.json` | Scheduled tasks |
 | OS keyring (`tuicommander-ai-chat` / `api-key`) | Provider API key |
 
 ## See also
 
-- [`docs/backend/mcp-http.md`](../backend/mcp-http.md) — `ai_terminal_*` MCP tools + OAuth 2.1 upstream auth.
+- [`docs/backend/mcp-http.md`](../backend/mcp-http.md) — the MCP tool family external agents use + OAuth 2.1 upstream auth.
 - [`docs/api/tauri-commands.md`](../api/tauri-commands.md) — Full Tauri command reference for chat + agent.
 - [`docs/backend/pty.md`](../backend/pty.md) — PTY lifecycle, OSC 133, TUI detection, silence-based idle.
 - [`ideas/ai-assisted-terminal.md`](../../ideas/ai-assisted-terminal.md) — Original 3-level plan (Level 1 = Chat, Level 2 = Agent, Level 3 = Knowledge).

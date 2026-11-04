@@ -16,7 +16,7 @@ const SEP_RE = /[/\\]/;
 
 /** Normalize all backslashes to forward slashes for comparison. */
 export function normalizeSep(p: string): string {
-	return p.replace(/\\/g, "/");
+	return p.replaceAll("\\", "/");
 }
 
 /** True when `p` is an absolute path on any OS. */
@@ -62,7 +62,7 @@ export function pathParts(p: string): string[] {
 /** Get the last segment of a path (filename or directory name). */
 export function pathBasename(p: string): string {
 	const parts = pathParts(p);
-	return parts.length > 0 ? parts[parts.length - 1] : "";
+	return parts.length > 0 ? parts.at(-1)! : "";
 }
 
 /** Get the directory portion of a path, preserving the original separator. */
@@ -76,4 +76,17 @@ export function replaceBasename(p: string, newName: string): string {
 	const lastSep = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
 	if (lastSep < 0) return newName;
 	return p.slice(0, lastSep + 1) + newName;
+}
+
+/** Resolve dot segments for a local asset URL, without consulting the host OS. */
+export function normalizePathSegments(path: string): string {
+	const normalized = normalizeSep(path);
+	const root = /^(?:[A-Za-z]:\/|\/\/[^/]+\/[^/]+(?:\/|$)|\/)/.exec(normalized)?.[0] ?? "";
+	const parts: string[] = [];
+	for (const part of normalized.slice(root.length).split("/")) {
+		if (!part || part === ".") continue;
+		if (part === ".." && parts.length && parts.at(-1) !== "..") parts.pop();
+		else if (part !== ".." || !root) parts.push(part);
+	}
+	return root + (root && !root.endsWith("/") && parts.length ? "/" : "") + parts.join("/");
 }

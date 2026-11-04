@@ -103,7 +103,7 @@ pub(super) async fn rename_branch_http(Json(body): Json<RenameBranchRequest>) ->
     let old_name = body.old_name;
     let new_name = body.new_name;
     match tokio::task::spawn_blocking(move || {
-        crate::git::rename_branch_impl(&path, &old_name, &new_name)
+        crate::git::rename_branch_with_label(&path, &old_name, &new_name)
     })
     .await
     {
@@ -212,59 +212,36 @@ pub(super) async fn remote_url(Query(q): Query<PathQuery>) -> Response {
     }
 }
 
-pub(super) async fn list_user_plugins_http() -> impl axum::response::IntoResponse {
-    // list_user_plugins() scans the plugin dir off disk — keep it off the runtime.
-    match tokio::task::spawn_blocking(crate::plugins::list_user_plugins).await {
+#[derive(serde::Deserialize)]
+pub(super) struct PluginListQuery {
+    plugin_ids: Option<String>,
+}
+
+pub(super) async fn list_user_plugins_http(
+    Query(query): Query<PluginListQuery>,
+) -> impl axum::response::IntoResponse {
+    let ids = match query
+        .plugin_ids
+        .map(|ids| serde_json::from_str::<Vec<String>>(&ids))
+        .transpose()
+    {
+        Ok(ids) => ids,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    // The shared command owns the blocking-pool boundary for both transports.
+    match crate::plugins::list_user_plugins(ids).await {
         Ok(plugins) => Json(serde_json::json!(plugins)).into_response(),
-        Err(e) => err_500(&format!("Task failed: {e}")),
+        Err(e) => err_500(&e),
     }
 }
 
 // --- GitPanel commands ---
-
-pub(super) async fn git_panel_context(
-    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
-    Query(q): Query<PathQuery>,
-) -> Response {
-    if let Err(e) = validate_repo_path(&q.path) {
-        return e.into_response();
-    }
-    let path = q.path.clone();
-    let cache = state.git_cache.git_panel_context.clone();
-    let p = path.clone();
-    match tokio::task::spawn_blocking(move || {
-        cache.get_with(p.clone(), || {
-            std::sync::Arc::new(crate::git::get_git_panel_context_impl(
-                std::path::Path::new(&p),
-            ))
-        })
-    })
-    .await
-    {
-        Ok(ctx) => Json(&*ctx).into_response(),
-        Err(e) => err_500(&format!("Task failed: {e}")),
-    }
-}
-
-/// Allowed git subcommands for the HTTP endpoint.
-/// Only safe, non-destructive operations that the GitPanel needs.
-const ALLOWED_GIT_SUBCOMMANDS: &[&str] = &[
-    "fetch",
-    "pull",
-    "push",
-    "stash",
-    "log",
-    "diff",
-    "show",
-    "branch",
-    "tag",
-    "merge",
-    "rebase",
-    "cherry-pick",
-    "remote",
-    "status",
-    "rev-parse",
-];
 
 pub(super) async fn run_git_command_http(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
@@ -274,53 +251,25 @@ pub(super) async fn run_git_command_http(
         return e.into_response();
     }
 
-    // Validate subcommand against allowlist
-    let subcommand = body.args.first().map(|s| s.as_str()).unwrap_or("");
-    if !ALLOWED_GIT_SUBCOMMANDS.contains(&subcommand) {
+    if let Err(error) = crate::git::validate_git_command_args(&body.args) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("Git subcommand \"{subcommand}\" is not allowed via HTTP")
-            })),
+            Json(serde_json::json!({"error": error})),
         )
             .into_response();
     }
 
     let path = body.path;
     let args = body.args;
-    let state_clone = state.clone();
+    // Shared with the Tauri command so both transports carry the same deadline
+    // and return the same shape: a failure — a killed network command included —
+    // is a `GitCommandResult` with `success: false`, not an HTTP error.
     match tokio::task::spawn_blocking(move || {
-        let repo_path = std::path::PathBuf::from(&path);
-        let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let mut builder = crate::git_cli::git_cmd(&repo_path).args(&args_str);
-        if let Some(ref askpass_path) = crate::git::ensure_askpass_script() {
-            let askpass_str = askpass_path.to_string_lossy();
-            builder = builder
-                .env("SSH_ASKPASS", &askpass_str)
-                .env("SSH_ASKPASS_REQUIRE", "prefer")
-                .env("DISPLAY", ":0");
-        }
-        match builder.run_raw() {
-            Ok(o) => {
-                let success = o.status.success();
-                let result = crate::git::GitCommandResult {
-                    success,
-                    stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&o.stderr).to_string(),
-                    exit_code: o.status.code().unwrap_or(-1),
-                };
-                if success {
-                    state_clone.invalidate_repo_caches(&path);
-                }
-                Ok(result)
-            }
-            Err(e) => Err(format!("git command failed: {e}")),
-        }
+        crate::git::run_git_command_blocking(&state, &path, &args)
     })
     .await
     {
-        Ok(Ok(result)) => Json(result).into_response(),
-        Ok(Err(e)) => err_500(&e),
+        Ok(result) => Json(result).into_response(),
         Err(e) => err_500(&format!("Task failed: {e}")),
     }
 }
@@ -498,8 +447,9 @@ pub(super) async fn file_blame_http(Query(q): Query<FileBlameQuery>) -> Response
 // --- Git panel (story 064; browser/remote parity) ---
 // Reads call the cfg_attr commands / *_impl fns directly; mutations call the
 // non-gated *_impl + invalidate_repo_caches (mirroring the desktop wrappers).
-// update_from_base / switch_branch / merge_and_archive_worktree / run_diff_triage
-// are intentionally NOT mapped here (see todo.md).
+// update_from_base / switch_branch / merge_and_archive_worktree are intentionally
+// NOT mapped here. run_diff_triage used to be on that list; it went
+// with the embedded AI engine (#784-0aec).
 
 pub(super) async fn get_gutter_changes_http(Query(q): Query<GitGutterQuery>) -> Response {
     if let Err(e) = validate_repo_path(&q.path) {
@@ -539,10 +489,10 @@ pub(super) async fn check_worktree_dirty_http(Query(q): Query<GitWorktreeDirtyQu
     }
     let GitWorktreeDirtyQuery {
         repo_path,
-        branch_name,
+        workspace_id,
     } = q;
     match tokio::task::spawn_blocking(move || {
-        crate::worktree::check_worktree_dirty(repo_path, branch_name)
+        crate::worktree::check_worktree_dirty(repo_path, workspace_id)
     })
     .await
     {
@@ -635,12 +585,18 @@ pub(super) async fn delete_local_branch_http(
     let GitDeleteLocalBranchRequest {
         repo_path,
         branch_name,
+        workspace_id,
         keep_worktree,
     } = body;
     let res = tokio::task::spawn_blocking(move || {
+        crate::worktree::guard_suspended_workspace(
+            std::path::Path::new(&repo_path),
+            &workspace_id,
+        )?;
         crate::worktree::delete_local_branch_impl(
             &repo_path,
             &branch_name,
+            &workspace_id,
             keep_worktree.unwrap_or(false),
         )?;
         state.invalidate_repo_caches(&repo_path);
@@ -674,5 +630,262 @@ pub(super) async fn update_from_base_http(
         // Plain-string result: serialized bare so `invoke<string>` receives it directly.
         Ok(r) => json_result(r),
         Err(e) => err_500(&format!("Task failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::ALLOWED_GIT_SUBCOMMANDS;
+    use std::time::{Duration, Instant};
+
+    /// A remote that completes the TCP handshake and then answers nothing, so a
+    /// `git fetch` aimed at it blocks reading the ref advertisement. It
+    /// reproduces the shape this endpoint has to survive — a host that is
+    /// reachable but mute — without depending on a real network or on how a
+    /// firewall treats an unroutable address.
+    ///
+    /// The accept loop parks for the life of the test binary; there is nothing
+    /// to shut down because a mute remote has nothing to say.
+    fn mute_git_remote() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                held.push(stream);
+            }
+        });
+        port
+    }
+
+    /// A repo whose `origin` points at `port` and which has never been fetched.
+    fn repo_pointing_at(port: u16) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .output()
+                .expect("git");
+        };
+        run(&["init"]);
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            &format!("git://127.0.0.1:{port}/mute.git"),
+        ]);
+        dir
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let (_, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// Catches the HTTP twin dropping the optional ID array, or malformed JSON
+    /// silently widening a targeted request into full-store discovery.
+    #[tokio::test]
+    async fn plugin_list_http_preserves_empty_filter_and_rejects_invalid_json() {
+        let empty = list_user_plugins_http(Query(PluginListQuery {
+            plugin_ids: Some("[]".into()),
+        }))
+        .await
+        .into_response();
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert_eq!(json_body(empty).await, serde_json::json!([]));
+        let invalid = list_user_plugins_http(Query(PluginListQuery {
+            plugin_ids: Some("not-json".into()),
+        }))
+        .await
+        .into_response();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(invalid).await["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
+    }
+
+    /// Pins the audit in `git::NETWORK_GIT_SUBCOMMANDS` in both directions.
+    ///
+    /// The second assertion alone would be near-tautological: it filters the
+    /// allowlist *through* the network set and then compares against that same
+    /// set, so adding `clone` to the allowlist and forgetting to classify it
+    /// changes nothing — the filter simply drops it, and an unbounded network
+    /// command becomes reachable over HTTP with the test still green. That is
+    /// the exact regression this test exists to catch, so the allowlist is
+    /// pinned verbatim first: any addition fails here and forces a decision.
+    #[test]
+    fn every_allowlisted_subcommand_that_reaches_a_remote_is_bounded() {
+        assert_eq!(
+            ALLOWED_GIT_SUBCOMMANDS,
+            &[
+                "fetch",
+                "pull",
+                "push",
+                "stash",
+                "log",
+                "diff",
+                "show",
+                "branch",
+                "tag",
+                "merge",
+                "rebase",
+                "cherry-pick",
+                "remote",
+                "status",
+                "rev-parse",
+            ],
+            "a new allowlisted subcommand must be classified in \
+             NETWORK_GIT_SUBCOMMANDS before it is added here — an unclassified \
+             one that reaches a remote runs unbounded"
+        );
+        // And nothing may quietly leave the network set: these four must stay
+        // bounded for as long as they are reachable over HTTP.
+        let bounded: Vec<&str> = ALLOWED_GIT_SUBCOMMANDS
+            .iter()
+            .copied()
+            .filter(|sub| crate::git::is_network_git_subcommand(&[(*sub).to_string()]))
+            .collect();
+        assert_eq!(bounded, vec!["fetch", "pull", "push", "remote"]);
+    }
+
+    // Catches: validating only args[0] lets executable/config/output options reach Git.
+    #[tokio::test]
+    async fn run_git_http_rejects_option_injection_in_every_position() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).expect("tempdir");
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        for args in [
+            vec!["rebase", "--exec", "touch x"],
+            vec!["rebase", "main", "--exec=touch x"],
+            vec!["fetch", "--upload-pack=x"],
+            vec!["fetch", "origin", "--upload-pack", "x"],
+            vec!["log", "-c", "core.pager=x"],
+            vec!["diff", "--output=x"],
+            vec!["push", "--receive-pack=x"],
+            vec!["log", "--", "--exec=x"],
+            vec!["-c", "alias.x=!touch x", "status"],
+        ] {
+            let response = run_git_command_http(
+                axum::extract::State(state.clone()),
+                Json(RunGitCommandRequest {
+                    path: dir.path().to_string_lossy().into_owned(),
+                    args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{args:?}");
+        }
+    }
+
+    // Catches: a restrictive flag policy breaking GitPanel's local operations.
+    #[tokio::test]
+    async fn run_git_http_preserves_git_panel_operations() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).expect("tempdir");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+            vec!["branch", "feature"],
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        for args in [
+            vec!["status", "--porcelain"],
+            vec!["diff", "--name-status", "main...feature"],
+            vec!["merge", "feature"],
+            vec!["rebase", "feature"],
+            vec!["stash", "push"],
+            vec!["fetch", "--all"],
+        ] {
+            let response = run_git_command_http(
+                axum::extract::State(state.clone()),
+                Json(RunGitCommandRequest {
+                    path: dir.path().to_string_lossy().into_owned(),
+                    args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{args:?}");
+            let body = json_body(response).await;
+            assert_eq!(body["success"], true, "{args:?}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_over_http_gives_up_on_a_mute_remote() {
+        // Setup gets its own budget, and deliberately not a deadline. Two git
+        // subprocesses and a socket bind must not be able to fail this test on
+        // time — a loaded machine that takes a while to reach the starting line
+        // has not disproved anything about the deadline under test. It is only
+        // measured so a failure below can name it instead of implying the
+        // deadline misfired.
+        let setup_started = Instant::now();
+        let port = mute_git_remote();
+        let dir = repo_pointing_at(port);
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        let body = RunGitCommandRequest {
+            path: dir.path().to_string_lossy().to_string(),
+            args: vec!["fetch".to_string(), "origin".to_string()],
+        };
+        let setup = setup_started.elapsed();
+
+        // The bound must wrap the await, not follow it. Asserting on an elapsed
+        // measured *after* the call can only fire when the call returned — the
+        // one failure it named, "never came back", makes the assertion itself
+        // unreachable and hands the test to nextest's anonymous 120s kill,
+        // which names nothing. That is how this test once failed as a bare
+        // TIMED OUT and accused the mechanism it exists to prove works.
+        //
+        // 35s is far above the 5s deadline under test and far below the outer
+        // 120s, so setup keeps 85s of headroom it cannot spend on us.
+        let response = tokio::time::timeout(
+            crate::git_cli::FETCH_TIMEOUT + Duration::from_secs(30),
+            run_git_command_http(axum::extract::State(state), Json(body)),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "run_git_command_http never returned: the FETCH_TIMEOUT inside it \
+                 did not fire. Setup had already finished in {setup:?}, so this is \
+                 the deadline, not a slow machine"
+            )
+        });
+
+        let json = json_body(response).await;
+        assert_eq!(
+            json["success"], false,
+            "a killed fetch must not report success: {json}"
+        );
+        // Names the deadline, so this cannot pass on a fetch that failed for an
+        // unrelated reason and happened to be fast.
+        assert!(
+            json["stderr"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("timed out"),
+            "expected the deadline named in stderr, got {json}"
+        );
     }
 }

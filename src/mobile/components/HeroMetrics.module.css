@@ -7,14 +7,14 @@
 
 .card {
   flex: 1;
+}
+
+.content {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 12px 8px;
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  padding-block: 12px;
 }
 
 .number {

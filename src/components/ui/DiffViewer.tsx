@@ -1,5 +1,5 @@
 import { DiffFile } from "@git-diff-view/core";
-import { DiffModeEnum, DiffView } from "@git-diff-view/solid";
+import { DiffModeEnum, DiffView, type DiffViewProps } from "@git-diff-view/solid";
 import { type Component, createEffect, createMemo, createSignal, on, Show } from "solid-js";
 import "@git-diff-view/solid/styles/diff-view.css";
 import { appLogger } from "../../stores/appLogger";
@@ -96,6 +96,12 @@ export interface DiffViewerProps {
 	mode?: DiffViewMode;
 	/** Callback to expose the content DOM element for search */
 	contentRef?: (el: HTMLElement) => void;
+	/** Per-line annotations (e.g. review threads), keyed by line number per side. */
+	extendData?: DiffViewProps<unknown>["extendData"];
+	renderExtendLine?: DiffViewProps<unknown>["renderExtendLine"];
+	/** Shows the "+" gutter button; `renderWidgetLine` renders what it opens. */
+	diffViewAddWidget?: boolean;
+	renderWidgetLine?: DiffViewProps<unknown>["renderWidgetLine"];
 }
 
 /** Convert our mode string to the library's enum */
@@ -171,6 +177,10 @@ export const DiffViewer: Component<DiffViewerProps> = (props) => {
 					diffViewTheme="dark"
 					diffViewWrap={false}
 					diffViewFontSize={13}
+					extendData={props.extendData}
+					renderExtendLine={props.renderExtendLine}
+					diffViewAddWidget={props.diffViewAddWidget}
+					renderWidgetLine={props.renderWidgetLine}
 				/>
 			</Show>
 		</div>

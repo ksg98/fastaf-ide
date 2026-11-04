@@ -1,7 +1,7 @@
 import { appLogger } from "../stores/appLogger";
 import { dictationStore } from "../stores/dictation";
-import { terminalsStore } from "../stores/terminals";
-import { getShellFamily, sendCommand } from "../utils/sendCommand";
+import { toastsStore } from "../stores/toasts";
+import { captureDictationTarget, type DictationTarget } from "./dictationTarget";
 
 /** Transcription result from the Rust backend */
 interface TranscribeResponse {
@@ -14,6 +14,8 @@ interface TranscribeResponse {
 
 /** Dependencies injected into useDictation */
 export interface DictationDeps {
+	/** A detached chat has no active PTY: transcript focus still targets its composer. */
+	fallbackInput?: () => HTMLTextAreaElement | null;
 	pty: {
 		write: (sessionId: string, data: string) => Promise<void>;
 	};
@@ -24,10 +26,14 @@ export interface DictationDeps {
 			processing: boolean;
 			loading: boolean;
 			modelStatus: "not_downloaded" | "downloaded" | "ready" | "not_configured";
+			/** Null before anything polled; see the store's own doc comment. */
+			handsFree: { armed: boolean } | null;
 		};
 		refreshStatus: () => Promise<void>;
-		startRecording: () => Promise<void>;
+		startRecording: (source?: string) => Promise<void>;
 		stopRecording: () => Promise<TranscribeResponse | null>;
+		refreshHandsFree: () => Promise<void>;
+		disarmHandsFree: () => Promise<void>;
 	};
 	setStatusInfo: (msg: string) => void;
 	openSettings: (tab?: string) => void;
@@ -40,19 +46,31 @@ export function useDictation(deps: DictationDeps) {
 	// startRecording resolves, causing it to see recording=false and bail.
 	let startPromise: Promise<boolean> | null = null;
 
-	// Capture the focused element at key-press time. During push-to-talk the
-	// focus may shift (e.g. to the terminal) by the time the key is released,
-	// so we snapshot it here to guarantee dictation targets the right element.
-	let focusTarget: Element | null = null;
+	let recordingTarget: { id: string; target: DictationTarget } | null = null;
+	let starting = false;
 
-	const handleDictationStart = async () => {
-		if (!deps.dictation.state.enabled) return;
-		if (deps.dictation.state.recording || deps.dictation.state.processing || deps.dictation.state.loading) return;
-
-		// Snapshot focus target before any async work
-		focusTarget = document.activeElement;
-
+	const handleDictationStart = async (source = "hotkey") => {
+		if (!deps.dictation.state.enabled || starting) return;
+		const captured = { id: crypto.randomUUID(), target: captureDictationTarget(deps.fallbackInput?.()) };
+		starting = true;
 		startPromise = (async () => {
+			// The hotkey also stops hands-free; refresh before trusting its cached flag.
+			await deps.dictation.refreshHandsFree();
+			if (deps.dictation.state.handsFree?.armed) {
+				await deps.dictation.disarmHandsFree();
+				deps.setStatusInfo("Hands-free: stopped");
+				return false;
+			}
+			if (deps.dictation.state.recording || deps.dictation.state.processing || deps.dictation.state.loading)
+				return false;
+			recordingTarget = captured;
+			appLogger.info("dictation", "Dictation target captured", {
+				recordingId: captured.id,
+				targetKind: captured.target.kind,
+				terminalId: captured.target.terminalId,
+				sessionId: captured.target.sessionId,
+			});
+
 			// Sync state from Rust before proceeding — the store may be stale
 			// (e.g. Rust still processing previous transcription)
 			await deps.dictation.refreshStatus();
@@ -64,7 +82,7 @@ export function useDictation(deps: DictationDeps) {
 			}
 
 			if (deps.dictation.state.modelStatus === "not_downloaded") {
-				deps.setStatusInfo("Dictation: model not downloaded — open Settings > Dictation");
+				deps.setStatusInfo("Dictation: model not downloaded — open Settings > Voice");
 				deps.openSettings("dictation");
 				return false;
 			}
@@ -80,7 +98,7 @@ export function useDictation(deps: DictationDeps) {
 			}
 
 			try {
-				await deps.dictation.startRecording();
+				await deps.dictation.startRecording(source);
 				deps.setStatusInfo("Dictation: recording…");
 				return true;
 			} catch (err) {
@@ -88,7 +106,9 @@ export function useDictation(deps: DictationDeps) {
 				deps.setStatusInfo("Dictation: failed to start recording");
 				return false;
 			}
-		})();
+		})().finally(() => {
+			starting = false;
+		});
 
 		await startPromise;
 	};
@@ -96,36 +116,36 @@ export function useDictation(deps: DictationDeps) {
 	const handleDictationStop = async () => {
 		// Wait for any in-flight start to finish before checking state
 		if (startPromise) {
-			const started = await startPromise;
+			// A refused overlapping start resolves false while the first recording is
+			// still active, so the recording flag below decides, not the start result.
+			await startPromise;
 			startPromise = null;
-			if (!started) return;
 		}
 
 		if (!deps.dictation.state.recording) return;
+		const captured = recordingTarget;
+		recordingTarget = null;
 		deps.setStatusInfo("Dictation: transcribing…");
 		const response = await deps.dictation.stopRecording();
 
 		if (!response) {
-			focusTarget = null;
 			deps.setStatusInfo("Dictation: transcription failed");
 			return;
 		}
 
 		if (response.skip_reason) {
-			focusTarget = null;
 			deps.setStatusInfo(`Dictation: ${response.skip_reason}`);
 			return;
 		}
 
 		const text = response.text.trim();
 		if (!text) {
-			focusTarget = null;
 			deps.setStatusInfo("Dictation: no text recognized");
 			return;
 		}
 
 		// Optional AI rewrite — any failure falls back to the raw transcript.
-		// focusTarget stays snapshotted across this extra await.
+		// The target captured at key-press time stays fixed across this extra await.
 		let finalText = text;
 		let rewriteFailed = false;
 		if (dictationStore.state.rewriteEnabled) {
@@ -142,59 +162,52 @@ export function useDictation(deps: DictationDeps) {
 		const doneMessage = rewriteFailed
 			? "Dictation: AI rewrite failed — inserted raw transcript"
 			: response.truncated_s > 0
-				? `Dictation: recording too long — the first ${Math.round(response.truncated_s)}s were not transcribed`
+				? `Dictation: ${Math.round(response.truncated_s)}s of audio were lost before transcription`
 				: "Ready";
 
-		// Use the focus target captured at key-press time
-		const el = focusTarget;
-		focusTarget = null;
-
-		// Terminal components use hidden input/textarea elements for keyboard capture.
-		// Writing directly to .value doesn't reach the PTY — route to the terminal
-		// fallback below instead. Covers both xterm (.xterm) and CanvasTerminal
-		// ([data-terminal-container]).
-		const isTerminalInput =
-			(el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) &&
-			(el.closest(".xterm") || el.closest("[data-terminal-container]"));
-
-		const autoSend = dictationStore.state.autoSend;
-
-		if (!isTerminalInput && el && (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement)) {
-			const start = el.selectionStart ?? el.value.length;
-			const end = el.selectionEnd ?? start;
-			const before = el.value.slice(0, start);
-			const after = el.value.slice(end);
-			el.value = before + finalText + after;
-			el.selectionStart = el.selectionEnd = start + finalText.length;
-			el.dispatchEvent(new Event("input", { bubbles: true }));
+		const metadata = {
+			recordingId: captured?.id ?? null,
+			targetKind: captured?.target.kind ?? "none",
+			terminalId: captured?.target.terminalId ?? null,
+			sessionId: captured?.target.sessionId ?? null,
+			characterCount: finalText.length,
+		};
+		try {
+			if (!captured) throw new Error("No captured dictation target");
+			await captured.target.deliver(finalText, deps.pty.write, dictationStore.state.autoSend);
+			appLogger.info("dictation", "Dictation delivered", { ...metadata, outcome: "delivered" });
 			deps.setStatusInfo(doneMessage);
-			return;
-		}
-		if (el && el.getAttribute("contenteditable") === "true") {
-			document.execCommand("insertText", false, finalText);
-			deps.setStatusInfo(doneMessage);
-			return;
-		}
-
-		const active = terminalsStore.getActive();
-		const targetSessionId = active?.sessionId;
-		if (active && targetSessionId) {
-			try {
-				const writeFn = (data: string) => deps.pty.write(targetSessionId, data);
-				if (autoSend) {
-					const shellFamily = await getShellFamily(targetSessionId);
-					await sendCommand(writeFn, finalText, active.agentType, shellFamily);
-				} else {
-					await writeFn(finalText);
-				}
-				deps.setStatusInfo(doneMessage);
-				requestAnimationFrame(() => active.ref?.focus());
-			} catch (err) {
-				appLogger.error("dictation", "Failed to write to terminal", err);
-				deps.setStatusInfo("Dictation: failed to write to terminal");
-			}
-		} else {
-			deps.setStatusInfo("Dictation: no active terminal");
+		} catch {
+			// Never log the transcript or an exception that might contain it. The
+			// sticky message and Messages bell retain it for manual recovery.
+			appLogger.warn("dictation", "Dictation delivery failed; transcript retained", {
+				...metadata,
+				outcome: "retained",
+			});
+			toastsStore.add(
+				"Dictation was not delivered",
+				finalText,
+				"error",
+				false,
+				undefined,
+				0,
+				undefined,
+				captured?.target.sessionId ?? undefined,
+				false,
+			);
+			toastsStore.addToBell(
+				"Dictation was not delivered",
+				finalText,
+				"error",
+				undefined,
+				undefined,
+				captured?.target.sessionId ?? undefined,
+			);
+			deps.setStatusInfo(
+				captured?.target.kind === "none"
+					? "Dictation: no active terminal"
+					: "Dictation: target unavailable — transcript kept in Messages",
+			);
 		}
 	};
 

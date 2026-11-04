@@ -1,6 +1,7 @@
 import { type Component, For, onCleanup, onMount, Show } from "solid-js";
 import type { RepositoryState } from "../../stores/repositories";
 import { repositoriesStore } from "../../stores/repositories";
+import { Button } from "../ui/Button";
 import s from "./Sidebar.module.css";
 
 export interface ParkedReposPopoverProps {
@@ -48,19 +49,27 @@ export const ParkedReposPopover: Component<ParkedReposPopoverProps> = (props) =>
 			<For each={parkedRepos()}>
 				{(repo: RepositoryState) => (
 					<div class={s.parkedPopoverItem}>
-						<button
+						<Button
+							size="compact"
+							variant="ghost"
 							class={s.parkedPopoverName}
 							onClick={() => props.onUnpark(repo.path)}
-							title={`Unpark and switch to ${repo.displayName}`}
+							data-tooltip={`Unpark and switch to ${repo.displayName}`}
+							data-tooltip-pos="bottom"
 						>
 							{repo.displayName}
-						</button>
-						<button
+						</Button>
+						<Button
+							size="compact"
+							variant="ghost"
 							class={s.parkedPopoverUnpark}
 							onClick={() => {
 								repositoriesStore.setPark(repo.path, false);
 							}}
-							title="Unpark"
+							aria-label="Unpark"
+							data-tooltip="Unpark"
+							data-tooltip-pos="bottom"
+							data-tooltip-align="right"
 						>
 							<svg width="12" height="12" viewBox="0 0 16 16" fill="none">
 								<path
@@ -71,7 +80,7 @@ export const ParkedReposPopover: Component<ParkedReposPopoverProps> = (props) =>
 									stroke-linejoin="round"
 								/>
 							</svg>
-						</button>
+						</Button>
 					</div>
 				)}
 			</For>

@@ -8,8 +8,15 @@ pub(super) struct HealthResponse {
     pub uptime_secs: u64,
     pub session_count: usize,
     pub protocol_version: u32,
+    pub build: Option<&'static crate::remote_deploy::assets::BuildIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub survive_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<String>,
+    /// Which running process answered. A remote connection compares it against
+    /// its own before mirroring, so a base URL that resolves back to this very
+    /// process is refused instead of looping every event through itself.
+    pub instance_id: &'static str,
 }
 
 #[derive(Serialize)]
@@ -18,21 +25,50 @@ pub(super) struct VersionResponse {
     pub git_hash: &'static str,
 }
 
-#[derive(Serialize)]
-pub(super) struct SessionInfo {
+/// One row of the session list, on every transport.
+///
+/// `Deserialize` because a mirrored row comes back from a remote daemon's own
+/// `GET /sessions` (#791-055e), and `serde(default)` because that daemon skips
+/// every field it has nothing to say about.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct SessionInfo {
     pub session_id: String,
+    /// Live PTY child, not the foreground agent or one of its tool subprocesses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_pid: Option<u32>,
     pub cwd: Option<String>,
     pub worktree_path: Option<String>,
     pub worktree_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub display_name_is_custom: bool,
+    /// The name came from the agent spawn, not from an OSC/intent title the UI
+    /// synced back. A reload cannot infer it from the other fields.
+    pub display_name_from_spawn: bool,
     pub is_remote: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pty_description: Option<String>,
+    /// Terminal alias (e.g. `tu-3`). The only record of it after a WebView
+    /// reload: `term-alias-assigned` fires once, at spawn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Live agent identity bound to this PTY; differs from session_id for a
+    /// locally launched tab that registered its own TUIC_SESSION.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tuic_session: Option<String>,
+    /// Session (or `$TUIC_SESSION`) of the agent that spawned this one. Published
+    /// once on `session-created`, so a reload or a late browser client needs it
+    /// here. Never a `pending-mcp:` placeholder: no tab can match one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
     // Session state (from accumulator) — present when broadcast channel is active
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<crate::state::SessionState>,
+    /// Which remote connection this session runs on; absent for a local one.
+    /// The caller needs it to tell two machines' sessions apart in one list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +83,10 @@ pub(super) struct CreateSessionRequest {
     /// locally-created and does not spawn a duplicate "PTY:" tab. Honored only
     /// when non-empty and not already in use; otherwise the backend mints one.
     pub session_id: Option<String>,
+    /// Terminal alias this tab held before the restart (e.g. `tu-3`). Same field
+    /// name and meaning as `PtyConfig::alias` on the Tauri IPC side — a restored
+    /// tab keeps the address other agents already know.
+    pub alias: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +110,10 @@ pub(super) struct SetNameRequest {
 #[derive(Deserialize)]
 pub(super) struct EnqueueCommandRequest {
     pub text: String,
+    #[serde(default, rename = "expectedDraft")]
+    pub expected_draft: Option<String>,
+    #[serde(default, rename = "idempotencyKey")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,15 +125,32 @@ pub(super) struct ResizeRequest {
 #[derive(Deserialize)]
 pub(super) struct OutputQuery {
     pub limit: Option<usize>,
+    /// Native MCP output windows, used only by format=mcp/mcp_raw.
+    pub from_line: Option<usize>,
+    pub from_byte: Option<u64>,
+    pub byte_budget: Option<u64>,
+    pub continuation: Option<String>,
+    pub since_cursor: Option<usize>,
     /// When set to "text", ANSI escape sequences are stripped from the output.
     pub format: Option<String>,
     /// Starting offset for log-mode WebSocket catch-up (skip lines already fetched via HTTP).
     pub offset: Option<usize>,
+    /// Content encoding the client can decode on the stream WebSocket. Only
+    /// `deflate` is offered; anything else, including absent, leaves the frames
+    /// in the original untagged framing. See `mcp_http::ws_compression`.
+    pub compress: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct PathQuery {
     pub path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProgressViewedQuery {
+    pub path: String,
+    pub pty_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -123,6 +184,46 @@ pub(super) struct ConflictAssistRequest {
     pub repo_path: String,
     #[serde(rename = "prNumber")]
     pub pr_number: i64,
+}
+
+/// `POST /repo/pr-review` — the same pair as a conflict assist, kept separate
+/// so neither route grows a field the other one has to ignore.
+#[derive(Deserialize)]
+pub(super) struct PrReviewRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "prNumber")]
+    pub pr_number: i64,
+}
+
+/// `POST /repo/improvement-scan`.
+#[derive(Deserialize)]
+pub(super) struct ImprovementScanRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub focus: crate::improvement_scan::ImprovementFocus,
+}
+
+/// `POST /repo/create-issue-from-proposal`.
+///
+/// The proposal travels whole rather than by id: nothing on this side stores a
+/// scan, so an id would name a thing only the caller has.
+#[derive(Deserialize)]
+pub(super) struct CreateIssueFromProposalRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub proposal: crate::improvement_scan::ImprovementProposal,
+}
+
+#[derive(Deserialize)]
+pub(super) struct UpdatePrBranchRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "prNumber")]
+    pub pr_number: i64,
+    /// Head commit the user saw; GitHub refuses the update if the PR head moved.
+    #[serde(rename = "expectedHeadSha")]
+    pub expected_head_sha: String,
 }
 
 #[derive(Deserialize)]
@@ -166,7 +267,9 @@ pub(super) struct PostPrReviewRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SpawnAgentRequest {
+    pub scope: Option<String>,
     pub rows: Option<u16>,
     pub cols: Option<u16>,
     pub cwd: Option<String>,
@@ -177,6 +280,17 @@ pub(super) struct SpawnAgentRequest {
     pub agent_type: Option<String>,
     pub binary_path: Option<String>,
     pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PrepareAgentLaunchArgsRequest {
+    pub agent_type: String,
+    pub binary_path: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -196,14 +310,23 @@ pub(super) struct CreateWorktreeRequest {
 pub(super) struct RemoveWorktreeQuery {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
-    /// When true, also delete the local branch. Defaults to true.
+    /// When true, also delete the local branch. Defaults to true unless force is true.
     #[serde(rename = "deleteBranch", default)]
     pub delete_branch: Option<bool>,
-    /// When true, force-remove a locked worktree (mirrors the desktop
-    /// confirmation dialog). Also switches the branch deletion from `git
-    /// branch -d` (safe) to `-D` (force). Defaults to false.
+    /// Permit discarding dirty workspace files. Does not override a lock or
+    /// bypass branch deletion proof.
     #[serde(default)]
     pub force: Option<bool>,
+    /// Explicit confirmation to remove a locked worktree.
+    #[serde(rename = "overrideLock", default)]
+    pub override_lock: Option<bool>,
+    #[serde(rename = "expectedFingerprint", default)]
+    pub expected_fingerprint: Option<String>,
+    #[serde(rename = "confirmMissingCheckout", default)]
+    pub confirm_missing_checkout: Option<bool>,
+    /// Explicit safe deletion instead of retaining a reusable checkout.
+    #[serde(rename = "permanentDelete", default)]
+    pub permanent_delete: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -319,6 +442,15 @@ pub(super) struct FsWriteFileRequest {
 }
 
 #[derive(Deserialize)]
+pub(super) struct FsWriteIfUnchangedRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub file: String,
+    pub expected: String,
+    pub content: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct FsDirCreateRequest {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
@@ -382,6 +514,14 @@ pub(super) struct FsResolveTerminalPathsRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FsResolveMarkdownLinkRequest {
+    pub root: String,
+    pub current_file: String,
+    pub href: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct FsWarmIndexRequest {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
@@ -424,13 +564,26 @@ pub(super) struct FsTransferPathsRequest {
 pub(super) struct FinalizeMergeRequest {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
-    #[serde(rename = "branchName")]
-    pub branch_name: String,
+    /// Checkout to archive or delete. The merge already happened, so no branch
+    /// is needed here — only which workspace to dispose of (#726-5ac7).
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
     /// "archive" or "delete"
     pub action: String,
     /// Skip the pre-flight guard that refuses to destroy a dirty worktree.
     #[serde(default)]
     pub force: Option<bool>,
+    #[serde(rename = "expectedFingerprint", default)]
+    pub expected_fingerprint: Option<String>,
+}
+
+/// One workspace, addressed by id, for the read-only queries.
+#[derive(Deserialize)]
+pub(super) struct WorkspaceIdQuery {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
 }
 
 #[derive(Deserialize)]
@@ -447,6 +600,35 @@ pub(super) struct RemoveOrphanRequest {
     pub repo_path: String,
     #[serde(rename = "worktreePath")]
     pub worktree_path: String,
+    #[serde(rename = "safeOnly", default)]
+    pub safe_only: bool,
+    /// Session ids the user saw when confirming; a live session outside this
+    /// list refuses a `safeOnly` false removal.
+    #[serde(rename = "confirmedSessions", default)]
+    pub confirmed_sessions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct BeginOrphanCleanupRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AnswerOrphanCleanupRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub decision: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ClearOrphanCleanupRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    /// The dialog ended in Keep; other clients must see that instead of a cleared entry.
+    #[serde(default)]
+    pub kept: bool,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +647,8 @@ pub(super) struct MergeArchiveRequest {
     pub repo_path: String,
     #[serde(rename = "branchName")]
     pub branch_name: String,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
     #[serde(rename = "targetBranch")]
     pub target_branch: String,
     /// "archive", "delete", or "ask"
@@ -473,6 +657,8 @@ pub(super) struct MergeArchiveRequest {
     /// Skip the pre-flight guard that refuses to destroy a dirty worktree.
     #[serde(default)]
     pub force: Option<bool>,
+    #[serde(rename = "expectedFingerprint", default)]
+    pub expected_fingerprint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -484,6 +670,9 @@ pub(super) struct MergePrRequest {
     /// "merge", "squash", or "rebase"
     #[serde(rename = "mergeMethod")]
     pub merge_method: String,
+    /// Head commit the user reviewed; GitHub refuses the merge if the PR head moved.
+    #[serde(rename = "expectedHeadSha")]
+    pub expected_head_sha: String,
 }
 
 // --- Recent commits query ---
@@ -539,6 +728,10 @@ pub(super) struct CiFailureLogsQuery {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
     pub branch: String,
+    #[serde(rename = "checkUrl")]
+    pub check_url: Option<String>,
+    #[serde(rename = "headSha")]
+    pub head_sha: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -550,12 +743,6 @@ pub(super) struct GithubSetHideDraftsRequest {
 pub(super) struct GithubPollLoginRequest {
     #[serde(rename = "deviceCode")]
     pub device_code: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct GithubAddAccountRequest {
-    pub host: String,
-    pub pat: String,
 }
 
 #[derive(Deserialize)]
@@ -795,9 +982,22 @@ pub(super) struct TerminalScrollRequest {
     pub delta: i32,
 }
 
+/// The resolved terminal theme, for answering OSC 10/11/12 colour queries.
+#[derive(Deserialize)]
+pub(super) struct TerminalThemeColorsRequest {
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub cursor: [u8; 3],
+}
+
 #[derive(Deserialize)]
 pub(super) struct TerminalScrollToRequest {
     pub line: usize,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TerminalScrollToAnchorRequest {
+    pub anchor: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -822,6 +1022,21 @@ pub(super) struct TerminalLinesQuery {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ChatViewQuery {
+    pub epoch: Option<u64>,
+    pub from_seq: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ChatViewRequest {
+    pub epoch: Option<u64>,
+    pub from_seq: Option<u64>,
+    #[serde(default)]
+    pub pending_texts: Vec<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct TerminalStyledRowsQuery {
     pub start: usize,
     pub count: usize,
@@ -843,6 +1058,8 @@ pub(super) struct TerminalSelectionQuery {
     pub end_row: usize,
     #[serde(rename = "endCol")]
     pub end_col: usize,
+    #[serde(rename = "historyBase")]
+    pub history_base: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -887,8 +1104,8 @@ pub(super) struct GitBranchBaseQuery {
 pub(super) struct GitWorktreeDirtyQuery {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
-    #[serde(rename = "branchName")]
-    pub branch_name: String,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
 }
 
 #[derive(Deserialize)]
@@ -933,6 +1150,10 @@ pub(super) struct GitDeleteLocalBranchRequest {
     pub repo_path: String,
     #[serde(rename = "branchName")]
     pub branch_name: String,
+    /// Checkout holding the ref. Distinct from `branch_name`: the branch is what
+    /// gets deleted, the workspace is what gets disposed of (#726-5ac7).
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
     #[serde(rename = "keepWorktree")]
     pub keep_worktree: Option<bool>,
 }
@@ -943,4 +1164,21 @@ pub(super) struct GitUpdateFromBaseRequest {
     #[serde(rename = "branchName")]
     pub branch_name: String,
     pub strategy: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct RemoteConnectionPasswordRequest {
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct RemoteConnectionRelayPairingRequest {
+    pub bundle: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct RemoteConnectionTokenRequest {
+    #[serde(rename = "baseUrl")]
+    pub base_url: String,
+    pub username: String,
 }

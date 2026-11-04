@@ -23,13 +23,6 @@ describe("markdownProviderRegistry", () => {
 	// Registration
 	// -------------------------------------------------------------------------
 	describe("register", () => {
-		it("registers a provider and returns a Disposable", () => {
-			const d = markdownProviderRegistry.register("plan", syncProvider("# Plan"));
-			expect(d).toBeDefined();
-			expect(typeof d.dispose).toBe("function");
-			d.dispose();
-		});
-
 		it("dispose removes the provider so resolve returns null", async () => {
 			const d = markdownProviderRegistry.register("plan", syncProvider("hello"));
 			d.dispose();

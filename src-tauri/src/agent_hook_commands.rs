@@ -25,12 +25,21 @@ fn hook_map_for(agent_type: &str) -> Option<Vec<HookEntry>> {
 /// The settings file an agent reads its hooks from. Claude/Gemini merge into a
 /// shared `settings.json`; Grok owns its own `~/.grok/hooks/tuic.json`.
 fn hook_settings_path(agent_type: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = crate::agent_test::test_root() {
+        return Some(root.join(agent_type).join("settings.json"));
+    }
     let home = dirs::home_dir()?;
     match agent_type {
         "claude" => Some(home.join(".claude/settings.json")),
         "gemini" => Some(home.join(".gemini/settings.json")),
         "grok" => Some(home.join(".grok/hooks/tuic.json")),
-        "codex" => Some(home.join(".codex/hooks.json")),
+        "codex" => Some(
+            std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".codex"))
+                .join("hooks.json"),
+        ),
         "opencode" => Some(home.join(".config/opencode/plugin/tuic.ts")),
         _ => None,
     }
@@ -103,7 +112,7 @@ pub(crate) fn apply_at(
 /// commands for the sentinel regardless of how they were written.
 pub(crate) fn state_at(agent_type: &str, settings_path: &Path) -> InstallState {
     // Codex state combines the hooks file AND the config.toml enable flag — both
-    // present = installed, both absent = notInstalled, a mismatch = outdated.
+    // present = reviewRequired until native verification, both absent = notInstalled.
     if agent_type == "codex" {
         let hooks = agent_hook_installer::install_state(
             settings_path,
@@ -113,7 +122,7 @@ pub(crate) fn state_at(agent_type: &str, settings_path: &Path) -> InstallState {
             .map(|c| crate::agent_hook_codex::features_hooks_present(&c))
             .unwrap_or(false);
         return match (hooks, flag) {
-            (InstallState::Installed, true) => InstallState::Installed,
+            (InstallState::Installed, true) => InstallState::ReviewRequired,
             (InstallState::NotInstalled, false) => InstallState::NotInstalled,
             _ => InstallState::Outdated,
         };
@@ -132,27 +141,42 @@ pub(crate) fn state_at(agent_type: &str, settings_path: &Path) -> InstallState {
     }
 }
 
-/// Persist `hook_instrumentation` for an agent into `AgentsConfig`.
+/// Persist `hook_instrumentation` for an agent into `AgentsConfig`. Off is the
+/// default every reader falls back to, so it is stored as absent.
 fn persist_flag(agent_type: &str, enabled: bool) -> Result<(), String> {
     let mut cfg = crate::config::load_agents_config();
+    let base = cfg.clone();
     cfg.agents
         .entry(agent_type.to_string())
         .or_default()
-        .hook_instrumentation = Some(enabled);
-    crate::config::save_agents_config(cfg)
+        .hook_instrumentation = enabled.then_some(true);
+    crate::config::save_agents_config(base, cfg)
 }
 
 /// Toggle hook instrumentation for an agent: persist the flag, then install (or
 /// uninstall) the hooks in the agent's settings file. Effect applies on the next
 /// agent launch.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn set_agent_hook_instrumentation(
+pub(crate) async fn set_agent_hook_instrumentation(
     agent_type: String,
     enabled: bool,
 ) -> Result<(), String> {
+    if crate::agent_test::active() {
+        return Err("Global agent hook changes are disabled in agent-test".into());
+    }
+    let _codex_guard = if agent_type == "codex" {
+        Some(crate::agent_hook_codex_trust::INSTALL_LOCK.lock().await)
+    } else {
+        None
+    };
     persist_flag(&agent_type, enabled)?;
     if let Some(path) = hook_settings_path(&agent_type) {
         apply_at(&agent_type, &path, enabled)?;
+        if agent_type == "codex" && enabled {
+            // Installation succeeded even if this CLI needs normal /hooks review.
+            // The following status read publishes reviewRequired, never installed.
+            let _ = crate::agent_hook_codex_trust::verify(&path, true).await;
+        }
     }
     Ok(())
 }
@@ -160,17 +184,94 @@ pub(crate) fn set_agent_hook_instrumentation(
 /// Report install state for the agent's hooks: `installed` / `outdated` /
 /// `notInstalled`, or `unsupported` for agents without a (wired) hook system.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn get_agent_hook_state(agent_type: String) -> String {
+pub(crate) async fn get_agent_hook_state(agent_type: String) -> String {
+    let _codex_guard = if agent_type == "codex" {
+        Some(crate::agent_hook_codex_trust::INSTALL_LOCK.lock().await)
+    } else {
+        None
+    };
     match hook_settings_path(&agent_type) {
-        Some(path) => state_at(&agent_type, &path).as_str().to_string(),
+        Some(path) => {
+            let state = state_at(&agent_type, &path);
+            if state == InstallState::ReviewRequired
+                && crate::agent_hook_codex_trust::verify(&path, false)
+                    .await
+                    .is_ok()
+            {
+                InstallState::Installed.as_str().to_string()
+            } else {
+                state.as_str().to_string()
+            }
+        }
         None => "unsupported".to_string(),
     }
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn get_agent_native_status_signals(agent_type: String) -> bool {
+    crate::agent_hook_launch::enabled(&agent_type)
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn set_agent_native_status_signals(
+    agent_type: String,
+    enabled: bool,
+) -> Result<(), String> {
+    if !matches!(agent_type.as_str(), "claude" | "codex") {
+        return Err(format!(
+            "native status signals are unsupported for '{agent_type}'"
+        ));
+    }
+    // On is the default every reader falls back to, so it is stored as absent.
+    let mut config = crate::config::load_agents_config();
+    let base = config.clone();
+    config
+        .agents
+        .entry(agent_type)
+        .or_default()
+        .native_status_signals = (!enabled).then_some(false);
+    crate::config::save_agents_config(base, config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn agent_test_hook_toggle_refuses_before_persistence_and_shared_writes() {
+        // Bug caught: a named instance still rewrites shared hooks and persists a lying flag.
+        for agent in ["claude", "gemini", "grok", "codex", "opencode"] {
+            for enabled in [true, false] {
+                let dir = TempDir::new_in(crate::test_support::test_temp_root()).unwrap();
+                let config = dir.path().join("instance");
+                std::fs::create_dir(&config).unwrap();
+                let _config = crate::config::set_config_dir_override(config.clone());
+                let settings = dir.path().join(agent).join("settings.json");
+                std::fs::create_dir(settings.parent().unwrap()).unwrap();
+                // Use the real installer to seed valid agent-specific content for removal.
+                apply_at(agent, &settings, true).unwrap();
+                let before = std::fs::read(&settings).unwrap();
+                let codex_config = settings.with_file_name("config.toml");
+                let codex_before = std::fs::read(&codex_config).ok();
+                crate::agent_test::with_test_profile(dir.path(), || {
+                    let result = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(set_agent_hook_instrumentation(agent.into(), enabled));
+                    assert_eq!(
+                        std::fs::read_dir(&config).unwrap().count(),
+                        0,
+                        "{agent}/{enabled}: refusal must precede instance flag persistence"
+                    );
+                    assert_eq!(std::fs::read(&settings).unwrap(), before);
+                    assert_eq!(std::fs::read(&codex_config).ok(), codex_before);
+                    assert!(result.unwrap_err().contains("agent-test"));
+                });
+            }
+        }
+    }
 
     #[test]
     fn config_agent_hook_apply_installs_then_uninstalls() {
@@ -186,12 +287,12 @@ mod tests {
     fn config_agent_hook_unsupported_agent_writes_nothing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
-        apply_at("aider", &path, true).unwrap();
+        apply_at("unknown-agent", &path, true).unwrap();
         assert!(
             !path.exists(),
             "unsupported agent must not write a settings file"
         );
-        assert_eq!(state_at("aider", &path), InstallState::NotInstalled);
+        assert_eq!(state_at("unknown-agent", &path), InstallState::NotInstalled);
     }
 
     #[test]
@@ -202,6 +303,56 @@ mod tests {
         assert_eq!(state_at("gemini", &path), InstallState::Installed);
         // Same file judged against Claude's map: different command multiset → outdated.
         assert_eq!(state_at("claude", &path), InstallState::Outdated);
+    }
+
+    /// Every reader resolves an absent flag to the same value as the default
+    /// (`hook_instrumented_for`, `agent_hook_launch::enabled`), so writing the
+    /// default back as `None` keeps one spelling per meaning. An explicit
+    /// default would read as a user override in Settings forever.
+    #[test]
+    #[serial_test::serial]
+    fn hook_flag_stores_the_default_as_absent() {
+        let dir = TempDir::new().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let flag = || {
+            crate::config::load_agents_config()
+                .agents
+                .get("gemini")
+                .and_then(|s| s.hook_instrumentation)
+        };
+
+        persist_flag("gemini", true).unwrap();
+        assert_eq!(flag(), Some(true));
+        persist_flag("gemini", false).unwrap();
+        assert_eq!(
+            flag(),
+            None,
+            "off is the default, so it must be stored as absent"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_status_signals_store_the_default_as_absent() {
+        let dir = TempDir::new().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let flag = || {
+            crate::config::load_agents_config()
+                .agents
+                .get("claude")
+                .and_then(|s| s.native_status_signals)
+        };
+
+        set_agent_native_status_signals("claude".to_string(), false).unwrap();
+        assert_eq!(flag(), Some(false));
+        assert!(!get_agent_native_status_signals("claude".to_string()));
+        set_agent_native_status_signals("claude".to_string(), true).unwrap();
+        assert_eq!(
+            flag(),
+            None,
+            "on is the default, so it must be stored as absent"
+        );
+        assert!(get_agent_native_status_signals("claude".to_string()));
     }
 
     #[test]
@@ -275,7 +426,7 @@ mod tests {
 
         apply_at("codex", &hooks, true).unwrap();
 
-        assert_eq!(state_at("codex", &hooks), InstallState::Installed);
+        assert_eq!(state_at("codex", &hooks), InstallState::ReviewRequired);
         let h = std::fs::read_to_string(&hooks).unwrap();
         assert!(h.contains("user-codex.sh"), "user Codex hook preserved");
         assert!(h.contains(r"7770;state=busy"));
@@ -296,7 +447,7 @@ mod tests {
         std::fs::write(&cfg, b"[features]\n").unwrap();
 
         apply_at("codex", &hooks, true).unwrap();
-        assert_eq!(state_at("codex", &hooks), InstallState::Installed);
+        assert_eq!(state_at("codex", &hooks), InstallState::ReviewRequired);
 
         apply_at("codex", &hooks, false).unwrap();
         assert_eq!(

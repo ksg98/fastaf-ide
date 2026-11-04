@@ -122,6 +122,10 @@ Open a file in the external editor.
 | `path` | `string` | File path — relative or absolute |
 | `opts.line` | `number` | Line number to jump to (default: `0`) |
 
+#### `tuic.openUrl(url)`
+
+Open an `http`, `https`, or `mailto` URL outside FastAF from an inline HTML panel. Clicked absolute links with these schemes use the same path automatically. Other schemes are rejected. Cross-origin URL tabs cannot prove a user click to the host, so this method is unavailable there; use the tab menu's **Open in Browser** action instead.
+
 #### `tuic.getFile(path): Promise<string>`
 
 Read a file's text content from the active repo.
@@ -137,6 +141,13 @@ tuic.getFile("package.json")
   .then(content => JSON.parse(content))
   .catch(err => console.error("Cannot read:", err.message));
 ```
+
+### Host messaging
+
+`tuic.send(data)` sends plugin data to the host's `openPanel({ onMessage })` callback.
+`tuic.onMessage(callback)` receives the original data passed to `PanelHandle.send(data, transfer?)`.
+The host wraps it as `{ type: "tuic:host-message", payload: data }`; transfer lists preserve buffer ownership semantics.
+`tuic.offMessage(callback)` removes the listener. Closing or unloading the panel removes its host bridges.
 
 ### Path Resolution
 
@@ -164,7 +175,7 @@ HTML `<a>` tags with `tuic://` href are automatically intercepted:
 <a href="tuic://terminal?repo=/path/to/repo">Open terminal</a>
 ```
 
-Link pathnames are treated as **relative paths** (the leading `/` from URL parsing is stripped).
+Absolute link targets use an extra slash, for example `tuic://open//Users/me/repo/file.md`. The URL parser collapses redundant leading slashes to one POSIX root before resolving the file. A single leading slash is the URL delimiter for a relative path; Windows drive paths keep their existing meaning.
 
 ### Repository
 

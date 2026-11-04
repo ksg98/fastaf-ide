@@ -1,0 +1,12 @@
+{
+  "status": "failed",
+  "steps": [
+    { "name": "prepare", "actions": [{ "failed": false, "output_url": "https://logs.example/prepare" }] },
+    { "name": "unit", "actions": [{ "failed": true, "output_url": "https://logs.example/unit" }] },
+    { "name": "lint", "actions": [{ "failed": true, "output_url": "https://logs.example/lint" }] },
+    { "name": "integration", "actions": [{ "failed": true, "output_url": "https://logs.example/integration" }] },
+    { "name": "e2e", "actions": [{ "failed": true, "output_url": "https://logs.example/e2e" }] },
+    { "name": "package", "actions": [{ "failed": true, "output_url": "https://logs.example/package" }] },
+    { "name": "publish", "actions": [{ "failed": true, "output_url": "https://logs.example/publish" }] }
+  ]
+}

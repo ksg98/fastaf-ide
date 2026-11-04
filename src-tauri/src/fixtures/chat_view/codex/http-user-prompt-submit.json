@@ -1,0 +1,10 @@
+{
+  "session_id": "01a15587-5ffa-7533-a890-de6ca6df8ad2",
+  "turn_id": "01a15587-6303-7260-845e-368701f0f2b6",
+  "transcript_path": "/recorded/rollout.jsonl",
+  "cwd": "/recorded/workspace",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "default",
+  "prompt": "Reply with exactly MOBILE_CHAT_REALITY_OK. Do not use tools or change files."
+}

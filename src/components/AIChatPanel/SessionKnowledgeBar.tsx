@@ -1,7 +1,6 @@
 import { type Component, createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { invoke, listen } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
-import { uiStore } from "../../stores/ui";
 import { cx } from "../../utils";
 import s from "./SessionKnowledgeBar.module.css";
 
@@ -128,14 +127,6 @@ export const SessionKnowledgeBar: Component<{ sessionId: string | null }> = (pro
 					<Show when={summary().tui_mode}>
 						<span class={cx(s.count, s.tuiMode)}>tui: {summary().tui_mode}</span>
 					</Show>
-				</button>
-				<button
-					type="button"
-					class={s.historyBtn}
-					title="Browse saved knowledge sessions"
-					onClick={() => uiStore.setKnowledgeHistoryOverlayVisible(true)}
-				>
-					History
 				</button>
 			</div>
 

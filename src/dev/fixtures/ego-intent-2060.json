@@ -1,0 +1,4 @@
+{
+  "text": "intent: Verificando l’ultima release e riconciliando main senza perdere il lavoro locale (Allineamento Agent2)Criteri di riuscita: identificare la release corretta, conservare commit e file locali, allineare `main` solo dopo aver verificato le differenze, poi creare una PR con fingerprint corroborato e test sui falsi positivi. Verifico prima riferimenti Git e istruzioni del repository.",
+  "source": "Ego session c5aaa82f-bf04-5dcc-b922-1a49c7376aed events.jsonl seq=401, AssistantMessage seq=396, recorded 2026-10-19. Original model text has no newline between title and Criteri; not reconstructed PTY bytes."
+}

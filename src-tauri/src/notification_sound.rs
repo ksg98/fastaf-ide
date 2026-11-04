@@ -5,12 +5,16 @@
 //! and an integrated ADSR amplitude envelope for smooth, click-free playback.
 
 use rodio::cpal::traits::HostTrait;
-use rodio::{DeviceSinkBuilder, DeviceTrait, MixerDeviceSink, Player, Source};
+use rodio::{DeviceTrait, Player, Source};
 use serde::Serialize;
 use std::num::NonZero;
 use std::time::Duration;
 
 const SAMPLE_RATE: u32 = 48_000;
+/// Keep the device fed with zeroes after the audible source ends. Without this,
+/// CoreAudio can tear down the short-lived stream on a non-silent hardware
+/// buffer boundary and produce a click after the chime.
+const OUTPUT_SETTLE_DURATION: Duration = Duration::from_millis(100);
 
 /// Notification sound types — mirrors the TypeScript `NotificationSound` union.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
@@ -220,11 +224,12 @@ impl EnvelopedTone {
         } else {
             // Linear ramp down: 1 -> 0
             let release_len = self.total_samples - self.sustain_end;
-            if release_len == 0 {
+            let last_release_index = release_len.saturating_sub(1);
+            if last_release_index == 0 {
                 return 0.0;
             }
             let release_pos = i - self.sustain_end;
-            1.0 - (release_pos as f32 / release_len as f32)
+            1.0 - (release_pos as f32 / last_release_index as f32)
         }
     }
 
@@ -284,7 +289,7 @@ pub(crate) struct AudioOutputDevice {
     pub is_default: bool,
 }
 
-pub(crate) fn list_output_devices() -> Vec<AudioOutputDevice> {
+pub(crate) fn list_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
     let host = rodio::cpal::default_host();
     let default_name: Option<String> = host
         .default_output_device()
@@ -302,46 +307,14 @@ pub(crate) fn list_output_devices() -> Vec<AudioOutputDevice> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .map_err(|_| "Audio output device enumeration unavailable".to_string())
 }
 
 // ---------------------------------------------------------------------------
 // Playback
 // ---------------------------------------------------------------------------
 
-/// Resolve an output device by name, falling back to default.
-///
-/// Shared with `voice::playback`, which speaks Kokoro's output through the same
-/// device the user picked for notification sounds.
-pub(crate) fn resolve_output_stream(device_name: Option<&str>) -> Option<MixerDeviceSink> {
-    if let Some(name) = device_name {
-        let host = rodio::cpal::default_host();
-        let device = host.output_devices().ok()?.find(|d| {
-            d.description()
-                .map(|description| description.name() == name)
-                .unwrap_or(false)
-        });
-        if let Some(dev) = device {
-            match DeviceSinkBuilder::from_device(dev).and_then(|builder| builder.open_stream()) {
-                Ok(stream) => return Some(stream),
-                Err(e) => {
-                    tracing::warn!(
-                        source = "notification_sound",
-                        device = name,
-                        "Failed to open selected device, falling back to default: {e}"
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                source = "notification_sound",
-                device = name,
-                "Configured device not found, falling back to default"
-            );
-        }
-    }
-    DeviceSinkBuilder::open_default_sink().ok()
-}
+pub(crate) use tuic_core::audio_output::resolve_output_stream;
 
 /// Play a notification sound on a background thread.
 ///
@@ -378,6 +351,17 @@ pub(crate) fn play(sound: NotificationSound, volume: f32, device_name: Option<St
             }
         }
 
+        // The audible source ends at exactly zero, then the stream remains open
+        // through several device buffers. Dropping it immediately after the last
+        // tone caused a relay-like crackle on macOS audio outputs.
+        player.append(
+            rodio::source::Zero::new(
+                NonZero::new(1).expect("one channel is non-zero"),
+                NonZero::new(SAMPLE_RATE).expect("sample rate is non-zero"),
+            )
+            .take_duration(OUTPUT_SETTLE_DURATION),
+        );
+
         player.sleep_until_end();
     });
 }
@@ -392,10 +376,16 @@ pub(crate) fn play_notification_sound(
     play(sound, volume, device);
 }
 
-/// Tauri command: list available audio output devices.
+/// Tauri command: list available audio output devices. Shared by
+/// `GET /audio/output-devices`.
 #[tauri::command]
-pub(crate) fn list_audio_output_devices() -> Vec<AudioOutputDevice> {
-    list_output_devices()
+pub(crate) async fn list_audio_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
+    crate::audio_enumeration::run_bounded(
+        "listing audio output devices",
+        crate::audio_enumeration::ENUMERATION_TIMEOUT,
+        list_output_devices,
+    )
+    .await?
 }
 
 #[cfg(test)]
@@ -469,10 +459,14 @@ mod tests {
             "Expected ~0.5 at mid-release, got {env}"
         );
 
-        // At the very end, should be ~0
+        // The final emitted sample must be exactly silent. Merely approaching
+        // zero still leaves a discontinuity when the source is detached.
         tone.sample_index = total - 1;
         let env = tone.envelope();
-        assert!(env < 0.05, "Expected ~0 at end of release, got {env}");
+        assert!(
+            env.abs() < f32::EPSILON,
+            "Expected 0 at end of release, got {env}"
+        );
     }
 
     #[test]

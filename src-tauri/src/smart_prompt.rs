@@ -29,12 +29,29 @@ const ENV_ALLOWLIST: &[&str] = &[
     "USERNAME",
     "SYSTEMROOT",
     "COMSPEC",
+    // Windows essentials with no POSIX counterpart, so easy to leave out and
+    // hard to diagnose. `PATHEXT` is half of what `PATH` means there — without
+    // it a bare `claude` or `npm`, which are `.cmd` shims, resolves to nothing.
+    // The rest is where a Windows program keeps its own configuration: strip
+    // them and a working agent CLI reports a broken install.
+    "PATHEXT",
+    "WINDIR",
+    "SYSTEMDRIVE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
 ];
 
 /// Clear the child's env, re-populate from the allowlist inherited from the
 /// current process, then overlay caller-supplied vars. Centralises the policy
 /// so headless and shell paths can't drift out of sync.
 fn apply_clean_env(cmd: &mut Command, extra: Option<&HashMap<String, String>>) {
+    apply_clean_std_env(cmd.as_std_mut(), extra);
+}
+
+fn apply_clean_std_env(cmd: &mut std::process::Command, extra: Option<&HashMap<String, String>>) {
     cmd.env_clear();
     for key in ENV_ALLOWLIST {
         if let Ok(value) = std::env::var(key) {
@@ -45,6 +62,27 @@ fn apply_clean_env(cmd: &mut Command, extra: Option<&HashMap<String, String>>) {
         for (k, v) in vars {
             cmd.env(k, v);
         }
+    }
+}
+
+/// Shell scripts and scheduler prechecks share the same non-interactive shell
+/// and environment policy. Windows disables cmd AutoRun configuration.
+pub(crate) fn clean_shell_command(script: &str) -> std::process::Command {
+    #[cfg(windows)]
+    let program = crate::fs::system32_exe("cmd.exe");
+    #[cfg(not(windows))]
+    let program = "sh";
+    let mut command = std::process::Command::new(program);
+    command.args(shell_flags(cfg!(windows))).arg(script);
+    apply_clean_std_env(&mut command, None);
+    command
+}
+
+fn shell_flags(windows: bool) -> &'static [&'static str] {
+    if windows {
+        &["/D", "/S", "/C"]
+    } else {
+        &["-c"]
     }
 }
 
@@ -146,31 +184,13 @@ pub(crate) async fn execute_shell_script(
 ) -> Result<String, String> {
     let duration = Duration::from_millis(timeout_ms.min(60_000)); // Cap at 60 seconds
 
-    let shell = if cfg!(target_os = "windows") {
-        "cmd"
-    } else {
-        "sh"
-    };
-    let shell_flag = if cfg!(target_os = "windows") {
-        "/C"
-    } else {
-        "-c"
-    };
-
     let repo_path = crate::cli::expand_tilde(&repo_path);
-    let mut cmd = Command::new(shell);
-    cmd.arg(shell_flag)
-        .arg(&script_content)
-        .current_dir(&repo_path)
+    let mut cmd = Command::from(clean_shell_command(&script_content));
+    cmd.current_dir(&repo_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-
-    // Shell scripts never receive caller-supplied env vars today — strip the
-    // inherited parent env to the allowlist so repo-controlled script_content
-    // cannot read ANTHROPIC_API_KEY / GITHUB_TOKEN / etc. from the Tauri process.
-    apply_clean_env(&mut cmd, None);
 
     let child = cmd
         .spawn()
@@ -193,28 +213,64 @@ pub(crate) async fn execute_shell_script(
 mod tests {
     use super::*;
 
+    // Catches: selecting POSIX flags on Windows or permitting cmd AutoRun hooks.
+    #[test]
+    fn shell_families_keep_noninteractive_flags() {
+        assert_eq!(shell_flags(false), &["-c"]);
+        assert_eq!(shell_flags(true), &["/D", "/S", "/C"]);
+    }
+
+    use crate::test_support::{
+        host_shell, normalize_newlines, print_var_script, sleep_script, system32_exe,
+    };
+
+    /// These tests drive real child processes, so they need a directory that
+    /// exists and commands that resolve on the host. `/tmp` and the POSIX
+    /// utilities are neither of those on Windows: every spawn died there with
+    /// "The directory name is invalid" (os error 267) before reaching the
+    /// behaviour under test. The behaviour itself — the env allowlist, argv
+    /// staying literal, the timeout, the working directory — is the same on
+    /// every platform, so the tests express it with the host's own shell
+    /// instead of being gated off one.
+    fn tmp_cwd() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
+
+    /// `execute_headless_prompt` arguments that run `script` through the host
+    /// shell.
+    fn shell_argv(script: &str) -> (String, Vec<String>) {
+        let (shell, flag) = host_shell();
+        (
+            shell.to_string(),
+            vec![flag.to_string(), script.to_string()],
+        )
+    }
+
     #[tokio::test]
     async fn headless_echo_command() {
-        let result = execute_headless_prompt(
-            "echo".to_string(),
-            vec!["hello".to_string()],
-            None,
-            5000,
-            "/tmp".to_string(),
-            None,
-        )
-        .await;
+        let (command, args) = shell_argv("echo hello");
+        let result = execute_headless_prompt(command, args, None, 5000, tmp_cwd(), None).await;
         assert_eq!(result.unwrap(), "hello");
     }
 
     #[tokio::test]
     async fn headless_stdin_piped() {
+        // `sort` is the stock Windows filter that reads stdin and writes it
+        // back; with a single line it cannot reorder anything. By absolute
+        // path, because `cmd` resolves a bare name through the child's `PATH`
+        // and this test is about stdin, not about the host's `PATH`.
+        let filter = if cfg!(windows) {
+            system32_exe("sort.exe")
+        } else {
+            "cat".to_string()
+        };
+        let (command, args) = shell_argv(&filter);
         let result = execute_headless_prompt(
-            "cat".to_string(),
-            vec![],
+            command,
+            args,
             Some("hello from stdin".to_string()),
             5000,
-            "/tmp".to_string(),
+            tmp_cwd(),
             None,
         )
         .await;
@@ -223,29 +279,15 @@ mod tests {
 
     #[tokio::test]
     async fn headless_nonzero_exit() {
-        let result = execute_headless_prompt(
-            "false".to_string(),
-            vec![],
-            None,
-            5000,
-            "/tmp".to_string(),
-            None,
-        )
-        .await;
+        let (command, args) = shell_argv("exit 1");
+        let result = execute_headless_prompt(command, args, None, 5000, tmp_cwd(), None).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn headless_timeout() {
-        let result = execute_headless_prompt(
-            "sleep".to_string(),
-            vec!["10".to_string()],
-            None,
-            100,
-            "/tmp".to_string(),
-            None,
-        )
-        .await;
+        let (command, args) = shell_argv(&sleep_script());
+        let result = execute_headless_prompt(command, args, None, 100, tmp_cwd(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Timed out"));
     }
@@ -257,16 +299,8 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        // printenv reads env directly — no shell interpolation needed.
-        let result = execute_headless_prompt(
-            "printenv".to_string(),
-            vec!["TUIC_TEST_VAR".to_string()],
-            None,
-            5000,
-            "/tmp".to_string(),
-            env,
-        )
-        .await;
+        let (command, args) = shell_argv(&print_var_script("TUIC_TEST_VAR"));
+        let result = execute_headless_prompt(command, args, None, 5000, tmp_cwd(), env).await;
         assert_eq!(result.unwrap(), "injected_value");
     }
 
@@ -274,73 +308,93 @@ mod tests {
     /// no command injection regardless of arg content.
     #[tokio::test]
     async fn headless_args_shell_metachars_are_literal() {
-        // Semicolon + command substitution + backticks — if passed through a shell,
-        // these would execute `whoami` / run `rm -rf`. With argv form, echo prints them verbatim.
-        let injection = "safe; rm -rf /tmp/tuictest_inject; $(whoami); `whoami`".to_string();
-        let result = execute_headless_prompt(
-            "echo".to_string(),
-            vec![injection.clone()],
-            None,
-            5000,
-            "/tmp".to_string(),
-            None,
-        )
-        .await;
-        assert_eq!(result.unwrap(), injection);
+        // Semicolon + command substitution + backticks — if passed through a
+        // shell, these would execute `whoami` / run `rm -rf`. In argv form the
+        // child prints them verbatim.
+        //
+        // This is the one test here that must NOT go through the host shell:
+        // running the injection through `sh -c` is exactly the bug it guards
+        // against. So the child is a program that echoes argv. `cmd /C echo` is
+        // the Windows stand-in for `/bin/echo`, and it is sound for this string
+        // because none of `;`, `$(…)` or a backtick means anything to `cmd` —
+        // a POSIX shell layer anywhere in the call would still rewrite them.
+        let scratch = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let marker = scratch.path().join("tuictest_inject");
+        let injection = format!("safe; rm -rf {}; $(whoami); `whoami`", marker.display());
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "echo".to_string(), injection.clone()],
+            )
+        } else {
+            ("echo".to_string(), vec![injection.clone()])
+        };
+        let result = execute_headless_prompt(command, args, None, 5000, tmp_cwd(), None).await;
+        // `contains` rather than equality: `cmd` keeps the quotes Rust adds
+        // around an argument that has spaces. What matters is that the text
+        // came back unsubstituted.
+        let out = result.unwrap();
+        assert!(out.contains(&injection), "argv reached a shell: {out}");
         // Confirm the would-be created file does not exist.
-        assert!(!std::path::Path::new("/tmp/tuictest_inject").exists());
+        assert!(!marker.exists());
     }
 
     #[tokio::test]
     async fn headless_empty_command_rejected() {
-        let result = execute_headless_prompt(
-            "   ".to_string(),
-            vec![],
-            None,
-            5000,
-            "/tmp".to_string(),
-            None,
-        )
-        .await;
+        let result =
+            execute_headless_prompt("   ".to_string(), vec![], None, 5000, tmp_cwd(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("command must not be empty"));
     }
 
     #[tokio::test]
     async fn shell_script_echo() {
-        let result = execute_shell_script("echo hello".to_string(), 5000, "/tmp".to_string()).await;
+        let result = execute_shell_script("echo hello".to_string(), 5000, tmp_cwd()).await;
         assert_eq!(result.unwrap(), "hello");
     }
 
     #[tokio::test]
     async fn shell_script_multiline() {
-        let result = execute_shell_script(
-            "echo line1\necho line2".to_string(),
-            5000,
-            "/tmp".to_string(),
-        )
-        .await;
-        assert_eq!(result.unwrap(), "line1\nline2");
+        // `sh` separates commands with a newline, `cmd /C` with `&`.
+        let script = if cfg!(windows) {
+            "echo line1&echo line2"
+        } else {
+            "echo line1\necho line2"
+        };
+        let result = execute_shell_script(script.to_string(), 5000, tmp_cwd()).await;
+        assert_eq!(normalize_newlines(&result.unwrap()), "line1\nline2");
     }
 
     #[tokio::test]
     async fn shell_script_nonzero_exit() {
-        let result = execute_shell_script("exit 1".to_string(), 5000, "/tmp".to_string()).await;
+        let result = execute_shell_script("exit 1".to_string(), 5000, tmp_cwd()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn shell_script_timeout() {
-        let result = execute_shell_script("sleep 10".to_string(), 100, "/tmp".to_string()).await;
+        let result = execute_shell_script(sleep_script(), 100, tmp_cwd()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Timed out"));
     }
 
     #[tokio::test]
     async fn shell_script_uses_cwd() {
-        let result = execute_shell_script("pwd".to_string(), 5000, "/tmp".to_string()).await;
-        // macOS resolves /tmp → /private/tmp
-        assert!(result.unwrap().contains("tmp"));
+        let script = if cfg!(windows) { "cd" } else { "pwd" };
+        let result = execute_shell_script(script.to_string(), 5000, tmp_cwd()).await;
+        // The shell reports the directory it was given, but not always by the
+        // same name: macOS resolves /tmp to /private/tmp, and Windows hands out
+        // a short 8.3 path for a user whose name is too long. The last
+        // component survives both, case aside.
+        let leaf = std::env::temp_dir()
+            .components()
+            .next_back()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .expect("temp dir has at least one component");
+        assert!(
+            result.unwrap().to_lowercase().contains(&leaf),
+            "shell did not run in the directory it was given"
+        );
     }
 
     /// Setting sensitive secrets on the parent and then spawning a headless
@@ -365,17 +419,14 @@ mod tests {
 
         // Spawn without passing the key in the `env` map: it must NOT appear.
         for k in LEAK_KEYS {
-            let out = execute_headless_prompt(
-                "sh".to_string(),
-                vec!["-c".to_string(), format!("echo \"${{{k}:-UNSET}}\"")],
-                None,
-                5000,
-                "/tmp".to_string(),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(out, "UNSET", "leaked {k} into child env");
+            let (command, args) = shell_argv(&print_var_script(k));
+            let out = execute_headless_prompt(command, args, None, 5000, tmp_cwd(), None)
+                .await
+                .unwrap();
+            assert!(
+                !out.contains("SHOULD-NOT-LEAK"),
+                "leaked {k} into child env: {out}"
+            );
         }
 
         for k in LEAK_KEYS {
@@ -390,14 +441,10 @@ mod tests {
         // SAFETY: test-only env mutation.
         unsafe { std::env::set_var(LEAK_KEY, "SHOULD-NOT-LEAK") };
 
-        let out = execute_shell_script(
-            format!("echo \"${{{LEAK_KEY}:-UNSET}}\""),
-            5000,
-            "/tmp".to_string(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(out, "UNSET");
+        let out = execute_shell_script(print_var_script(LEAK_KEY), 5000, tmp_cwd())
+            .await
+            .unwrap();
+        assert!(!out.contains("SHOULD-NOT-LEAK"), "leaked the secret: {out}");
 
         // SAFETY: see above.
         unsafe { std::env::remove_var(LEAK_KEY) };
@@ -408,16 +455,15 @@ mod tests {
         // PATH is on the allowlist, so the child must still be able to resolve
         // common binaries — otherwise `sh -c 'echo x'` wouldn't even start in
         // most distro layouts. Regression guard for over-aggressive clearing.
-        let out = execute_headless_prompt(
-            "sh".to_string(),
-            vec!["-c".to_string(), "echo \"${PATH:+PATH_OK}\"".to_string()],
-            None,
-            5000,
-            "/tmp".to_string(),
-            None,
-        )
-        .await
-        .unwrap();
+        let script = if cfg!(windows) {
+            "if defined PATH (echo PATH_OK)"
+        } else {
+            "echo \"${PATH:+PATH_OK}\""
+        };
+        let (command, args) = shell_argv(script);
+        let out = execute_headless_prompt(command, args, None, 5000, tmp_cwd(), None)
+            .await
+            .unwrap();
         assert_eq!(out, "PATH_OK");
     }
 }

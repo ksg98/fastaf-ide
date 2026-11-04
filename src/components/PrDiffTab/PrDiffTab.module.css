@@ -31,6 +31,10 @@
   z-index: 3;
 }
 
+@media (max-width: 600px) {
+  .header { height: auto; }
+}
+
 .headerTitle {
   font-weight: 600;
   color: var(--fg-primary);
@@ -122,28 +126,18 @@
   margin-left: auto;
 }
 
+/* View-mode toggle (side-by-side / inline) — FastAF's DiffTab vocabulary at
+   the PR header's density: ghost icon buttons, the pressed one accent-tinted. */
 .modeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 22px;
   height: 18px;
-  background: none;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.1s, background 0.1s;
 }
 
-.modeBtn:hover {
-  color: var(--fg-secondary);
-  background: var(--bg-highlight);
-}
-
-.modeBtnActive {
+.modeBtn.modeBtnActive {
   color: var(--accent);
-  background: var(--bg-highlight);
+  background: rgba(var(--accent-rgb), 0.14);
   border-color: var(--accent);
 }
 

@@ -54,13 +54,6 @@
   color: var(--fg-primary);
 }
 
-.subtitle {
-  display: block;
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  margin-top: 2px;
-}
-
 .fields {
   padding: 12px 16px;
   display: flex;
@@ -88,17 +81,8 @@
   color: var(--fg-muted);
 }
 
-.fieldInput {
-  composes: input from "../shared/controls.module.css";
-  padding: 6px 10px;
-  font-size: var(--font-base);
-  font-family: inherit;
-}
 
-.fieldInput::placeholder {
-  color: var(--fg-muted);
-  opacity: 0.5;
-}
+
 
 .actions {
   display: flex;
@@ -106,15 +90,4 @@
   gap: 8px;
   padding: 8px 16px 12px;
   border-top: 1px solid var(--border-subtle);
-}
-
-/* Buttons delegate to the shared controls vocabulary. Local class names
-   (.cancelBtn / .submitBtn) are preserved because the TSX imports them —
-   .submitBtn is this dialog's primary action, so it composes btnPrimary. */
-.cancelBtn {
-  composes: btn from "../shared/controls.module.css";
-}
-
-.submitBtn {
-  composes: btnPrimary from "../shared/controls.module.css";
 }

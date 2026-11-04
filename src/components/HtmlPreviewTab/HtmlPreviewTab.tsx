@@ -1,5 +1,4 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { type Component, createEffect, createSignal, Match, onCleanup, Show, Switch } from "solid-js";
 import { useRepository } from "../../hooks/useRepository";
 import { invoke } from "../../invoke";
@@ -8,12 +7,17 @@ import { appLogger } from "../../stores/appLogger";
 import { editorTabsStore } from "../../stores/editorTabs";
 import { type HtmlPreviewTab as HtmlPreviewTabData, mdTabsStore } from "../../stores/mdTabs";
 import { repositoriesStore } from "../../stores/repositories";
+import { isTauri } from "../../transport";
+import { IFRAME_EXTERNAL_LINK_SCRIPT } from "../../utils/iframeExternalLinks";
 import { attachIframeKeyForwarder } from "../../utils/iframeKeyForwarder";
 import { IFRAME_SCROLLBAR_STYLE, IFRAME_SEARCH_BRIDGE_SCRIPT } from "../../utils/iframeSearch";
+import { handleOpenUrl, openLocalPath } from "../../utils/openUrl";
 import { isAbsolutePath, joinPath } from "../../utils/pathUtils";
+import { browserLocalImageUrl, rewriteLocalImages } from "../../utils/repoImageUrl";
 import { buildSearchPattern, type SearchOptions } from "../shared/DomSearchEngine";
 import e from "../shared/editor-header.module.css";
 import { createSearchVisibility, SearchBar } from "../shared/SearchBar";
+import { Button } from "../ui/Button";
 import s from "./HtmlPreviewTab.module.css";
 
 export interface HtmlPreviewTabProps {
@@ -100,6 +104,9 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 		const data = event.data;
 		if (!data || typeof data !== "object") return;
 		switch (data.type) {
+			case "tuic:preview-open-url":
+				if (typeof data.url === "string") handleOpenUrl(data.url);
+				break;
 			case "tuic:reload-request":
 				reloadIframe();
 				break;
@@ -129,9 +136,9 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 
 	// Expose openSearch (global find shortcut) and reload (Cmd+R) so the global
 	// handlers can drive this tab when the wrapper — not the iframe — holds focus.
-	// reload is what lets Cmd+R refresh a web/preview tab instead of opening the
-	// Run Command dialog (cross-origin URL iframes can't receive the in-iframe
-	// reload-request, so the parent must trigger it).
+	// reload is what lets Cmd+R (reload-tab) refresh a web/preview tab
+	// (cross-origin URL iframes can't receive the in-iframe reload-request,
+	// so the parent must trigger it).
 	createEffect(() => {
 		mdTabsStore.setHandle(props.tab.id, {
 			openSearch: () => openSearchBar(),
@@ -163,6 +170,7 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 
 	/** Asset URL for binary files (PDF, images, video, audio), cache-busted via repo revision */
 	const assetUrl = () => {
+		if (!isTauri()) return browserLocalImageUrl(absolutePath(props.tab), kind() === "image") ?? undefined;
 		const rev = props.tab.repoPath ? repositoriesStore.getRevision(props.tab.repoPath) : 0;
 		return `${convertFileSrc(absolutePath(props.tab))}?v=${rev}`;
 	};
@@ -198,7 +206,8 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 				if (k === "html") {
 					const absPath = absolutePath(props.tab);
 					const dirPath = absPath.substring(0, absPath.lastIndexOf("/") + 1);
-					const baseTag = `<base href="${convertFileSrc(dirPath)}">`;
+					const baseTag = isTauri() ? `<base href="${convertFileSrc(dirPath)}">` : "";
+					if (!isTauri()) fileContent = rewriteLocalImages(fileContent, dirPath);
 					fileContent = fileContent.includes("<head")
 						? fileContent.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`)
 						: `${baseTag}${fileContent}`;
@@ -207,10 +216,12 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 						fileContent =
 							fileContent.slice(0, headClose) +
 							IFRAME_SEARCH_BRIDGE_SCRIPT +
+							IFRAME_EXTERNAL_LINK_SCRIPT +
 							IFRAME_SCROLLBAR_STYLE +
 							fileContent.slice(headClose);
 					} else {
-						fileContent = IFRAME_SEARCH_BRIDGE_SCRIPT + IFRAME_SCROLLBAR_STYLE + fileContent;
+						fileContent =
+							IFRAME_SEARCH_BRIDGE_SCRIPT + IFRAME_EXTERNAL_LINK_SCRIPT + IFRAME_SCROLLBAR_STYLE + fileContent;
 					}
 				}
 				setContent(fileContent);
@@ -225,11 +236,7 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 		})();
 	});
 
-	const handleOpenExternal = () => {
-		openPath(absolutePath(props.tab)).catch((err) =>
-			appLogger.error("app", "Failed to open file externally", { path: absolutePath(props.tab), error: String(err) }),
-		);
-	};
+	const handleOpenExternal = () => openLocalPath(absolutePath(props.tab));
 
 	const handleEdit = () => {
 		const { fsRoot, repoPath, filePath } = props.tab;
@@ -248,16 +255,16 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 				<span class={e.filename} title={displayPath()}>
 					{props.tab.fileName}
 				</span>
-				<button class={e.btn} onClick={handleEdit} title="Edit source">
+				<Button class={e.btn} onClick={handleEdit} title="Edit source">
 					<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 						<path d="M11.13 1.47a1.5 1.5 0 0 1 2.12 0l1.28 1.28a1.5 1.5 0 0 1 0 2.12L5.9 13.5a1 1 0 0 1-.5.27l-3.5.87a.5.5 0 0 1-.6-.6l.87-3.5a1 1 0 0 1 .27-.5L11.13 1.47ZM12.2 2.53l-8.46 8.47-.58 2.34 2.34-.58 8.47-8.46-1.77-1.77Z" />
 					</svg>
-				</button>
-				<button class={e.btn} onClick={handleOpenExternal} title="Open externally">
+				</Button>
+				<Button class={e.btn} onClick={handleOpenExternal} title="Open externally">
 					<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 						<path d="M9 2h5v5l-2-2-3 3-2-2 3-3zm-3 7l-3 3 2 2H0V9l2 2 3-3z" />
 					</svg>
-				</button>
+				</Button>
 			</div>
 			<Show when={kind() === "html"}>
 				<SearchBar
@@ -295,7 +302,16 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 					</Match>
 					<Match when={kind() === "image"}>
 						<div class={s.mediaContainer}>
-							<img class={s.image} src={assetUrl()} alt={props.tab.fileName} />
+							<Show
+								when={assetUrl()}
+								fallback={
+									<span role="img" aria-label="Image unavailable">
+										Image unavailable: outside open repositories.
+									</span>
+								}
+							>
+								{(src) => <img class={s.image} src={src()} alt={props.tab.fileName} />}
+							</Show>
 						</div>
 					</Match>
 					<Match when={kind() === "video"}>

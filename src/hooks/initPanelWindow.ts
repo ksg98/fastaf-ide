@@ -1,3 +1,4 @@
+import { onCleanup } from "solid-js";
 import { appLogger } from "../stores/appLogger";
 import { settingsStore } from "../stores/settings";
 import { applyAppTheme, applyFontFamily, listenForThemeChanges, loadThemes } from "../themes";
@@ -5,6 +6,10 @@ import { syncVibrancy } from "../vibrancy";
 import { syncAppZoom } from "../zoom";
 
 export async function initPanelWindow(): Promise<void> {
+	// Settings are edited in the main WebView, which owns a separate store.
+	const refreshSettings = () => void settingsStore.hydrate();
+	window.addEventListener("focus", refreshSettings);
+	onCleanup(() => window.removeEventListener("focus", refreshSettings));
 	document.getElementById("splash")?.remove();
 	await settingsStore.hydrate().catch((e) => {
 		appLogger.warn("panel", "Failed to hydrate settings in panel window — using defaults", e);

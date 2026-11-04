@@ -13,12 +13,35 @@ use super::json_result;
 use super::types::{ClaudeStatsQuery, ClaudeTimelineQuery};
 use crate::AppState;
 
-pub(super) async fn claude_usage_api() -> Response {
-    json_result(crate::claude_usage::get_claude_usage_api().await)
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClaudeUsageQuery {
+    session_id: Option<String>,
+}
+
+pub(super) async fn claude_usage_api(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ClaudeUsageQuery>,
+) -> Response {
+    json_result(
+        crate::claude_usage::get_claude_usage_api_impl(&state, q.session_id.as_deref()).await,
+    )
 }
 
 pub(super) async fn claude_project_list() -> Response {
     json_result(crate::claude_usage::get_claude_project_list().await)
+}
+
+pub(super) async fn codex_usage_api() -> Response {
+    json_result(crate::codex_usage::get_codex_usage_api().await)
+}
+
+pub(super) async fn codex_usage_stats() -> Response {
+    json_result(crate::codex_usage::get_codex_usage_stats().await)
+}
+
+pub(super) async fn grok_usage_api() -> Response {
+    json_result(crate::grok_usage::get_grok_usage_api().await)
 }
 
 pub(super) async fn claude_usage_timeline(

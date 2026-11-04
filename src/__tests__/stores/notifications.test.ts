@@ -3,6 +3,27 @@ import { testInScope, testInScopeAsync } from "../helpers/store";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
 const mockSetBadgeCount = vi.fn().mockResolvedValue(undefined);
+const nativeSend = vi.fn();
+// Hoisted so the terminals module is mocked before any import, whatever the load or test order.
+const terminalsState = vi.hoisted(() => ({ activeId: "" }));
+
+vi.mock("../../stores/terminals", () => ({
+	terminalsStore: {
+		get: () => ({ name: "Deploy Agent" }),
+		state: {
+			get activeId() {
+				return terminalsState.activeId;
+			},
+		},
+		isDetached: () => false,
+	},
+}));
+
+vi.mock("@tauri-apps/plugin-notification", () => ({
+	isPermissionGranted: vi.fn().mockResolvedValue(true),
+	requestPermission: vi.fn().mockResolvedValue("granted"),
+	sendNotification: nativeSend,
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
 	invoke: mockInvoke,
@@ -62,6 +83,7 @@ describe("notificationsStore", () => {
 		vi.resetModules();
 		mockInvoke.mockReset().mockResolvedValue(undefined);
 		mockSetBadgeCount.mockReset().mockResolvedValue(undefined);
+		nativeSend.mockReset();
 		localStorage.clear();
 
 		vi.doMock("@tauri-apps/api/core", () => ({
@@ -103,6 +125,8 @@ describe("notificationsStore", () => {
 		const notifMod = await import("../../notifications");
 		mockManager = notifMod.notificationManager as unknown as typeof mockManager;
 		store = (await import("../../stores/notifications")).notificationsStore;
+		await store.hydrate();
+		mockInvoke.mockClear();
 	});
 
 	describe("defaults", () => {
@@ -115,6 +139,76 @@ describe("notificationsStore", () => {
 				expect(store.state.config.sounds.completion).toBe(true);
 				expect(store.state.config.sounds.warning).toBe(true);
 			});
+		});
+	});
+
+	// Catches: opting out is lost on reload, or the missing preference unexpectedly defaults off.
+	it("persists automatic card opt-out across store reloads and resets to on", async () => {
+		expect(store.state.autoToastCards).toBe(true);
+		store.setAutoToastCards(false);
+		vi.resetModules();
+		const reloaded = (await import("../../stores/notifications")).notificationsStore;
+		expect(reloaded.state.autoToastCards).toBe(false);
+		reloaded.reset();
+		vi.resetModules();
+		expect((await import("../../stores/notifications")).notificationsStore.state.autoToastCards).toBe(true);
+	});
+
+	describe("ACP interaction notifications", () => {
+		async function withUnfocusedDesktop(run: () => Promise<void>) {
+			vi.stubGlobal("__TAURI_INTERNALS__", {});
+			// WKWebView answers denied at once; the native notifier must not depend on it.
+			vi.stubGlobal("Notification", { permission: "denied", requestPermission: vi.fn().mockResolvedValue("denied") });
+			const focus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+			try {
+				await run();
+			} finally {
+				focus.mockRestore();
+				vi.unstubAllGlobals();
+			}
+		}
+
+		it("uses the native notifier even when the WebView Notification permission is denied", async () => {
+			await withUnfocusedDesktop(async () => {
+				store.syncAcpAttention([{ id: "connection-1:permission-1", kind: "permission" }]);
+				await vi.waitFor(() =>
+					expect(nativeSend).toHaveBeenCalledWith({ title: "AI Chat needs input", body: "Permission requested" }),
+				);
+			});
+		});
+
+		it("notifies once per interaction, including after an unrelated refresh", async () => {
+			await withUnfocusedDesktop(async () => {
+				const pending = [{ id: "connection-1:permission-1", kind: "permission" as const }];
+				store.syncAcpAttention(pending);
+				store.syncAcpAttention([...pending]);
+				await vi.waitFor(() => expect(nativeSend).toHaveBeenCalledTimes(1));
+				store.syncAcpAttention([...pending, { id: "connection-1:form-1", kind: "elicitation" }]);
+				await vi.waitFor(() => expect(nativeSend).toHaveBeenCalledTimes(2));
+				expect(nativeSend).toHaveBeenLastCalledWith({ title: "AI Chat needs input", body: "Form requested" });
+			});
+		});
+
+		it("does not notify after the interaction is answered while native permission is pending", async () => {
+			await withUnfocusedDesktop(async () => {
+				store.syncAcpAttention([{ id: "connection-1:permission-1", kind: "permission" }]);
+				store.syncAcpAttention([]);
+				await new Promise((resolve) => setTimeout(resolve, 0));
+				expect(nativeSend).not.toHaveBeenCalled();
+			});
+		});
+
+		it("does not notify while the window is focused", async () => {
+			vi.stubGlobal("__TAURI_INTERNALS__", {});
+			const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+			try {
+				store.syncAcpAttention([{ id: "connection-1:permission-1", kind: "permission" }]);
+				await new Promise((resolve) => setTimeout(resolve, 0));
+				expect(nativeSend).not.toHaveBeenCalled();
+			} finally {
+				focus.mockRestore();
+				vi.unstubAllGlobals();
+			}
 		});
 	});
 
@@ -316,9 +410,61 @@ describe("notificationsStore", () => {
 	});
 
 	describe("playQuestion()", () => {
+		it("sends a native notification naming the terminal while the window is unfocused", async () => {
+			vi.stubGlobal("__TAURI_INTERNALS__", {});
+			const focus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+			const oldNotification = window.Notification;
+			vi.stubGlobal("Notification", { permission: "denied" });
+			try {
+				await store.playQuestion("term-1");
+				await vi.waitFor(() =>
+					expect(nativeSend).toHaveBeenCalledWith({
+						title: "Agent needs input",
+						body: "Deploy Agent",
+					}),
+				);
+			} finally {
+				focus.mockRestore();
+				vi.stubGlobal("Notification", oldNotification);
+				vi.unstubAllGlobals();
+			}
+		});
+
 		it("plays question sound via play()", async () => {
 			await store.playQuestion();
 			expect(mockManager.play).toHaveBeenCalledWith("question");
+		});
+	});
+
+	describe("playQuestionReminder()", () => {
+		async function remind(activeId: string, focused: boolean) {
+			vi.stubGlobal("__TAURI_INTERNALS__", {});
+			const focus = vi.spyOn(document, "hasFocus").mockReturnValue(focused);
+			terminalsState.activeId = activeId;
+			try {
+				await store.playQuestionReminder("term-1");
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			} finally {
+				focus.mockRestore();
+				vi.unstubAllGlobals();
+			}
+		}
+
+		it("always plays the question sound", async () => {
+			await remind("term-1", true);
+			expect(mockManager.play).toHaveBeenCalledWith("question");
+		});
+
+		// Catches: reminder silent for a question in a background tab of a focused window.
+		it("sends the OS notice for a background tab of a focused window", async () => {
+			await remind("term-2", true);
+			expect(nativeSend).toHaveBeenCalledWith({ title: "Agent needs input", body: "Deploy Agent" });
+		});
+
+		// Catches: OS notice popping for a question the user is looking at.
+		it("sends no OS notice when the question's tab is active in a focused window", async () => {
+			await remind("term-1", true);
+			expect(nativeSend).not.toHaveBeenCalled();
 		});
 	});
 

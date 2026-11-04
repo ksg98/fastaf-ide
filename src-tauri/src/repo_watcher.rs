@@ -68,14 +68,20 @@ pub(crate) fn classify_path(
         if let Some(name) = rel.file_name().and_then(|n| n.to_str())
             && matches!(
                 name,
-                "index" | "MERGE_HEAD" | "REBASE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
+                "index"
+                    | "packed-refs"
+                    | "config"
+                    | "MERGE_HEAD"
+                    | "REBASE_HEAD"
+                    | "CHERRY_PICK_HEAD"
+                    | "REVERT_HEAD"
             )
             && rel.parent().is_some_and(|p| p == Path::new(""))
         {
             return EventCategory::GitState;
         }
 
-        // Everything else under .git/ is noise (objects, config, hooks, logs, etc.)
+        // Everything else under .git/ is noise (objects, hooks, logs, etc.)
         return EventCategory::Noise;
     }
 
@@ -517,13 +523,23 @@ fn resolve_head_target(git_dir: &Path) -> Option<String> {
 /// `--no-optional-locks` (non-writing) read path — and folds them with
 /// `compute_git_fingerprint`. Runs on the post-debounce emit task, not the
 /// FSEvents hot path.
+///
+/// DEFERRED (2026-09-05) — story 693-1711 asked for this read to come from the
+/// shared `git_reads().status_counts()` instead of a fork. It cannot: that read
+/// returns only the clean/dirty/conflict verdict and the staged/changed counts,
+/// and swapping *which* file is staged leaves all three — plus the index size
+/// and HEAD — byte-identical (measured). The fingerprint would go blind to a
+/// stage swap and suppress the emit, which is worse than the fork it saves. See
+/// `test_real_fingerprint_moves_across_stage_commit_conflict_and_clean`, whose
+/// last leg fails the moment the counts are substituted. A conversion needs a
+/// per-file digest carried on `StatusCounts` first.
 fn repo_git_fingerprint(repo_root: &Path, git_dir: &Path) -> u64 {
     let index_size = std::fs::metadata(git_dir.join("index"))
         .map(|m| m.len())
         .unwrap_or(0);
     let head_target = resolve_head_target(git_dir).unwrap_or_default();
     let porcelain = crate::git_cli::git_cmd(repo_root)
-        .args(["status", "--porcelain"])
+        .args(["--no-optional-locks", "status", "--porcelain"])
         .run_silent()
         .map(|o| o.stdout)
         .unwrap_or_default();
@@ -609,6 +625,7 @@ pub(crate) struct RepoWatchHandle {
     /// Lock-cheap copy of the registered roots for `classify_path`, shared with
     /// the event callback. Refreshed at the end of each sync.
     worktree_snapshot: Arc<parking_lot::RwLock<Vec<PathBuf>>>,
+    status_watch_complete: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Register the watches for one working-tree root: the main checkout at startup,
@@ -706,10 +723,26 @@ fn sync_worktree_watches(state: &Arc<AppState>, repo_path: &str, git_dir: &Path)
         let mut watcher = handle.watcher.lock();
         for root in desired.difference(&registered) {
             tracing::debug!(source = "repo_watcher", repo = %repo_path, path = %root.display(), "Watching linked worktree");
-            watch_working_tree_root(&mut watcher, root, &mut watched);
+            let failures = watch_working_tree_root(&mut watcher, root, &mut watched);
+            crate::monitoring_status::CACHE.set_watching(
+                Path::new(repo_path),
+                root,
+                failures == 0
+                    && handle
+                        .status_watch_complete
+                        .load(std::sync::atomic::Ordering::Acquire),
+            );
+            if !handle
+                .status_watch_complete
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                crate::monitoring_status::CACHE.stop(Path::new(repo_path));
+            }
         }
         for root in registered.difference(&desired) {
             tracing::debug!(source = "repo_watcher", repo = %repo_path, path = %root.display(), "Dropping linked-worktree watch");
+            crate::monitoring_status::CACHE.invalidate_checkout(root);
+            crate::monitoring_status::CACHE.set_watching(Path::new(repo_path), root, false);
             unwatch_working_tree_root(&mut watcher, root, &mut watched);
         }
     }
@@ -746,7 +779,7 @@ fn is_new_watchable_dir(kind: &notify::EventKind, category: EventCategory) -> bo
 /// `Access(Close(Write))` is kept: it signals a *completed write*. Real
 /// modifications also arrive as `Modify`/`Create`/`Remove`, which are never
 /// dropped, so no change is missed.
-fn is_ignorable_access(kind: &notify::EventKind) -> bool {
+pub(crate) fn is_ignorable_access(kind: &notify::EventKind) -> bool {
     use notify::event::{AccessKind, AccessMode};
     match kind {
         notify::EventKind::Access(AccessKind::Close(AccessMode::Write)) => false,
@@ -804,7 +837,12 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
     #[cfg(target_os = "linux")]
     let rt_for_cb = rt_handle.clone();
     let emitter = Arc::new(CategoryEmitter::new(rt_handle));
+    // The base-checkout fingerprint cannot see a sibling ref/HEAD move. Keep
+    // one pending bit across the debounce rather than reading every checkout.
+    let shared_git_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    let status_watch_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let status_complete_cb = Arc::clone(&status_watch_complete);
     let repo_for_cb = repo.clone();
     let git_dir_for_cb = git_dir.clone();
     let gitignore_cb = Arc::clone(&gitignore);
@@ -816,15 +854,41 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
                 Ok(e) => e,
                 Err(err) => {
                     tracing::warn!(source = "repo_watcher", path = %repo_path_owned, "Watcher error: {err}");
+                    status_complete_cb.store(false, std::sync::atomic::Ordering::Release);
+                    crate::monitoring_status::CACHE.stop(&repo_for_cb);
+                    tuic_git::worktree::set_monitoring_watch_active(&repo_for_cb, false);
                     return;
                 }
             };
+
+            if !crate::monitoring_status::CACHE.event(&repo_for_cb, &event) {
+                status_complete_cb.store(false, std::sync::atomic::Ordering::Release);
+            }
 
             // Drop read-only access events (open/read/close-nowrite) before any
             // work: file reads spray thousands per second per repo and pinned a
             // core processing them on this (notify event) thread (issue #84).
             if is_ignorable_access(&event.kind) {
                 return;
+            }
+
+            if event.need_rescan() {
+                tuic_git::worktree::set_monitoring_watch_active(&repo_for_cb, false);
+            }
+            let git_paths: Vec<_> = event.paths.iter()
+                .filter(|path| path.starts_with(&git_dir_for_cb)).cloned().collect();
+            if !git_paths.is_empty() {
+                tuic_git::worktree::monitoring_paths_changed(&repo_for_cb, &git_paths);
+            }
+            if git_paths.iter().any(|path| {
+                path == &git_dir_for_cb.join("packed-refs")
+                    || path == &git_dir_for_cb.join("config")
+                    || (path.starts_with(git_dir_for_cb.join("refs"))
+                        && path.extension().is_none_or(|extension| extension != "lock"))
+                    || (path.starts_with(git_dir_for_cb.join("worktrees"))
+                        && path.file_name().is_some_and(|name| name == "HEAD"))
+            }) {
+                shared_git_changed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
             // Rebuild the matcher when an ignore source that matters changes.
@@ -948,13 +1012,15 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
                 let repo = repo_for_cb.clone();
                 let git_dir = git_dir_for_cb.clone();
                 let em = Arc::clone(&emitter);
+                let shared_changed = Arc::clone(&shared_git_changed);
                 emitter.trigger(&EventCategory::GitState, move || {
                     // Skip the emit (and cache invalidation) when the meaningful git
                     // state is unchanged. A no-op `.git` touch — e.g. a non-writing
                     // status refreshing the index stat cache — leaves the fingerprint
                     // identical, so we avoid the redundant ~20-panel frontend cascade.
+                    let shared_changed = shared_changed.swap(false, std::sync::atomic::Ordering::Relaxed);
                     let fp = repo_git_fingerprint(&repo, &git_dir);
-                    if st.repo_git_fingerprints.get(&repo_path).map(|v| *v) == Some(fp) {
+                    if !shared_changed && st.repo_git_fingerprints.get(&repo_path).map(|v| *v) == Some(fp) {
                         tracing::debug!(source = "repo_watcher", path = %repo_path, "Skip repo-changed (git-state unchanged)");
                         return;
                     }
@@ -964,7 +1030,7 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
                     // always lands here — catch its watches up before emitting.
                     sync_worktree_watches(&st, &repo_path, &git_dir);
                     tracing::debug!(source = "repo_watcher", path = %repo_path, "Emit repo-changed (git-state)");
-                    st.invalidate_repo_caches(&repo_path);
+                    st.invalidate_repo_caches_from_watch(&repo_path);
                     // Dedupe: a pending working-tree emit would send this exact
                     // event again in another second. `git add`, `git commit` and
                     // `git checkout` all write `.git` *and* the working tree, so
@@ -1009,7 +1075,7 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
                 };
                 emitter.trigger_with_delay(&EventCategory::WorkingTree, wt_delay, move || {
                     tracing::debug!(source = "repo_watcher", path = %repo_path, "Emit repo-changed (working-tree)");
-                    st.invalidate_repo_caches(&repo_path);
+                    st.invalidate_repo_caches_from_watch(&repo_path);
                     let _ = bus.send(AppEvent::RepoChanged {
                         repo_path: repo_path.clone(),
                         kind: RepoChangeKind::WorkingTree,
@@ -1038,6 +1104,12 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
     // `.git/objects`, whose churn floods the callback and pins CPU (issue #82).
     let mut watched_dirs = std::collections::HashSet::new();
     let watch_failures = watch_working_tree_root(&mut watcher, repo.as_path(), &mut watched_dirs);
+    // Only claim path-complete Git watching for a canonical main checkout.
+    // Linked roots, partial registrations and watcher loss retain signature checks.
+    #[allow(unused_mut)]
+    let mut monitoring_watch_complete = watch_failures == 0
+        && git_dir == repo.join(".git")
+        && std::fs::canonicalize(&repo).ok().as_ref() == Some(&repo);
 
     #[cfg(not(target_os = "linux"))]
     if watch_failures > 0 {
@@ -1073,6 +1145,7 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
                 .map_err(|e| format!("Failed to watch .git: {e}"))?;
             let refs_dir = git_dir.join("refs");
             if let Err(e) = watcher.watch(&refs_dir, RecursiveMode::Recursive) {
+                monitoring_watch_complete = false;
                 tracing::warn!(source = "repo_watcher", path = %refs_dir.display(), "Failed to watch .git/refs: {e}");
             }
             let worktrees_dir = git_dir.join("worktrees");
@@ -1084,19 +1157,43 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
         }
     }
 
+    // DEFERRED (2026-10-21) — Linux prunes ignored/excluded directories, which
+    // can contain tracked files. Keep status fresh there; do not widen watches
+    // for this macOS Defender fix.
+    let status_complete = status_watch_supported(monitoring_watch_complete);
+    if !status_complete {
+        status_watch_complete.store(false, std::sync::atomic::Ordering::Release);
+    }
+    crate::monitoring_status::CACHE.set_watching(
+        &repo,
+        &repo,
+        status_watch_complete.load(std::sync::atomic::Ordering::Acquire),
+    );
     let handle = RepoWatchHandle {
         watcher: Mutex::new(watcher),
         watched_dirs: Mutex::new(watched_dirs),
         worktree_roots: Mutex::new(std::collections::HashSet::new()),
         worktree_snapshot,
+        status_watch_complete,
     };
+    if !handle
+        .status_watch_complete
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        crate::monitoring_status::CACHE.stop(&repo);
+    }
     state
         .repo_watchers
         .insert(repo_path.to_string(), Arc::new(handle));
     // Linked worktrees get their own watches — the handle must be registered
     // first, since the sync reaches it through `state.repo_watchers`.
     sync_worktree_watches(state, repo_path, &git_dir);
+    tuic_git::worktree::set_monitoring_watch_active(&repo, monitoring_watch_complete);
     Ok(())
+}
+
+fn status_watch_supported(complete: bool) -> bool {
+    complete && !cfg!(target_os = "linux")
 }
 
 /// Stop watching a repository and retire its repo-local semantic caches, so a
@@ -1108,6 +1205,8 @@ pub(crate) fn start_watching(repo_path: &str, state: &Arc<AppState>) -> Result<(
 /// removed the repo, parked it, or the refresh coordinator retired it. An
 /// in-flight build keeps its own `Arc` and simply writes into an orphan.
 pub(crate) fn stop_watching(repo_path: &str, state: &Arc<AppState>) {
+    crate::monitoring_status::CACHE.stop(Path::new(repo_path));
+    tuic_git::worktree::set_monitoring_watch_active(Path::new(repo_path), false);
     if state.repo_watchers.remove(repo_path).is_some() {
         tracing::info!(source = "repo_watcher", path = %repo_path, "Stopping watcher");
     }
@@ -1159,6 +1258,13 @@ mod tests {
         IgnoreSet {
             layers: vec![(PathBuf::new(), builder.build().unwrap())],
         }
+    }
+
+    /// Catches enabling snapshot reuse on Linux's status-incomplete pruned watches.
+    #[test]
+    fn monitoring_status_requires_complete_platform_watches() {
+        assert!(!status_watch_supported(false));
+        assert_eq!(status_watch_supported(true), !cfg!(target_os = "linux"));
     }
 
     #[test]
@@ -1377,6 +1483,21 @@ mod tests {
         );
     }
 
+    // Catches: packing refs or changing integration configuration never wakes monitoring.
+    #[test]
+    fn monitoring_dependency_files_are_git_state_not_noise() {
+        let root = Path::new("/repo");
+        let git = root.join(".git");
+        let gi = empty_gitignore();
+        for name in ["packed-refs", "config"] {
+            assert_eq!(
+                classify_path(&git.join(name), root, &git, &[], &gi),
+                EventCategory::GitState,
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn test_classify_noise_git_internals() {
         let root = Path::new("/repo");
@@ -1385,10 +1506,6 @@ mod tests {
 
         assert_eq!(
             classify_path(Path::new("/repo/.git/objects/ab/cdef"), root, git, &[], &gi),
-            EventCategory::Noise
-        );
-        assert_eq!(
-            classify_path(Path::new("/repo/.git/config"), root, git, &[], &gi),
             EventCategory::Noise
         );
         assert_eq!(
@@ -1610,14 +1727,22 @@ mod tests {
         let root = dir.path();
         let git_dir = root.join(".git");
         std::fs::create_dir_all(&git_dir).unwrap();
-        let global_ignore = dir.path().join("global-ignore");
+        // Canonicalised, because the Windows CI runner's temp directory is an
+        // 8.3 short name (`C:\Users\RUNNER~1\…`) and `ignore`'s config reader
+        // expands *every* `~` in `core.excludesFile` to the home directory, not
+        // just a leading one. The path it then looks for does not exist, so the
+        // global ignore is silently empty and every file reads as a working-tree
+        // change. `long_form` also drops the `\\?\` prefix canonicalising adds,
+        // which git config cannot read, and gives forward slashes — a git config
+        // *value* treats `\` as the start of an escape sequence.
+        let global_ignore = crate::fs::long_form(dir.path()).join("global-ignore");
         std::fs::write(&global_ignore, "*.swp\n").unwrap();
         let gitconfig = dir.path().join("gitconfig");
         std::fs::write(
             &gitconfig,
             format!(
                 "[core]\n\texcludesFile = {}\n",
-                global_ignore.to_string_lossy()
+                crate::fs::portable_spelling(&global_ignore.to_string_lossy())
             ),
         )
         .unwrap();
@@ -1632,6 +1757,86 @@ mod tests {
         assert_eq!(
             classify_path(&root.join("src/main.rs"), root, &git_dir, &[], &gi),
             EventCategory::WorkingTree
+        );
+    }
+
+    /// Every path under `root`, with its bytes, as one comparable snapshot.
+    /// Small trees only — this is a test fixture, not a scanner.
+    #[cfg(test)]
+    fn tree_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    out.push((path.clone(), Vec::new()));
+                    walk(&path, out);
+                } else {
+                    out.push((path.clone(), std::fs::read(&path).unwrap_or_default()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// Nothing Progress writes belongs in the user's source tree.
+    ///
+    /// The previous design wrote `.tuic/progress.sqlite3` plus WAL/SHM sidecars
+    /// at the project root and had to register them in `.git/info/exclude` so
+    /// the watcher would not read its own runtime state as a working-tree
+    /// change. Merely opening the panel created that directory in all 39
+    /// registered repositories. The store now writes one file in the config
+    /// directory, so the exclude contract is not tightened — it is gone, and
+    /// this asserts the stronger property that replaced it: a report leaves the
+    /// project directory byte-identical.
+    #[test]
+    fn progress_store_writes_never_touch_the_repository() {
+        use std::process::Command;
+        let config = tempfile::tempdir().unwrap();
+        let _config_guard = crate::config::set_config_dir_override(config.path().to_path_buf());
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let out = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let before = tree_snapshot(&repo);
+        let store = crate::progress::ProgressStore::open().unwrap();
+        let project = repo.to_string_lossy().to_string();
+        store
+            .record(
+                &project,
+                &crate::progress::NewProgressEntry {
+                    kind: crate::progress::ProgressKind::Done,
+                    text: "Watcher-storm regression coverage recorded.".to_string(),
+                    step: None,
+                    agent_name: None,
+                },
+            )
+            .unwrap();
+        store.delete(&project, &[1]).unwrap();
+        store.mark_viewed_for_pty(&project, None).unwrap();
+
+        assert_eq!(
+            tree_snapshot(&repo),
+            before,
+            "a Progress write left something inside the repository"
+        );
+        assert!(
+            store.database_path().starts_with(config.path()),
+            "the journal must live in the config directory, not under any repo"
         );
     }
 
@@ -2029,12 +2234,106 @@ mod tests {
         );
     }
 
+    /// Every git-state transition the watcher must report has to move the
+    /// fingerprint: stage, commit, conflict, and back to clean. The last leg is
+    /// the demanding one — swapping *which* file is staged leaves the staged and
+    /// changed counts, the index size and HEAD all identical, so only a per-file
+    /// status read tells the two states apart. A fingerprint folded from counts
+    /// alone goes blind there and the emit is skipped, leaving the git panel
+    /// showing the file that is no longer staged.
+    #[test]
+    fn test_real_fingerprint_moves_across_stage_commit_conflict_and_clean() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
+        let git = |args: &[&str]| {
+            let out = run(args);
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let write = |name: &str, body: &str| std::fs::write(repo.join(name), body).unwrap();
+
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "t@t.com"]);
+        git(&["config", "user.name", "T"]);
+        write("a.txt", "one\n");
+        write("b.txt", "one\n");
+        git(&["add", "."]);
+        git(&["commit", "-m", "init"]);
+
+        let git_dir = repo.join(".git");
+        let fp = || repo_git_fingerprint(&repo, &git_dir);
+
+        let clean = fp();
+        write("a.txt", "two\n");
+        let dirty = fp();
+        assert_ne!(
+            clean, dirty,
+            "a working-tree edit must move the fingerprint"
+        );
+
+        git(&["add", "a.txt"]);
+        let staged = fp();
+        assert_ne!(dirty, staged, "staging must move the fingerprint");
+
+        git(&["commit", "-m", "two"]);
+        let committed = fp();
+        assert_ne!(staged, committed, "committing must move the fingerprint");
+
+        // Conflict: a sibling commit on the same file, merged back.
+        git(&["checkout", "-b", "feat", "HEAD~1"]);
+        write("a.txt", "feat\n");
+        git(&["commit", "-am", "feat"]);
+        git(&["checkout", "main"]);
+        assert!(
+            !run(&["merge", "feat"]).status.success(),
+            "the merge must conflict for this leg to test anything"
+        );
+        let conflict = fp();
+        assert_ne!(committed, conflict, "a conflict must move the fingerprint");
+
+        git(&["merge", "--abort"]);
+        let resolved = fp();
+        assert_ne!(
+            conflict, resolved,
+            "leaving the conflict must move the fingerprint back"
+        );
+
+        // Same counts, different file: staged a.txt -> staged b.txt.
+        write("a.txt", "swap-a\n");
+        write("b.txt", "swap-b\n");
+        git(&["add", "a.txt"]);
+        let staged_a = fp();
+        git(&["restore", "--staged", "a.txt"]);
+        git(&["add", "b.txt"]);
+        let staged_b = fp();
+        assert_ne!(
+            staged_a, staged_b,
+            "staging a different file must move the fingerprint even though the \
+             staged/changed counts and the index size are unchanged"
+        );
+    }
+
     #[test]
     fn test_worktree_admin_names_empty_without_worktrees_dir() {
         // A repo with no linked worktrees (no `.git/worktrees`) must not error and
         // must hash the same as one whose worktrees were all removed.
         let dir = tempfile::tempdir().unwrap();
-        assert!(worktree_admin_names(dir.path()).is_empty());
+        assert_eq!(
+            worktree_admin_names(dir.path()),
+            [] as [std::string::String; 0]
+        );
     }
 
     /// End-to-end proof of the fix: an edit inside a linked worktree, made by
@@ -2113,10 +2412,10 @@ mod tests {
     /// silent staleness far worse than the redundant fetch being removed.
     ///
     /// Note the commit also rewrites the working tree (git updates the index and
-    /// stat cache), which is exactly why the git-state emit cancels the pending
-    /// working-tree one: one logical change, one event, and it is this one.
+    /// stat cache). Earlier edits may already have emitted WorkingTree before
+    /// the commit finishes; skip those and wait for the commit notification.
     #[tokio::test]
-    async fn a_commit_reports_git_state_not_working_tree() {
+    async fn a_commit_reports_git_state_not_working_tree_even_after_preceding_edits() {
         use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         // Canonicalize: on macOS the temp dir is `/var/...`, a symlink to
@@ -2143,6 +2442,14 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "hi\n").unwrap();
         git(&["add", "a.txt"]);
         git(&["commit", "-m", "init"]);
+        let sibling = repo.parent().unwrap().join("watcher-sibling");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "watcher-sibling",
+            &tuic_core::path_spelling::portable_spelling(&sibling.to_string_lossy()),
+        ]);
 
         let state = Arc::new(crate::state::tests_support::make_test_app_state());
         let repo_path = repo.to_string_lossy().to_string();
@@ -2153,6 +2460,7 @@ mod tests {
         // writes that land between the registration call and the stream opening,
         // and this test makes exactly one burst of them.
         tokio::time::sleep(Duration::from_millis(500)).await;
+        let before = tuic_git::worktree::monitoring_ref_key(&repo, "main").unwrap();
 
         std::fs::write(repo.join("b.txt"), "second\n").unwrap();
         git(&["add", "b.txt"]);
@@ -2161,7 +2469,9 @@ mod tests {
         let kind = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 match rx.recv().await {
-                    Ok(AppEvent::RepoChanged { repo_path: p, kind }) if p == repo_path => {
+                    Ok(AppEvent::RepoChanged { repo_path: p, kind })
+                        if p == repo_path && kind == RepoChangeKind::GitState =>
+                    {
                         return kind;
                     }
                     Ok(_) => continue,
@@ -2170,9 +2480,37 @@ mod tests {
             }
         })
         .await
-        .expect("a commit must emit repo-changed");
+        .expect("a commit must emit GitState after any preceding working-tree notifications");
 
         assert_eq!(kind, RepoChangeKind::GitState);
+        // Catches: watcher delivery refreshes panels but leaves the ref snapshot stale.
+        let after = tuic_git::worktree::monitoring_ref_key(&repo, "main").unwrap();
+        assert_ne!(before, after);
+
+        // Catches: the base fingerprint suppresses later linked-checkout commits.
+        for _ in 0..2 {
+            let before = tuic_git::worktree::monitoring_ref_key(&repo, "watcher-sibling").unwrap();
+            git(&[
+                "-C",
+                sibling.to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "sibling",
+            ]);
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    match rx.recv().await {
+                        Ok(AppEvent::RepoChanged { repo_path: p, kind: RepoChangeKind::GitState }) if p == repo_path => {
+                            let after = tuic_git::worktree::monitoring_ref_key(&repo, "watcher-sibling").unwrap();
+                            if after != before { break; }
+                        }
+                        Ok(_) => {}
+                        Err(error) => panic!("event bus closed: {error}"),
+                    }
+                }
+            }).await.expect("a linked-checkout commit must wake monitoring even when the base fingerprint is unchanged");
+        }
 
         stop_watching(&repo_path, &state);
     }
@@ -2210,7 +2548,10 @@ mod tests {
     #[test]
     fn test_linked_worktree_roots_empty_without_worktrees_dir() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(linked_worktree_roots(dir.path()).is_empty());
+        assert_eq!(
+            linked_worktree_roots(dir.path()),
+            [] as [std::path::PathBuf; 0]
+        );
     }
 
     /// The watch target for a linked worktree comes from `.git/worktrees/*/gitdir`
@@ -2242,7 +2583,10 @@ mod tests {
         git(&["commit", "-m", "init"], &repo);
 
         let git_dir = repo.join(".git");
-        assert!(linked_worktree_roots(&git_dir).is_empty());
+        assert_eq!(
+            linked_worktree_roots(&git_dir),
+            [] as [std::path::PathBuf; 0]
+        );
 
         let wt = dir.path().join("wt-feat");
         git(

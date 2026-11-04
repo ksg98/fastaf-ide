@@ -16,30 +16,12 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="stylesheet" href="/style.css" />
 
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-    gtag('config', 'G-PCXPSMR9JZ');
-  </script>
+  <script src="/analytics.js"></script>
+  <link rel="canonical" href="https://tuicommander.com/blog/sidebar-workspace.html" />
 </head>
 <body>
 
-  <nav class="nav">
-    <div class="container nav-inner">
-      <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
-      </a>
-      <div class="nav-links">
-        <a href="/#features">Features</a>
-        <a href="/blog.html" class="nav-active">Blog</a>
-        <a href="/#faq">FAQ</a>
-        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
-      </div>
-    </div>
-  </nav>
+  <!-- @include nav -->
 
   <article class="blog-post">
     <header class="blog-post-header">
@@ -90,18 +72,7 @@
     </div>
   </article>
 
-  <footer class="footer">
-    <div class="container">
-      <div class="footer-links">
-        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
-        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
-        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
-        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
-      </div>
-      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
-      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
-    </div>
-  </footer>
+  <!-- @include footer -->
 
   <script type="module" src="/main.js"></script>
 </body>

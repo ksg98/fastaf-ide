@@ -1,12 +1,17 @@
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { type Component, createSignal, For, onMount, Show } from "solid-js";
 import { invoke } from "../../invoke";
+import { settingOptions } from "../../services/settingsCatalogue";
 import { appLogger } from "../../stores/appLogger";
 import { registerModal } from "../../stores/modalStack";
 import type { ForwardSpec, ProfileOptions, TunnelProfile } from "../../stores/tunnels";
 import { tunnelsStore } from "../../stores/tunnels";
+import { openDialog as openFileDialog } from "../../utils/nativeDialog";
 import s from "../SettingsPanel/Settings.module.css";
 import d from "../shared/dialog.module.css";
+import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
+import { Select } from "../ui/Select";
+import layout from "./TunnelEditorModal.module.css";
 
 interface AgentKey {
 	fingerprint: string;
@@ -29,6 +34,7 @@ function defaultOptions(): ProfileOptions {
 		server_alive_interval: 15,
 		server_alive_count_max: 3,
 		strict_host_key_checking: "Yes",
+		compression: true,
 	};
 }
 
@@ -180,7 +186,7 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 				</div>
 
 				<div
-					class={d.body}
+					class={`${d.body} ${layout.body}`}
 					style={{
 						display: "flex",
 						"flex-direction": "column",
@@ -189,55 +195,68 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 						"overflow-y": "auto",
 					}}
 				>
-					<div class={s.group}>
+					<div class={`${s.group} ${layout.field}`}>
 						<label class={s.label}>Name</label>
-						<input value={name()} onInput={(e) => setName(e.currentTarget.value)} />
+						<Input
+							data-setting-id="tunnels.profiles.{id}.name"
+							value={name()}
+							onInput={(e) => setName(e.currentTarget.value)}
+						/>
 					</div>
 
 					<div style={{ display: "flex", gap: "8px" }}>
-						<div class={s.group} style={{ flex: "1" }}>
+						<div class={`${s.group} ${layout.field}`} style={{ flex: "1" }}>
 							<label class={s.label}>Host</label>
-							<input value={host()} onInput={(e) => setHost(e.currentTarget.value)} list="ssh-hosts-list" />
+							<Input
+								data-setting-id="tunnels.profiles.{id}.host"
+								value={host()}
+								onInput={(e) => setHost(e.currentTarget.value)}
+								list="ssh-hosts-list"
+							/>
 							<datalist id="ssh-hosts-list">
 								<For each={sshHosts()}>{(h) => <option value={h} />}</For>
 							</datalist>
 						</div>
-						<div class={s.group} style={{ width: "80px" }}>
+						<div class={`${s.group} ${layout.field}`} style={{ width: "80px" }}>
 							<label class={s.label}>Port</label>
-							<input type="number" value={port()} onInput={(e) => setPort(parsePort(e.currentTarget.value, 22))} />
+							<Input
+								data-setting-id="tunnels.profiles.{id}.port"
+								type="number"
+								value={port()}
+								onInput={(e) => setPort(parsePort(e.currentTarget.value, 22))}
+							/>
 						</div>
 					</div>
 
-					<div class={s.group}>
+					<div class={`${s.group} ${layout.field}`}>
 						<label class={s.label}>User</label>
-						<input value={user()} onInput={(e) => setUser(e.currentTarget.value)} />
+						<Input
+							data-setting-id="tunnels.profiles.{id}.user"
+							value={user()}
+							onInput={(e) => setUser(e.currentTarget.value)}
+						/>
 					</div>
 
-					<div class={s.group}>
+					<div class={`${s.group} ${layout.field}`}>
 						<label class={s.label}>Identity / Authentication</label>
 						<div style={{ display: "flex", gap: "6px" }}>
-							<input
+							<Input
+								data-setting-id="tunnels.profiles.{id}.identity_file"
 								style={{ flex: "1" }}
 								value={identityFile()}
 								onInput={(e) => setIdentityFile(e.currentTarget.value)}
 								placeholder="Leave empty to use SSH agent"
 							/>
-							<button
+							<Button
+								data-non-setting="Choose a key-file path for the existing tunnel draft"
 								type="button"
 								class={d.cancelBtn}
-								style={{
-									flex: "none",
-									padding: "4px 10px",
-									"font-size": "var(--font-sm)",
-									border: "none",
-									"border-radius": "var(--radius-md)",
-									cursor: "pointer",
-								}}
+								style={{ flex: "none" }}
 								onClick={browseIdentityFile}
 								title="Browse for key file"
 							>
 								Browse…
-							</button>
+							</Button>
 						</div>
 						<Show when={agentInfo().agent_type}>
 							<div style={{ "margin-top": "6px", "font-size": "var(--font-sm)", color: "var(--fg-muted)" }}>
@@ -257,26 +276,25 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 					<div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
 						<div style={{ display: "flex", "align-items": "center", "justify-content": "space-between" }}>
 							<label class={s.label}>Port Forwards</label>
-							<button
+							<Button
+								data-non-setting="Add or remove a typed forward in the tunnel draft"
 								type="button"
 								class={d.cancelBtn}
-								style={{
-									flex: "none",
-									padding: "2px 10px",
-									"font-size": "var(--font-sm)",
-									border: "none",
-									"border-radius": "var(--radius-md)",
-									cursor: "pointer",
-								}}
+								style={{ flex: "none" }}
 								onClick={addForward}
 							>
 								+ Add
-							</button>
+							</Button>
 						</div>
 						<For each={forwards()}>
 							{(fw, idx) => (
-								<div class={s.group} style={{ display: "flex", gap: "6px", "align-items": "center" }}>
-									<select
+								<div
+									class={`${s.group} ${layout.field}`}
+									style={{ display: "flex", gap: "6px", "align-items": "center" }}
+								>
+									<Select
+										data-setting-id="tunnels.profiles.{id}.forwards"
+										compact
 										style={{ width: "80px" }}
 										value={fw.type}
 										onChange={(e) =>
@@ -288,8 +306,10 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 									>
 										<option value="Local">Local</option>
 										<option value="Remote">Remote</option>
-									</select>
-									<input
+									</Select>
+									<Input
+										data-setting-id="tunnels.profiles.{id}.forwards"
+										compact
 										inputMode="numeric"
 										pattern="[0-9]*"
 										placeholder="bind"
@@ -302,7 +322,9 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 										}
 									/>
 									<span style={{ color: "var(--fg-muted)" }}>:</span>
-									<input
+									<Input
+										data-setting-id="tunnels.profiles.{id}.forwards"
+										compact
 										placeholder={fw.type === "Remote" ? "local host" : "remote host"}
 										style={{ flex: "1" }}
 										value={fw.type === "Remote" ? (fw.local_host ?? fw.remote_host ?? "") : (fw.remote_host ?? "")}
@@ -316,7 +338,9 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 										}
 									/>
 									<span style={{ color: "var(--fg-muted)" }}>:</span>
-									<input
+									<Input
+										data-setting-id="tunnels.profiles.{id}.forwards"
+										compact
 										inputMode="numeric"
 										pattern="[0-9]*"
 										placeholder="port"
@@ -331,21 +355,16 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 											)
 										}
 									/>
-									<button
+									<Button
+										data-non-setting="Add or remove a typed forward in the tunnel draft"
 										type="button"
 										class={d.cancelBtn}
-										style={{
-											flex: "none",
-											padding: "2px 8px",
-											"font-size": "var(--font-sm)",
-											border: "none",
-											"border-radius": "var(--radius-md)",
-											cursor: "pointer",
-										}}
+										style={{ flex: "none" }}
+										size="compact"
 										onClick={() => removeForward(idx())}
 									>
 										x
-									</button>
+									</Button>
 								</div>
 							)}
 						</For>
@@ -353,9 +372,10 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 
 					{/* Options */}
 					<div style={{ display: "flex", gap: "8px" }}>
-						<div class={s.group} style={{ flex: "1" }}>
+						<div class={`${s.group} ${layout.field}`} style={{ flex: "1" }}>
 							<label class={s.label}>ServerAliveInterval</label>
-							<input
+							<Input
+								data-setting-id="tunnels.profiles.{id}.options.server_alive_interval"
 								type="number"
 								value={options().server_alive_interval}
 								onInput={(e) =>
@@ -366,9 +386,10 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 								}
 							/>
 						</div>
-						<div class={s.group} style={{ width: "160px" }}>
+						<div class={`${s.group} ${layout.field}`} style={{ width: "160px" }}>
 							<label class={s.label}>StrictHostKeyChecking</label>
-							<select
+							<Select
+								data-setting-id="tunnels.profiles.{id}.options.strict_host_key_checking"
 								value={options().strict_host_key_checking}
 								onChange={(e) =>
 									setOptions((o) => ({
@@ -377,14 +398,35 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 									}))
 								}
 							>
-								<option value="AcceptNew">AcceptNew</option>
-								<option value="Yes">Yes</option>
-							</select>
+								<For
+									each={settingOptions("tunnels.profiles.{id}.options.strict_host_key_checking", {
+										AcceptNew: "AcceptNew",
+										Yes: "Yes",
+									})}
+								>
+									{(option) => <option value={option.value}>{option.label}</option>}
+								</For>
+							</Select>
 						</div>
 					</div>
 
 					<label class={s.toggle}>
-						<input type="checkbox" checked={autoConnect()} onChange={(e) => setAutoConnect(e.currentTarget.checked)} />
+						<input
+							data-setting-id="tunnels.profiles.{id}.options.compression"
+							type="checkbox"
+							checked={options().compression}
+							onChange={(e) => setOptions((o) => ({ ...o, compression: e.currentTarget.checked }))}
+						/>
+						<span>Compress the channel (ssh -C)</span>
+					</label>
+
+					<label class={s.toggle}>
+						<input
+							data-setting-id="tunnels.profiles.{id}.auto_connect"
+							type="checkbox"
+							checked={autoConnect()}
+							onChange={(e) => setAutoConnect(e.currentTarget.checked)}
+						/>
 						<span>Connect automatically on startup</span>
 					</label>
 
@@ -399,12 +441,22 @@ export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 				</div>
 
 				<div class={d.actions}>
-					<button class={d.cancelBtn} onClick={props.onClose}>
+					<Button
+						data-non-setting="Cancel the tunnel editor without persistence"
+						class={d.cancelBtn}
+						onClick={props.onClose}
+					>
 						Cancel
-					</button>
-					<button class={d.primaryBtn} onClick={handleSave} disabled={saving()}>
+					</Button>
+					<Button
+						data-non-setting="Commit the complete typed tunnel draft through its owner"
+						variant="primary"
+						class={d.primaryBtn}
+						onClick={handleSave}
+						disabled={saving()}
+					>
 						{saving() ? "Saving..." : "Save"}
-					</button>
+					</Button>
 				</div>
 			</div>
 		</div>

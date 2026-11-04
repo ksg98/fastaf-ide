@@ -2,7 +2,7 @@ import type { DirEntry } from "../../types/fs";
 
 /** Fields that drive an entry's visible state. Entries are fresh objects on every
  *  listing, so identity comparison would report a change every time. */
-function entriesEqual(a: DirEntry[], b: DirEntry[]): boolean {
+export function entriesEqual(a: DirEntry[], b: DirEntry[]): boolean {
 	if (a.length !== b.length) return false;
 	return a.every((e, i) => {
 		const o = b[i];
@@ -10,7 +10,9 @@ function entriesEqual(a: DirEntry[], b: DirEntry[]): boolean {
 			e.path === o.path &&
 			e.git_status === o.git_status &&
 			e.modified_at === o.modified_at &&
-			e.is_ignored === o.is_ignored
+			e.is_ignored === o.is_ignored &&
+			e.symlink_target === o.symlink_target &&
+			e.symlink_target_kind === o.symlink_target_kind
 		);
 	});
 }

@@ -1,0 +1,13 @@
+// ego cancelling a tool call it is still waiting on.
+//
+// The cancel names the `mcp/message` request by its ACP id, which is the only
+// id that request has: MCP-over-ACP carries no inner JSON-RPC id. The answer
+// must be the standard "request cancelled" error, and the call must stop.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"request","id":201,"method":"mcp/connect","params":{"serverId":"tuicommander"}}
+{"step":"expect_response","id":201,"result":{"connectionId":"mcp-1"}}
+{"step":"request","id":202,"method":"mcp/message","params":{"connectionId":"mcp-1","method":"tools/call","params":{"name":"slow"}}}
+{"step":"notify","method":"$/cancel_request","params":{"requestId":202}}
+{"step":"expect_response","id":202,"errorCode":-32800}
+{"step":"await_stdin_eof"}

@@ -1,0 +1,11 @@
+{
+  "idleThresholdMs": 20000,
+  "maxWakes": 3,
+  "maxWakesEver": 12,
+  "checkIntervalMs": 5000,
+  "minBusyDurationMs": 1500,
+  "questionStaleMs": 1800000,
+  "pendingTimeoutMs": 60000,
+  "doneMaxBusyMs": 8000,
+  "errorLoopThreshold": 3
+}

@@ -35,6 +35,11 @@ export interface SearchBarProps {
 	onReplace?: (replacement: string) => void;
 	/** Replace every match at once. */
 	onReplaceAll?: (replacement: string) => void;
+	/** Accessible name for the find field (its placeholder is only a hint). */
+	inputLabel?: string;
+	/** Show the Match Case / Whole Word / Regex toggles (default). A phone-width
+	 * host turns them off so the bar stays one row. */
+	optionToggles?: boolean;
 }
 
 /** SVG icons for toggle buttons and navigation (VS Code style) */
@@ -225,7 +230,9 @@ export const SearchBar: Component<SearchBarProps> = (props) => {
 			<div class={s.overlay}>
 				<Show when={hasReplace()}>
 					<button
+						type="button"
 						class={cx(s.expandBtn, expanded() && s.expandBtnOpen)}
+						aria-expanded={expanded()}
 						onClick={() => setExpanded((v) => !v)}
 						title="Toggle Replace"
 					>
@@ -241,6 +248,7 @@ export const SearchBar: Component<SearchBarProps> = (props) => {
 								class={s.input}
 								type="text"
 								placeholder="Find…"
+								aria-label={props.inputLabel}
 								value={searchTerm()}
 								onInput={(e) => handleInput(e.currentTarget.value)}
 								onKeyDown={handleKeyDown}
@@ -253,36 +261,46 @@ export const SearchBar: Component<SearchBarProps> = (props) => {
 							</Show>
 						</div>
 
-						<div class={s.separator} />
+						<Show when={props.optionToggles !== false}>
+							<div class={s.separator} />
 
-						<button
-							class={cx(s.toggleBtn, caseSensitive() && s.toggleActive)}
-							onClick={toggleCaseSensitive}
-							title="Match Case"
-						>
-							<CaseSensitiveIcon />
-						</button>
+							<button
+								type="button"
+								class={cx(s.toggleBtn, caseSensitive() && s.toggleActive)}
+								aria-pressed={caseSensitive()}
+								onClick={toggleCaseSensitive}
+								title="Match Case"
+							>
+								<CaseSensitiveIcon />
+							</button>
 
-						<button
-							class={cx(s.toggleBtn, wholeWord() && s.toggleActive)}
-							onClick={toggleWholeWord}
-							title="Match Whole Word"
-						>
-							<WholeWordIcon />
-						</button>
+							<button
+								type="button"
+								class={cx(s.toggleBtn, wholeWord() && s.toggleActive)}
+								aria-pressed={wholeWord()}
+								onClick={toggleWholeWord}
+								title="Match Whole Word"
+							>
+								<WholeWordIcon />
+							</button>
 
-						<button
-							class={cx(s.toggleBtn, useRegex() && s.toggleActive)}
-							onClick={toggleRegex}
-							title="Use Regular Expression"
-						>
-							<RegexIcon />
-						</button>
+							<button
+								type="button"
+								class={cx(s.toggleBtn, useRegex() && s.toggleActive)}
+								aria-pressed={useRegex()}
+								onClick={toggleRegex}
+								title="Use Regular Expression"
+							>
+								<RegexIcon />
+							</button>
+						</Show>
 
 						<For each={props.extraToggles}>
 							{(toggle) => (
 								<button
+									type="button"
 									class={cx(s.toggleBtn, toggle.active && s.toggleActive)}
+									aria-pressed={toggle.active}
 									onClick={toggle.onToggle}
 									title={toggle.title}
 								>

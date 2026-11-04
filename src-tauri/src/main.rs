@@ -3,7 +3,10 @@
 
 #[cfg(feature = "desktop")]
 fn main() {
-    tuicommander_lib::run()
+    #[cfg(debug_assertions)]
+    tuicommander_lib::dev_backend::record_process_start();
+    // Keep generated frontend assets out of the library unit-test dependency graph.
+    tuicommander_lib::run(tauri::generate_context!())
 }
 
 #[cfg(not(feature = "desktop"))]

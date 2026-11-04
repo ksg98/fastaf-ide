@@ -1,9 +1,25 @@
 allowBuilds:
   esbuild: true
 
+# Boss-approved 2026-10-04; extended 2026-11-03, expires 2027-02-04 (pnpm does
+# not enforce expiry). braces 3.0.3 is build-only (vite-plugin-purgecss > purgecss
+# > fast-glob > micromatch > braces) and has no patched release. GitHub withdrew
+# the advisory on 2026-10-23 as "not a practically exploitable vulnerability".
+# Delete this block once `pnpm audit` passes without it; see development-setup.md.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-vfj7-8cjw-p6xm
+
 # pnpm 11 no longer reads the "pnpm.overrides" field from package.json — overrides
 # live here. These pin transitive deps for security and to dedupe versions.
 overrides:
+  # Pin the runtime sanitizer, including Mermaid's transitive copy.
+  dompurify: "3.4.17"
+  # Development-only dependency via Stryker.
+  qs: "6.16.0"
+  # Patched serialization and source-map lines (frontend advisory audit).
+  seroval: "^1.6.3"
+  source-map-js: "^1.2.2"
   "vite-plugin-purgecss>purgecss": "^8.0.0"
   minimatch: ">=3.1.4"
   brace-expansion: ">=1.1.13"

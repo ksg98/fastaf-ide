@@ -10,9 +10,7 @@ vi.mock("../../transport", () => ({
 	isTauri: mockIsTauri,
 }));
 
-vi.mock("@tauri-apps/plugin-opener", () => ({
-	openUrl: mockOpenUrl,
-}));
+vi.mock("../../invoke", () => ({ invoke: mockOpenUrl }));
 
 vi.mock("../../stores/appLogger", () => ({
 	appLogger: {
@@ -32,7 +30,7 @@ describe("handleOpenUrl", () => {
 		mockError.mockReset();
 
 		vi.doMock("../../transport", () => ({ isTauri: mockIsTauri }));
-		vi.doMock("@tauri-apps/plugin-opener", () => ({ openUrl: mockOpenUrl }));
+		vi.doMock("../../invoke", () => ({ invoke: mockOpenUrl }));
 		vi.doMock("../../stores/appLogger", () => ({
 			appLogger: { warn: mockWarn, error: mockError },
 		}));
@@ -43,19 +41,22 @@ describe("handleOpenUrl", () => {
 	describe("allowed schemes", () => {
 		it("opens http:// URLs via Tauri in native mode", () => {
 			handleOpenUrl("http://example.com");
-			expect(mockOpenUrl).toHaveBeenCalledWith("http://example.com");
+			expect(mockOpenUrl).toHaveBeenCalledWith("open_default_app", { target: "http://example.com", kind: "url" });
 			expect(mockWarn).not.toHaveBeenCalled();
 		});
 
 		it("opens https:// URLs via Tauri in native mode", () => {
 			handleOpenUrl("https://github.com/org/repo");
-			expect(mockOpenUrl).toHaveBeenCalledWith("https://github.com/org/repo");
+			expect(mockOpenUrl).toHaveBeenCalledWith("open_default_app", {
+				target: "https://github.com/org/repo",
+				kind: "url",
+			});
 			expect(mockWarn).not.toHaveBeenCalled();
 		});
 
 		it("opens mailto: URLs via Tauri in native mode", () => {
 			handleOpenUrl("mailto:user@example.com");
-			expect(mockOpenUrl).toHaveBeenCalledWith("mailto:user@example.com");
+			expect(mockOpenUrl).toHaveBeenCalledWith("open_default_app", { target: "mailto:user@example.com", kind: "url" });
 			expect(mockWarn).not.toHaveBeenCalled();
 		});
 
@@ -115,5 +116,25 @@ describe("handleOpenUrl", () => {
 			expect(mockOpenUrl).not.toHaveBeenCalled();
 			expect(mockWarn).toHaveBeenCalledWith("app", expect.stringContaining("Blocked malformed URL"));
 		});
+	});
+});
+
+describe("openLocalPath", () => {
+	it("routes trusted local paths through the same reaped boundary", async () => {
+		mockIsTauri.mockReturnValue(true);
+		mockOpenUrl.mockClear();
+		const { openLocalPath } = await import("../../utils/openUrl");
+		openLocalPath("/repo/file with spaces.pdf");
+		expect(mockOpenUrl).toHaveBeenCalledWith("open_default_app", {
+			target: "/repo/file with spaces.pdf",
+			kind: "path",
+		});
+	});
+	it("does not launch paths on the host in browser mode", async () => {
+		mockIsTauri.mockReturnValue(false);
+		mockOpenUrl.mockClear();
+		const { openLocalPath } = await import("../../utils/openUrl");
+		openLocalPath("/repo/file.pdf");
+		expect(mockOpenUrl).not.toHaveBeenCalled();
 	});
 });

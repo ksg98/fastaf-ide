@@ -56,6 +56,8 @@ export interface PendingApproval {
 	sessionId: string;
 	command: string;
 	reason: string;
+	/** One-time id from the `needs_approval` event; the backend refuses an answer without it. */
+	approvalId?: string;
 }
 
 // Backend conversation types (mirror ai_agent::conversation)
@@ -89,7 +91,7 @@ type ConversationEvent =
 	| { type: "reasoning_chunk"; text: string }
 	| { type: "tool_call"; tool_name: string; args: Record<string, unknown> }
 	| { type: "tool_result"; tool_name: string; success: boolean; output: string }
-	| { type: "needs_approval"; tool_name: string; command: string; reason: string }
+	| { type: "needs_approval"; tool_name: string; command: string; reason: string; approval_id: string }
 	| { type: "bypassed"; tool_name: string }
 	| { type: "paused" }
 	| { type: "resumed" }
@@ -107,7 +109,14 @@ type LegacyAgentEvent =
 	| { type: "reasoning_chunk"; session_id: string; text: string }
 	| { type: "tool_call"; session_id: string; tool_name: string; args: Record<string, unknown> }
 	| { type: "tool_result"; session_id: string; tool_name: string; success: boolean; output: string }
-	| { type: "needs_approval"; session_id: string; tool_name: string; command: string; reason: string }
+	| {
+			type: "needs_approval";
+			session_id: string;
+			tool_name: string;
+			command: string;
+			reason: string;
+			approval_id?: string;
+	  }
 	| { type: "paused"; session_id: string }
 	| { type: "resumed"; session_id: string }
 	| { type: "rate_limited"; session_id: string; wait_ms: number }
@@ -554,7 +563,12 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 
 		case "needs_approval":
 			if (s.activeSessionId) {
-				s.setPendingApproval({ sessionId: s.activeSessionId, command: event.command, reason: event.reason });
+				s.setPendingApproval({
+					sessionId: s.activeSessionId,
+					command: event.command,
+					reason: event.reason,
+					approvalId: event.approval_id,
+				});
 			} else {
 				appLogger.warn("conversation", "needs_approval event dropped — no active session");
 			}
@@ -879,12 +893,23 @@ async function resumeAgent(sessionId: string): Promise<void> {
 	}
 }
 
+/** Answer the approval on screen. It quotes that request's one-time id, so the
+ * backend can refuse it if a newer request has taken its place. */
 async function approveAction(sessionId: string, approved: boolean): Promise<void> {
 	const s = activeConversation();
+	const pending = s.pendingApproval();
+	const approvalId = pending?.sessionId === sessionId ? (pending.approvalId ?? null) : null;
 	try {
-		await invoke("approve_conversation_action", { sessionId, approved });
+		await invoke("approve_conversation_action", { sessionId, approved, approvalId });
 		s.setPendingApproval(null);
 	} catch (e) {
+		// The request it answered is gone (answered, cancelled or replaced): drop
+		// the stale card; the run itself is unaffected.
+		if (String(e).includes("no longer pending")) {
+			if (s.pendingApproval() === pending) s.setPendingApproval(null);
+			appLogger.info("conversation", "approval answered a request that is no longer pending");
+			return;
+		}
 		s.setAgentState("error");
 		s.setAgentError(String(e));
 		appLogger.warn("conversation", "approve_conversation_action failed", { error: String(e) });
@@ -962,7 +987,12 @@ function processEvent(raw: unknown): void {
 			});
 			break;
 		case "needs_approval":
-			s.setPendingApproval({ sessionId: event.session_id, command: event.command, reason: event.reason });
+			s.setPendingApproval({
+				sessionId: event.session_id,
+				command: event.command,
+				reason: event.reason,
+				approvalId: event.approval_id,
+			});
 			break;
 		case "paused":
 			s.setAgentState("paused");

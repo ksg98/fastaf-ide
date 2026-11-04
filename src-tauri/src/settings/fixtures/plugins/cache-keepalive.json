@@ -1,0 +1,9 @@
+{
+  "ttlMs": 300000,
+  "marginMs": 30000,
+  "maxKeepalives": 3,
+  "checkIntervalMs": 30000,
+  "message": "[noop]",
+  "maxConsecutiveMisses": 2,
+  "maxTotalKeepalives": 9
+}

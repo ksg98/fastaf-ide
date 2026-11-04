@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+#
+# pre-commit — two gates, independent of each other:
+#   1. Makefile `TUIC_APP_INSTANCE` scope (see below; no bypass but --no-verify)
+#   2. the agent-state fixture gate (bypass: TUIC_SKIP_FIXTURE_GATE=1)
+#
+# Both stand down during merge / cherry-pick / revert conflict resolution — you
+# did not author those lines — and neither blocks on a verification failure.
+#
+# ---------------------------------------------------------------------------
+# Gate 2 — the agent-state fixture gate (AGENTS.md → "Agent state detection
+# — capture before you theorise").
+#
+# That section already states the rule in prose: "A reproduced failure becomes a
+# fixture, always." This hook makes it mechanical. A commit that changes
+# agent-state detection LOGIC is blocked unless it also stages a TCAP with provenance under
+# src-tauri/src/fixtures/agent_prompts/. The corpus was 2 captures against 14
+# agent-state fixes, which is how a regression ships twice.
+#
+# Deliberately narrow, because a gate that cries wolf gets bypassed by reflex:
+#   • cfg(test) modules and test functions are excluded from HEAD/index views;
+#   • only ADDED/REMOVED lines count — a change elsewhere in pty.rs is invisible;
+#   • comment-only and blank-line changes are stripped — a doc edit or a rustfmt
+#     reflow is not a behaviour change;
+#   • outside chrome.rs (detection end to end) a detection symbol must be named
+#     either by a changed line or by the hunk's enclosing function. Touching
+#     pty.rs is not the trigger; touching `awaiting_input`, or any line inside
+#     `suppress_heuristic_question`, is.
+#
+# Replayed over the last 120 commits that touch a gated file it fired on 24 —
+# every `fix(agent-state):` among them. If it starts firing on everything, the
+# symbol list has drifted; tighten it rather than teaching people to bypass.
+#
+# Escape hatch for a rename or refactor that genuinely needs no capture:
+#   TUIC_SKIP_FIXTURE_GATE=1 git commit ...   (or git commit --no-verify)
+set -euo pipefail
+
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+for in_progress in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+  [ -e "$git_dir/$in_progress" ] && exit 0
+done
+
+# --------------------------------------------------------------------------
+# Gate 1 — Makefile TUIC_APP_INSTANCE scope.
+#
+# A bare `TUIC_APP_INSTANCE?=tuic-test` is a *global* make variable, so `make
+# dev` launches the daily driver against an empty config instance and every
+# repository looks gone. It reads identically to the correct target-specific
+# form, and it has shipped twice. `make check` runs the same script, but that
+# is the once-per-batch heavyweight target and this repo pushes straight to
+# main — the bad edit lands first. Here it is a `make -n` dry run: seconds.
+#
+# It reads the working tree, not the index, so a partially staged Makefile is
+# judged by what is on disk. Cheap and right in every case but that one.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qx 'Makefile'; then
+  if ! bash scripts/check-make-instance-scope.sh; then
+    printf '\n\033[1;31m✗ pre-commit blocked:\033[0m Makefile TUIC_APP_INSTANCE scope\n\n' >&2
+    printf '  Only `make test` may default to an isolated config instance, and only\n' >&2
+    printf '  as `test: TUIC_APP_INSTANCE?=…`. A column-0 assignment is global and\n' >&2
+    printf '  sends `make dev` to an empty `instances/<id>/`.\n' >&2
+    exit 1
+  fi
+  if ! bash scripts/check-make-dev-builds-sibling.sh; then
+    printf '\n\033[1;31m✗ pre-commit blocked:\033[0m `make dev` must build the sibling tuic-remote\n\n' >&2
+    exit 1
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# Gate 2 — the agent-state fixture gate.
+[ "${TUIC_SKIP_FIXTURE_GATE:-}" = "1" ] && exit 0
+
+fixtures_dir='src-tauri/src/fixtures/agent_prompts'
+
+# chrome.rs is the bottom-zone cutoff and nothing else — any code line counts.
+chrome_file='src-tauri/crates/tuic-terminal/src/chrome.rs'
+intent_marker_file='src-tauri/crates/tuic-terminal/src/intent_marker.json'
+
+# Multi-purpose files: a changed code line must name a detection symbol.
+scoped_files='
+src-tauri/src/pty.rs
+src-tauri/src/pty/commands.rs
+src-tauri/src/pty/lifecycle.rs
+src-tauri/src/pty/screen.rs
+src-tauri/src/pty/tests.rs
+src-tauri/src/state.rs
+src-tauri/crates/tuic-terminal/src/output_parser.rs
+src-tauri/crates/tuic-terminal/src/ego_question.rs
+src-tauri/src/relay_client.rs
+src-tauri/src/mcp_http/session.rs
+'
+
+# The awaiting set/clear sites, the parsers they read, and the OSC that feeds
+# them. 7770 is the TUIC hook's state sequence.
+detection_symbols='awaiting_input|question_confident|question_text|question-cleared|suppress_heuristic_question|rearm_awaiting_for_open_dialog|find_chrome_cutoff|find_agent_chrome_cutoff|find_ego_composer|parse_intent|structured_token_anchor|intent_anchor_pattern|INTENT_ANCHOR_RE|parse_clean_lines|parse_choice_prompt|parse_grok_question|parse_ego_approval|parse_ego_question|parse_ego_free_text_question|footer_end|option_text|is_question_boundary|parse_slash_menu|is_ink_dialog_footer_row|resolve_choice_prompt_input|raw_stream_events|provider_recovery|ProviderRecovery|7770|injection_delivery_uncertain|recover_uncertain_injection_on_empty_composer|detect_ego_screen_activity'
+
+# Only framed captures with provenance satisfy production edits; a handwritten raw
+# fixture or a documentation-only addition is not recorded external evidence.
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if python3 "$hook_dir/fixture-production-diff.py" --capture; then
+  exit 0
+fi
+
+staged_diff() {
+  python3 "$hook_dir/fixture-production-diff.py" "$1"
+}
+
+# Added/removed lines, minus diff headers, blanks and comments.
+code_changes() {
+  printf '%s\n' "$1" \
+    | grep -E '^[-+]' \
+    | grep -vE '^(\+\+\+|---) ' \
+    | sed -E 's/^[-+][[:space:]]*//' \
+    | grep -vE '^(//|/\*|\*|$)' || true
+}
+
+# The function enclosing each hunk, off the `@@ ... @@ <ctx>` header. Without it
+# an edit to the *body* of a detection function names no symbol and slips past.
+hunk_contexts() {
+  printf '%s\n' "$1" | awk '
+    function flush() { if (in_hunk && !declaration) print context }
+    /^@@/ {
+      flush()
+      in_hunk = 1
+      declaration = 0
+      context = $0
+      sub(/^.*@@ ?/, "", context)
+      next
+    }
+    /^[-+]/ && $0 !~ /^(\+\+\+|---) / {
+      if ($0 ~ /^[+-][[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]/) declaration = 1
+    }
+    END { flush() }
+  ' || true
+}
+
+offenders=()                     # "path — symbol symbol" lines to report
+
+[ -n "$(code_changes "$(staged_diff "$chrome_file")")" ] && offenders+=("$chrome_file — bottom-zone cutoff")
+[ -n "$(code_changes "$(staged_diff "$intent_marker_file")")" ] && offenders+=("$intent_marker_file — shared intent grammar")
+
+for f in $scoped_files; do
+  d="$(staged_diff "$f")"
+  hits="$(printf '%s\n%s\n' "$(code_changes "$d")" "$(hunk_contexts "$d")" \
+    | grep -oE "$detection_symbols" | sort -u | tr '\n' ' ' || true)"
+  [ -n "$hits" ] && offenders+=("$f — ${hits% }")
+done
+
+[ "${#offenders[@]}" -eq 0 ] && exit 0
+
+new_raw="$(git diff --cached --name-only --diff-filter=A -- "$fixtures_dir" | grep -E '\.(raw|txt)$' || true)"
+if [ -n "$new_raw" ]; then
+  printf 'pre-commit blocked: new external fixtures must be recorded TCAP captures, not handwritten text: %s\n' "$new_raw" >&2
+  exit 1
+fi
+
+printf '\n\033[1;31m✗ pre-commit blocked:\033[0m agent-state detection changed with no capture\n\n' >&2
+printf '%s\n' "${offenders[@]}" | sed 's/^/  /' >&2
+cat >&2 <<EOF
+
+AGENTS.md → "Agent state detection — capture before you theorise":
+"A reproduced failure becomes a fixture, always." The output ring holds 2 MB;
+the 8192-byte output page limit is not its retention bound. A busy session can
+still roll past the bytes that prove the fix, so record them before they go.
+
+  • Reproduced a failure? Record it, then stage the capture:
+      curl -X POST localhost:9876/diagnostics/capture \\
+           -H 'content-type: application/json' -d '{"enabled":true}'
+    Captures land in <config dir>/captures/<session-id>.tcap — copy it into
+    $fixtures_dir/ and add a case to the
+    "Awaiting-signal fixtures" block in src-tauri/src/pty/tests.rs.
+
+  • Rename, refactor or no behaviour change:
+      TUIC_SKIP_FIXTURE_GATE=1 git commit ...   (or git commit --no-verify)
+EOF
+exit 1

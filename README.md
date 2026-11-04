@@ -122,7 +122,7 @@ It's not a second terminal engine bolted on top: every session is already perman
 
 ## The problem
 
-You're running Claude Code in one terminal, Aider in another, Codex in a third. One hit a rate limit 10 minutes ago and you didn't notice. Another is waiting for a Y/N confirmation. You switch between windows and still lose track.
+You're running Claude Code in one terminal, Gemini CLI in another, Codex in a third. One hit a rate limit 10 minutes ago and you didn't notice. Another is waiting for a Y/N confirmation. You switch between windows and still lose track.
 
 The more sessions you run, the worse it gets. The tooling doesn't understand what's happening inside the terminal.
 
@@ -146,15 +146,28 @@ Launch Claude Code on five branches at once — or mix agents. Each session runs
 
 ### Agent observability — not just terminals
 
-FastAF auto-detects **11 AI coding agents** (Claude Code, Codex CLI, Aider, Gemini CLI, Amp, Cursor Agent, OpenCode, Droid, Goose, Grok, pi) and understands what they're doing:
+FastAF auto-detects **10 AI coding agents** (Claude Code, Codex CLI, Gemini CLI, Amp, Cursor Agent, OpenCode, Droid, Goose, Grok, pi) and understands what they're doing:
 
 - **Rate limit detection** — Provider-specific patterns with countdown timers per session.
 - **Question detection** — Y/N prompts, numbered options, inquirer-style menus. Tab indicator, notification sound, keyboard overlay.
-- **Usage tracking** — Claude Code weekly/session limits with color-coded thresholds. Full Claude Usage Dashboard with rate limit bars, 7-day chart, 52-week heatmap, per-project breakdown.
+- **Usage tracking** — Provider-aware Claude, Codex, and Grok limits with color-coded thresholds and native dashboards; Gemini remains terminal-detection only until it exposes a stable account quota API.
 - **Activity dashboard** — Every session at a glance: agent type, status (working / waiting / rate-limited / idle), last activity.
 - **Session-aware resume** — Auto-discovers agent session IDs from disk (Claude Code, Gemini CLI, Codex CLI, Grok). Resume exactly where you left off.
 
 No other tool knows that your agent is stuck.
+
+### Progress — what happened while you were away
+
+Every project gets an append-only journal. Agents write two kinds of entry — `done` when the work they announced is finished, `blocked` when they cannot continue without you — and FastAF writes a third, `intent`, read off the agent's own `intent:` marker, so an agent that never calls the tool still leaves a trail of what it set out to do.
+
+- **MCP `progress` tool** — `type`, `text`, and an optional free-text `step`. One call appends the entry and raises the toast.
+- **Toolbar bell** with the number of entries that arrived since your last visit; the dialog freezes the last-visit divider so it never moves under the line you are reading.
+- **Blocked entries in red**, a blocked-only filter, per-entry deletion. No pause, no clear, no correction — you read it and delete what you do not want to keep.
+- **Nothing is written inside your repositories** — one SQLite database in FastAF's configuration directory, with the project as a column. No `.tuic` directory, nothing for Git to ignore, no file-watcher event.
+- A worktree files under its parent project, so a repository and its worktrees show one history.
+- One global switch plus a per-agent override; off globally removes the tool from every agent's tool list.
+
+[Project Progress →](docs/user-guide/project-progress.md)
 
 ### Git worktrees, fully managed
 
@@ -207,6 +220,15 @@ A **mobile companion PWA** lets you monitor agents from your phone, answer quest
 - Tailscale auto-HTTPS or E2E-encrypted cloud relay — no VPN or port forwarding
 - Live WebSocket output, suggest follow-up chips, slash menu
 
+**`tuic-remote` headless daemon** *(beta)* — Run the backend where the code is: a Linux build host, a server, any machine with no desktop environment. Pure Rust binary, no Tauri and no GUI, serving the same HTTP/WebSocket API as the desktop app. Point a desktop FastAF at it and its repositories, terminals and agents behave like local ones.
+
+- Published for Linux x64/ARM64, macOS ARM and Windows x64 — together with `tuic-bridge`, which gives the agents running on that machine the full `tuicommander` MCP tool surface
+- Every TCP request is authenticated: the headless build has no loopback bypass, so an SSH tunnel does not make the daemon local. `GET /health` is the only unauthenticated route
+- `--instance <id>` for a fully isolated configuration directory and keyring vault
+- Default port 9877 (`TUIC_PORT` to override), optional manual TLS
+
+[Remote Access →](docs/user-guide/remote-access.md) &bull; [`tuic-remote` setup →](docs/user-guide/remote-access.md#tuic-remote-beta)
+
 ### Agents that coordinate
 
 **Agent Teams** — Claude Code's sub-agents run as native FastAF tabs instead of tmux panes. Full session awareness, output parsing, and question detection for each sub-agent.
@@ -234,13 +256,13 @@ Voice is the front door to FastAF, and all of it runs on your machine: speech-to
 
 ### Extend everything
 
-**Plugin system** — Obsidian-style plugins with hot reload and a community registry:
+**Plugin system** — Obsidian-style plugins with hot reload:
 
 - 5 capability tiers from read-only watchers to scoped Tauri invoke
 - TUIC SDK v1.0: `tuic.activeRepo`, `tuic.toast`, `tuic.onRepoChange` and more
 - Terminal output watchers with regex triggers
 - Status bar tickers, custom panels, notification contributions
-- Browse and install with one click
+- Install from a folder or `.zip`
 
 [Plugin Authoring Guide →](docs/plugins.md)
 
@@ -250,7 +272,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 - **`fastaf` CLI companion** — Open files with cursor goto (`fastaf src/main.rs:42:8`), manage sessions (`ls` / `new` / `kill` / `send`), orchestrate agents (`spawn` / `ls` / `send`), plus a tmux-compatibility alias mode. Installs from Settings, auto-updates on launch.
 - **HTTP API** — REST + WebSocket + SSE on a local port: list/create/close sessions, stream live output, spawn agents, read terminal grids and scrollback, query process CPU/RSS. Script TUIC from anything that can hit a socket.
-- **MCP control surface** — TUIC is itself an MCP server. Connected agents get `session`, `agent`, `repo`, and `ui` tools — including `drive_agent` (atomic send → wait-for-idle → read) and delta cursors that return only new output. *(Distinct from the MCP Proxy Hub above, which aggregates your upstream servers.)*
+- **MCP control surface** — TUIC is itself an MCP server. Connected agents get `session`, `agent`, `repo`, `ui`, and `progress` tools — including `drive_agent` (atomic send → wait-for-idle → read) and delta cursors that return only new output. *(Distinct from the MCP Proxy Hub above, which aggregates your upstream servers.)*
 - **Custom "Open in…" launchers** — Define your own editor/tool commands with placeholder tokens: `{file}`, `{repo}`, `{fileDir}`, `{cwd}`, `{home}`, `{line}`, `{column}`. iTerm2, Tower, and the full JetBrains family ship built in.
 
 [CLI guide →](docs/user-guide/cli.md) &bull; [HTTP API →](docs/api/http-api.md) &bull; [MCP server →](docs/backend/mcp-http.md)
@@ -329,6 +351,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 - Voice agent: hands-free talk with the AI agent, spoken replies, barge-in (see [Voice to action](#-voice-to-action))
 - Voice dictation: streaming on-device Whisper with partial results
 - Focus mode (`Cmd+Alt+Enter`): maximize active tab, hide sidebar and panels
+- Project Progress: append-only per-project journal of agent `done` / `blocked` reports plus captured `intent:` markers, with a toolbar bell for unseen entries
 </details>
 
 <details>
@@ -336,7 +359,8 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 - `fastaf` CLI: file open with cursor goto, session/agent orchestration, tmux-compat alias mode, auto-update
 - HTTP API (REST + WebSocket + SSE): sessions, live output stream, agent spawn, terminal grid/scrollback ops, process stats
-- MCP control surface: `session` / `agent` / `repo` / `ui` tools, `drive_agent` atomic send→wait→read, delta cursors for incremental reads
+- MCP control surface: `session` / `agent` / `repo` / `ui` / `progress` tools, `drive_agent` atomic send→wait→read, delta cursors for incremental reads
+- `tuic-remote` headless daemon (beta): same HTTP/WebSocket API with no Tauri and no GUI, `tuic-bridge` for the agents on that machine, isolated `--instance` config + keyring, authenticated on every TCP request
 - Custom launchers: user-defined exec + args with `{file}`/`{repo}`/`{fileDir}`/`{cwd}`/`{home}`/`{line}`/`{column}` placeholder tokens
 - Command blocks: terminal output segmented per prompt+output cycle — semantic scrollbar marks, fold (`Cmd+Shift+.`), block search (`Cmd+Shift+B`), navigate (`Cmd+Shift+Up/Down`)
 - Generators (command palette): Password, UUID v4/v7, ULID, CUID2, JWT secret, TOTP secret, Nano ID, Slug, Ed25519 keypair — generated natively in Rust
@@ -356,6 +380,26 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 [Download the latest `.dmg`](https://github.com/ksg98/fastaf-ide/releases/latest/download/FastAF_aarch64.dmg), open it and drag FastAF.app to Applications.
 Builds from v1.8.7 on are signed with a Developer ID and notarized by Apple, so they
 open like any other app.
+
+**Or install from the shell** (macOS and Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/website/public/install.sh | sh
+```
+
+On macOS the installer never replaces the app with a bundle it has not checked.
+It downloads and unpacks into a private temporary directory, then runs
+`codesign --verify --deep --strict` and requires a **Developer ID Application**
+signature with TeamIdentifier **NH9933XQGX** (FastAF's). Only then does it stage
+the bundle next to the target, move the installed `/Applications/FastAF.app`
+aside (to `.FastAF.app.previous`), move the new one in, and delete the old one
+last. If a check fails it stops with "Nothing was installed." and the installed
+app is untouched; if the final move fails, it puts the previous app back and says
+so ("The previous version was restored."). On Linux it installs the `.deb`, `.rpm` or AppImage.
+Pass a version (`sh -s 2.0.4`) to pin one, or `nightly` for the nightly build.
+`TUICOMMANDER_HOME=<dir>` installs somewhere other than `/Applications`.
+
+The macOS app requires **macOS 12 Monterey or later**, with system WebKit updated to **Safari 17.4 or later** for Mermaid diagrams. Windows uses WebView2; Linux uses WebKitGTK.
 
 ### Other platforms
 
@@ -378,13 +422,15 @@ See [docs/guides/development-setup.md](docs/guides/development-setup.md) for pla
 
 ## Plugins
 
-The plugin directory is derived from the app identifier (`com.fastaf.ide`). On macOS, copy plugins to:
+Plugins live in the `plugins/` folder of FastAF's config directory. On macOS that is:
 
 ```
-~/Library/Application Support/com.fastaf.ide/plugins/
+~/Library/Application Support/com.tuic.commander/plugins/
 ```
 
-Note: the upstream project's `plugins` git submodule was removed from this repo; plugin bundles must be copied into the directory above manually.
+Two plugins are built into the app: **Plan Tracker** and **Stories Ticker**. They are TypeScript modules compiled with FastAF, so nothing is copied into the folder above.
+
+FastAF ships no other plugin. There is no work-item provider for the Tasks panel and no plugin registry. **Tasks** appears once you install a work-item provider plugin. Install any plugin from a folder or a `.zip` in **Settings → Manage plugins**, or copy it into the folder above.
 
 ## Built with
 
@@ -397,6 +443,8 @@ Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI,
 | [Getting Started](docs/user-guide/getting-started.md) | First-run guide |
 | [Features](docs/FEATURES.md) | Complete feature reference with all keyboard shortcuts |
 | [AI Agents](docs/user-guide/ai-agents.md) | Agent detection, rate limits, question detection |
+| [Project Progress](docs/user-guide/project-progress.md) | The per-project journal agents report into |
+| [Remote Access](docs/user-guide/remote-access.md) | Mobile PWA, SSH tunnels, remote connections, `tuic-remote` daemon |
 | [Plugin API](docs/plugins.md) | Build plugins for FastAF |
 | [HTTP API](docs/api/http-api.md) | REST/WebSocket/SSE endpoints |
 | [Architecture](docs/architecture/overview.md) | System design and component overview |
@@ -415,3 +463,5 @@ FastAF is based on [TUICommander](https://github.com/sstraus/tuicommander) by ss
 ## License
 
 [Apache 2.0](LICENSE) &copy; 2026 Stefano Straus
+
+See [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attributions and third-party licenses. Both ship inside the app with `LICENSE`; open them from **Help → Licenses**.

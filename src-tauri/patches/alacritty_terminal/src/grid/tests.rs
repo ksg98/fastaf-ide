@@ -471,3 +471,23 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+// Catches narrowing reflow treating discarded blank rows as lost content, or missing real loss.
+#[test]
+fn shrink_reflow_marks_lost_copy_origin_only_for_discarded_content() {
+    for predecessor in [' ', 'z'] {
+        let mut grid: Grid<Cell> = Grid::new(2, 10, 1);
+        grid[Line(0)][Column(0)].c = predecessor;
+        grid.scroll_up(&(Line(0)..Line(2)), 1);
+        for (column, character) in "❯ h".chars().enumerate() {
+            grid[Line(0)][Column(column)].c = character;
+        }
+        for column in 0..10 {
+            grid[Line(1)][Column(column)].c = 'q';
+        }
+        grid.resize(ReflowMode::All, 2, 5);
+        let oldest = &grid[grid.topmost_line()];
+        assert_eq!(oldest[Column(0)].c, '❯');
+        assert_eq!(oldest.copy_origin_unknown, predecessor != ' ');
+    }
+}

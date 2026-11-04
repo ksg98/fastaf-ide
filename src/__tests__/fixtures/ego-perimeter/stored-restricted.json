@@ -1,0 +1,1 @@
+{"v":1,"scope":"user","profile":null,"values":{"network":"off","roots":[{"access":"read","path":"~/Gits/.tmp/tuic-1401/primary"},{"access":"read","path":"~/Gits/.tmp/tuic-1401/reference"},{"access":"read-write","path":"~/Gits/.tmp/tuic-1401/writable"}]}}

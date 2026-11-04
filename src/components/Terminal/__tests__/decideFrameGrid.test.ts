@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { type DecodedFrame, type DecodedRow, decideFrameGrid, type FrameGridPrev } from "../canvasTerminalUtils";
+import {
+	type DecodedFrame,
+	type DecodedRow,
+	decideFrameGrid,
+	type FrameGridPrev,
+	installFrameRows,
+} from "../canvasTerminalUtils";
 
 function makeRow(index: number, count = 8): DecodedRow {
 	return {
@@ -19,7 +25,9 @@ function makeFrame(opts: {
 	screenCols?: number;
 	displayOffset?: number;
 	historySize?: number;
+	historyBase?: number;
 	altScreen?: boolean;
+	hasPartialRows?: boolean;
 	rows: DecodedRow[];
 }): DecodedFrame {
 	return {
@@ -29,7 +37,7 @@ function makeFrame(opts: {
 		cursorShape: "block",
 		displayOffset: opts.displayOffset ?? 0,
 		historySize: opts.historySize ?? 0,
-		historyBase: 0,
+		historyBase: opts.historyBase ?? 0,
 		hasSelection: false,
 		keyboardFlags: 0,
 		altScreen: opts.altScreen ?? false,
@@ -41,6 +49,7 @@ function makeFrame(opts: {
 		screenRows: opts.screenRows,
 		screenCols: opts.screenCols ?? 80,
 		rows: opts.rows,
+		hasPartialRows: opts.hasPartialRows,
 		needsFullFrame: false,
 	};
 }
@@ -51,7 +60,9 @@ describe("decideFrameGrid", () => {
 		lastScreenCols: 80,
 		lastDisplayOffset: 0,
 		lastHistorySize: 100,
+		lastHistoryBase: 0,
 		lastAltScreen: false,
+		awaitingFullFrame: false,
 	};
 
 	it("flags geomChanged when screen rows or cols differ", () => {
@@ -73,6 +84,98 @@ describe("decideFrameGrid", () => {
 			decideFrameGrid(prev, makeFrame({ screenRows: 24, displayOffset: 0, historySize: 100, rows: [] }), 24)
 				.scrollChanged,
 		).toBe(false);
+	});
+
+	it("waits for a full frame when scrollback eviction advances historyBase", () => {
+		const decision = decideFrameGrid(
+			prev,
+			makeFrame({ screenRows: 24, historySize: 100, historyBase: 1, rows: [makeRow(23)] }),
+			24,
+		);
+		expect(decision.scrollChanged).toBe(true);
+		expect(decision.scrollWait).toBe(true);
+	});
+
+	it("keeps the row-map origin when history growth also parks the display offset", () => {
+		const decision = decideFrameGrid(
+			prev,
+			makeFrame({ screenRows: 24, historySize: 101, displayOffset: 1, rows: [makeRow(23)] }),
+			24,
+		);
+		expect(decision.scrollChanged).toBe(false);
+		expect(decision.scrollWait).toBe(false);
+	});
+
+	it("does not treat a screenful of partial spans as an authoritative replacement", () => {
+		const rows = Array.from({ length: 24 }, (_, i) => makeRow(i));
+		const decision = decideFrameGrid(
+			prev,
+			makeFrame({ screenRows: 24, historyBase: 1, rows, hasPartialRows: true }),
+			24,
+		);
+		expect(decision.fullReplace).toBe(false);
+		expect(decision.scrollWait).toBe(true);
+	});
+
+	it("holds the coherent frame across repeated deltas until a whole-row replacement arrives", () => {
+		const coherentRow = makeRow(0);
+		coherentRow.codepoints[0] = "A".codePointAt(0)!;
+		const rowMap = new Map([[0, coherentRow]]);
+		const changedPartial = makeFrame({
+			screenRows: 24,
+			historyBase: 1,
+			rows: [makeRow(23)],
+			hasPartialRows: true,
+		});
+		const first = decideFrameGrid(prev, changedPartial, 24);
+		expect(first.holdPreviousFrame).toBe(true);
+		expect(first.requestFullFrame).toBe(true);
+		expect(installFrameRows(rowMap, changedPartial, first)).toBe(false);
+		expect(rowMap.get(0)).toBe(coherentRow);
+
+		const waiting = { ...prev, awaitingFullFrame: true };
+		const second = decideFrameGrid(waiting, changedPartial, 24);
+		expect(second.holdPreviousFrame).toBe(true);
+		expect(second.requestFullFrame).toBe(false);
+
+		const replacement = decideFrameGrid(
+			waiting,
+			makeFrame({
+				screenRows: 24,
+				historyBase: 1,
+				rows: Array.from({ length: 24 }, (_, i) => makeRow(i)),
+			}),
+			24,
+		);
+		expect(replacement.fullReplace).toBe(true);
+		expect(replacement.holdPreviousFrame).toBe(false);
+		expect(
+			installFrameRows(
+				rowMap,
+				makeFrame({
+					screenRows: 24,
+					historyBase: 1,
+					rows: Array.from({ length: 24 }, (_, i) => makeRow(i)),
+				}),
+				replacement,
+			),
+		).toBe(true);
+		expect(rowMap.get(0)).not.toBe(coherentRow);
+	});
+
+	it("waits for whole rows after a geometry change instead of installing a partial new grid", () => {
+		const partialResize = makeFrame({
+			screenRows: 30,
+			screenCols: 100,
+			rows: [makeRow(0, 100)],
+			hasPartialRows: true,
+		});
+		const decision = decideFrameGrid(prev, partialResize, 24);
+
+		expect(decision.geomChanged).toBe(true);
+		expect(decision.fullReplace).toBe(false);
+		expect(decision.holdPreviousFrame).toBe(true);
+		expect(decision.requestFullFrame).toBe(true);
 	});
 
 	it("flags fullReplace when the frame carries >= screenRows rows", () => {
@@ -106,6 +209,7 @@ describe("decideFrameGrid", () => {
 			24,
 		);
 		expect(geomAndScroll.scrollWait).toBe(false);
+		expect(geomAndScroll.holdPreviousFrame).toBe(true);
 
 		// A full frame after a scroll is a fullReplace, not a scrollWait.
 		const fullScroll = decideFrameGrid(

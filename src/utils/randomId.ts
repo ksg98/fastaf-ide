@@ -14,3 +14,21 @@ export function randomId(prefix: string): string {
 	const uuid = globalThis.crypto?.randomUUID?.();
 	return `${prefix}${uuid ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`}`;
 }
+
+/**
+ * A random UUID, in a form `uuid::Uuid` will parse.
+ *
+ * `randomId` above is deliberately not a UUID, which makes it the wrong thing
+ * to send to a backend field typed as one: the request would be refused at
+ * deserialization, in a non-secure context only, which is exactly where nobody
+ * tests. The fallback keeps the version-4 shape for that reason and not because
+ * anything reads the version bits.
+ */
+export function randomUuid(): string {
+	const uuid = globalThis.crypto?.randomUUID?.();
+	if (uuid) return uuid;
+	return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+		const value = Math.floor(Math.random() * 16);
+		return (char === "x" ? value : (value & 0x3) | 0x8).toString(16);
+	});
+}

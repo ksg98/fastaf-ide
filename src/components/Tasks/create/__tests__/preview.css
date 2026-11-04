@@ -1,0 +1,3 @@
+body { margin: 0; background: var(--bg-primary); }
+#root { min-height: 100dvh; display: flex; flex-direction: column; }
+.fixture-detail { flex: 1; min-height: 0; }

@@ -1,12 +1,19 @@
 [workspace]
 members = [
     ".",
+    "crates/tuic-terminal",
+    "crates/tuic-ansi",
+    "crates/tuic-test-support",
+    "crates/tuic-core",
+    "crates/tuic-ipc",
+    "crates/tuic-git",
+    "crates/tuic-dictation",
     "crates/tuic-bridge",
     "crates/fastaf-cli",
     "patches/alacritty_terminal",
+    "patches/bm25",
     "patches/vte",
 ]
-exclude = ["patches/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
@@ -16,7 +23,7 @@ version = "2.0.4"
 name = "tuicommander"
 version.workspace = true
 description = "FastAF - Native platform for AI coding agents"
-authors = ["Stefano Straus <github.com/sstraus>"]
+authors = ["FastAF <https://github.com/ksg98/fastaf-ide>"]
 edition = "2024"
 # The binary is what macOS labels the app with when it runs unbundled (`tauri
 # dev`), so it carries the product name even though the crate keeps its
@@ -27,10 +34,17 @@ default-run = "FastAF"
 name = "FastAF"
 path = "src/main.rs"
 
+# This native WebKit reality probe must execute on the process main thread.
+[[test]]
+name = "webkit_nil_url"
+path = "tests/webkit_nil_url.rs"
+harness = false
+required-features = ["desktop"]
+
 [package.metadata.cargo-machete]
 # Used from build.rs behind the desktop feature; cargo-machete does not inspect
 # feature-gated build scripts.
-ignored = ["tauri-build"]
+ignored = ["tauri-build", "cc"]
 
 [profile.dev]
 opt-level = 1
@@ -53,6 +67,17 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 1
 
+# Test inherits dev, including the O1 override for non-workspace dependencies.
+# Keep workspace test rebuilds fast without changing dev or release builds.
+[profile.test]
+opt-level = 0
+debug = 0
+
+# The full-corpus history replays run near the 120s harness bound at O0.
+# Keep the root test crate at O0; optimize the grid adapter and replay oracle.
+[profile.test.package.tuic-terminal]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -60,6 +85,11 @@ strip = "debuginfo"
 
 [profile.release.package."*"]
 codegen-units = 16
+
+[workspace.lints.rust]
+# cargo-llvm-cov sets this cfg for instrumented builds. Wall-clock budget
+# tests use it to stay out of coverage runs.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -127,23 +157,61 @@ workspace = true
 
 [lib]
 name = "tuicommander_lib"
-# Desktop-only: the bin links the lib as rlib (main.rs → tuicommander_lib::run()).
+# Desktop-only: the bin links the lib as rlib (main.rs → tuicommander_lib::run(context)).
 # staticlib/cdylib are only needed for mobile (iOS/Android) — dropping them makes
 # the huge lib compile once instead of three times. Re-add if mobile is planned.
 crate-type = ["rlib"]
 
 [[bin]]
+name = "tuicommander-agent-test"
+path = "src/bin/agent_test.rs"
+required-features = ["desktop"]
+test = false
+bench = false
+
+[[bin]]
 name = "tuic-remote"
 path = "src/bin/tuic_remote.rs"
 
+# The deterministic ACP agent the client tests drive. It is a test fixture, not
+# a product binary: Tauri bundling lists production binaries and sidecars
+# explicitly, so this target never ships.
+[[bin]]
+name = "tuic-acp-fixture-agent"
+path = "tests/fixtures/acp_fixture_agent.rs"
+test = false
+bench = false
+
+# The deterministic MCP server the stdio-client tests drive, for the same
+# reason and under the same rule as the ACP fixture above.
+[[bin]]
+name = "tuic-mcp-fixture-server"
+path = "tests/fixtures/mcp_fixture_server.rs"
+test = false
+bench = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
+cc = "1"
+serde_json = "1"
 
 [dependencies]
+tuic-terminal = { path = "crates/tuic-terminal" }
+tuic-ansi = { path = "crates/tuic-ansi" }
+tuic-core = { path = "crates/tuic-core" }
+tuic-ipc = { path = "crates/tuic-ipc" }
+tuic-git = { path = "crates/tuic-git" }
+tuic-dictation = { path = "crates/tuic-dictation", optional = true }
+agent-client-protocol = { version = "=2.0.0", features = [
+    "unstable_elicitation",
+    "unstable_end_turn_token_usage",
+    "unstable_mcp_over_acp",
+    "unstable_session_fork",
+] }
 # macos-private-api: required for transparent windows on macOS, which the
 # vibrancy look needs. Forecloses Mac App Store distribution — releases ship
 # through the GitHub updater, so that is an accepted permanent constraint.
-tauri = { version = "2", features = ["protocol-asset", "macos-private-api"], optional = true }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon", "image-png"], optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 # `rc` (Serialize for Arc<T>) is required by AppEvent::PtyParsed, which carries its
 # payload behind an Arc so the three broadcast lanes share it instead of deep-cloning
@@ -152,45 +220,49 @@ tauri-plugin-opener = { version = "2", optional = true }
 # an unrelated build.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-# Zed, VS Code and opencode all store their MCP servers in a JSONC document —
-# comments and trailing commas that serde_json rejects. We parse with ranges so
-# the writer can splice a single member instead of reserializing the file.
-jsonc-parser = { version = "0.33", features = ["cst", "serde", "serde_json"] }
-# Goose stores its MCP extensions in YAML. Deprecated upstream, but already in
-# the tree via gh-token, so the direct dependency adds nothing to the build.
+semver = "1"
+schemars = { version = "1", features = ["derive"] }
+jsonschema = { version = "0.59", default-features = false }
+unicode-width = "0.2"
+# Goose stores its MCP extensions in YAML. Deprecated upstream.
 serde_yaml = "0.9"
+toml_edit = "0.25"
 portable-pty = "0.9"
 tokio = { version = "1", features = ["full"] }
 dashmap = "6"
 moka = { version = "0.12", features = ["sync"] }
-gix = { version = "0.85", default-features = false, features = [
-    "sha1",
-    "revision",
-    "status",
-    "blame",
-    "blob-diff",
-    "dirwalk",
-    "parallel",
-] }
 parking_lot = "0.12"
 regex = "1"
+# github.rs sanitize_ci_logs strips terminal escapes from CI logs in production.
 lazy_static = "1"
-uuid = { version = "1", features = ["v4", "v7"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
+# Not test-only: `progress::export::atomic_replace` needs a uniquely named
+# sibling file that is removed if the replacement fails.
+tempfile = "3"
 ulid = "3"
-cuid2 = "0.1"
 base32 = "0.5.1"
 zeroize = { version = "1", features = ["alloc"] }
 hex = "0.4"
 ring = "0.17"
-dirs = "6"
+# Noise PSK handshake for the relay tunnel (story 2085): reviewed library, no home-made protocol.
+snow = { version = "0.10", default-features = false, features = ["ring-accelerated", "use-curve25519", "use-getrandom", "use-chacha20poly1305", "use-sha2"] }
+dirs = "7"
 tauri-plugin-dialog = { version = "2.7", optional = true }
+# Keep the Rust/npm notification pair on the same 2.7 release line.
+tauri-plugin-notification = { version = "~2.7.0", optional = true }
+# Direct, because the file pickers must run inside OUR main-thread closure — see
+# native_dialog.rs. Version and features are copied from tauri-plugin-dialog's own
+# rfd dependency on purpose: a mismatch forks the lockfile into two rfd builds.
+rfd = { version = "0.16", default-features = false, features = [
+    "common-controls-v6",
+], optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
-whisper-rs = { version = "0.16", optional = true }
-cpal = { version = "0.17.3", optional = true }
-rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
 # Voice agent: Kokoro TTS + Silero VAD run as ONNX graphs. `ort` links ONNX
 # Runtime statically via its default download-binaries feature, so nothing extra
-# ships in the bundle. Desktop-only — the remote-daemon targets never link it.
+# ships in the bundle and the voice agent needs no runtime download. Feature
+# unification makes tuic-dictation's Pocket TTS use the same static runtime
+# (its `load-dynamic` was dropped for this reason). Desktop-only — the
+# remote-daemon targets never link it.
 ort = { version = "2.0.0-rc.13", optional = true }
 # Grapheme-to-phoneme for Kokoro. default-features = false drops the bundled
 # espeak-ng CMake build; out-of-vocabulary words are spelled letter-by-letter
@@ -201,7 +273,20 @@ misaki-rs = { version = "0.3", default-features = false, optional = true }
 # Without it the microphone hears our own speech through the speakers and the
 # agent interrupts itself, so barge-in only works on headphones.
 aec3 = { version = "0.3", optional = true }
-reqwest = { version = "0.13", features = ["stream", "json", "form", "multipart"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"], optional = true }
+# gzip/brotli: the daemon compresses every response above 860 bytes
+# (`CompressionLayer` in mcp_http), but only for a client that advertises the
+# encoding. A browser does it unasked; reqwest does not, so without these two
+# features every backend-to-daemon call — and the event stream this backend
+# mirrors from it — crosses the network uncompressed.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "charset", "http2", "system-proxy", "stream", "json", "form", "query", "gzip", "brotli", "multipart"] }
+# The WebSocket half of the same problem. `CompressionLayer` is an HTTP layer and
+# never sees a WS frame, and tungstenite 0.29 — the implementation behind both
+# `axum::extract::ws` and the tunnel's client — has no permessage-deflate at all,
+# so the terminal stream crossed a remote link uncompressed. Already in the tree
+# under `async-compression`; named here because `mcp_http::ws_compression` uses
+# it directly, per frame, with a retained window (#794-832e).
+flate2 = "1.1"
 futures-util = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 async-stream = "0.3"
@@ -210,119 +295,212 @@ bcrypt = "0.19"
 base64 = "0.22"
 include_dir = { version = "0.7.4", features = ["glob"] }
 mime_guess = "2.0.5"
-tower-http = { version = "0.7", features = ["cors", "compression-gzip", "compression-br"] }
+tower-http = { version = "0.7", features = ["cors", "compression-gzip", "compression-br", "timeout"] }
 rand = "0.10"
 libc = "0.2"
 notify = "8"
-gh-token = "0.1"
+# Stable identity for a transcript replaced at the same path, on all platforms.
+same-file = "1.0.6"
 keepawake = "0.6"
-tauri-plugin-updater = { version = "2", optional = true }
+# Keep the Rust/npm updater pair on the same 2.14 release line.
+# DEFERRED (2026-10-19) — updater 2.14 still uses ZIP 4; its Windows ZIP extraction
+# can reach RUSTSEC-2026-0367/0368/0369. Accepted scope is in .cargo/audit.toml.
+# Dirs 7 follow-up from 2035-096f: this paired updater upgrade (2039-428c)
+# removes the last dirs 6 consumer.
+tauri-plugin-updater = { version = "~2.14.0", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 tauri-plugin-deep-link = { version = "2", optional = true }
-tauri-plugin-clipboard-manager = { version = "2", optional = true }
+# Text only; preserve the plugin's native Wayland clipboard support.
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"], optional = true }
 tauri-plugin-global-shortcut = { version = "2", optional = true }
 drag = { version = "2.1", features = ["serde"], optional = true }
-zip = "8"
+# DEFERRED (2026-10-09) — trimming ZIP codecs would reject previously supported plugin archives.
+zip = "9"
+# Microsoft ships onnxruntime as a .tgz everywhere except Windows, and the
+# speech downloader takes one shared library out of it (`dictation::speech::
+# assets`). Already in the tree transitively; named here because we read it.
+tar = "0.4"
+cap-std = "3.4.6"
+cap-fs-ext = "3.4.6"
 glob = "0.3"
 ignore = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 url = "2"
+open = "5"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "=0.10.4"
+croner = { version = "=4.0.1", default-features = false, features = ["chrono"] }
+iana-time-zone = "=0.1.65"
 alacritty_terminal = "0.26.0"
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
-aes-gcm = "0.11"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 sha2 = "0.11"
-hkdf = "0.13"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-axum-server-dual-protocol = "0.7"
-web-push-native = { version = "0.4", default-features = false }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server-dual-protocol = { version = "0.7", default-features = false }
+# Stored VAPID keys are bare scalars: ring requires a public key too
+# (KeyRejected("InconsistentComponents") without it). p256 derives that point.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64ct = { version = "1", features = ["alloc"] }
 anyhow = "1"
-oauth2 = "5"
 bm25 = "2.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# FastAF's built-in AI engine (chat, voice agent, dictation rewrite, Smart
+# Prompts api mode, PR review, changelog, improvement scan). Upstream 2.0 moved
+# these to the external ego agent; FastAF keeps its own.
 genai = "0.6.0-beta.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 console-subscriber = { version = "0.5", optional = true }
 cron = "0.17"
+chromey = { version = "2.58", default-features = false, features = ["bytes"], optional = true }
+sourcemap = { version = "9.3.2", optional = true }
 toml = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
-ssh2-config = "0.7"
+ssh2-config = "0.8"
 
 [features]
 default = ["desktop"]
 desktop = [
+    "dep:gio",
+    "tuic-core/audio-output",
+    "dep:chromey",
+    "dep:sourcemap",
     "dep:tauri",
+    "dep:webview2-com",
+    "dep:windows-core",
     "dep:tauri-build",
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-notification",
+    "dep:mac-notification-sys",
+    "dep:rfd",
     "dep:tauri-plugin-single-instance",
     "dep:tauri-plugin-window-state",
     "dep:tauri-plugin-updater",
     "dep:tauri-plugin-process",
     "dep:tauri-plugin-deep-link",
-    "dep:tauri-plugin-clipboard-manager",
+    "dep:arboard",
     "dep:tauri-plugin-global-shortcut",
     "dep:drag",
-    "dep:whisper-rs",
-    "dep:cpal",
     "dep:rodio",
-    "dep:ort",
-    "dep:misaki-rs",
-    "dep:aec3",
-    "dep:coreaudio-rs",
-    "dep:objc2-audio-toolbox",
     "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-app-kit",
     "dep:block2",
 ]
+# Native speech is opt-in for Cargo dev/test builds. Tauri dev/release builds
+# enable it through tauri.conf.json.
+# FastAF's voice agent (Kokoro TTS, Silero VAD, AEC, VoiceProcessingIO capture)
+# rides the same feature: it captures through the dictation crate's microphone.
+dictation = [
+    "desktop",
+    "dep:tuic-dictation",
+    "dep:ort",
+    "dep:misaki-rs",
+    "dep:aec3",
+    "dep:coreaudio-rs",
+    "dep:objc2-audio-toolbox",
+]
+# Opt-in generated-command IPC tests use Tauri's mock runtime, never a desktop app.
+settings-ipc-test = ["desktop", "tauri/test"]
+
 # GPU features for Linux builds (macOS always has Metal via target dep; Windows
 # is CPU-only — the whisper.cpp Vulkan backend's vulkan-shaders-gen sub-build is
 # chronically broken on the Windows runner (MAX_PATH/MSBuild), so we ship CPU).
-cuda = ["whisper-rs/cuda"]
-vulkan = ["whisper-rs/vulkan"]
+cuda = ["dictation", "tuic-dictation/cuda"]
+vulkan = ["dictation", "tuic-dictation/vulkan"]
 tokio-console = ["console-subscriber"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = { version = "0.18", optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.16", features = ["metal"], optional = true }
 # Voice sessions capture through kAudioUnitSubType_VoiceProcessingIO instead of
 # cpal, so the OS cancels everything the machine is playing out of the mic
 # signal — the same engine-owned echo cancellation a browser gets from
 # getUserMedia, which is what makes barge-in work on open laptop speakers.
-# Same versions cpal already pulls in, so nothing new is compiled.
 coreaudio-rs = { version = "0.14", optional = true }
 objc2-audio-toolbox = { version = "0.3", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSDictionary", "NSString", "NSValue"], optional = true }
+mac-notification-sys = { version = "0.6.15", optional = true }
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSDictionary", "NSString", "NSValue", "NSProcessInfo"], optional = true }
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"], optional = true }
 block2 = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = { version = "0.39.1", optional = true }
+windows-core = { version = "0.62.2", optional = true }
 # CPU-only on Windows: the Vulkan backend (vulkan-shaders-gen) fails to build on
 # the CI runner. Dictation runs on CPU; re-enable "vulkan" only once the
 # whisper.cpp Windows shader build is stabilized.
-whisper-rs = { version = "0.16", optional = true }
-windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_Foundation", "Win32_System_ProcessStatus", "Wdk_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_System_ProcessStatus", "Wdk_System_Threading", "Wdk_Storage_FileSystem", "Win32_System_IO", "Win32_Storage_FileSystem"] }
 
 [patch.crates-io]
 alacritty_terminal = { path = "patches/alacritty_terminal" }
+# 0.7.0 unchanged except for the axum-server bump from `^0.7.1` to 0.8. Upstream
+# has not released since 2024-07 and that cap was the only thing holding
+# axum-server 0.7 in the tree, which is the sole path to unmaintained
+# rustls-pemfile (RUSTSEC-2025-0134). The 0.8 break is confined to `Server`
+# gaining an address type parameter and `from_tcp` becoming fallible; the
+# `Accept` trait this crate implements is untouched.
+axum-server-dual-protocol = { path = "patches/axum-server-dual-protocol" }
+# 2.3.2 plus one read-only accessor: `Scorer::embeddings`. Upstream can build and
+# query an index but never persist one, because the embeddings it holds are
+# private with no getter. `content_index` needs them to write a snapshot so a repo
+# evicted by the memory budget is reloaded instead of re-indexed from scratch.
+bm25 = { path = "patches/bm25" }
 vte = { path = "patches/vte" }
-# crates.io 0.31.10 pins vulnerable quick-xml 0.39. Keep that release's code
-# compatible with wayland-client/backend 0.31/0.3, while applying upstream's
-# quick-xml 0.41 parser adaptation. Patching current Wayland master here would
-# generate interfaces for its unreleased backend ABI and break Linux builds.
-wayland-scanner = { path = "patches/wayland-scanner" }
+# 2.1.0 with six changes. Five of them exist because upstream has no Windows CI
+# job (`.github/workflows/rust.yml` runs ubuntu-latest and macos-latest only) and
+# its `bundled` build does not work there; the fifth is a macOS link failure.
+# Measured on a Windows 10.0.26200 box with VS 2022 BuildTools 14.44 and meson
+# 1.12, and on macOS 27 with Xcode clang:
+#   1. `build.rs` shelled out to `cp -a`, which Windows does not have; the build
+#      died with "program not found" before meson ran. Now an in-process
+#      `fs_extra::dir::copy`, using a build dependency the crate already had.
+#   2. `webrtc-audio-processing/meson.build` pinned `cpp_std=c++17` while the
+#      vendored WebRTC source uses C++20 designated initializers. gcc and clang
+#      accept those as a C++17 extension, MSVC rejects them (C7555), and
+#      `CXXFLAGS=/std:c++20` does not help because meson emits its own `/std:`
+#      afterwards. Raised to c++20 for the project and for its abseil subproject
+#      together: abseil aliases different std types per standard, so those two
+#      must match or the mismatch links and then misbehaves.
+#   3. `build.rs` looked abseil up through pkg-config first. On a Mac with brew's
+#      abseil installed that wins, and the vendored WebRTC then links against a
+#      newer ABI: `Undefined symbols: absl::lts_20260817::ThrowStdLengthError`.
+#      The subproject paths are now unconditional and meson runs with
+#      `--wrap-mode=forcefallback`, so the version we compiled is the version we
+#      link, on every machine.
+#   4. The wrapper was compiled with `-std=c++17 -Wno-unused-parameter` as raw
+#      flags. `cl` rejects the second (D8021). Now `cc::Build::std("c++20")`,
+#      which cc-rs spells per toolchain, plus `/wd4100` on MSVC.
+#   5. `build.rs` renamed every symbol in the static archive to a `v2_` prefix so
+#      two major versions could coexist in one binary. It located the archive by
+#      globbing `lib*.a`, which MSVC does not produce — so on Windows the wrapper
+#      half silently did nothing and the link failed with 12 unresolved
+#      `webrtc::` externals. We link exactly one version, so the mechanism is
+#      deleted rather than taught about `.lib`; that also drops its `nm` and
+#      `rust-objcopy` requirements.
+#   6. Meson auto-detection chose MinGW on the Windows Nightly runner. MSVC
+#      targets force `--vsenv`; compile/install go through Meson so each
+#      subprocess activates the same Visual Studio environment.
+webrtc-audio-processing-sys = { path = "patches/webrtc-audio-processing-sys" }
 
 [dev-dependencies]
-tempfile = "3"
+# Migration guards use an independent ECDH and ECDSA implementation.
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa"] }
+ctor = "0.8"
+tuic-test-support = { path = "crates/tuic-test-support" }
+tuic-core = { path = "crates/tuic-core", features = ["test-support"] }
+tuic-git = { path = "crates/tuic-git", features = ["test-support"] }
+# `full` does not include `test-util`, and `start_paused` needs it. It used to
+# arrive transitively through a dependency of the embedded AI engine; deleting
+# that engine (#784-0aec) made the suite stop compiling, so it is declared here
+# where the tests that use it can see why.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 serial_test = "3"
 mockito = "1"
-strip-ansi-escapes = "0.2"

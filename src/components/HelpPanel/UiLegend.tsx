@@ -1,4 +1,6 @@
 import { type Component, For } from "solid-js";
+import { PrStateBadge } from "../Sidebar/PrStateBadge";
+import { BranchIcon, type BranchIconProps, UnmergedMarker } from "../Sidebar/RepoSection";
 import s from "./UiLegend.module.css";
 
 // ---------------------------------------------------------------------------
@@ -49,49 +51,107 @@ interface SymbolEntry {
 	color?: string;
 }
 
-const SIDEBAR_SYMBOL_LEGEND: SymbolEntry[] = [
-	{ symbol: "\u2731", label: "Main branch", description: "Primary branch (main/master)", color: "var(--warning)" },
-	{ symbol: "\u2387", label: "Feature branch", description: "Feature or topic branch", color: "var(--fg-muted)" },
-	{ symbol: "?", label: "Awaiting input", description: "A terminal needs input", color: "var(--warning)" },
-];
-
-interface BadgeEntry {
+/** Sidebar row icons. Each entry renders the real `BranchIcon` with the props
+ *  that select its shape, so the legend can never drift from the sidebar. */
+export interface BranchIconEntry {
+	icon: BranchIconProps;
 	label: string;
 	description: string;
-	bg: string;
-	fg: string;
-	border?: string;
-	pulsing?: boolean;
 }
 
-const PR_BADGE_LEGEND: BadgeEntry[] = [
-	{ label: "#N", description: "Open PR (number)", bg: "var(--accent)", fg: "var(--text-on-accent)" },
-	{ label: "Ready", description: "Approved and mergeable", bg: "var(--success)", fg: "var(--text-on-success)" },
-	{ label: "Draft", description: "PR is a draft", bg: "transparent", fg: "var(--fg-muted)", border: "var(--fg-muted)" },
-	{ label: "Conflicts", description: "Merge conflicts", bg: "var(--error)", fg: "var(--text-on-error)", pulsing: true },
-	{ label: "CI Failed", description: "CI checks failed", bg: "var(--error)", fg: "var(--text-on-error)" },
-	{ label: "Changes Req.", description: "Changes requested", bg: "var(--changes)", fg: "var(--text-on-success)" },
+export const SIDEBAR_SYMBOL_LEGEND: BranchIconEntry[] = [
 	{
-		label: "Review Req.",
-		description: "Awaiting review",
-		bg: "transparent",
-		fg: "var(--changes)",
-		border: "var(--changes)",
+		icon: { isMainBranch: true, isMainWorktree: true, branchHasTerminals: true },
+		label: "Main branch",
+		description: "Primary branch (main/master)",
 	},
 	{
-		label: "CI Running",
-		description: "CI in progress",
-		bg: "transparent",
-		fg: "var(--warning)",
-		border: "var(--warning)",
-		pulsing: true,
+		icon: { isMainBranch: false, isMainWorktree: true, branchHasTerminals: true },
+		label: "Feature branch",
+		description: "Main worktree switched to another branch",
 	},
-	{ label: "Merged", description: "PR merged", bg: "var(--merged)", fg: "var(--text-on-accent)" },
+	{
+		icon: { isMainBranch: false, isMainWorktree: false, branchHasTerminals: true },
+		label: "Worktree",
+		description: "Linked git worktree",
+	},
+	{
+		icon: { isMainBranch: false, isMainWorktree: false, isShell: true, branchHasTerminals: true },
+		label: "Shell",
+		description: "Folder without a git repository",
+	},
+	{
+		icon: { isMainBranch: false, isMainWorktree: false, hasQuestion: true, branchHasTerminals: true },
+		label: "Awaiting input",
+		description: "A terminal needs input",
+	},
+	{
+		icon: { isMainBranch: false, isMainWorktree: false, hasError: true, branchHasTerminals: true },
+		label: "Error",
+		description: "API error or agent stuck",
+	},
+	{
+		icon: { isMainBranch: false, isMainWorktree: false, branchHasTerminals: false },
+		label: "Idle",
+		description: "No open terminal on this row",
+	},
+];
+
+/** Rendered with the real sidebar component, so the legend cannot drift from
+ *  what a branch row shows — color, shape and pulse included. */
+export interface PrLegendEntry {
+	label: string;
+	description: string;
+	badge: Partial<Parameters<typeof PrStateBadge>[0]>;
+}
+
+export const PR_BADGE_LEGEND: PrLegendEntry[] = [
+	{ label: "Open", description: "Open PR", badge: { state: "open" } },
+	{
+		label: "Ready",
+		description: "Approved and mergeable",
+		badge: { state: "open", mergeable: "MERGEABLE", reviewDecision: "APPROVED" },
+	},
+	{ label: "Draft", description: "PR is a draft", badge: { state: "open", isDraft: true } },
+	{
+		label: "Conflicts",
+		description: "Merge conflicts (pulsing diamond)",
+		badge: { state: "open", conflictState: "conflicting" },
+	},
+	{
+		label: "Checking",
+		description: "GitHub is recomputing mergeability (pulsing)",
+		badge: { state: "open", conflictState: "checking" },
+	},
+	{ label: "CI Failed", description: "CI checks failed", badge: { state: "open", ciFailed: 1 } },
+	{
+		label: "Changes Req.",
+		description: "Changes requested",
+		badge: { state: "open", reviewDecision: "CHANGES_REQUESTED" },
+	},
+	{
+		label: "Comments",
+		description: "Unresolved review threads (bot and human)",
+		badge: { state: "open", unresolvedThreads: 1 },
+	},
+	{ label: "Review", description: "Awaiting review", badge: { state: "open", reviewDecision: "REVIEW_REQUIRED" } },
+	{ label: "CI Running", description: "CI in progress (pulsing)", badge: { state: "open", ciPending: 1 } },
+	{ label: "Merged", description: "PR merged", badge: { state: "merged" } },
+	{ label: "Closed", description: "PR closed without merging", badge: { state: "closed" } },
+];
+
+const TOOLBAR_COUNT_LEGEND: SymbolEntry[] = [
+	{
+		symbol: "↑N",
+		label: "Ahead",
+		description: "Selected branch has N commits not pushed to its upstream. Absent without an upstream",
+	},
+	{ symbol: "↓N", label: "Behind", description: "Selected branch is N commits behind its upstream" },
 ];
 
 const STATS_LEGEND: SymbolEntry[] = [
 	{ symbol: "+N", label: "Additions", description: "Lines added vs main", color: "var(--success)" },
-	{ symbol: "-N", label: "Deletions", description: "Lines removed vs main", color: "var(--error)" },
+	{ symbol: "-N", label: "Deletions", description: "Lines removed vs main", color: "var(--diff-del)" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -104,7 +164,6 @@ export const UiLegend: Component = () => {
 			{/* Terminal dot states */}
 			<div class={s.group}>
 				<label class={s.groupLabel}>Terminal Status Dots</label>
-				<p class={s.hint}>The colored dot on each terminal tab</p>
 				<div class={s.grid}>
 					<For each={TERMINAL_DOT_LEGEND}>
 						{(entry) => (
@@ -121,7 +180,6 @@ export const UiLegend: Component = () => {
 			{/* Tab type colors */}
 			<div class={s.group}>
 				<label class={s.groupLabel}>Tab Types</label>
-				<p class={s.hint}>Background tint and bottom border color by tab type</p>
 				<div class={s.grid}>
 					<For each={TAB_TYPE_LEGEND}>
 						{(entry) => (
@@ -138,7 +196,6 @@ export const UiLegend: Component = () => {
 			{/* Panel colors */}
 			<div class={s.group}>
 				<label class={s.groupLabel}>Panels</label>
-				<p class={s.hint}>Right-side panel accent colors</p>
 				<div class={s.grid}>
 					<For each={PANEL_COLOR_LEGEND}>
 						{(entry) => (
@@ -159,8 +216,8 @@ export const UiLegend: Component = () => {
 					<For each={SIDEBAR_SYMBOL_LEGEND}>
 						{(entry) => (
 							<div class={s.row}>
-								<span class={s.symbol} style={{ color: entry.color }}>
-									{entry.symbol}
+								<span class={s.symbol}>
+									<BranchIcon {...entry.icon} />
 								</span>
 								<span class={s.label}>{entry.label}</span>
 								<span class={s.desc}>{entry.description}</span>
@@ -170,24 +227,45 @@ export const UiLegend: Component = () => {
 				</div>
 			</div>
 
+			{/* Unmerged marker */}
+			<div class={s.group}>
+				<label class={s.groupLabel}>Branch Markers</label>
+				<div class={s.grid}>
+					<div class={s.row}>
+						<span class={s.symbol}>
+							<UnmergedMarker />
+						</span>
+						<span class={s.label}>Unmerged</span>
+						<span class={s.desc}>Commits not merged into the default branch. Not a dirty worktree</span>
+					</div>
+				</div>
+			</div>
+
 			{/* PR badges */}
 			<div class={s.group}>
 				<label class={s.groupLabel}>PR Status Badges</label>
-				<p class={s.hint}>Shown next to branches with a pull request</p>
 				<div class={s.grid}>
 					<For each={PR_BADGE_LEGEND}>
 						{(entry) => (
 							<div class={s.row}>
-								<span
-									class={entry.pulsing ? s.badgePulsing : s.badge}
-									style={{
-										background: entry.bg,
-										color: entry.fg,
-										border: entry.border ? `1px solid ${entry.border}` : undefined,
-									}}
-								>
-									{entry.label}
-								</span>
+								<PrStateBadge compact prNumber={42} {...entry.badge} />
+								<span class={s.label}>{entry.label}</span>
+								<span class={s.desc}>{entry.description}</span>
+							</div>
+						)}
+					</For>
+				</div>
+			</div>
+
+			{/* Toolbar ahead/behind */}
+			<div class={s.group}>
+				<label class={s.groupLabel}>Toolbar Branch Counts</label>
+				<div class={s.grid}>
+					<For each={TOOLBAR_COUNT_LEGEND}>
+						{(entry) => (
+							<div class={s.row}>
+								<span class={s.symbol}>{entry.symbol}</span>
+								<span class={s.label}>{entry.label}</span>
 								<span class={s.desc}>{entry.description}</span>
 							</div>
 						)}

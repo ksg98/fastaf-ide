@@ -1,4 +1,5 @@
 use crate::AppState;
+use crate::mdkb_daemon::with_client;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,21 +72,21 @@ pub async fn mdkb_outline(
     repo_path: String,
     file_path: String,
 ) -> Result<Vec<OutlineSymbol>, String> {
-    let mut daemon = state.mdkb_daemon.lock().await;
-    let client = match daemon.ensure_running().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("mdkb unavailable: {e}");
-            return Ok(vec![]);
-        }
-    };
-    match client.symbols_in_file(&repo_path, &file_path).await {
-        Ok(symbols) => Ok(symbols.into_iter().map(OutlineSymbol::from).collect()),
-        Err(e) => {
-            tracing::warn!("mdkb_outline failed: {e}");
-            Ok(vec![])
-        }
-    }
+    let symbols = with_client(
+        &state.mdkb_daemon,
+        "mdkb_outline",
+        |mut client| async move {
+            let result = client.symbols_in_file(&repo_path, &file_path).await;
+            (client, result)
+        },
+    )
+    .await;
+
+    Ok(symbols
+        .unwrap_or_default()
+        .into_iter()
+        .map(OutlineSymbol::from)
+        .collect())
 }
 
 #[tauri::command]
@@ -96,28 +97,23 @@ pub async fn mdkb_goto_definition(
     line: u32,
     col: Option<u32>,
 ) -> Result<Option<DefinitionLocation>, String> {
-    let mut daemon = state.mdkb_daemon.lock().await;
-    let client = match daemon.ensure_running().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("mdkb unavailable: {e}");
-            return Ok(None);
-        }
-    };
-    match client
-        .symbol_at_position(&repo_path, &file_path, line, col)
-        .await
-    {
-        Ok(Some(sym)) => Ok(Some(DefinitionLocation {
-            file_path: sym.file_path,
-            line: editor_line(sym.line_start),
-        })),
-        Ok(None) => Ok(None),
-        Err(e) => {
-            tracing::warn!("mdkb_goto_definition failed: {e}");
-            Ok(None)
-        }
-    }
+    let symbol = with_client(
+        &state.mdkb_daemon,
+        "mdkb_goto_definition",
+        |mut client| async move {
+            let result = client
+                .symbol_at_position(&repo_path, &file_path, line, col)
+                .await;
+            (client, result)
+        },
+    )
+    .await
+    .flatten();
+
+    Ok(symbol.map(|sym| DefinitionLocation {
+        file_path: sym.file_path,
+        line: editor_line(sym.line_start),
+    }))
 }
 
 /// A caller symbol is a jump target: the panel needs where it is and what it is
@@ -139,21 +135,31 @@ pub async fn mdkb_references(
     repo_path: String,
     symbol_name: String,
 ) -> Result<Vec<ReferenceLocation>, String> {
-    let mut daemon = state.mdkb_daemon.lock().await;
-    let client = match daemon.ensure_running().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("mdkb unavailable: {e}");
-            return Ok(vec![]);
-        }
-    };
-    match client.code_graph(&repo_path, &symbol_name, "callers").await {
-        Ok(symbols) => Ok(to_reference_locations(symbols)),
-        Err(e) => {
-            tracing::warn!("mdkb_references failed: {e}");
-            Ok(vec![])
-        }
-    }
+    let symbols = with_client(
+        &state.mdkb_daemon,
+        "mdkb_references",
+        |mut client| async move {
+            let result = client.code_graph(&repo_path, &symbol_name, "callers").await;
+            (client, result)
+        },
+    )
+    .await;
+
+    Ok(to_reference_locations(symbols.unwrap_or_default()))
+}
+
+/// A `code_find` answer, with the count that says whether it is the whole one.
+///
+/// `symbols` alone cannot carry that: mdkb caps the rows, so a list of fifty is
+/// fifty of fifty or fifty of three hundred and the rows look identical either
+/// way. `total` is what mdkb matched before the cap, `None` when mdkb sent no
+/// count — which a caller must render as "unknown", not as `symbols.length`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeFindResult {
+    pub symbols: Vec<OutlineSymbol>,
+    pub total: Option<u32>,
+    pub capped: Option<bool>,
 }
 
 #[tauri::command]
@@ -162,22 +168,24 @@ pub async fn mdkb_code_find(
     repo_path: String,
     name: String,
     kind: Option<String>,
-) -> Result<Vec<OutlineSymbol>, String> {
-    let mut daemon = state.mdkb_daemon.lock().await;
-    let client = match daemon.ensure_running().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("mdkb unavailable: {e}");
-            return Ok(vec![]);
-        }
-    };
-    match client.code_find(&repo_path, &name, kind.as_deref()).await {
-        Ok(symbols) => Ok(symbols.into_iter().map(OutlineSymbol::from).collect()),
-        Err(e) => {
-            tracing::warn!("mdkb_code_find failed: {e}");
-            Ok(vec![])
-        }
-    }
+) -> Result<CodeFindResult, String> {
+    let found = with_client(
+        &state.mdkb_daemon,
+        "mdkb_code_find",
+        |mut client| async move {
+            let result = client.code_find(&repo_path, &name, kind.as_deref()).await;
+            (client, result)
+        },
+    )
+    .await
+    .unwrap_or_default();
+
+    let capped = found.capped();
+    Ok(CodeFindResult {
+        symbols: found.symbols.into_iter().map(OutlineSymbol::from).collect(),
+        total: found.total,
+        capped,
+    })
 }
 
 #[tauri::command]
@@ -193,6 +201,16 @@ pub async fn mdkb_status(state: State<'_, Arc<AppState>>) -> Result<MdkbStatus, 
         binary_path,
         version,
     })
+}
+
+/// The launch prompt carries the MDKB search rule only while mdkb is installed.
+fn refresh_launch_files() {
+    if let Err(error) = crate::launch_instructions::write_files(&crate::config::config_dir()) {
+        tracing::error!(
+            source = "mdkb",
+            "Failed to rewrite launch instructions: {error}"
+        );
+    }
 }
 
 fn mdkb_install_path() -> PathBuf {
@@ -234,10 +252,32 @@ fn mdkb_asset_name() -> &'static str {
     }
 }
 
+fn stage_mdkb_for_elevation(
+    base: &std::path::Path,
+    asset: &str,
+    bytes: &[u8],
+) -> std::io::Result<crate::private_scratch::StagedFile> {
+    crate::private_scratch::stage_for_elevated_copy(base, "mdkb-install-", asset, bytes)
+}
+
+/// Where `install_mdkb` downloads release binaries from. `None` disables the
+/// download: FastAF has no mdkb release of its own, and upstream's pointed at a
+/// third party's `latest` release, fetched unverified and copied into the
+/// system PATH with elevation. Point this at a FastAF-published release to
+/// re-enable it.
+const MDKB_RELEASE_BASE: Option<&str> = None;
+
 #[tauri::command]
 pub async fn install_mdkb(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let Some(release_base) = MDKB_RELEASE_BASE else {
+        return Err(
+            "FastAF does not download mdkb. Install mdkb yourself, put it on your PATH, \
+             and FastAF will pick it up."
+                .to_string(),
+        );
+    };
     let asset = mdkb_asset_name();
-    let url = format!("https://github.com/sstraus/mdkb/releases/latest/download/{asset}");
+    let url = format!("{release_base}/{asset}");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -274,19 +314,18 @@ pub async fn install_mdkb(state: State<'_, Arc<AppState>>) -> Result<String, Str
         std::fs::rename(&tmp_path, &install_path)
             .map_err(|e| format!("Failed to move binary: {e}"))?;
     } else {
-        // Need elevation
+        // Need elevation. The staged file is copied as root, so it must sit
+        // in a fresh private dir (random name, 0700), never a predictable
+        // `temp_dir()/mdkb-install` another local user could pre-create and
+        // swap the binary in. Dropping `staged` removes the dir on every path.
         let _ = std::fs::remove_file(&tmp_path);
-        let tmp_dir = std::env::temp_dir().join("mdkb-install");
-        let _ = std::fs::create_dir_all(&tmp_dir);
-        let staged = tmp_dir.join(asset);
-        std::fs::write(&staged, &bytes).map_err(|e| format!("Failed to stage binary: {e}"))?;
+        let staged = stage_mdkb_for_elevation(&std::env::temp_dir(), asset, &bytes)
+            .map_err(|e| format!("Failed to stage binary: {e}"))?;
 
         crate::fastaf_cli::copy_with_elevation(
-            &staged.to_string_lossy(),
+            &staged.path().to_string_lossy(),
             &install_path.to_string_lossy(),
         )?;
-
-        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     #[cfg(unix)]
@@ -312,6 +351,8 @@ pub async fn install_mdkb(state: State<'_, Arc<AppState>>) -> Result<String, Str
         .ensure_running()
         .await
         .map_err(|e| format!("Installed mdkb but failed to start its daemon: {e}"))?;
+    drop(daemon);
+    refresh_launch_files();
 
     Ok(install_path.display().to_string())
 }
@@ -351,6 +392,8 @@ pub async fn uninstall_mdkb(state: State<'_, Arc<AppState>>) -> Result<(), Strin
 
     let mut daemon = state.mdkb_daemon.lock().await;
     *daemon = crate::mdkb_daemon::MdkbDaemon::new();
+    drop(daemon);
+    refresh_launch_files();
 
     Ok(())
 }
@@ -358,6 +401,28 @@ pub async fn uninstall_mdkb(state: State<'_, Arc<AppState>>) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_does_not_reuse_a_planted_install_path() {
+        // Catches the elevated installer adopting a directory controlled by another user.
+        let base = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let planted = base.path().join("mdkb-install");
+        std::fs::create_dir(&planted).unwrap();
+        let planted_binary = planted.join("mdkb-linux-x64");
+        std::fs::write(&planted_binary, b"attacker-controlled").unwrap();
+        let staged =
+            stage_mdkb_for_elevation(base.path(), "mdkb-linux-x64", b"downloaded").unwrap();
+        assert_ne!(
+            staged.path().parent().unwrap(),
+            planted,
+            "must not reuse a planted staging directory"
+        );
+        assert_eq!(std::fs::read(staged.path()).unwrap(), b"downloaded");
+        assert_eq!(
+            std::fs::read(&planted_binary).unwrap(),
+            b"attacker-controlled"
+        );
+    }
 
     fn symbol(name: &str, file: &str, line_start: u32) -> crate::mdkb_client::MdkbSymbol {
         crate::mdkb_client::MdkbSymbol {

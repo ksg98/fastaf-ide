@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { BranchState, RepositoryState } from "../../stores/repositories";
+import type { RepositoryState, WorkspaceState } from "../../stores/repositories";
 import { resolveRepoOwnerIn, unregisteredRepoRootFor } from "../../utils/repoOwnership";
 
 /**
@@ -12,9 +12,13 @@ import { resolveRepoOwnerIn, unregisteredRepoRootFor } from "../../utils/repoOwn
  * The cases below are the ones that actually differed between those seven copies.
  */
 
-function branch(name: string, worktreePath: string | null, isMain = false): BranchState {
+function branch(name: string, worktreePath: string | null, isMain = false): WorkspaceState {
 	return {
-		name,
+		// Branch-derived records key themselves by branch name, so the id is the name.
+		workspaceId: name,
+		branchName: name,
+		kind: isMain ? "main" : "worktree",
+		parentRepoPath: null,
 		isMain,
 		worktreePath,
 		terminals: [],
@@ -27,7 +31,7 @@ function branch(name: string, worktreePath: string | null, isMain = false): Bran
 	};
 }
 
-function repo(path: string, branches: BranchState[], activeBranch: string | null = null): RepositoryState {
+function repo(path: string, branches: WorkspaceState[], activeWorkspaceId: string | null = null): RepositoryState {
 	return {
 		path,
 		displayName: path.split("/").pop() ?? path,
@@ -35,8 +39,8 @@ function repo(path: string, branches: BranchState[], activeBranch: string | null
 		expanded: true,
 		collapsed: false,
 		parked: false,
-		branches: Object.fromEntries(branches.map((b) => [b.name, b])),
-		activeBranch,
+		workspaces: Object.fromEntries(branches.map((b) => [b.workspaceId, b])),
+		activeWorkspaceId,
 	};
 }
 
@@ -67,28 +71,28 @@ describe("resolveRepoOwnerIn", () => {
 	it("matches a repo root exactly", () => {
 		expect(resolveRepoOwnerIn(`${ROOT}/LS/veritas`, REPOS)).toEqual({
 			repoPath: `${ROOT}/LS/veritas`,
-			branchName: null,
+			workspaceId: null,
 		});
 	});
 
 	it("maps a nested cwd back to its repo root", () => {
 		expect(resolveRepoOwnerIn(`${ROOT}/LS/veritas/crates/parser`, REPOS)).toEqual({
 			repoPath: `${ROOT}/LS/veritas`,
-			branchName: null,
+			workspaceId: null,
 		});
 	});
 
-	// The repo root is reported as branchName null rather than as the main branch:
+	// The repo root is reported with a null workspaceId rather than as the main branch:
 	// whatever is checked out at the root moves under the user's feet, so the
 	// caller resolves it through activeBranch instead of freezing "master" here.
 	it("reports the repo root without claiming a branch", () => {
-		expect(resolveRepoOwnerIn(`${ROOT}/LS/agent2/src`, REPOS)?.branchName).toBeNull();
+		expect(resolveRepoOwnerIn(`${ROOT}/LS/agent2/src`, REPOS)?.workspaceId).toBeNull();
 	});
 
-	it("attributes a linked worktree to its branch, not just the repo", () => {
+	it("attributes a linked worktree to its workspace, not just the repo", () => {
 		expect(resolveRepoOwnerIn(`${ROOT}/LS/agent2__wt/refactor-inventory-dpkg-shadow/src`, REPOS)).toEqual({
 			repoPath: `${ROOT}/LS/agent2`,
-			branchName: "refactor-inventory-dpkg-shadow",
+			workspaceId: "refactor-inventory-dpkg-shadow",
 		});
 	});
 

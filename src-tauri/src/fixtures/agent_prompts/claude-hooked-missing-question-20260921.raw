@@ -1,0 +1,95 @@
+]7770;state=awaiting\[?2026h[2D[10B[2C[13A[38;2;220;129;97mSpelunking…[29G[38;2;153;153;153m3[39m
+
+
+
+
+
+
+
+
+
+
+
+
+[2C[10A[?2026l[?2026h[2D[10B[2C[13A[38;2;223;134;102mSpelunking…[39m
+
+
+
+
+
+
+
+
+
+
+
+
+[2C[10A[?2026l]0;✳ 131-7294 Edge/entity resolution falls back to declared identity after every path form[?2026h[2D[10B[14A[38;2;153;153;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────[1B← [48;2;177;185;249m[38;2;0;0;0m ☐ AGENTS.md [39m[49m ☐ Prosecuzione  ✔ Submit[43G→[2B[2m│[22m [38;2;255;255;255m[1mQualcosa ha riscritto la sezione Testing di AGENTS.md dopo il mio commit: da "Run the targets your change [22m[39m[K[1B[2m│[22m [38;2;255;255;255m[1mtouches" a "Select tests by behavioral impact, including unchanged consumers". Non sono stato io. Come [1B[22m[39m[2m│[22m [38;2;255;255;255m[1mprocedo?[22m[39m[K[2C[1B[K[1B[38;2;177;185;249m❯[3G[38;2;153;153;153m1.[39m [38;2;177;185;249mTengo la riscrittura, la committo (Recommended)[39m[K[2C[1B   [38;2;153;153;153mLa frase nuova è più precisa della mia: copre i co[57Gsumatori non modificati (es. un bump di [2C[1B[39m   [38;2;153;153;153mSCHEMA_VERSION). La committo e ti dico che non è farina mia.[2C[1B2.[39m Ripristino la mia versione[K[5C[1B[38;2;153;153;153mgit checkout AGENTS.md. Un hook che riscrive file versionati senza dirlo è di per sé un problema.[1B[39m  [38;2;153;153;153m3.[39m Fermati,[15Gvoglio[22Gvedere[29Gil[32Gdiff[37Gintero[1B     [38;2;153;153;153mNon tocco nien[21Ge e ti stampo [36Gutto il[44Gdiff prima di decidere.[39m[K
+[3G[38;2;153;153;153m4.[6GType[11Gsomething.[39m
+[38;2;153;153;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G5.[6GChat[11Gabout[17Gthis
+
+[38;2;153;153;153mEnter[7Gto[10Gselect[17G·[19GTab/Arrow[29Gkeys[34Gto[37Gnavigate[46G·[48GEsc[52Gto[55Gcancel[39m
+[12A[?2026l]7770;state=busy\]777;notify;Claude Code;Claude needs your permission]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\]7770;state=busy\(B[<u[>5u[>4;2m[?2026h[12B[H[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[2K[1B[H[38;2;153;153;153m [3G⎿[5G [39mCreated[14G[1m.mdkb/memory/entries/frontmatter-parse-failure-is-silent.md[74G[22m[38;2;153;153;153m(+12[79G-0)[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  1 +[38;2;248;248;242m---                                                                                                                                                                                                                        [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  2 +[38;2;248;248;242mid: frontmatter-parse-failure-is-silent                                                                                                                                                                                    [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  3 +[38;2;248;248;242mtitle: A YAML frontmatter parse failure is stored as null                                                                                                                                                                  [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  4 +[38;2;248;248;242mentry_type: problem                                                                                                                                                                                                        [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  5 +[38;2;248;248;242msource_type: user_statement                                                                                                                                                                                                [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  6 +[38;2;248;248;242mstatus: active                                                                                                                                                                                                             [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  7 +[38;2;248;248;242mtags: [frontmatter, silent-failure, yaml, graph, measured]                                                                                                                                                                 [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  8 +[38;2;248;248;242mcreated_at: 1789982046                                                                                                                                                                                                     [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m  9 +[38;2;248;248;242mupdated_at: 1789982046                                                                                                                                                                                                     [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m 10 +[38;2;248;248;242m---                                                                                                                                                                                                                        [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m 11 +[38;2;248;248;242m                                                                                                                                                                                                                           [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m 12 +[38;2;248;248;242mMeasured 2026-09-21 on brainstorming/work. Three documents carried an unquoted at-prefixed item inside a YAML flow sequence (aliases with @sstraus, @saikalur, @carlo-medas). At is a YAML reserved indicator at the start [49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m    +[38;2;248;248;242mof a plain scalar, so the parser refused the ENTIRE frontmatter block. mdkb wrote the JSON string 'null' into documents.metadata and reported nothing - mdkb update printed '330 indexed' with 0 errors. Consequence: those[49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m    +[38;2;248;248;242m documents lost id, type, org and projects; the v29 identity backfill found nothing to read; every edge pointing at them dangled. Those three names were exactly the three distinct unresolved targets behind all 25 remain[49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m    +[38;2;248;248;242ming lines of graph dangling. Quoting the aliases and running mdkb update --force took dangling from 25 to 1. Falsifier run before writing this: yaml.safe_load('aliases: [Boss, x@y.it, @sstraus]') raises ScannerError and[49m[39m
+[6G[38;2;80;200;80m[48;2;2;40;0m    +[38;2;248;248;242m the quoted form parses, so the parse error exists and is being discarded, not absent. Detection query for any store: SELECT relative_path FROM documents WHERE metadata='null'. Filed as a P1 in the mdkb story queue.    [49m[39m
+
+[38;2;78;186;101m⏺[3G[39m[1mBash[22m(cd[11G/Users/stefano.straus/Gits/personal/mdkb;[53Ggit[57Gstatus[64G--short[72G|[74Ghead[79G-10)
+[38;2;153;153;153m [3G⎿[5G [7G[39mM[9GAGENTS.md
+[6G??[9G.mdkb/memory/entries/cargo-target-dir-leak-stale-binary.md
+[6G??[9G.mdkb/memory/entries/frontmatter-parse-failure-is-silent.md
+[6G??[9G.mdkb/memory/entries/test-leaked-tempdir-into-repos-json.md
+
+[38;2;78;186;101m⏺[3G[39m[1mBash[22m(cd[11G/Users/stefano.straus/Gits/personal/mdkb;[53Ggit[57Gdiff[62GAGENTS.md[72G|[74Ghead[79G-20)
+[38;2;153;153;153m [3G⎿[5G [39mAGENTS.md[16G|[18G6[20G+++---
+[7G1[9Gfile[14Gchanged,[23G3[25Ginsertions(+),[40G3[42Gdeletions(-)
+[6G[2m…[8G+17[12Glines[18G(ctrl+o[26Gto[29Gexpand)[22m
+
+[38;2;255;255;255m⏺[3G[39m[1mTre[7Gstorie[14Gchiuse.[22G[22mRiepilogo[32Gdi[35Gquello[42Gche[46Gè[48Gsuccesso:
+
+[3G┌──────────────────────────────────────────────┬────────┬────────────────────────────────────────────────────────────────────┐
+[3G│[24Gstoria[50G│[52Gesito[59G│[91Gprova[128G│
+[3G├──────────────────────────────────────────────┼────────┼────────────────────────────────────────────────────────────────────┤
+[3G│[5G129[9Gschema[16Gv29[20G[38;2;177;185;249mdocument_aliases[50G[39m│[52Gchiusa[59G│[61G51[64Gtest[69G[38;2;177;185;249mstore::schema[39m,[84Gbackfill[93GSQL[97Gpuro[102Gdal[106G[38;2;177;185;249mmetadata[115G[39mgià[119Gin[122Gstore[128G│
+[3G├──────────────────────────────────────────────┼────────┼────────────────────────────────────────────────────────────────────┤
+[3G│[5G130[9Gidentità[18Gscritte[26Ge[28Grimpiazzate[40Gall'index[50G│[52Gchiusa[59G│[61G6[63Gtest[68G[38;2;177;185;249mgraph_identity[39m,[84G[38;2;177;185;249mgraph.identity_keys[104G[39mconfigurabile[128G│
+[3G├──────────────────────────────────────────────┼────────┼────────────────────────────────────────────────────────────────────┤
+[3G│[5G131[9Grisoluzione[21Gper[25Gidentità[34Gdichiarata[50G│[52Gchiusa[59G│[61G23[64Gtest[69G[38;2;177;185;249mstore::graph[82G[39m(erano[89G17)[93G+[95G[1mcorpus:[103Gdangling[112G182[116G→[118G1[128G[22m│
+[3G└──────────────────────────────────────────────┴────────┴────────────────────────────────────────────────────────────────────┘
+
+[3GSul[7Gcorpus[14Greale[20G[38;2;177;185;249mbrainstorming/work[39G[39mil[42Gpiano[48Gprevedeva[58G182[62G→[64G1[66Ged[69Gè[71Gesattamente[83Gquello[90Gche[94Gè[96Guscito,[104Gma[107G[1mnon[111Gsolo[116Gper[120Gil[123Gcodice[22m.[131GLe[134Gultime[141G25[144Grighe[150Gerano[156Gtre[160Gfile[165Gcon[169G[38;2;177;185;249maliases:[178G[@sstraus][39m:[190G[38;2;177;185;249m@[192G[39mè[194Gun[197Gindicatore[208Griservato[218GYAML,[224Gil[227Gblocco
+[3Gfrontmatter[15Gintero[22Gveniva[29Grifiutato[39Ge[41G[1mmdkb[46Gscriveva[55G[38;2;177;185;249mmetadata[64G=[66G'null'[39m senza[79Gdire[84Gniente[91G[22m—[93G[38;2;177;185;249mupdate[100G[39mstampava[109G"330[114Gindexed,[123G0[125Gerrors".[134GHo[137Gmesso[143Gle[146Gvirgolette[157Gnei[161Gtre[165Gfile[170Ge[172Gho[175Gaperto[182Guna[186Gstoria[193GP1[196Gper[200Gil[203Gsilenzio[212Gdi[215Gmdkb,[221Gche[225Gè[227Gil[230Gdifetto
+[3Gvero.
+
+[3GDue[7Gcose[12Gda[15Gdecidere[24Gtu:
+[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[38;2;153;153;153m←[3G[48;2;177;185;249m[38;2;0;0;0m ☐ AGENTS.md [17G[39m[49m☐[19GProsecuzione[33G✔[35GSubmit[43G→
+
+[2m│[3G[22m[38;2;255;255;255m[1mQualcosa[12Gha[15Griscritto[25Gla[28Gsezione[36GTesting[44Gdi[47GAGENTS.md[57Gdopo[62Gil[65Gmio[69Gcommit:[77Gda[80G"Run[85Gthe[89Gtargets[97Gyour[102Gchange[109Gtouches"[118Ga[120G"Select[128Gtests[134Gby[137Gbehavioral[148Gimpact,[156Gincluding[166Gunchanged[176Gconsumers".[188GNon[192Gsono[197Gstato[203Gio.[207GCome[212Gprocedo?[22m[39m
+
+[38;2;177;185;249m❯[3G[38;2;153;153;153m1.[6G[38;2;177;185;249mTengo[12Gla[15Griscrittura,[28Gla[31Gcommitto[40G(Recommended)[39m
+[6G[38;2;153;153;153mLa[9Gfrase[15Gnuova[21Gè[23Gpiù[27Gprecisa[35Gdella[41Gmia:[46Gcopre[52Gi[54Gconsumatori[66Gnon[70Gmodificati[81G(es.[86Gun[89Gbump[94Gdi[97GSCHEMA_VERSION).[114GLa[117Gcommitto[126Ge[128Gti[131Gdico[136Gche[140Gnon[144Gè[146Gfarina[153Gmia.[39m
+[3G[38;2;153;153;153m2.[6G[39mRipristino[17Gla[20Gmia[24Gversione
+[6G[38;2;153;153;153mgit[10Gcheckout[19GAGENTS.md.[30GUn[33Ghook[38Gche[42Griscrive[51Gfile[56Gversionati[67Gsenza[73Gdirlo[79Gè[81Gdi[84Gper[88Gsé[91Gun[94Gproblema.[39m
+[3G[38;2;153;153;153m3.[6G[39mFermati,[15Gvoglio[22Gvedere[29Gil[32Gdiff[37Gintero
+[6G[38;2;153;153;153mNon[10Gtocco[16Gniente[23Ge[25Gti[28Gstampo[35Gtutto[41Gil[44Gdiff[49Gprima[55Gdi[58Gdecidere.[39m
+[3G[38;2;153;153;153m4.[6GType[11Gsomething.[39m
+[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G5.[6GChat[11Gabout[17Gthis
+
+[38;2;153;153;153mEnter[7Gto[10Gselect[17G·[19GTab/Arrow[29Gkeys[34Gto[37Gnavigate[46G·[48GEsc[52Gto[55Gcancel[39m
+[11A[?2026l(B[<u[>5u[>4;2m

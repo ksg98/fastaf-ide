@@ -15,6 +15,8 @@ import {
 import { createStore, produce } from "solid-js/store";
 import type { ContentSearchOptions } from "../../hooks/useFileBrowser";
 import { useFileBrowser } from "../../hooks/useFileBrowser";
+import { onFolderDropComplete } from "../../hooks/useFileDrop";
+import { initMouseDrag, isHoldPointer } from "../../hooks/useMouseDrag";
 import { useSmartPrompts } from "../../hooks/useSmartPrompts";
 import { t } from "../../i18n";
 import { invoke, listen } from "../../invoke";
@@ -23,13 +25,22 @@ import { appLogger } from "../../stores/appLogger";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { markInternalDragEnd, markInternalDragStart, startNativeDrag } from "../../stores/dragDrop";
 import { editorTabsStore } from "../../stores/editorTabs";
+import { mdTabsStore } from "../../stores/mdTabs";
 import { repositoriesStore } from "../../stores/repositories";
 import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
 import type { ContentMatch, DeleteResult, DirEntry, PasteResult } from "../../types/fs";
 import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
-import { isAbsolutePath, joinPath, pathBasename, pathDirname, replaceBasename } from "../../utils/pathUtils";
+import { openLocalPath } from "../../utils/openUrl";
+import {
+	isAbsolutePath,
+	joinPath,
+	pathBasename,
+	pathDirname,
+	pathStartsWith,
+	replaceBasename,
+} from "../../utils/pathUtils";
 import { fileContextSmartMenuItem } from "../../utils/promptContext";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
@@ -61,7 +72,7 @@ import s from "./FileBrowserPanel.module.css";
 import { FileIcon } from "./FileIcon";
 import { fileTooltip, getStatusClass, matchPreview, statusLabel } from "./fileUtils";
 import { TreeNode } from "./TreeNode";
-import { revalidateTreeCache } from "./treeRevalidate";
+import { entriesEqual, revalidateTreeCache } from "./treeRevalidate";
 
 export interface FileBrowserPanelProps {
 	visible: boolean;
@@ -104,12 +115,32 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	 */
 	const root = () => uiStore.state.fileBrowserExternalRoot || props.fsRoot || props.repoPath;
 
-	/** Relative path of the file shown in the active editor OR diff tab, when it
-	 * lives under the root this browser shows — for highlighting it in the tree
-	 * like VS Code. Editor-first: opening a diff clears the editor's active id, so
-	 * editor-first precedence resolves the visible tab correctly. Null otherwise. */
+	// The external folder belongs to the repository it was opened from: picking
+	// another repository or worktree returns the browser to it.
+	createEffect(
+		on(
+			() => [props.repoPath, props.fsRoot],
+			() => uiStore.setFileBrowserExternalRoot(null),
+			{ defer: true },
+		),
+	);
+
+	/** The active markdown-panel tab when a file on disk backs it — a markdown tab
+	 * or an HTML preview. The other md types (virtual, plugin panels, dashboards,
+	 * pr-diff) carry no path to highlight. */
+	const activeMdFileTab = () => {
+		const tab = mdTabsStore.getActive();
+		return tab && (tab.type === "file" || tab.type === "html-preview") ? tab : null;
+	};
+
+	/** Relative path of the file shown in the active editor, diff, markdown or
+	 * HTML-preview tab, when it lives under the root this browser shows — for
+	 * highlighting it in the tree like VS Code. Editor-first: opening a diff clears
+	 * the editor's active id, so editor-first precedence resolves the visible tab
+	 * correctly, and the markdown panel is the same fallback the Toolbar uses for
+	 * `focusedFilePath`. Null otherwise. */
 	const activeFilePath = createMemo(() => {
-		const tab = editorTabsStore.getActive() ?? diffTabsStore.getActive();
+		const tab = editorTabsStore.getActive() ?? diffTabsStore.getActive() ?? activeMdFileTab();
 		if (!tab) return null;
 		const r = root();
 		const tabFsRoot = "fsRoot" in tab ? tab.fsRoot : tab.repoPath;
@@ -402,7 +433,9 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 							e.path !== c.path ||
 							e.git_status !== c.git_status ||
 							e.modified_at !== c.modified_at ||
-							e.is_ignored !== c.is_ignored
+							e.is_ignored !== c.is_ignored ||
+							e.symlink_target !== c.symlink_target ||
+							e.symlink_target_kind !== c.symlink_target_kind
 						);
 					});
 				if (changed) {
@@ -438,48 +471,85 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		})();
 	});
 
-	// Directory watcher lifecycle: start/stop watcher as directory or visibility changes
-	createEffect(() => {
-		if (!props.visible || !root()) return;
-
-		const fsRoot = root()!;
-		const subdir = currentSubdir();
-		// Don't watch during search (search is recursive, watcher is not)
-		if (searchQuery().trim()) return;
-
-		const absPath = subdir === "." || subdir === "" ? fsRoot : `${fsRoot}/${subdir}`;
-
-		invoke("start_dir_watcher", { path: absPath }).catch((err) => {
-			appLogger.warn("app", `Dir watcher failed for ${absPath}: ${err}`);
-		});
-
-		// Listen for dir-changed events matching this path. Tree-cache invalidation
-		// is NOT done here: `dir_path` is absolute while treeCache is keyed by
-		// repo-relative paths, and this watcher is non-recursive so it never sees
-		// writes into expanded subfolders anyway. The revalidation effect below
-		// handles the tree off this revision bump.
-		const unlisten = listen<{ dir_path: string }>("dir-changed", (event) => {
-			if (event.payload.dir_path === absPath) {
-				setDirRevision((n) => n + 1);
-				// Invalidate only the changed directory in tree cache. The payload path is
-				// absolute; tree cache keys are repo-relative, and `subdir` is exactly the
-				// relative form of the watched `absPath` — deleting the absolute path never
-				// matched a key, so the subtree stayed stale forever.
-				setTreeCache((prev) => {
-					if (!prev.has(subdir)) return prev;
-					const next = new Map(prev);
-					next.delete(subdir);
-					return next;
-				});
-			}
-		});
-
-		onCleanup(() => {
-			invoke("stop_dir_watcher", { path: absPath }).catch((err) => {
-				appLogger.warn("app", `Failed to stop dir watcher for ${absPath}`, err);
+	// A nonrecursive watch must cover every directory whose children are visible,
+	// not just the flat listing. Keep unchanged watches when another node expands.
+	const watchedDirs = new Map<string, string>();
+	// Re-list a cached directory in place and swap its children in only when they
+	// changed. Dropping the key instead (TreeNode then re-fetches) would blank an
+	// expanded folder and flash its spinner on every watcher tick.
+	const relistGeneration = new Map<string, number>();
+	const invalidateDirectory = (subdir: string) => {
+		const fsRoot = root();
+		if (!fsRoot || !untrack(treeCache).has(subdir)) return;
+		const gen = (relistGeneration.get(subdir) ?? 0) + 1;
+		relistGeneration.set(subdir, gen);
+		const settle = (children: DirEntry[] | null) => {
+			if (relistGeneration.get(subdir) !== gen || root() !== fsRoot) return;
+			setTreeCache((prev) => {
+				const current = prev.get(subdir);
+				if (!current || (children && entriesEqual(current, children))) return prev;
+				const next = new Map(prev);
+				if (children) next.set(subdir, children);
+				else next.delete(subdir); // gone or unreadable: TreeNode re-fetches if it reappears
+				return next;
 			});
-			unlisten.then((fn) => fn());
+		};
+		fb.listDirectory(fsRoot, subdir).then(settle, () => settle(null));
+	};
+	const stopDirectoryWatch = (path: string) => {
+		invoke("stop_dir_watcher", { path }).catch((err) => {
+			appLogger.warn("app", `Failed to stop dir watcher for ${path}`, err);
 		});
+	};
+	createEffect(() => {
+		if (!props.visible || !root() || searchQuery().trim()) return;
+		const unlisten = listen<{ dir_path: string }>("dir-changed", (event) => {
+			const subdir = watchedDirs.get(event.payload.dir_path);
+			if (subdir === undefined) return;
+			if (subdir === currentSubdir()) setDirRevision((n) => n + 1);
+			invalidateDirectory(subdir);
+		});
+		onCleanup(() => unlisten.then((fn) => fn()));
+	});
+
+	createEffect(() => {
+		const desired = new Map<string, string>();
+		const fsRoot = root();
+		if (props.visible && fsRoot && !searchQuery().trim()) {
+			const subdir = currentSubdir();
+			desired.set(subdir === "." || subdir === "" ? fsRoot : joinPath(fsRoot, subdir), subdir);
+			if (viewMode() === "tree") {
+				const expanded = expandedDirs();
+				const cache = treeCache();
+				const visit = (children: DirEntry[]) => {
+					for (const entry of children) {
+						if (!entry.is_dir || !expanded.has(entry.path)) continue;
+						desired.set(joinPath(fsRoot, entry.path), entry.path);
+						visit(cache.get(entry.path) ?? []);
+					}
+				};
+				visit(entries());
+			}
+		}
+		for (const path of watchedDirs.keys()) {
+			if (desired.has(path)) continue;
+			watchedDirs.delete(path);
+			stopDirectoryWatch(path);
+		}
+		for (const [path, subdir] of desired) {
+			if (watchedDirs.has(path)) continue;
+			watchedDirs.set(path, subdir);
+			// A collapsed or hidden directory may have changed while unwatched.
+			invalidateDirectory(subdir);
+			invoke("start_dir_watcher", { path }).catch((err) => {
+				appLogger.warn("app", `Dir watcher failed for ${path}: ${err}`);
+			});
+		}
+	});
+
+	onCleanup(() => {
+		for (const path of watchedDirs.keys()) stopDirectoryWatch(path);
+		watchedDirs.clear();
 	});
 
 	// Tree-cache revalidation. TreeNode fetches a folder's children once, on first
@@ -635,7 +705,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		const raw = searchQuery().trim() ? searchResults() : entries();
 		if (sortBy() === "name") return raw; // already sorted by name from Rust
 		// Sort by date: dirs first, then newest first
-		return [...raw].sort((a, b) => (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || b.modified_at - a.modified_at);
+		return raw.toSorted((a, b) => (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || b.modified_at - a.modified_at);
 	});
 
 	/**
@@ -737,6 +807,19 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	// search, search mode or view drops it, so a copy never picks up rows that
 	// are no longer on screen.
 	createEffect(on([root, currentSubdir, searchQuery, searchMode, viewMode], clearSelection, { defer: true }));
+
+	onCleanup(
+		onFolderDropComplete((request) => {
+			const fsRoot = root();
+			if (!fsRoot || request.connectionId !== repositoriesStore.getConnectionId(props.repoPath ?? "")) return;
+			if (
+				pathStartsWith(request.destDir, fsRoot) ||
+				(request.mode === "move" && request.paths.some((path) => pathStartsWith(path, fsRoot)))
+			) {
+				refresh();
+			}
+		}),
+	);
 
 	const navigateInto = (entry: DirEntry) => {
 		changeSubdir(entry.path);
@@ -1201,7 +1284,45 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		_ptrGhost.style.top = `${y - 8}px`;
 	};
 
+	// Touch and pen: a swipe is a scroll, never a file move (the move is irreversible).
+	// initMouseDrag arms the drag only after a hold and bails out on movement before that.
+	const handleHoldDragStart = (absPath: string, e: PointerEvent) => {
+		// The hold arms the drag without movement: a release in place or finger jitter
+		// (the context-menu gesture) must not drop the file on the folder under the
+		// finger, so a drop needs displacement beyond the touch slop and a pointer off
+		// the source row (whose nearest folder is the panel root).
+		const sourceRow = e.currentTarget as HTMLElement;
+		const slop = 10;
+		let moved = false;
+		const end = () => {
+			markInternalDragEnd();
+			ptrCleanup();
+			_ptrSrc = null;
+		};
+		initMouseDrag(e, e.currentTarget as HTMLElement, {
+			onStart: () => {
+				markInternalDragStart();
+				_ptrSrc = absPath;
+			},
+			onMove: (x, y) => {
+				if (Math.abs(x - e.clientX) + Math.abs(y - e.clientY) > slop) moved = true;
+				ptrHighlight(x, y);
+			},
+			onDrop: (x, y) => {
+				const target = moved && !sourceRow.contains(document.elementFromPoint(x, y)) ? findDropFolder(x, y) : null;
+				end();
+				if (target?.dataset.absPath) performFileMove(absPath, target.dataset.absPath);
+				_ptrSuppressClick = true;
+				requestAnimationFrame(() => {
+					_ptrSuppressClick = false;
+				});
+			},
+			onCancel: end,
+		});
+	};
+
 	const handlePointerDragStart = (absPath: string, e: PointerEvent) => {
+		if (isHoldPointer(e)) return handleHoldDragStart(absPath, e);
 		if (e.button !== 0) return;
 		// Must mark before drag threshold — Tauri's onDragDropEvent fires on any pointer
 		// hold, and without this flag the OS drop handler in dragDrop.ts would treat an
@@ -1430,10 +1551,8 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				action: () => {
 					const r = root();
 					if (!r) return;
-					import("@tauri-apps/plugin-opener").then(({ openPath }) => {
-						const abs = isAbsolutePath(entry.path) ? entry.path : joinPath(r, entry.path);
-						openPath(abs).catch((err) => appLogger.error("app", "Failed to open file with default app", err));
-					});
+					const abs = isAbsolutePath(entry.path) ? entry.path : joinPath(r, entry.path);
+					openLocalPath(abs);
 				},
 				separator: true,
 			});
@@ -1738,8 +1857,20 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				}}
 				onContextMenu={(e) => handleContextMenu(e, row.entry)}
 			>
-				<FileIcon name={row.entry.name} isDir={row.entry.is_dir} class={s.entryIcon} />
-				<span class={s.entryName}>{row.entry.name}</span>
+				<FileIcon
+					name={row.entry.name}
+					isDir={row.entry.is_dir}
+					isLink={row.entry.symlink_target_kind !== undefined}
+					class={s.entryIcon}
+				/>
+				<span class={s.entryName}>
+					{row.entry.name}
+					<Show when={row.entry.symlink_target_kind}>
+						<span class={s.entryLink}>
+							{row.entry.symlink_target_kind} link → {row.entry.symlink_target ?? "Target unavailable"}
+						</span>
+					</Show>
+				</span>
 				<Show when={dir()}>
 					<span class={s.entryDir}>{dir()}</span>
 				</Show>
@@ -1775,6 +1906,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			tabIndex={-1}
 			data-drop-target={panelDropDir() ? "folder" : undefined}
 			data-abs-path={panelDropDir()}
+			data-drop-connection-id={repositoriesStore.getConnectionId(props.repoPath ?? "")}
 			onPointerDown={() => setKeyboardCursor(false)}
 		>
 			<Show when={mode() === "inline"}>
@@ -1836,6 +1968,26 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 					<PanelWindowControls panelId="file-browser" mode={mode()} onInlineClose={props.onClose} />
 				</div>
 			</div>
+
+			{/* Browsing a folder outside the repository ("Open Folder…"): say where, and the way back */}
+			<Show when={uiStore.state.fileBrowserExternalRoot}>
+				{(externalRoot) => (
+					<div class={s.externalRoot} data-testid="external-root-banner">
+						<IconFolder size={14} class={s.externalRootIcon} />
+						<span class={s.externalRootPath} title={externalRoot()}>
+							{externalRoot()}
+						</span>
+						<button
+							type="button"
+							class={s.externalRootBack}
+							title={t("fileBrowser.backToRepo", "Back to the active repository")}
+							onClick={() => uiStore.setFileBrowserExternalRoot(null)}
+						>
+							{t("fileBrowser.backToRepoLabel", "Back to repository")}
+						</button>
+					</div>
+				)}
+			</Show>
 
 			{/* Search: filename (glob) or content, with the content options inside the field */}
 			<div class={s.searchBar}>

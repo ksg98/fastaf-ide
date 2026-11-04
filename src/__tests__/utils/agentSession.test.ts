@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../../agents";
-import { buildAgentLaunchCommand, buildResumeCommand, verifyAndBuildResumeCommand } from "../../utils/agentSession";
+import {
+	buildAgentLaunchCommand,
+	prepareAgentLaunchCommand,
+	verifyAndBuildResumeCommand,
+} from "../../utils/agentSession";
 
 const { mockAgentConfigsStore } = vi.hoisted(() => ({
 	mockAgentConfigsStore: {
@@ -11,6 +15,11 @@ const { mockAgentConfigsStore } = vi.hoisted(() => ({
 
 vi.mock("../../stores/agentConfigs", () => ({
 	agentConfigsStore: mockAgentConfigsStore,
+	// Every machine answers with the same stub here: which machine is chosen is
+	// asserted in remoteRepoRouting.test.ts, against the URL that leaves the
+	// process. These cases are about the command string the run config produces.
+	agentConfigsForRepo: () => mockAgentConfigsStore,
+	ensureAgentConfigsForRepo: () => Promise.resolve(mockAgentConfigsStore),
 }));
 
 // Mock rpc for verifyAndBuildResumeCommand tests
@@ -20,6 +29,10 @@ vi.mock("../../transport", () => ({
 }));
 
 describe("buildAgentLaunchCommand", () => {
+	it("leaves screen policy to the Rust launch-args builder", () => {
+		expect(buildAgentLaunchCommand("codex", null, "codex")).toBe("codex");
+		expect(buildAgentLaunchCommand("opencode run", null, "opencode")).toBe("opencode run");
+	});
 	it("injects --session-id for claude when UUID provided", () => {
 		expect(buildAgentLaunchCommand("claude", "abc-123")).toBe("claude --session-id abc-123");
 	});
@@ -53,70 +66,46 @@ describe("buildAgentLaunchCommand", () => {
 	});
 });
 
-describe("buildResumeCommand", () => {
-	it("returns --resume <uuid> for claude with UUID (bypass-permission mode)", () => {
-		expect(buildResumeCommand("claude", "abc-123")).toBe("claude --resume abc-123 --dangerously-skip-permissions");
+describe("prepareAgentLaunchCommand", () => {
+	beforeEach(() => mockRpc.mockReset());
+
+	it("uses Rust's decision for a supported interactive launch", async () => {
+		mockRpc.mockResolvedValueOnce(["--no-alt-screen", "resume"]);
+		expect(await prepareAgentLaunchCommand("codex resume", null, "codex")).toBe("codex --no-alt-screen resume");
+		expect(mockRpc).toHaveBeenCalledWith("prepare_agent_launch_args", {
+			agentType: "codex",
+			binaryPath: "codex",
+			args: ["resume"],
+			repoPath: undefined,
+		});
 	});
 
-	it("falls back to --continue for claude without UUID (bypass-permission mode)", () => {
-		expect(buildResumeCommand("claude", null)).toBe("claude --continue --dangerously-skip-permissions");
+	it("preserves non-interactive subcommands and excludes other agents", async () => {
+		mockRpc.mockResolvedValueOnce(["run"]).mockResolvedValueOnce(["exec"]).mockResolvedValueOnce([]);
+		expect(await prepareAgentLaunchCommand("opencode run", null, "opencode")).toBe("opencode run");
+		expect(await prepareAgentLaunchCommand("codex exec", null, "codex")).toBe("codex exec");
+		expect(await prepareAgentLaunchCommand("gemini", null, "gemini")).toBe("gemini");
 	});
 
-	it("falls back to --continue for claude with undefined UUID (bypass-permission mode)", () => {
-		expect(buildResumeCommand("claude")).toBe("claude --continue --dangerously-skip-permissions");
-	});
-
-	it("returns id-based resume for gemini with UUID", () => {
-		expect(buildResumeCommand("gemini", "abc-123")).toBe("gemini --resume abc-123");
-	});
-
-	it("falls back to static resume for gemini without UUID", () => {
-		expect(buildResumeCommand("gemini", null)).toBe("gemini --resume");
-	});
-
-	it("returns id-based resume for codex with UUID", () => {
-		expect(buildResumeCommand("codex", "abc-123")).toBe("codex resume abc-123");
-	});
-
-	it("falls back to static resume for codex without UUID", () => {
-		expect(buildResumeCommand("codex", null)).toBe("codex resume --last");
-	});
-
-	it("returns static resume for aider (no session discovery)", () => {
-		expect(buildResumeCommand("aider", null)).toBe("aider --restore-chat-history");
-	});
-
-	it("returns static resume for amp", () => {
-		expect(buildResumeCommand("amp", null)).toBe("amp threads continue");
-	});
-
-	it("returns null for agents without resume support", () => {
-		expect(buildResumeCommand("droid", null)).toBeNull();
-		expect(buildResumeCommand("git", null)).toBeNull();
-	});
-
-	it("uses launchCommand binary instead of default when provided (flag not duplicated)", () => {
-		// c is an alias for claude with custom flags; resume must use c, not claude.
-		// The launch command already has --dangerously-skip-permissions, and the
-		// resume default now adds it too — dedup keeps a single occurrence.
-		expect(buildResumeCommand("claude", "abc-123", "c --dangerously-skip-permissions")).toBe(
-			"c --resume abc-123 --dangerously-skip-permissions",
+	it("preserves an inline environment assignment while Rust chooses the screen flag", async () => {
+		mockRpc.mockResolvedValueOnce(["--no-alt-screen"]).mockResolvedValueOnce(["--no-alt-screen"]);
+		expect(await prepareAgentLaunchCommand("PROFILE=work codex", null, "codex")).toBe(
+			"PROFILE=work codex --no-alt-screen",
 		);
-	});
-
-	it("uses plain launchCommand binary when no extra args (adds bypass flag)", () => {
-		expect(buildResumeCommand("claude", "abc-123", "c")).toBe("c --resume abc-123 --dangerously-skip-permissions");
-	});
-
-	it("falls back to default when launchCommand is null (bypass-permission mode)", () => {
-		expect(buildResumeCommand("claude", "abc-123", null)).toBe(
-			"claude --resume abc-123 --dangerously-skip-permissions",
+		expect(await prepareAgentLaunchCommand("PROFILE='work' codex", null, "codex")).toBe(
+			"PROFILE='work' codex --no-alt-screen",
 		);
+		expect(mockRpc).toHaveBeenCalledWith("prepare_agent_launch_args", {
+			agentType: "codex",
+			binaryPath: "codex",
+			args: [],
+			repoPath: undefined,
+		});
 	});
 });
 
 describe("sessionDiscovery in AgentConfig", () => {
-	it("claude has sessionDiscovery with resumeWithId", () => {
+	it("claude has sessionDiscovery with resumeWithId (FastAF: bypass-permission mode)", () => {
 		const disc = AGENTS.claude.sessionDiscovery;
 		expect(disc).not.toBeNull();
 		expect(disc?.resumeWithId("test-uuid")).toBe("claude --resume test-uuid --dangerously-skip-permissions");
@@ -134,10 +123,6 @@ describe("sessionDiscovery in AgentConfig", () => {
 		expect(disc?.resumeWithId("test-uuid")).toBe("codex resume test-uuid");
 	});
 
-	it("aider has null sessionDiscovery (no session IDs)", () => {
-		expect(AGENTS.aider.sessionDiscovery).toBeNull();
-	});
-
 	it("amp has null sessionDiscovery (cloud-only)", () => {
 		expect(AGENTS.amp.sessionDiscovery).toBeNull();
 	});
@@ -148,99 +133,28 @@ describe("sessionDiscovery in AgentConfig", () => {
 });
 
 describe("verifyAndBuildResumeCommand", () => {
-	beforeEach(() => {
-		mockRpc.mockReset();
-		mockAgentConfigsStore.getDefaultConfig.mockReset().mockReturnValue(undefined);
-		mockAgentConfigsStore.getRunConfigs.mockReset().mockReturnValue([]);
-	});
-
-	it("uses agentSessionId (not tuicSession) for claude verification", async () => {
-		mockRpc.mockResolvedValueOnce(true);
-		const result = await verifyAndBuildResumeCommand("claude", "/tmp/repo", "tuic-uuid-1", "discovered-session-id");
-		expect(mockRpc).toHaveBeenCalledWith("verify_agent_session", {
-			agentType: "claude",
-			sessionId: "discovered-session-id",
-			cwd: "/tmp/repo",
-			agentPid: null,
-			envOverrides: {},
+	beforeEach(() => mockRpc.mockReset());
+	// Catches: client substitution of TUIC identity for the discovered agent id.
+	it("passes the exact resume context to Rust and returns its command", async () => {
+		mockRpc.mockResolvedValue({ cmd: "CLAUDE_CONFIG_DIR=private claude --resume exact", verified: true });
+		expect(await verifyAndBuildResumeCommand("claude", "/repo", "peer", "exact", "private claude")).toBe(
+			"CLAUDE_CONFIG_DIR=private claude --resume exact",
+		);
+		expect(mockRpc).toHaveBeenCalledWith("suspended_session_action", {
+			cwd: "/repo",
+			request: {
+				action: "resolve_resume",
+				agentType: "claude",
+				cwd: "/repo",
+				tuicSession: "peer",
+				agentSessionId: "exact",
+				launchCommand: "private claude",
+			},
 		});
-		expect(result).toBe("claude --resume discovered-session-id --dangerously-skip-permissions");
 	});
-
-	it("returns null when claude agentSessionId not verified (session gone)", async () => {
-		mockRpc.mockResolvedValueOnce(false);
-		const result = await verifyAndBuildResumeCommand("claude", "/tmp/repo", "tuic-uuid-1", "stale-session");
-		expect(result).toBeNull();
-	});
-
-	it("returns null when claude has no agentSessionId", async () => {
-		const result = await verifyAndBuildResumeCommand("claude", "/tmp/repo", "tuic-uuid-1", null);
-		expect(mockRpc).not.toHaveBeenCalled();
-		expect(result).toBe("claude --continue --dangerously-skip-permissions");
-	});
-
-	it("falls back gracefully when rpc throws (browser mode)", async () => {
-		mockRpc.mockRejectedValueOnce(new Error("browser unsupported"));
-		const result = await verifyAndBuildResumeCommand("claude", "/tmp/repo", "tuic-uuid-1", "old-session-id");
-		expect(result).toBe("claude --resume old-session-id --dangerously-skip-permissions");
-	});
-
-	it("uses agentSessionId directly when cwd is null (no verification)", async () => {
-		const result = await verifyAndBuildResumeCommand("claude", null, "tuic-uuid-1", "old-session-id");
-		expect(mockRpc).not.toHaveBeenCalled();
-		expect(result).toBe("claude --resume old-session-id --dangerously-skip-permissions");
-	});
-
-	it("skips verification for agents without sessionDiscovery", async () => {
-		const result = await verifyAndBuildResumeCommand("aider", "/tmp/repo", "tuic-uuid-1", null);
-		expect(mockRpc).not.toHaveBeenCalled();
-		expect(result).toBe("aider --restore-chat-history");
-	});
-
-	it("returns null for agents without resume support", async () => {
-		const result = await verifyAndBuildResumeCommand("droid", "/tmp/repo", "tuic-uuid-1", null);
-		expect(result).toBeNull();
-	});
-
-	it("verifies gemini agentSessionId instead of tuicSession", async () => {
-		mockRpc.mockResolvedValueOnce(true);
-		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "tuic-uuid-1", "discovered-gemini-id");
-		expect(mockRpc).toHaveBeenCalledWith("verify_agent_session", {
-			agentType: "gemini",
-			sessionId: "discovered-gemini-id",
-			cwd: "/tmp/repo",
-			agentPid: null,
-			envOverrides: {},
-		});
-		expect(result).toBe("gemini --resume discovered-gemini-id");
-	});
-
-	it("does not verify a stale Gemini tuicSession when discovery has no agentSessionId", async () => {
-		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "stale-tuic-uuid", null);
-
-		expect(mockRpc).not.toHaveBeenCalled();
-		expect(result).toBe("gemini --resume");
-	});
-
-	it("preserves persisted Gemini launch args while resuming the discovered ID", async () => {
-		mockAgentConfigsStore.getDefaultConfig.mockReturnValue({
-			name: "Gemini current",
-			command: "gemini",
-			args: ["--model", "current-model"],
-			env: { HOME: "/tmp/gemini-current-home" },
-			is_default: true,
-		});
-		mockRpc.mockResolvedValueOnce(true);
-
-		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "stale-tuic-uuid", "discovered-gemini-id");
-
-		expect(mockRpc).toHaveBeenCalledWith("verify_agent_session", {
-			agentType: "gemini",
-			sessionId: "discovered-gemini-id",
-			cwd: "/tmp/repo",
-			agentPid: null,
-			envOverrides: { HOME: "/tmp/gemini-current-home" },
-		});
-		expect(result).toBe("gemini --resume discovered-gemini-id --model current-model");
+	// Catches: frontend rebuilding a command for an agent Rust could not verify.
+	it("keeps the Rust refusal instead of choosing a local fallback", async () => {
+		mockRpc.mockResolvedValue({ cmd: null, verified: false });
+		expect(await verifyAndBuildResumeCommand("claude", "/repo", "peer", "gone")).toBeNull();
 	});
 });

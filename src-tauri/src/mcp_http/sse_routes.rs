@@ -11,6 +11,24 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::state::AppEvent;
 
+struct SseClientGuard(Arc<AppState>);
+
+impl SseClientGuard {
+    fn new(state: Arc<AppState>) -> Self {
+        state.sse_client_count.fetch_add(1, Ordering::Relaxed);
+        state
+            .remote_client_generation
+            .fetch_add(1, Ordering::Relaxed);
+        Self(state)
+    }
+}
+
+impl Drop for SseClientGuard {
+    fn drop(&mut self) {
+        self.0.sse_client_count.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct SseQuery {
     /// Comma-separated event type filter (e.g. "repo-changed,session-created").
@@ -167,6 +185,8 @@ pub(super) async fn sse_events(
     Query(query): Query<SseQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = state.event_bus.subscribe();
+    let client_guard = SseClientGuard::new(state.clone());
+    let watch = crate::background_mode::hidden::RemoteWatch::new(state.clone(), None);
     let initial_types: Option<Vec<String>> = query.types.map(|t| {
         t.split(',')
             .map(|s| s.trim().to_string())
@@ -186,6 +206,8 @@ pub(super) async fn sse_events(
     };
 
     let stream = async_stream::stream! {
+        let _client_guard = client_guard;
+        let _watch = watch;
         // Moved in so it lives exactly as long as the stream does.
         let _filter_guard = filter_guard;
         // Send retry directive as first event
@@ -194,6 +216,9 @@ pub(super) async fn sse_events(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if matches!(event, AppEvent::GitHubIntakeIssuesUpdate { .. }) {
+                        continue;
+                    }
                     let event_name = event_type_name(&event);
                     let allowed = match filter_rx {
                         Some(ref live) => allows(&live.borrow(), event_name),
@@ -247,27 +272,53 @@ fn allows(filter: &Option<Vec<String>>, event_name: &str) -> bool {
 }
 
 /// Extract the normalized event type name (matches SSE `event:` field).
-fn event_type_name(event: &AppEvent) -> &'static str {
+///
+/// Borrowed rather than `&'static str`: a mirrored event carries the far
+/// daemon's own name, so the name is data rather than a constant.
+/// Let another module's test check what name an event leaves this machine under.
+#[cfg(test)]
+pub(crate) fn event_type_name_for_test(event: &AppEvent) -> &str {
+    event_type_name(event)
+}
+
+fn event_type_name(event: &AppEvent) -> &str {
     match event {
+        AppEvent::WorkItemProviderRequest { .. } => "work-item-provider-request",
+        AppEvent::CloseDialog { .. } => "close-dialog",
+        AppEvent::BackgroundModeChanged { .. } => "background-mode-changed",
         AppEvent::HeadChanged { .. } => "head-changed",
         AppEvent::RepoChanged { .. } => "repo-changed",
         AppEvent::SessionCreated { .. } => "session-created",
         AppEvent::SessionClosed { .. } => "session-closed",
+        AppEvent::DesignModeChanged { .. } => "design-mode-changed",
         AppEvent::PtyParsed { .. } => "pty-parsed",
         AppEvent::PtyExit { .. } => "pty-exit",
         AppEvent::PtyActivity { .. } => "pty-activity",
+        AppEvent::ShellAbandoned { .. } => "shell-abandoned",
+        AppEvent::PtyTitle { .. } => "pty-title",
+        AppEvent::PtyBell { .. } => "pty-bell",
         AppEvent::PtyOsc133 { .. } => "pty-osc133",
         AppEvent::PtyCwd { .. } => "pty-cwd",
         AppEvent::PluginWatcherLines { .. } => "plugin-watcher-lines",
         AppEvent::PtyDescriptionChanged { .. } => "pty-description-changed",
+        AppEvent::ChatViewChanged { .. } => "chat-view-changed",
+        AppEvent::SessionRenamed { .. } => "session-renamed",
+        AppEvent::SessionSuspended { .. } => "session-suspended",
+        AppEvent::TermAliasAssigned { .. } => "term-alias-assigned",
         AppEvent::PluginChanged { .. } => "plugin-changed",
         AppEvent::UpstreamStatusChanged { .. } => "upstream-status-changed",
         AppEvent::McpOAuthStart { .. } => "mcp-oauth-start",
         AppEvent::McpToast { .. } => "mcp-toast",
         AppEvent::McpConfirm { .. } => "mcp-confirm",
         AppEvent::McpConfirmResolved { .. } => "mcp-confirm-resolved",
+        AppEvent::AcpNotice(_) => "acp-notice",
+        AppEvent::SettingsChanged(_) => "settings-changed",
         AppEvent::RepositoriesChanged => "repositories-changed",
+        AppEvent::IdeasChanged => "ideas-changed",
+        AppEvent::AiChatSelectionChanged => "ai-chat-selection-changed",
+        AppEvent::OpenMarkdownTabsChanged => "open-markdown-tabs-changed",
         AppEvent::DirChanged { .. } => "dir-changed",
+        AppEvent::SessionWorktreeDeclared { .. } => "session-worktree-declared",
         AppEvent::WorktreeCreated { .. } => "worktree-created",
         AppEvent::WorktreeRemoved { .. } => "worktree-removed",
         AppEvent::PeerRegistered { .. } => "peer-registered",
@@ -275,14 +326,30 @@ fn event_type_name(event: &AppEvent) -> &'static str {
         AppEvent::UiTab { .. } => "ui-tab",
         AppEvent::GitHubPrUpdate { .. } => "github-pr-update",
         AppEvent::GitHubTransition { .. } => "github-transition",
+        AppEvent::GitHubIntakeIssuesUpdate { .. } => "internal-github-intake-issues-update",
         AppEvent::GitHubIssuesUpdate { .. } => "github-issues-update",
         AppEvent::CloseHtmlTabs { .. } => "close-html-tabs",
-        AppEvent::ScheduledJobCompleted { .. } => "scheduled-job-completed",
-        AppEvent::DiffTriageProgress { .. } => "triage-progress",
-        AppEvent::ReviewProgress { .. } => "review-progress",
+        AppEvent::ScheduledJobCompleted { .. } => crate::ai_agent::scheduler::COMPLETED_EVENT,
+        AppEvent::ScheduledJobNeedsApproval { .. } => crate::ai_agent::scheduler::NEEDS_APPROVAL_EVENT,
+        AppEvent::AiSuggestion { .. } => crate::ai_agent::triggers::SUGGESTION_EVENT,
         AppEvent::ConflictAssistStatus { .. } => "conflict-assist-status",
+        AppEvent::ProgressRecorded { .. } => "progress-recorded",
+        AppEvent::WorkflowRunChanged { .. } => "workflow-run-changed",
+        AppEvent::AutomationRunChanged { .. } => "automation-run-changed",
+        AppEvent::ReviewProgress { .. } => "review-progress",
         AppEvent::ProposalsReady { .. } => "proposals-ready",
-        AppEvent::WorktreeCreateFailed { .. } => "worktree-create-failed",
+        AppEvent::SessionStateChanged { .. } => "session-state-changed",
+        AppEvent::RemoteConnectionStatusChanged { .. } => "remote-connection-status",
+        // Not "remote-mirrored": a client must not be able to tell a mirrored
+        // event from a local one, and a `?types=` filter has to match the name
+        // the client asked for.
+        AppEvent::RemoteMirrored { event, .. } => event,
+        #[cfg(feature = "dictation")]
+        AppEvent::DictationDownloadProgress { .. } => "dictation-download-progress",
+        #[cfg(feature = "dictation")]
+        AppEvent::SpeechDownloadProgress { .. } => "speech-download-progress",
+        #[cfg(feature = "dictation")]
+        AppEvent::SpeechUtterance { .. } => "speech-utterance",
     }
 }
 
@@ -299,6 +366,12 @@ pub(crate) fn event_payload_for_test(event: &AppEvent) -> serde_json::Value {
 
 fn event_payload(event: &AppEvent) -> serde_json::Value {
     match event {
+        AppEvent::AiChatSelectionChanged => serde_json::json!({}),
+        AppEvent::OpenMarkdownTabsChanged => serde_json::json!({}),
+        AppEvent::WorkItemProviderRequest {
+            request_id,
+            request,
+        } => serde_json::json!({"request_id":request_id,"request":request}),
         AppEvent::HeadChanged { repo_path, branch } => {
             serde_json::json!({ "repo_path": repo_path, "branch": branch })
         }
@@ -307,25 +380,46 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
         }
         AppEvent::SessionCreated {
             session_id,
+            tuic_session,
             cwd,
             agent_type,
             display_name,
+            parent_session,
         } => {
             serde_json::json!({
                 "session_id": session_id,
+                "tuic_session": tuic_session,
                 "cwd": cwd,
                 "agent_type": agent_type,
                 "display_name": display_name,
+                "parent_session": parent_session,
             })
         }
         AppEvent::SessionClosed { session_id, reason } => {
             serde_json::json!({ "session_id": session_id, "reason": reason })
+        }
+        AppEvent::DesignModeChanged {
+            repo_path,
+            session_id,
+            status,
+        } => {
+            serde_json::json!({ "repo_path": repo_path, "session_id": session_id, "status": status })
         }
         AppEvent::PtyParsed { session_id, parsed } => {
             serde_json::json!({ "session_id": session_id, "parsed": parsed })
         }
         AppEvent::PtyExit { session_id } => {
             serde_json::json!({ "session_id": session_id })
+        }
+        AppEvent::PtyTitle { session_id, title } => {
+            serde_json::json!({ "session_id": session_id, "title": title })
+        }
+        AppEvent::PtyBell { session_id } => serde_json::json!({ "session_id": session_id }),
+        AppEvent::ShellAbandoned {
+            session_id,
+            since_ms,
+        } => {
+            serde_json::json!({ "session_id": session_id, "since_ms": since_ms })
         }
         AppEvent::PtyActivity { session_id } => {
             serde_json::json!({ "session_id": session_id })
@@ -349,11 +443,25 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
         AppEvent::PluginWatcherLines { session_id, lines } => {
             serde_json::json!({ "session_id": session_id, "lines": lines })
         }
+        AppEvent::ChatViewChanged { session_id, seq } => {
+            serde_json::json!({ "session_id": session_id, "seq": seq })
+        }
         AppEvent::PtyDescriptionChanged {
             session_id,
             description,
         } => {
             serde_json::json!({ "session_id": session_id, "description": description })
+        }
+        AppEvent::SessionRenamed {
+            session_id,
+            name,
+            is_custom,
+        } => {
+            serde_json::json!({ "session_id": session_id, "name": name, "is_custom": is_custom })
+        }
+        AppEvent::SessionSuspended { record } => serde_json::json!({"record": record}),
+        AppEvent::TermAliasAssigned { session_id, alias } => {
+            serde_json::json!({ "session_id": session_id, "alias": alias })
         }
         AppEvent::PluginChanged { plugin_ids } => {
             serde_json::json!({ "plugin_ids": plugin_ids })
@@ -372,6 +480,7 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
             message,
             level,
             sound,
+            urgency,
             origin_repo_path,
             origin_session_id,
         } => {
@@ -380,6 +489,7 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
                 "message": message,
                 "level": level,
                 "sound": sound,
+                "urgency": urgency,
                 "origin_repo_path": origin_repo_path,
                 "origin_session_id": origin_session_id,
             })
@@ -405,21 +515,21 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
         } => {
             serde_json::json!({ "request_id": request_id, "confirmed": confirmed })
         }
+        // Forwarded whole: the notice IS the payload, in the same camelCase the
+        // `/acp` routes use, so a client needs no per-transport translation.
+        AppEvent::AcpNotice(notice) => serde_json::json!(notice),
         // Payload-free: the receiver re-reads `repositories.json` itself.
-        AppEvent::RepositoriesChanged => serde_json::json!({}),
+        AppEvent::SettingsChanged(notice) => serde_json::json!(notice),
+        AppEvent::RepositoriesChanged | AppEvent::IdeasChanged => serde_json::json!({}),
         AppEvent::DirChanged { dir_path } => {
             serde_json::json!({ "dir_path": dir_path })
         }
-        AppEvent::WorktreeCreated {
-            repo_path,
-            branch,
-            worktree_path,
-        } => {
-            serde_json::json!({ "repo_path": repo_path, "branch": branch, "worktree_path": worktree_path })
-        }
-        AppEvent::WorktreeRemoved { repo_path, branch } => {
-            serde_json::json!({ "repo_path": repo_path, "branch": branch })
-        }
+        // Forwarded whole, like `AcpNotice`: the desktop `emit` in
+        // `notify_worktree_created`/`notify_worktree_removed` serializes this
+        // same struct, so the two transports cannot spell a field differently.
+        AppEvent::SessionWorktreeDeclared(payload) => serde_json::json!(payload),
+        AppEvent::WorktreeCreated(payload) => serde_json::json!(payload),
+        AppEvent::WorktreeRemoved(payload) => serde_json::json!(payload),
         AppEvent::PeerRegistered { tuic_session, name } => {
             serde_json::json!({ "tuic_session": tuic_session, "name": name })
         }
@@ -434,6 +544,7 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
             pinned,
             focus,
             origin_repo_path,
+            opener_tuic_session,
         } => {
             let mut v = serde_json::json!({ "id": id, "title": title, "html": html, "pinned": pinned, "focus": focus });
             if let Some(u) = url {
@@ -441,6 +552,9 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
             }
             if let Some(p) = origin_repo_path {
                 v["origin_repo_path"] = serde_json::Value::String(p.clone());
+            }
+            if let Some(session) = opener_tuic_session {
+                v["opener_tuic_session"] = serde_json::Value::String(session.clone());
             }
             v
         }
@@ -453,53 +567,43 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
         AppEvent::GitHubTransition { transition } => {
             serde_json::to_value(transition).unwrap_or_default()
         }
+        AppEvent::GitHubIntakeIssuesUpdate { .. } => serde_json::Value::Null,
         AppEvent::GitHubIssuesUpdate { repo_path, issues } => {
             serde_json::json!({ "repo_path": repo_path, "issues": issues })
         }
         AppEvent::CloseHtmlTabs { tab_ids } => {
             serde_json::json!({ "tab_ids": tab_ids })
         }
-        AppEvent::ScheduledJobCompleted {
-            job_id,
-            goal,
-            timed_out,
-        } => {
-            serde_json::json!({ "job_id": job_id, "goal": goal, "timed_out": timed_out })
-        }
-        AppEvent::DiffTriageProgress {
-            repo_path,
-            summary,
-            files,
-            phase,
-            done,
-            llm_used,
-            llm_model,
-        } => {
-            serde_json::json!({
-                "repo_path": repo_path,
-                "summary": summary,
-                "files": files,
-                "phase": phase,
-                "done": done,
-                "llm_used": llm_used,
-                "llm_model": llm_model,
-            })
-        }
-        AppEvent::ReviewProgress { repo_path, payload }
-        | AppEvent::ConflictAssistStatus { repo_path, payload }
+        AppEvent::ConflictAssistStatus { repo_path, payload }
+        | AppEvent::ProgressRecorded { repo_path, payload }
+        | AppEvent::WorkflowRunChanged { repo_path, payload }
+        | AppEvent::ReviewProgress { repo_path, payload }
         | AppEvent::ProposalsReady { repo_path, payload } => {
             serde_json::json!({ "repo_path": repo_path, "payload": payload })
         }
-        AppEvent::WorktreeCreateFailed {
-            repo_path,
-            branch,
-            reason,
-        } => {
-            // camelCase keys mirror the Tauri window `worktree-create-failed`
-            // event so the same frontend `handleWorktreeCreateFailed` consumes
-            // both transports unchanged.
-            serde_json::json!({ "repoPath": repo_path, "branch": branch, "reason": reason })
+        AppEvent::SessionStateChanged { session_id, state } => {
+            // Built by the same function the desktop window emit uses, so the
+            // two transports cannot drift into two shapes for one thing.
+            crate::state::session_state_payload(session_id, state)
         }
+        // Already the shape the desktop window emit carries: the publisher builds
+        // it once and hands the same value to both transports.
+        AppEvent::RemoteConnectionStatusChanged { payload } => payload.clone(),
+        // The daemon's own body, untouched.
+        AppEvent::RemoteMirrored { payload, .. } => payload.clone(),
+        AppEvent::AutomationRunChanged { payload }
+        | AppEvent::CloseDialog { payload }
+        | AppEvent::BackgroundModeChanged { payload }
+        | AppEvent::ScheduledJobCompleted { payload }
+        | AppEvent::ScheduledJobNeedsApproval { payload }
+        | AppEvent::AiSuggestion { payload } => payload.clone(),
+        // Built once by the producer and handed to both transports, for the
+        // same reason as `SessionStateChanged` above: the frontend applies one
+        // shape, and a pair built from separate code in separate files drifts.
+        #[cfg(feature = "dictation")]
+        AppEvent::DictationDownloadProgress { payload }
+        | AppEvent::SpeechDownloadProgress { payload }
+        | AppEvent::SpeechUtterance { payload } => payload.clone(),
     }
 }
 
@@ -530,6 +634,64 @@ mod tests {
         AppEvent::DirChanged {
             dir_path: "/dir".into(),
         }
+    }
+
+    // Catches: unfiltered internal intake snapshots leaking onto an unfiltered SSE stream.
+    #[tokio::test]
+    async fn intake_snapshots_never_reach_client_streams() {
+        let state = crate::mcp_http::tests::test_state();
+        let response = sse_events(
+            State(state.clone()),
+            Query(SseQuery {
+                types: None,
+                stream_id: None,
+            }),
+        )
+        .await
+        .into_response();
+        let mut body = response.into_body().into_data_stream();
+        assert!(next_chunk(&mut body).await.unwrap().contains("retry"));
+        state
+            .event_bus
+            .send(AppEvent::GitHubIntakeIssuesUpdate {
+                repo_path: "/private-intake".into(),
+                issues: vec![],
+            })
+            .unwrap();
+        state
+            .event_bus
+            .send(AppEvent::GitHubIssuesUpdate {
+                repo_path: "/client".into(),
+                issues: vec![],
+            })
+            .unwrap();
+        let chunk = next_chunk(&mut body).await.expect("client snapshot");
+        assert!(chunk.contains("event: github-issues-update"), "{chunk}");
+        assert!(
+            chunk.contains("/client") && !chunk.contains("/private-intake"),
+            "{chunk}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_lifetime_tracks_only_the_connected_client() {
+        let state = crate::mcp_http::tests::test_state();
+        let _internal = state.event_bus.subscribe();
+        assert_eq!(state.sse_client_count.load(Ordering::Relaxed), 0);
+
+        let response = sse_events(
+            State(state.clone()),
+            Query(SseQuery {
+                types: None,
+                stream_id: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(state.sse_client_count.load(Ordering::Relaxed), 1);
+
+        drop(response);
+        assert_eq!(state.sse_client_count.load(Ordering::Relaxed), 0);
     }
 
     /// A panel that mounts late adds an event type the stream was not opened
@@ -678,9 +840,11 @@ mod tests {
     fn session_created_preserves_stable_display_name() {
         let event = AppEvent::SessionCreated {
             session_id: "session-1".into(),
+            tuic_session: Some("stable-identity".into()),
             cwd: Some("/repo".into()),
             agent_type: Some("codex".into()),
             display_name: Some("linux-primary".into()),
+            parent_session: Some("tuic-parent".into()),
         };
 
         assert_eq!(event_type_name(&event), "session-created");
@@ -689,6 +853,22 @@ mod tests {
         assert_eq!(body["cwd"], "/repo");
         assert_eq!(body["agent_type"], "codex");
         assert_eq!(body["display_name"], "linux-primary");
+        // Browser clients tag sub-agent tabs from this field, as the desktop does.
+        assert_eq!(body["parent_session"], "tuic-parent");
+    }
+
+    #[test]
+    fn pty_title_has_matching_sse_name_and_payload() {
+        let event = AppEvent::PtyTitle {
+            session_id: "session-1".into(),
+            title: "Claude Code".into(),
+        };
+
+        assert_eq!(event_type_name(&event), "pty-title");
+        assert_eq!(
+            event_payload(&event),
+            serde_json::json!({"session_id": "session-1", "title": "Claude Code"})
+        );
     }
 
     #[test]
@@ -705,26 +885,51 @@ mod tests {
         );
     }
 
-    /// The three GitHub Ops lifecycle events share a `{repo_path, payload}` shape.
+    #[test]
+    fn term_alias_assigned_has_matching_sse_name_and_payload() {
+        let event = AppEvent::TermAliasAssigned {
+            session_id: "session-1".into(),
+            alias: "tu-3".into(),
+        };
+
+        assert_eq!(event_type_name(&event), "term-alias-assigned");
+        assert_eq!(
+            event_payload(&event),
+            serde_json::json!({"session_id": "session-1", "alias": "tu-3"})
+        );
+    }
+
+    /// The GitHub Ops lifecycle events share a `{repo_path, payload}` shape.
     /// Each must map to its own SSE `event:` name and round-trip the payload
     /// verbatim so browser/PWA clients receive the same data as desktop.
+    ///
+    /// Two of the three original cases (`review-progress`, `proposals-ready`)
+    /// went with the embedded engine that produced them (#784-0aec); the arm
+    /// they shared is what this still guards.
     #[test]
     fn ops_lifecycle_events_have_distinct_names_and_passthrough_payload() {
         let payload = serde_json::json!({ "pr_number": 42, "phase": "done", "done": true });
         let cases: Vec<(AppEvent, &str)> = vec![
-            (
-                AppEvent::ReviewProgress {
-                    repo_path: "/repo".into(),
-                    payload: payload.clone(),
-                },
-                "review-progress",
-            ),
             (
                 AppEvent::ConflictAssistStatus {
                     repo_path: "/repo".into(),
                     payload: payload.clone(),
                 },
                 "conflict-assist-status",
+            ),
+            (
+                AppEvent::ProgressRecorded {
+                    repo_path: "/repo".into(),
+                    payload: payload.clone(),
+                },
+                "progress-recorded",
+            ),
+            (
+                AppEvent::ReviewProgress {
+                    repo_path: "/repo".into(),
+                    payload: payload.clone(),
+                },
+                "review-progress",
             ),
             (
                 AppEvent::ProposalsReady {
@@ -750,44 +955,112 @@ mod tests {
     }
 
     #[test]
-    fn worktree_create_failed_uses_camelcase_matching_window_event() {
-        // The background stale-dir recreation dual-emits this on the bus (SSE)
-        // AND the Tauri window. The SSE payload MUST use the same camelCase keys
-        // as the window `worktree-create-failed` event so the frontend
-        // `handleWorktreeCreateFailed({ repoPath, branch, reason })` consumes
-        // both transports unchanged.
-        let event = AppEvent::WorktreeCreateFailed {
+    fn progress_recorded_has_the_same_receipt_and_event_envelope_on_sse() {
+        let payload = serde_json::json!({
+            "receipt": {"status":"recorded", "revision":7, "eventId":"event-7"},
+            "event": {"id":"event-7", "revision":7, "type":"milestone", "summary":"Done."}
+        });
+        let event = AppEvent::ProgressRecorded {
             repo_path: "/repo".into(),
-            branch: "feat-x".into(),
-            reason: "recreation failed: boom".into(),
+            payload: payload.clone(),
         };
-        assert_eq!(event_type_name(&event), "worktree-create-failed");
-        let body = event_payload(&event);
-        assert_eq!(body["repoPath"], "/repo");
-        assert_eq!(body["branch"], "feat-x");
-        assert_eq!(body["reason"], "recreation failed: boom");
-        // No snake_case leakage that a browser handler wouldn't read.
-        assert!(body.get("repo_path").is_none());
+
+        assert_eq!(event_type_name(&event), "progress-recorded");
+        assert_eq!(
+            event_payload(&event),
+            serde_json::json!({"repo_path":"/repo", "payload":payload})
+        );
     }
 
     #[test]
-    fn triage_progress_payload_is_flat_not_wrapped() {
-        let event = AppEvent::DiffTriageProgress {
+    fn workflow_run_changed_is_a_cursor_wake_hint() {
+        let payload = serde_json::json!({ "runId": "run-1", "sequence": 7 });
+        let event = AppEvent::WorkflowRunChanged {
             repo_path: "/repo".into(),
-            summary: Some("s".into()),
-            files: vec![],
-            phase: "done".into(),
-            done: true,
-            llm_used: true,
-            llm_model: Some("m".into()),
+            payload: payload.clone(),
         };
-        assert_eq!(event_type_name(&event), "triage-progress");
+        assert_eq!(event_type_name(&event), "workflow-run-changed");
+        assert_eq!(
+            event_payload(&event),
+            serde_json::json!({
+                "repo_path": "/repo", "payload": payload,
+            })
+        );
+    }
+
+    /// A browser learns a session's lifecycle from this arm; the desktop learns
+    /// it from the window event of the same name. Both must hand the frontend
+    /// the shape `list_active_sessions` returns per session — `{session_id,
+    /// state}` with `state` in snake_case — because one applier consumes all
+    /// three and a renamed key silently stops updating a badge.
+    #[test]
+    fn session_state_changed_carries_a_list_active_sessions_entry() {
+        let event = AppEvent::SessionStateChanged {
+            session_id: "sess-1".into(),
+            state: Box::new(crate::state::SessionState {
+                awaiting_input: true,
+                question_confident: true,
+                shell_state: Some("idle".into()),
+                agent_state: Some("awaiting_input".into()),
+                queued_commands: 2,
+                ..Default::default()
+            }),
+        };
+        assert_eq!(event_type_name(&event), "session-state-changed");
         let body = event_payload(&event);
-        // Working-tree triage keeps its flat shape (not the {repo_path,payload}
-        // envelope) — existing panel consumers depend on it.
-        assert_eq!(body["repo_path"], "/repo");
-        assert_eq!(body["phase"], "done");
-        assert_eq!(body["done"], true);
-        assert!(body.get("payload").is_none());
+        assert_eq!(body["session_id"], "sess-1");
+        assert_eq!(body["state"]["awaiting_input"], true);
+        assert_eq!(body["state"]["question_confident"], true);
+        assert_eq!(body["state"]["shell_state"], "idle");
+        assert_eq!(body["state"]["agent_state"], "awaiting_input");
+        assert_eq!(body["state"]["queued_commands"], 2);
+        // Not flattened: the frontend reads `payload.state.*`, exactly as it
+        // reads `session.state.*` from the polled snapshot it replaces.
+        assert!(body.get("awaiting_input").is_none());
+    }
+
+    #[test]
+    fn design_mode_changed_carries_the_bound_session_and_status() {
+        let event = AppEvent::DesignModeChanged {
+            repo_path: "/repo".into(),
+            session_id: "agent-1".into(),
+            status: "armed".into(),
+        };
+        assert_eq!(event_type_name(&event), "design-mode-changed");
+        assert_eq!(
+            event_payload(&event),
+            serde_json::json!({
+                "repo_path": "/repo", "session_id": "agent-1", "status": "armed"
+            })
+        );
+    }
+
+    /// An ACP wake signal reaches a browser unchanged.
+    ///
+    /// Field-for-field the object the `/acp` routes and the desktop commands
+    /// return, camelCase included: a client that reacts by fetching the
+    /// connection snapshot has to be able to use the ids it was just handed,
+    /// and a renamed key here would be a second spelling for one thing.
+    #[test]
+    fn an_acp_notice_reaches_the_browser_as_the_object_the_acp_routes_return() {
+        let connection_id = crate::acp::AcpConnectionId::new();
+        let request_id = crate::acp::AcpHostRequestId::new();
+        let event = AppEvent::AcpNotice(crate::acp::AcpNotice {
+            connection_id,
+            generation: 3,
+            session_id: Some(agent_client_protocol::schema::v1::SessionId::new("sess-1")),
+            request_id: Some(request_id),
+            sequence: 42,
+            kind: crate::acp::AcpNoticeKind::InteractionPending,
+        });
+        assert_eq!(event_type_name(&event), "acp-notice");
+        let body = event_payload(&event);
+        assert_eq!(body["connectionId"], serde_json::json!(connection_id));
+        assert_eq!(body["requestId"], serde_json::json!(request_id));
+        assert_eq!(body["sessionId"], "sess-1");
+        assert_eq!(body["generation"], 3);
+        assert_eq!(body["sequence"], 42);
+        assert_eq!(body["kind"], "interaction_pending");
+        assert!(body.get("connection_id").is_none());
     }
 }

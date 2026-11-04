@@ -1,13 +1,142 @@
 # Settings
 
-Open settings with `Cmd+,`. Settings are organized into tabs.
+If a saved setting has an invalid type or enum value, TUIC resets that field and
+keeps valid settings. Missing font settings and theme use their defaults. A
+**Settings recovered** warning lists the reset fields and the backup path of the
+original file. Truncated or invalid JSON still uses whole-file recovery.
 
-## General Tab
+Older installations receive a one-time scrollback reflow migration. You can turn
+reflow off again in Terminal settings; later starts keep that choice.
+
+Repository Settings separates identity, inherited worktree overrides, Design Mode, scripts, team sharing, and reset. Nullable controls retain their global-default choice. Reset clears override fields, including scripts, but retains repository identity and its Design Mode URL. Team exports never include scripts. The Dev Server URL and setup, run, and archive script fields have contextual help; hover or focus a help badge to read it, or click to keep it open.
+
+MCP uses the shared Settings row typography and label/help spacing for capabilities and shows retained legacy denials as a warning.
+
+Agents Settings shows the selected machine in the header. Run configuration editors keep explicit Save and Cancel actions. Terminal-agent permissions and filesystem sandbox remain separate from AI Chat ACP settings; launch instructions still save on blur.
+
+Workspace pages use the same cards and aligned rows. Terminal retains its live canvas preview and all clipboard and scrollback controls. Keyboard Shortcuts places its searchable actions in Shortcut groups, before their keycaps, with explicit Rebind and Reset actions. Git & GitHub separates authentication, monitoring, repository defaults, worktree defaults, additional accounts, CircleCI, and repository bindings. Existing save boundaries and policy choices are unchanged.
+
+The Application pages use section cards and labelled rows. General places the update status and its check action above the page header. On desktop, a Local tools card groups the fastaf CLI, Code Intelligence, and Custom Launchers; this card is hidden in browser mode. General links to AI Chat defaults when AI Chat is enabled. The existing install, update, uninstall, and launcher actions keep their save and confirmation behavior. Appearance keeps group rename validation and client-local chat preferences. Notifications keeps visual controls available without audio; output-device discovery starts only after **Choose output device**. Changing master volume previews once on release.
+
+
+The settings-service policy foundation keeps secrets write-only. Changes that
+expose TUIC or select executable code require the existing confirmation dialog;
+ordinary preferences, push settings and outbound HTTP destinations do not. The
+dialog uses a backend-built diff and approvals expire after five minutes and
+cannot be reused. The replacement settings MCP/API transport is still awaiting
+its separate cutover (#1786-9cbd).
+
+Open settings with `Cmd+,`. Settings are organized into pages. The navigation
+groups the pages by task:
+
+| Group | Pages |
+|-------|-------|
+| **Application** | General, All settings (Expert), Appearance, Notifications |
+| **Workspace** | Terminal, Keyboard Shortcuts, Git & GitHub |
+| **AI** | Agents, AI Chat, Providers, Dictation, Voice, Smart Prompts |
+| **Integrations** | MCP, Remote Access, Remote Machines, Telegram, Manage plugins |
+| **Plugin settings** | Loaded plugins with registered settings, marked **Plugin** |
+| **Repositories** | One page for each repository in the sidebar |
+
+The **AI Chat** page is shown only while **Experimental Features** is on (see
+[AI Chat](#ai-chat)). **All settings (Expert)** is listed only while the
+**Expert** switch is on (see [All settings (Expert)](#all-settings-expert)); its
+fields stay reachable from search either way. **Voice** is desktop only.
+
+Settings uses short labels and behavior descriptions. Implementation ownership and persistence details stay in the documentation rather than page introductions. Repeated scope chips and permanent usage walkthroughs are omitted. Catalogue labels have space above their controls, and header scope badges stay within the page width. Catalogue actions use a wrapping row with 8px gaps and 8px clearance below the field separator; the field effect appears once beneath its name, while the status line reports only the value source.
+
+On narrow screens, the page selector truncates long names before its arrow. Settings reserves the same scrollbar space on every page, including plugin loading and error states. Help badges follow the final line of wrapped labels, and repository color actions keep the shared right alignment.
+
+Plugin pages show their source plugin ID below the page title and in the navigation tooltip. The Settings header, navigation and footer stay visible while plugin values load. Loading and read errors appear only inside the native editor; switching pages does not load a plugin iframe. Unloading a plugin removes its page and search entries.
+
+## Search
+
+A search box sits at the top of the page list. Typing filters settings across
+every page at once, so you do not have to know which page owns the one you want.
+Each result shows the setting name and the `Page › Section` trail it lives under;
+selecting one opens that page and scrolls to the field.
+
+Search reads the settings catalogue without opening every page or running their
+service probes. Plugin search uses the loaded plugin's described fields; values
+are read only when you open its editor. Reopening Settings clears the previous
+query so a requested page or section is visible.
+
+The following search rules are deliberate:
+
+- **Repository pages are not searched.** A repository page belongs to one specific
+  repository, and a global box has no way to know which one you mean.
+- **Per-agent controls in expandable cards are not searched.** Search cannot
+  select a specific agent card or scroll to a control inside it. For managed
+  workspace trust, open **Settings → Agents**, expand **Claude** or **Codex**,
+  then use **Accept workspace trust for managed spawns** in Expert Mode.
+- **ego permissions are searchable.** Permissions and Filesystem sandbox are
+  in a visible section on the Agents page; no agent card needs expansion.
+- **Settings the current build does not render are not listed.** The same rule
+  hides the AI Chat page while Experimental Features is off, so a search does
+  not open a page that is not in the navigation.
+
+A result for an expert setting shows an **Expert** badge. See the next section.
+
+## Expert Mode
+
+Some settings have a default that is correct for almost everyone. These are
+*expert* settings. The **Expert** switch in the Settings header controls them:
+
+- **Expert off** (basic mode) — an expert setting is hidden while it has its
+  default value. When its value is different from the default, it is shown, so
+  an override is never hidden from you.
+- **Expert on** — all expert settings are shown.
+
+The switch position is kept between restarts (UI preference
+`settings_expert_mode`, see [UI Preferences](../backend/config.md#ui-preferences-ui-prefsjson)).
+
+A setting that you change stays shown until you open Settings again. If you
+set it back to the default, it does not disappear under the cursor. The next
+time you open Settings, it is hidden again if it has its default value.
+
+When you select a search result with the **Expert** badge in basic mode,
+Settings opens the page, shows that setting and scrolls to it. The setting stays
+shown until you open Settings again. The switch does not change.
+
+If FastAF cannot read the default values (the `get_config_defaults`
+command), all expert settings stay visible.
+
+These settings are expert. All other settings are always shown. A page is
+never all expert: in basic mode it would show an empty page.
+
+| Page | Expert settings |
+|------|-----------------|
+| General | Auto-Standby Timeout, Content Indexing, Update Channel |
+| Notifications | Master Volume, Audio Output Device |
+| Terminal | Shell, Font Weight, Allow OSC 52 clipboard writes, Block folding, Show scrollbar marks, Reflow scrollback on resize |
+| Git & GitHub | Auto-Delete on PR Close, Copy ignored files, Copy untracked files, Storage Strategy, Auto-archive merged worktrees, Orphan Worktree Cleanup and safe cleanup countdown, After Merge Behavior, Auto-Fetch Interval, the **Add another GitHub account** button (shown while no additional account exists) |
+| Agents | Collect project progress, Launch instructions (global); per agent: Launch instructions, Close idle managed child after, Auto-retry on server errors, Prevent alternate screen, Accept workspace trust for managed spawns (Claude and Codex), Native status signals, Install hooks globally, Track agent intent, Collect progress, Show suggested follow-ups, Headless Command Template; Claude only: Environment Flags |
+| Dictation | Long-press threshold, Auto-send, Input device, Level gate, Speech confidence gate; in browser mode also Hold-back before sending, Speech engine, Speech command, Voice volume and Levelling |
+| MCP | Collapse tools |
+| Remote Access | Port, Session Token Duration, Enable IPv6 (dual-stack) |
+
+## Application
+
+### General
 
 | Setting | Description |
 |---------|-------------|
-| **Language** | UI language |
-| **Default IDE** | IDE for "Open in..." actions. Only installed apps are offered, grouped by category: Code Editors (VS Code, Cursor, Zed, Windsurf, Neovim, Xcode, `$EDITOR`), JetBrains (IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, PhpStorm, RubyMine, Rider, DataGrip, RustRover, Android Studio, Fleet), Terminals (Ghostty, WezTerm, Alacritty, Kitty, Warp, iTerm2), Git Tools (Sourcetree, GitHub Desktop, Fork, GitKraken, Sublime Merge, Tower), System (Terminal, Finder) |
+| **Language** | UI language. The list offers the locales that ship with a message catalog, each named in its own language, and the pick applies immediately — no reload. A locale without a catalog is never offered, because it would render English while claiming to be translated. The picker is hidden while only one catalog ships — today that is English alone — because a list of one is not a choice. |
+| **Show agent context bar** | Show the model's current intent, its orchestrator-assigned task, and the last prompt sent to an agent. |
+| **When closing the main window** | Desktop: Ask (default), Background, or Quit. Ask offers Remember. Background hides visible windows and keeps sessions running. Use the application menu to quit; on macOS, click the Dock icon to show the window again. |
+| **Hide Dock icon in background** | On | macOS desktop only. Hide the Dock icon while windows are hidden; restore it on Show. |
+| **Confirm before quitting** | Confirm real quit with active terminals, including Cmd/Ctrl+Q. Background does not prompt. Detached-panel close closes only that panel. |
+| **Confirm before closing a tab** | Ask before closing terminal tab |
+| **Prevent sleep when busy** | Keep the machine awake for active turns, background agent jobs and live managed agents marked `keep_open`; the backend retains the hold when the app is hidden or locked (**Power Management** section) |
+| **Auto-Standby Timeout** | Pause idle background sessions after this duration to save resources. Default 5 min; `0` disables it. |
+| **Content Indexing** | When to build search indexes: Disabled, Active repo only, Active + on switch, or All repos at boot |
+| **Automatically check for updates** | Check for new versions on startup |
+| **Update Channel** | Stable or Nightly. FastAF publishes no beta feed: a saved `beta` (from upstream TUICommander) loads as Nightly once and is saved that way |
+| **Wait for agents before restarting** | After an update installs, restart only when no session is busy or awaiting input. The APP UPDATE notification shows the busy count and offers Restart now. Default on |
+| **Resume all agents after an update** | After the app restarts for an update, resume every agent tab with a confirmed session on every branch. Default on |
+| **fastaf CLI** | Install or uninstall the `fastaf` command-line tool, with its status. Desktop app only. See [CLI](cli.md). |
+| **Code Intelligence** | Shows whether MDKB is installed, with an **Uninstall** button when it is. There is no Install button: install `mdkb` yourself and put it on your `PATH`, and FastAF picks it up on its own. MDKB gives the editor go-to-definition, find references, and symbol outline, and serves as a memory manager for AI agents. Desktop app only. |
+| **Default IDE** | IDE for "Open in..." actions (**IDE** section). Only installed apps are offered, grouped by category: Code Editors (VS Code, Cursor, Zed, Windsurf, Neovim, Xcode, `$EDITOR`), JetBrains (IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, PhpStorm, RubyMine, Rider, DataGrip, RustRover, Android Studio, Fleet), Terminals (Ghostty, WezTerm, Alacritty, Kitty, Warp, iTerm2), Git Tools (Sourcetree, GitHub Desktop, Fork, GitKraken, Sublime Merge, Tower), System (Terminal, Finder) |
 | **Custom Launchers** | Define your own tools for the "Open in" menu. Each launcher has a name, an executable (bare name resolved on `PATH`, or absolute path), and arguments (one per line). Arguments may use placeholders, expanded at launch: `{path}`/`{file}` (focused file, else repo root), `{fileDir}` (directory of the focused file), `{repo}` (repo/worktree root), `{cwd}` (focused terminal's working directory), `{home}` (your home directory), `{line}`/`{column}` (1-based editor cursor position). Args are passed verbatim (no shell parsing), so paths with spaces are safe. |
 | **Shell** | Custom shell path (e.g., `/bin/zsh`, `/usr/local/bin/fish`). Leave empty for system default. |
 | **Confirm before quitting** | Show dialog when closing app with active terminals |
@@ -21,13 +150,22 @@ Open settings with `Cmd+,`. Settings are organized into tabs.
 | **Scroll sensitivity** | Terminal wheel/trackpad scroll speed, 20–200% (default 70%; 100% = raw device speed). |
 | **Allow OSC 52 clipboard writes** | Let terminal programs set the system clipboard via the OSC 52 escape sequence (used by tmux, vim, ssh yank-over-SSH, etc.). Because OSC 52 is honored from anywhere in the byte stream, a displayed file or log can also overwrite the clipboard — so a non-blocking "Clipboard updated" notice appears on every write. Disable to ignore OSC 52 entirely. Enabled by default. |
 | **Repository defaults** | Base branch, file handling, setup/run scripts applied to new repos |
-| **Experimental Features** | Master toggle for experimental features. When enabled, shows sub-toggles: **AI Chat** (AI Chat panel, shortcuts, command palette entry), **Scroll History** (scrollback overlay with search when scrolling up in agent mode). |
+| **Experimental Features** | Master toggle for experimental features. When it is on, one sub-toggle appears: **AI Chat** (the AI Chat panel, its shortcuts and command palette entry, and the AI Chat settings page). AI Chat needs both toggles on. |
 
-## Appearance Tab
+### Appearance
+
+The page opens with the **Theme** card:
+
+| Setting | Description |
+|---------|-------------|
+| **App theme** | The look of the whole app: chrome, panels and terminals |
+| **Reduce Transparency** | macOS only. Keep the window opaque instead of letting the desktop show through the frame. Applies live |
+| **App Zoom** | Scales the entire interface, including terminals (`Cmd +/-`), in 5% steps |
+
+The other cards follow:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| **Terminal theme** | — | — | Color theme with preview swatches |
 | **File Type Colors** | `boolean` | `true` | Tint file browser icons by file type (VSCode-style pastel palette). Folders get a muted gray-blue; dotfiles and lockfiles are dimmed. |
 | **Open Files Beside Terminal** | `boolean` | `true` | Files opened from the file browser while a terminal is focused dock into a split pane (VSCode "open to the side") instead of replacing the view. Falls back to a normal tab when no terminal is active. |
 | **Align Docked File Tabs** | `boolean` | `true` | While split, docked file tabs cluster on the right of the tab bar above their pane (VSCode-style), with terminal tabs on the left. Clicking one focuses it inside its pane. |
@@ -35,116 +173,242 @@ Open settings with `Cmd+,`. Settings are organized into tabs.
 | **Terminal font** | — | JetBrains Mono | 13 bundled monospace fonts: Fira Code, Hack, Cascadia Code, Source Code Pro, IBM Plex Mono, Inconsolata, Ubuntu Mono, Anonymous Pro, Roboto Mono, Space Mono, Monaspace Neon, Geist Mono |
 | **Default font size** | — | — | 8–32px slider. Applies to new terminals; existing terminals keep their zoom level. |
 | **Split tab mode** | — | — | Separate or unified tab appearance |
+| **Tab Ordering** | — | — | How tabs are ordered: grouped by type, terminals first, or freely interleaved |
 | **Cycle All Tab Types** | — | Off | When on, next/prev-tab shortcuts also cycle file/diff/markdown/editor tabs (ordered like the tab bar). Off cycles terminals only. |
 | **Nested Terminal Tabs** | — | Off | When on, a branch with more than one terminal shows a collapsible list of its terminals under its sidebar row, each with a status dot. Off by default. |
 | **Max tab name length** | — | — | 10–60 slider |
+| **New text indicator** | `boolean` | On | Show **New text below** when terminal Chat or AI Chat receives content while you read earlier messages. Saved on this client; mobile Settings offers the same toggle. |
 | **Repository groups** | — | — | Create, rename, delete, and color-code groups |
-| **Reset panel sizes** | — | — | Restore sidebar and panel widths to defaults |
+| **Reset panel sizes** | — | — | Restore sidebar and panel widths to defaults. It also rebuilds the active Global Workspace layout and keeps the focused terminal. |
 | **Copy on Select** | `boolean` | `true` | Auto-copy terminal selection to clipboard |
 | **Allow OSC 52 clipboard writes** | `boolean` | `true` | Honor OSC 52 clipboard writes from terminal output (shows a notice per write) |
 | **Bell Style** | `none/visual/sound/both` | `visual` | Terminal bell behavior |
+| **Mute Intermediate Text** | `boolean` | On | **Chat** section. In the terminal Chat view, AI Chat and the mobile chat, assistant text that is followed by a tool call in the same turn is drawn smaller and dimmer, so status lines such as "Pump restart." are not mistaken for the answer. The last text of a turn keeps the normal style. Copy and Find work on muted text. Applies immediately. |
+| **UI Legend** | — | — | Visual reference for colors, symbols, and badges used in the app |
 
-## Agents Tab
+The app theme (which also colours terminals) is in the **Theme** card at the top of this page, not on the Terminal page. Native window and webview backgrounds use the same theme color at startup and when the theme changes, including light themes. The mobile PWA offers a separate Dark/Light choice in its Settings screen, saved on the server for connected mobile clients; the screen also shows app and server versions.
+
+#### Show agents under branches
+
+Nested agent rows are disabled by default. To show them, open **Settings → Appearance → Tabs** and turn on **Nested Terminal Tabs**. No restart is required.
+
+After you enable the setting, a branch gets an activity caret when it has at least one open terminal session. Expand the branch to see its agents and shells. Each detected agent row shows its status, current intent or task, and last-update age; clicking a row switches to that session. The setting only displays existing sessions—it does not start or discover an agent outside a terminal assigned to that branch.
+
+### Notifications
+
+- When the desktop window is unfocused, agent questions and Progress `done`/`blocked` entries can appear in the operating system's Notification Center. FastAF checks notification permission when the first alert is needed. On macOS, clicking an alert opens the named terminal or Progress project. An open, focused window receives no duplicate system alert.
+- **Enable Audio Notifications** — Master toggle
+- **Volume** — 0-100% (applied natively by the Rust playback path). Releasing the slider plays a short preview at the new level.
+- **Audio Output Device** — defaults to the system output. Click **Choose output device…** to enumerate available outputs and pick a specific one. Enumeration is deferred until you click, because on macOS the audio device scan triggers the microphone-permission prompt — notifications never record audio.
+- **Per-event toggles:**
+  - Agent asks question
+  - Error occurred
+  - Task completed
+  - Warning
+  - Info
+  - Attention (agent needs you)
+- **Test buttons** — Test each sound individually. Normal notifications share one anti-spam interval across every sound type so a burst cannot play overlapping tones. The Test button bypasses that limit, so rapid A/B volume comparisons always play.
+- **Silence subagent sounds and notifications** — On desktop, browser-desktop and mobile/PWA, mute all session sounds and OS notifications from sessions spawned by another agent, including questions, errors, completion, attention requests and Progress updates. Tab state, Activity and bell entries still update; urgent user cards still show. Mobile question and completion Web Push also follow this host setting, including process exit after session teardown. Mobile sounds retain their per-device switch and visible-Sessions-list gate. Parent and user-started sessions are unaffected. This extends the existing orchestration control and keeps its default (on) and saved preference. Unparented HTTP/MCP sessions retain the completion-chime mute only. Each busy cycle can notify at most once, even when idle and process exit arrive separately.
+- **Reset to Defaults** — Restore default notification settings
+- **Keep toasts in the bell** — Retain user-action toasts in the toolbar bell's **MESSAGES** section, including their level and explicit action. Turning this off leaves ordinary user feedback transient; agent/MCP notices and agent spawns still go directly to the bell (identical consecutive notices within five seconds are deduplicated), and overflow from the two-card limit is retained there regardless of this setting. Dedicated-domain toasts that explicitly opt out of Messages remain visible or queued. Transient cards sit top-right of the terminal, clear of docked panels and bottom input; same-kind bursts within five seconds show ×N and restart their dismissal timer. Informational toasts leave after 20 seconds and warnings after 60 seconds; an error toast stays until you click it away (the bell keeps a copy). Errors take priority over informational cards, and tall cards scroll to keep actions reachable. This setting is visual and remains available without audio output.
+- **Automatic agent toast cards** — MCP toast notices show a transient card only while their origin terminal tab is active. Settings → Notifications → **Show cards from the active terminal** defaults on and is saved per client; turning it off restores urgent-only cards. Urgent notices always show a card, and notices without an origin session remain bell-only unless urgent.
+
+**Attention** is the distinct call-back-to-keyboard sound available to agent
+toasts. Native playback and the browser fallback share a triangular G4→G4→E5
+motif with two short knocks and a longer rise; each engine applies its own
+envelope. It remains subject
+to the master toggle, configured volume, and its own per-event toggle; native
+playback also uses the selected output device.
+
+## Workspace
+
+### Terminal
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Shell** | — | Custom shell path (e.g., `/bin/zsh`, `/usr/local/bin/fish`). Leave empty for system default. |
+| **Terminal Font** | JetBrains Mono | 13 bundled monospace fonts: Fira Code, Hack, Cascadia Code, Source Code Pro, IBM Plex Mono, Inconsolata, Ubuntu Mono, Anonymous Pro, Roboto Mono, Space Mono, Monaspace Neon, Geist Mono |
+| **Default Font Size** | — | 8–32px slider. Applies to new terminals; existing terminals keep their zoom level. |
+| **Font Weight** | — | Terminal font weight (200 = ExtraLight, 400 = Regular, 700 = Bold) |
+| **Cursor Style** | — | Bar, Block, or Underline |
+| **Copy on select** | On | Auto-copy terminal selection to clipboard. When text is selected in the terminal, it is immediately copied. A "Copied to clipboard" confirmation appears in the status bar. |
+| **Allow OSC 52 clipboard writes** | On | Let terminal programs set the system clipboard via the OSC 52 escape sequence (used by tmux, vim, ssh yank-over-SSH, etc.). Because OSC 52 is honored from anywhere in the byte stream, a displayed file or log can also overwrite the clipboard — so a non-blocking "Clipboard updated" notice appears on every write. Disable to ignore OSC 52 entirely. |
+| **Show block timestamps** | On | While Ctrl+Cmd is held, each command block is labelled at the right edge with how long ago it started. |
+| **Block folding** | On | Let the Toggle Block Fold shortcut (Cmd/Ctrl+Shift+.) and its command-palette entry collapse a command block's output. Blocks already folded stay collapsed when this is off. |
+| **Show scrollbar marks** | On | Mark each command's position on the terminal scrollbar, so a long scrollback shows where output began. Covers the **history** markers only — the blue/red block ticks and the green user-prompt ticks. Orange search-match ticks are not affected: they are the result of a search you just ran, not a display preference. |
+| **Reflow scrollback on resize** | On | Re-wrap scrollback history when the terminal changes width, so output written at the old width stays readable after a side panel opens or closes. Turn it off to leave history lines as they were written and truncate them to the new width instead. The visible screen is never reflowed either way — cursor-addressed TUIs redraw themselves. A change applies to sessions already open. |
+
+The terminal bell mode (`none`, `visual`, `sound`, `both`) has no control on
+the dedicated Terminal page. Use All settings (Expert) to edit `app.bell_style` (see [Terminal Bell](terminals.md#terminal-bell)).
+
+### Keyboard Shortcuts
+
+Browse and rebind all app actions. The same editor is also in the **Help panel**
+(Help > Keyboard Shortcuts).
+
+- Every registered action is listed with its current keybinding
+- Click the pencil icon next to any action and press a new key combination to rebind it
+- Custom bindings are stored in `keybindings.json` in the platform config directory
+- Auto-populated from the action registry — new actions appear automatically
+- **Global Hotkey (Toggle Window)** — an OS-level shortcut to show or hide FastAF from any application (desktop app only)
+- **Plugin Commands** — commands that plugins register, which you can bind like any other action
+- Most shortcuts are also listed in the native system menu bar (desktop app only — browser/PWA clients have no native menu)
+
+See [Keyboard Shortcuts](keyboard-shortcuts.md) for the full reference and customization guide.
+
+### Git & GitHub
+
+GitHub authentication, pull request and issue display, and the global
+repository and worktree defaults.
+
+| Setting | Description |
+|---------|-------------|
+| **OAuth Login** | Device Flow login — click "Sign in with GitHub", enter code on github.com. Token stored in OS keyring. (**GitHub Authentication** section) |
+| **Auth Status** | Shows current login, avatar, token source (OAuth/env/CLI), and available scopes |
+| **Disconnect** | Clear all GitHub tokens (keyring + env cache). Falls back to next available source. |
+| **Diagnostics** | Token source details, scope verification, API connectivity check |
+| **Auto-show PR popover** | Automatically display PR details when switching branches. Only shows for OPEN pull requests — CLOSED PRs are hidden, and MERGED PRs fade after 5 minutes of user activity. (**Pull Requests** section) |
+| **Hide Draft PRs / Hide Conflicting PRs / Hide CI Failing PRs** | Filter the pull requests the app shows |
+| **Auto-Delete on PR Close** | Off (default), Ask, or Auto — controls branch cleanup when a PR is merged/closed |
+| **Show issues / Issue Filter** | Which issues to show in the GitHub panel: Assigned (default), Created, Mentioned, All, or Disabled (**Issues** section) |
+| **Repository Defaults** | Base branch, **Copy ignored files** and **Copy untracked files** (two separate toggles), setup/run/archive scripts applied to new repos |
+| **Worktree Defaults** | Storage strategy, branch-name prompt, branch deletion, auto-archive, orphan cleanup, merge strategy, after-merge behavior, auto-fetch interval. See [Worktrees](worktrees.md). |
+| **Additional GitHub Accounts** | Extra github.com or Enterprise logins. See [GitHub Integration](github-integration.md). |
+| **CircleCI** | Store or remove a read-only CircleCI token for failed job logs. The saved token is never displayed again. |
+| **Repository Bindings** | Which account each workspace repo resolves to |
+
+Git & GitHub requests `repo project` during OAuth login. A connected account with
+known scopes that omit `project` shows **Log in again for Projects**. This renews
+consent without requiring logout first. Existing repository permissions do not
+change; external tokens and organization access must be updated separately.
+
+Token priority: `GH_TOKEN` env → `GITHUB_TOKEN` env → OAuth keyring. The `gh` CLI login is not used.
+
+## AI
+
+### Agents
+
+**Close idle managed child after** sets the time a finished orchestrator-spawned
+agent stays open for follow-up. The default is 15 minutes; 0 disables automatic
+closure. User-created sessions are unaffected. Unread mail and background work
+keep a managed child open, and its parent receives an idle-timeout notice before
+closure. A child can also be marked keep-open at spawn or through the agent or
+session tool.
+
+**Launch instructions** combines generated modules with user additions. Select Markers, Working with the user, Waiting and long work, Git and worktrees, Process safety, and Children. Each module has a (?) control that explains its instructions and the agent behavior they enable. Waiting continues independent work during background tasks and yields only for a needed result or your answer; yield reports are not completion claims. Children applies only to spawned children. Global switches are ceilings for the per-agent switches. Changing a module refreshes the generated preview without detaching Settings or resetting the page scroll position. **Turn all launch instructions off** suppresses the complete text, including additions. When mdkb is installed, a fixed "Code search" rule (search with MDKB first) follows the modules; it has no toggle and is absent without mdkb.
+
+**Add instructions** and **Add instructions for <agent>** open empty user-addition fields, not copies of the generated text. TUIC appends global additions and then agent additions after enabled modules. Save on blur; clear a layer with **Clear global additions** or **Clear agent additions**. Empty adds nothing. `{VER}` becomes the TUIC version.
+
+Read-only effective previews follow the selected machine and draft changes. While its configuration loads, or if it fails, previews stay unavailable and **Add instructions** is disabled; text from the previous machine is not reused. Legacy default copies migrate away without duplication; custom text remains an addition. See [AI Agents](ai-agents.md#launch-instructions-tuic-output-markers).
 
 Each supported agent has an expandable row showing detection status, version, and MCP badge.
+
+The default Codex run configuration includes
+`--dangerously-bypass-approvals-and-sandbox` in its editable arguments.
+The warning icon on a configuration identifies an active bypass. Remove that
+argument through **Edit** to enable normal approvals and sandboxing for new
+launches. The removal survives restart. Existing direct Codex defaults receive
+the argument once during migration; wrapper configurations keep their own
+arguments and the managed-launch wrapper warning.
 
 | Setting | Description |
 |---------|-------------|
 | **Agent Detection** | Auto-detects running agents from terminal output patterns. Shows "Available" or "Not found" for each agent. |
 | **Run Configurations** | Custom launch configs (binary path, args, model, prompt) per agent. Add, set default, edit, or delete configurations (Edit / Delete live under the `···` menu on each row). A config named **"review"** enables the Review button in the PR Detail Popover — its args are interpolated with `{pr_number}`, `{branch}`, `{base_branch}`, `{repo}`, `{pr_url}`. The agent's **default run config** also drives resume: launching / resuming the agent swaps the agent's default binary (e.g. `claude`) for `command` and appends `args` after the resume flag. |
 | **MCP Integration** | Install/remove FastAF as MCP server for supported agents. Shows install status with a dot indicator. |
-| **Native agent hooks for status** | (Claude, Gemini, Codex, Grok, OpenCode) Toggle under each supported agent's expanded row. When enabled, TUIC writes lifecycle hooks into the agent's settings file / plugin directory so that busy/idle/awaiting state is driven directly by the agent's own hook events (OSC 7770) rather than inferred from terminal output. An install-state badge next to the toggle shows **"Hooks installed"** (current), **"Hooks: re-enable"** (outdated — TUIC version changed), or nothing (not installed). The effect takes place on the agent's **next launch**. See [AI Agents — Native Hook Instrumentation](ai-agents.md#native-hook-instrumentation) for details. |
+| **Native status signals** | Claude and Codex only. Enabled by default; injects process-scoped status configuration at launch without changing global agent files. The **Signals: at launch** badge identifies this mode. |
+| **Prevent alternate screen** | Enabled by default for every agent. TUIC applies a verified native-scrollback control when the installed CLI supports one. Turning it off leaves new launches without TUIC's screen control. Existing shells need to be reopened to receive the changed policy. |
+| **Accept workspace trust for managed spawns** | Claude and Codex only. In Expert Mode, expand the agent's card to change whether agent-to-agent spawns skip that agent's workspace trust question in a new folder. |
+| **Install hooks globally** | Codex, Gemini, Grok, and OpenCode. Explicitly installs/removes sentinel-owned lifecycle hooks in the agent's global configuration. Off by default. Codex verifies native trust; **Hooks: review in /hooks** requires normal Codex review. Profile-specific hooks require review in that profile. |
+| **Show agent intent as tab title** | When agents declare their current work phase, update the tab name with a short title |
+| **Show suggested follow-up actions** | Display actionable suggestions from agents after completing a task |
+| **Collect project progress** | Global switch for the Progress journal. On by default. Off removes the `progress` tool from every agent's tool list, stops the reporting obligation being sent, and records nothing — including the `intent:` markers FastAF writes itself. |
+| **Collect progress** (per agent) | Per-agent override, shown with the agent's MCP settings and disabled while the global switch is off. The effective value is *global AND (per-agent, default on)*, so an agent with no opinion follows the global switch. An agent that reports while its own override is off is answered `progress_tracking_disabled` rather than silently ignored. |
 | **Claude Usage Dashboard** | (Claude Code only) Toggle under Features when the Claude row is expanded. Enables rate limit monitoring, session analytics, token usage charts, activity heatmap, and per-project breakdowns. Usage data appears in the status bar agent badge and in a dedicated dashboard tab. |
-| **Agent Model Overrides** | Per-task-phase model routing for the AI Agent loop. Four phases: `plan`, `search`, `read`, `write`. Each phase can use a different model (e.g. a cheaper model for search, a stronger model for write). Configure in Settings > AI Chat. |
-| **Unsafe Mode** | When enabled, the agent skips all approval prompts and operates without sandbox restrictions (`TrustLevel::Unrestricted`). Toggle via the lock icon in the AI Chat panel header. A confirmation dialog warns before activating. The header turns red to indicate unrestricted operation. |
-| **Cron Scheduler** | Time-triggered agent tasks. Define cron expressions with goals in Settings > AI Chat > Scheduler. Jobs are persisted to `ai-cron.json` and tick every 30 s. |
 
 See [AI Agents](ai-agents.md) for details on agent detection, rate limits, and the usage dashboard.
 
-## GitHub Tab
+### AI Chat
 
-GitHub authentication and token management:
+AI Chat, the voice agent, the dictation rewrite, Smart Prompts in API mode, PR
+review, changelog generation and the improvement scan all run on FastAF's
+built-in AI engine. No external agent is needed.
 
-| Setting | Description |
-|---------|-------------|
-| **OAuth Login** | Device Flow login — click "Sign in with GitHub", enter code on github.com. Token stored in OS keyring. |
-| **Auth Status** | Shows current login, avatar, token source (OAuth/env/CLI), and available scopes |
-| **Disconnect** | Clear all GitHub tokens (keyring + env cache). Falls back to next available source. |
-| **Diagnostics** | Token source details, scope verification, API connectivity check |
-| **Issue Filter** | Which issues to show in the GitHub panel: Assigned (default), Created, Mentioned, All, or Disabled |
-| **Auto-show PR popover** | Automatically show PR detail popover when opening a branch with an active PR |
-| **Auto-delete on PR close** | Off (default), Ask, or Auto — controls branch cleanup when a PR is merged/closed |
+The **AI Chat** page appears only while AI Chat is enabled (Experimental Features
+on, plus its **AI Chat** sub-toggle). Below the page header are two cards.
 
-Token priority: `GH_TOKEN` env → `GITHUB_TOKEN` env → OAuth keyring → `gh` CLI config → `gh auth token` subprocess.
+**Parameters**:
 
-## Services & MCP Tab
+- **Temperature**
+- **Extended thinking** — the reasoning-effort levels that the Main slot's model
+  advertises.
 
-### HTTP API Server
+**Scheduled tasks** — goals an agent works on by itself on a schedule, each in
+its own terminal and with standard trust, so destructive commands wait for your
+approval: a toast asks you to **Approve** or **Deny** them. See
+[AI Chat → Scheduled tasks](ai-chat.md#scheduled-tasks). Each row shows the goal, its schedule ("Every 15 min") and next run, a **Runs once** or
+**Added by agent** badge where it applies, an on/off switch and Remove. To add a
+task, type a goal, choose **Every** <step> <minutes, hours or day>, optionally
+tick **Run once**, and click **Add task**. The step dropdown offers only even
+steps (5, 6, 10, 12, 15, 20 or 30 minutes; 1, 2, 3, 4, 6, 8 or 12 hours);
+**day** hides it and runs at 09:00 UTC. Each task reuses one terminal while it is
+open. The AI Chat agent can also add, list and
+cancel tasks itself.
 
-Enable the HTTP API server for external tool integration:
-- Serves the REST API and MCP protocol for AI agents and automation tools
-- Local MCP connections use a Unix domain socket at `<config_dir>/mcp.sock` — no port configuration needed
-- AI agents connect via the `tuic-bridge` sidecar (auto-installed on first launch for every supported agent that is installed on the machine — see [MCP bridge auto-install](../backend/config.md#mcp-bridge-auto-install))
-- Shows server status (running/stopped) and active session count
+The chat model is not chosen here: pick it in the panel's composer, or through
+the slots on the **Providers** page.
 
-### TUIC Tools
+### Providers
 
-Native tools exposed to AI agents via MCP. Each tool can be individually enabled or disabled to restrict what agents can access.
+Always shown. It configures the providers every AI feature draws on, including
+the dictation rewrite, Smart Prompts in API mode and PR review.
 
-**Manual MCP configuration** (expandable) — shows the `tuic-bridge` binary path and a ready-to-paste JSON snippet for manually configuring MCP clients that aren't auto-installed. Click "Copy" to copy the snippet to clipboard.
+Below the page header are two cards: **Configured providers** and **Slot
+assignments**.
 
-**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost from ~35k tokens to ~500 tokens per agent turn; the agent fetches schemas on demand via BM25-ranked search. Native semantics do not change: a managed command is still one `call_tool` request for `session action=submit`, and its bounded receipt comes back in that response. Default: off. Grok sessions receive this compact surface automatically for compatibility with Grok's tool-name parser, without changing the checkbox or other clients. Toggling emits `notifications/tools/list_changed`; compatible clients refresh automatically, while clients that ignore the notification may require a reconnect.
+- **Configured providers** — add (**Add provider**), edit and remove providers:
+  **Anthropic**, **OpenAI**, **OpenRouter**, **Ollama** (local, detected on
+  `localhost:11434`), any OpenAI-compatible endpoint, and **ChatGPT (sign in)**.
+  API keys are stored in the OS keyring, never in a config file.
+- **Sign in with ChatGPT** — use a ChatGPT Plus, Pro or Team plan instead of an
+  API key. **Sign in with ChatGPT** opens the browser flow when `localhost:1455`
+  is free, and otherwise shows a device code to enter at
+  `auth.openai.com/codex/device`. Remote clients always get the code. The
+  account's models are listed live, with their reasoning levels.
+- **Models** — each provider keeps its own model list (add, remove, reorder).
+- **Slot assignments** — the slot list holds **Main** only (the chat uses it).
+  Below it, **Headless / Smart Prompts** picks the default agent for headless
+  prompts and, for API mode, the model that Smart Prompts, PR review, the
+  changelog and the improvement scan use.
+- **Test connection** checks a slot's model before you rely on it.
 
-Tools:
-- **session** — PTY terminal session management
-- **git** — Repository state queries
-- **agent** — AI agent detection and spawning
-- **config** — App configuration read/write
-- **workspace** — Repo and worktree queries
-- **notify** — User notifications (toast, confirm)
-- **plugin_dev_guide** — Plugin authoring reference
+Agent CLIs (Claude Code, Codex, …) are unaffected — they keep their own
+credentials and are configured on the **Agents** page.
 
-### Upstream MCP Servers
+### Dictation
 
-**Manage in Settings** in the MCP popup (**Cmd+Shift+I**) opens this tab scrolled to this block — the block sits below the fold, so a plain tab switch would look like nothing happened.
+On desktop: Dictation, the speech-to-text provider, speech recognition, Whisper
+models, AI Rewrite (a **Rewrite transcripts** toggle, "An AI model cleans up each transcript before it is inserted"; its Provider and Model rows show only while it is on) and auto-corrections. Upstream TUICommander's **Hands-free
+conversation**, **Spoken replies** and Pocket TTS voice cards are not shown on
+desktop: FastAF's voice agent ([Voice](#voice)) is the hands-free mode there.
 
-OAuth upstreams show **Authorize** when consent is required. TUIC prepares the OAuth request, then displays a blocking in-app confirmation naming the authorization-server origin before opening the system browser. Cancelling that confirmation discards the pending request.
+A browser client shows those cards too, because a browser holds that
+conversation through its own microphone and speaker. There, **Spoken replies**
+defaults to on and speaks with Pocket TTS (local) or an external command. The
+toggle is also in the mobile conversation header and mobile Settings; all
+controls save the same preference on the server device. Hands-free
+conversation uses an accent **Start conversation** action and a distinct
+**Stop conversation** action. The global dictation hotkey and this machine's
+input devices are desktop-only. FastAF has no online speech engine. See [Voice Dictation](dictation.md) for full details.
 
-Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
-- Add upstream servers via HTTP (Streamable MCP) or stdio (process) transport
-- API keys for HTTP upstreams are stored in the OS keychain
-- Live status (connecting, ready, circuit open, failed) with tool count and call metrics
-- Reconnect and remove controls per upstream
-- Per-repo scoping: each repo can define an allowlist of active upstream servers via **Cmd+Shift+I** popup (or repo settings). Empty/null allowlist = all servers active
+### Voice
 
-### Remote Access
+FastAF's voice agent (desktop only), and the desktop's hands-free mode. Below
+the page header are four cards: **Speech model** (Kokoro), **Memory** (load
+ahead or free the model), **Voices** (the voice it answers in) and **Playback**
+(speaking rate, output device and barge-in, **Interrupt by speaking**).
 
-Enable HTTP/WebSocket access from other devices on your network. See [Remote Access](remote-access.md) for full setup guide.
-
-### Voice Dictation
-
-See [Voice Dictation](dictation.md) for full details.
-
-## Keyboard Shortcuts (Help panel)
-
-The keybinding UI lives in the **Help panel** (Help > Keyboard Shortcuts), not the Settings panel. Browse and rebind all app actions there:
-
-- Every registered action is listed with its current keybinding
-- Click any action row and press a new key combination to rebind it
-- Custom bindings are stored in `keybindings.json` in the platform config directory
-- Auto-populated from the action registry — new actions appear automatically
-- The Help panel notes that most shortcuts are also listed in the native system menu bar (desktop app only — browser/PWA clients have no native menu)
-
-See [Keyboard Shortcuts](keyboard-shortcuts.md) for the full reference and customization guide.
-
-## Plugins Tab
-
-Install, manage, and browse plugins. See [Plugins](plugins.md) for the full guide.
-
-- **Installed** — List all plugins with enable/disable toggle, logs viewer, uninstall
-- **Browse** — Discover and install from the community registry
-
-## Smart Prompts Tab
+### Smart Prompts
 
 Manage the AI-powered actions surfaced in the toolbar, context menus, and command palette. Reachable from the nav or directly via "Manage Smart Prompts..." in the Smart Prompts drawer.
 
@@ -155,9 +419,90 @@ Manage the AI-powered actions surfaced in the toolbar, context menus, and comman
 
 See [Smart Prompts](smart-prompts.md) for the full guide.
 
-## Repository Settings
+## Integrations
 
-Per-repository settings accessed via sidebar `⋯` → "Repo Settings".
+### MCP
+
+#### HTTP API Server
+
+Enable the HTTP API server for external tool integration:
+- Serves the REST API and MCP protocol for AI agents and automation tools
+- Local MCP connections use a Unix domain socket at `<config_dir>/mcp.sock` — no port configuration needed
+- AI agents connect via the `tuic-bridge` sidecar (auto-installed on first launch for every supported agent that is installed on the machine — see [MCP bridge auto-install](../backend/config.md#mcp-bridge-auto-install))
+- Shows server status (running/stopped) and active session count
+
+#### TUIC Tools
+
+Native tools exposed to AI agents via MCP. Each tool can be individually enabled or disabled to restrict what agents can access.
+
+**Manual MCP configuration** (expandable) — shows the `tuic-bridge` binary path and a ready-to-paste JSON snippet for manually configuring MCP clients that aren't auto-installed. Click "Copy" to copy the snippet to clipboard.
+
+**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost the agent carries every turn. Measured 2026-09-13 against the running desktop instance with 190 tools connected: the full list is 154,117 bytes / 35,104 tokens, the collapsed list 2,810 bytes / 615 tokens — and the collapsed figure does not move with the number of upstream tools, because they are no longer in the list. The agent fetches schemas on demand via BM25-ranked search. (Tokenizer: tiktoken 0.14.0 `o200k_base`, a GPT tokenizer used as a proxy; Anthropic publishes no offline tokenizer. Method and full table: [`mcp-http.md`](../backend/mcp-http.md#measuring-the-surfaces).) Native semantics do not change: a managed command is still one `call_tool` request for `session action=submit`, and its bounded receipt comes back in that response. Default: off. Grok sessions receive this compact surface automatically for compatibility with Grok's tool-name parser, without changing the checkbox or other clients. Toggling emits `notifications/tools/list_changed`; compatible clients refresh automatically, while clients that ignore the notification may require a reconnect.
+
+**Call audit** (MCP page) — **Record MCP call outcomes** keeps a body-free, in-memory log of recent agent tool calls. When on, the table lists time, operation, known target name and id (or a digest when unresolved), outcome (Replied / Error / Cancelled), response bytes and effect (Read-only / Completed / Failed / Not started / Unknown), with an outcome filter and a Refresh button; it loads when the page opens and on Refresh only. Effect tooltips explain the observation: Completed means the handler returned, not that queued external work finished or the client received the reply. Unknown is reserved for uncertain completion, such as cancellation, an interrupted handler or a lost upstream reply. Default: off in release builds, on in debug builds.
+
+**Capabilities** — three visible sections follow the approved MCP domains: **Always listed** (sessions, peers with task outcomes, repositories, workflows with story/run/proposal/report/launch controls, automations, user interaction with Design Mode, secrets, settings and progress), **Rarely needed** (diagnostics and plugin reference), and **Conditional** (voice, Telegram and remote deployment). Member controls stay nested under their domain without a disclosure. Conditional rows report whether voice or Telegram is configured or a remote server is connected, independently of their saved switch. Unavailable features remain configurable. A parent restriction also denies its member actions without changing saved member denials. Blocked member switches show off and cannot be edited; their help text names the parent to enable. Enable that parent to restore each saved member preference and edit individual members. Progress still requires global Progress tracking, and Settings requires trusted UI opt-in. Saved tool denials migrate once without re-enabling their new actions. Unknown old names remain visible as migration diagnostics. See [Capability cutover](../backend/mcp-http.md#capability-cutover-and-client-migration) for the breaking tool-name changes and reconnect requirements.
+
+#### Upstream MCP Servers
+
+**Manage in Settings** in the MCP popup (**Cmd+Shift+I**) opens the MCP page scrolled to this block — the block sits below the fold, so a plain page switch would look like nothing happened.
+
+OAuth upstreams show **Authorize** when consent is required. TUIC prepares the OAuth request, then displays a blocking in-app confirmation naming the authorization-server origin before opening the system browser. Cancelling that confirmation discards the pending request.
+
+Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
+- Add upstream servers via HTTP (Streamable MCP) or stdio (process) transport
+- HTTP authentication starts with a masked Bearer field. Choose OAuth 2.1 when the upstream supports it.
+- Use **+** beside **Secret headers** to add multiple name/value rows, and **−** to remove a row. Every value is masked and stored in the OS credential vault. Saved rows show an empty secret field: leave it blank to keep the current value, or enter a replacement.
+- Header names and credential references are saved in `mcp-upstreams.json`; values are never saved there. Invalid names, duplicate names and Authorization beside Bearer/OAuth are rejected. Routing, framing and MCP protocol headers are reserved.
+- An upstream with Bearer, OAuth or secret headers cannot change to another URL origin (scheme, host or port). Add a new upstream with a different name for a different provider. Same-origin path edits retain the saved auth settings. Stored credentials are checked against their saved origin before requests. After upgrading, credentials saved without an origin binding must be entered again, or authorized again for OAuth; the connection error explains this.
+- Credentials are sent only to the configured origin. Same-origin redirects work; a redirect to another scheme, host or port stops with an upstream error.
+- Live status (connecting, ready, circuit open, failed) with tool count and call metrics
+- Reconnect and remove controls per upstream
+- Per-repo scoping: each repo can define an allowlist of active upstream servers via **Cmd+Shift+I** popup (or repo settings). Empty/null allowlist = all servers active
+
+See [MCP Proxy](mcp-proxy.md) for the full guide.
+
+### Remote Access
+
+Enable HTTP/WebSocket access from other devices on your network: port,
+credentials, network interface, session token duration, IPv6, LAN access
+without authentication, **Tailscale HTTPS**, the connect QR code, and the
+**Cloud Relay**. See [Remote Access](remote-access.md) for full setup guide.
+
+- Every time remote access is turned on (from this page, All settings, the
+  settings API or an agent's MCP tools), a new session token replaces the old
+  one, so QR codes and links shared earlier stop working.
+- **Network Interface** listens on all interfaces or one address plus this
+  machine. If the picked address is missing (a Tailscale address before
+  Tailscale is up), remote access is paused on loopback with **Remote access
+  paused: <address> isn't on this Mac yet**, and resumes by itself when the
+  address appears. It never falls back to all interfaces. **Remote access could
+  not start: no free port** means no port could be bound. The QR code is hidden
+  in both cases.
+- While the pairing link is plain `http://`, a warning under it says the traffic
+  is unencrypted on this network. Use Tailscale HTTPS for an encrypted link.
+- The **Cloud Relay** URL starts empty: FastAF runs no relay server. Enter your
+  own relay to use it.
+
+### Remote Machines
+
+Add, connect, and manage `tuic-remote` daemons on other machines over SSH or a
+direct URL. **Auto-update remote daemons** is a per-connection option, off by
+default. It updates on connect only when the daemon has no live PTY sessions.
+See [Remote Access → Remote Connection Manager](remote-access.md#remote-connection-manager).
+
+### Plugins
+
+Install and manage plugins. See [Plugins](plugins.md) for the full guide.
+
+- **Installed plugins** — List all plugins, built-ins (Plan Tracker, Stories Ticker) first, with enable/disable toggle, logs viewer, and uninstall for external plugins
+- **Install from folder...** / **Install from ZIP...** — Add a plugin (desktop app only). A `tuic://install-plugin?url=https://…` link installs an HTTPS `.zip`
+- No Browse tab and no **Check for plugin updates** switch: FastAF has no plugin registry, so both are hidden
+
+## Repositories
+
+Per-repository settings. Open them from the **Repositories** group in the
+Settings navigation, or from the sidebar `⋯` → "Repo Settings".
 
 ### Worktree Tab
 
@@ -169,39 +514,240 @@ Per-repository settings accessed via sidebar `⋯` → "Repo Settings".
 ### Scripts Tab
 
 - **Setup Script** — Runs once after worktree creation (e.g., `npm install`)
-- **Run Script** — On-demand script launchable from toolbar with `Cmd+R`
+- **Run Script** — On-demand script launchable from toolbar with `Cmd+Shift+R`
 - **Archive Script** — Runs before a worktree is archived or deleted; non-zero exit blocks the operation
+- **Dev Server URL** — Optional address of this repository's development server. Design Mode opens it in a dedicated Chrome window; with no URL, Chrome opens `about:blank` so you can navigate manually. See [Design Mode](design-mode.md).
 
 ### Repo-Local Config (`.tuic.json`)
 
-A `.tuic.json` file in the repository root provides team-shareable settings that override per-repo app settings and global defaults. The file is read-only from FastAF (edit it in your repo directly).
+A `.tuic.json` file in the repository root provides team-shareable settings that override per-repo app settings and global defaults. The dedicated repository page reads this file. All settings (Expert) can edit its catalogue fields through the registered-repository owner, with a revision check; you can also edit it in your repository.
 
 **Precedence:** `.tuic.json` > per-repo app settings > global defaults
 
 Supported fields: `base_branch`, `copy_ignored_files`, `copy_untracked_files`, `setup_script`, `run_script`, `archive_script`, `worktree_storage`, `delete_branch_on_remove`, `auto_archive_merged`, `orphan_cleanup`, `pr_merge_strategy`, `after_merge`, `auto_delete_on_pr_close`.
 
-User-specific settings (`promptOnCreate`, `autoFetchIntervalMinutes`) are intentionally excluded from `.tuic.json`.
+User-specific settings (`promptOnCreate`, `autoFetchIntervalMinutes`, and the Dev Server URL) are intentionally excluded from `.tuic.json`.
 
-## Notification Settings
+Repository-local config reads are independent. If a repository is unavailable, its last successful values stay in use while other repositories refresh. A successful read that finds no `.tuic.json` clears the cached local values. A later successful read adopts the recovered repository's current values.
 
-- **Enable Audio Notifications** — Master toggle
-- **Volume** — 0-100% (applied natively by the Rust playback path). Releasing the slider plays a short preview at the new level.
-- **Audio Output Device** — defaults to the system output. Click **Choose output device…** to enumerate available outputs and pick a specific one. Enumeration is deferred until you click, because on macOS the audio device scan triggers the microphone-permission prompt — notifications never record audio.
-- **Per-event toggles:**
-  - Agent asks question
-  - Error occurred
-  - Task completed
-  - Warning
-  - Info
-  - Attention (agent needs you)
-- **Test buttons** — Test each sound individually. The Test button bypasses the anti-spam rate limit, so rapid A/B volume comparisons always play.
-- **Silence orchestration completions** — Remote HTTP/MCP workers still appear in Activity and update their tab state, but do not play a completion chime. The remote classification survives frontend reloads, and each busy cycle can notify at most once even when idle and process exit arrive separately.
-- **Reset to Defaults** — Restore default notification settings
-- **Keep toasts in the bell** — Each toast is also written to a **MESSAGES** section in the toolbar bell, so a message that faded while you looked at another window stays readable afterwards. The bell entry keeps the toast level (info / warning / error) and its action, if it had one. Turn this off to leave toasts transient. This setting is outside the audio block: the bell is visual, so it stays reachable on a machine with no audio output.
+### Telegram
 
-**Attention** is the distinct call-back-to-keyboard sound available to agent
-toasts. Native playback and the browser fallback share a triangular G4→G4→E5
-motif with two short knocks and a longer rise; each engine applies its own
-envelope. It remains subject
-to the master toggle, configured volume, and its own per-event toggle; native
-playback also uses the selected output device.
+Settings → Telegram configures the current machine. Bot setup, Chat access, Agent registration and Recent messages have separate cards. Authorized chats use named list rows with a Remove action, and Reload status refreshes the polling summary. Telegram setup is available only in desktop Settings, not in mobile Settings. Use it on the host running the desktop app or `tuic-remote`. Both share one polling owner on that machine.
+
+1. Paste the BotFather token into the password field and select **Save and check bot**. TUIC writes `bot.token` with owner-only permissions and checks `getMe`. Settings shows the bot username and whether a token is set; it never reads the token back.
+2. Enable Telegram. Ask an agent in the polling app to opt in with the Telegram MCP tool (`register`/`unregister`); Settings shows the registered agent read-only, or **No agent registered**. When the status is connected, select **Link chat**, then send the displayed six-character code to the bot within ten minutes. The code works once. Alternatively, type a positive private chat ID and select **Add chat ID**. Remove revokes authorization. The bot confirms a successful link with **Chat linked.**, and the consumed code hint disappears on the next Settings refresh. A bare `/start` explains how to get a code but does not authorize a chat. Wrong or expired six-character hexadecimal codes receive a safe retry instruction; other unauthorized text receives no reply. With no registered agent, an authorized message reaches the latest-connected live AI Chat agent (connection order, not tab selection). An explicit registration always takes priority. Connecting another AI Chat changes only future inbound delivery; existing requests keep their original reply peer. Request-specific reply tools require that peer’s MCP binding. Explicit registration takeover revokes pending requests. Only when neither exists does the bot send a short English registration instruction. An ordinary message after pairing in the same poll uses the new authorization; the pairing code never reaches the agent. Link confirmation is best-effort: if sending it fails, the chat stays linked and the consumed code is not replayed as agent mail. The failed reply appears in Recent messages.
+3. **Recent messages** shows the last 20 events in the process serving Settings, newest first: time, in/out direction, message/pairing/start/reply/button kind, outcome, and a preview of at most 60 characters. It refreshes while the page is open. Codes, tokens and unauthorized text are redacted before storage. This log stays in memory, clears when the app or daemon restarts, and is not shared between a polling owner and a standby process. Check connection status, safe error category and last accepted message time. Status identifies **this app**, **tuic-remote**, or another desktop owner. The desktop app starts the same adapter at boot; its process-held lock prevents a second local poller. A standby takes over when the owner exits. If no poller is connected, Settings explains the next action and disables **Link chat**. Config changes restart the owning adapter and retire its current transient draft state. Resolve any reported error, then disable and enable Telegram to retry a stopped adapter.
+
+#### Keep a coordinator as the Telegram owner
+
+Ask the coordinator in the app or daemon that owns Telegram polling to call the
+`telegram` MCP tool with `{"action":"register"}`. This registers that caller,
+not a named child. Settings shows its name under Agent registration. A second
+agent that registers replaces it, so child agents should use `send` without
+registering when the coordinator must keep inbound ownership.
+
+Registration is in memory. After TUIC or the polling daemon restarts, reconnect
+or resume the coordinator and ask it to call `{"action":"register"}` again.
+The same call is safe to repeat. `{"action":"unregister"}` releases its own
+registration. A role name alone does not register a Telegram owner.
+
+Non-owner messages show `[session name] [alias: TUIC address]` on every chunk.
+The address is the terminal alias, or the stable peer ID for a session without a
+terminal. You can quote both to the coordinator. Reply selects a unique live
+exact-name sender first, then the registered owner, then a live AI Chat.
+If the sender has exited, the fallback mail carries its quoted name and address,
+the original message and your reply. The bot names the session that received it;
+this confirms inbox delivery, not that the session has read it. The coordinator
+can use that context to find or recover the work; TUIC does not restart the child
+automatically. If nobody can receive it, the bot names the unavailable sender
+and asks you to register an agent. Older messages without an address retain the
+name but cannot supply a historical alias.
+
+## Shared provider account storage
+
+Core now stores provider accounts and sites in one registry. Existing GitHub accounts retain their identities and repository bindings. Token values remain in the core credential store; account reads show only set, unset or unavailable status. The Accounts controls and private native add flow are integrated separately by the Settings extension. A failed account operation may need storage repair before retrying; see [migration and recovery](../backend/github.md#github-migration-and-recovery).
+
+GitHub Enterprise account creation asks for the host in Settings, then opens a
+separate private native window for the PAT. Settings never displays or stores
+the PAT. Decline or close that window before submission to cancel. A headless
+server cannot open this native credential window. After Submit is accepted,
+verification finishes even if you close the window.
+
+The internal GitHub settings backend keeps OAuth device login for github.com and
+verifies Enterprise PAT identity before storage. Account reads expose credential
+status only. The new shared settings tool is published in a separate cutover step;
+this backend adapter does not add a new user-facing endpoint.
+
+### Work-item access for agents
+
+Agents can read linked Tasks items through the MCP repo tool. Tracker comments and status changes are disabled by default. To enable them, set `mcp_work_item_writes` to `true` through the configuration save API, or edit `config.json` while the app is stopped. There is no separate Tasks write toggle in Settings. A frontend with the provider loaded must remain connected. After a write times out, read the item before retrying.
+
+### Background tray and menu-bar icon
+
+In General > Confirmations, Tray and menu-bar icon selects Always, Only in background (default), or Never. Never disables the Background choice. If the tray cannot be created, or the Linux desktop has no tray host (such as stock GNOME), closing minimizes the window so it remains reachable. The tray menu offers Show FastAF, live working/awaiting counts and Quit. An attention mark clears when you show the window. Linux uses the menu; macOS and Windows also support left-click to show.
+
+## Plugin integration pages
+
+Loaded plugins with registered settings appear under Settings > Integrations. Search includes their catalogue field labels. Unloading removes the page and search entries. Reads, revision-checked edits, resets and secret set/unset status use the scoped Rust settings service; the UI owns no second configuration store.
+
+String-list edits, added rows, and removed rows stay in a draft until focus leaves the list. Read failures show an alert on the plugin page and do not close Settings.
+
+### Automatic idle-agent hibernation
+
+The backend checks unattended top-level agent tabs every five seconds. `agents.hibernate_idle_minutes` defaults to 60 awake minutes; zero disables the sweep. `agents.hibernate_scope` defaults to `background_only`; `always` also permits foreground hibernation. Both machine-owned controls are in Settings → Agents (Expert Mode).
+
+Hibernation requires an idle agent and a verified resume session in its saved profile. Plain shells and agents without a verifiable resume session stay live. Unread peer mail, pending commands or background work, awaiting input, attached readers, keep-open tabs and open automation runs prevent hibernation. Managed children retain their separate idle-close policy. Sleep gaps longer than 30 seconds do not advance the idle clock.
+
+The normal Rust suspension path persists `reason: "idle_hibernate"` before ending the PTY. Opening the tab, submitting input or sending peer mail uses the shared wake path. Storage or resume-verification failures leave the live session intact.
+
+### Tasks notifications
+
+Settings → Notifications → Tasks has **OS notifications for Tasks**, off by default and independent of the existing PR notification preference. Failed checks on a linked GitHub PR use the existing PR notice once and name the linked Tasks item. Click the notice to open the PR’s Comments section in Tasks. If its work-item provider is not loaded, the conversation opens on GitHub.
+
+Use **Follow task** in an item detail to follow comments locally; use **Unfollow task** to stop. Follow state and the policy are saved in the existing Tasks UI preferences. A first observation establishes a silent baseline. Existing visible detail refreshes (including its 60-second refresh) and provider-bridge detail reads compare authoritative comments; there is no extra background poller. Your own comment action advances the baseline silently. Native notices recheck the Tasks policy after permission is granted and retain the existing background-window policy; browser clients do not send native OS notices.
+
+GitHub provides a full normal-comment count, so an increase is detected even beyond the first page. Jira and GitLab provide paged comment entries: newly observed comments notify when their creation time is newer than the prior baseline, or when a previously unseen comment ID shares its latest timestamp. Unloaded pages, unseen review sources and items that are not refreshed cannot produce a notice. Editing a comment or loading older history does not notify. No Linear provider is shipped, so it is not covered.
+
+## Settings MCP access (#1787-4778)
+
+Enable the settings native tool under MCP to permit an agent to describe and edit settings. It is disabled by default, even if the removed config tool was enabled. Secrets are write-only. Changes to external access or the trusted executable require the existing confirmation dialog. The owner inventory is complete. Use explicit target/store/paths for owner reads and dynamic-choice describe/refresh. Typed workflows select their store and operation; credentials remain write-only. Future unresolved owner gaps block edits.
+
+
+Agent model settings support typed model edits without starting a CLI. Explicit
+choice refresh probes only the addressed Claude run config with `--help`, using
+its command and environment. Published aliases are suggestions, not account
+entitlement or an exhaustive model list. Other CLIs and failed probes report
+unavailable choices; typed edits remain supported. Describe never probes. Model
+edits preserve sibling configs and the default selection and apply next session
+(#1910-451e).
+
+Shortcut saves reject invalid action identities, duplicate action records and invalid modifier syntax. Plugin shortcuts retain stable namespaced IDs. Pane geometry saves reject invalid ratios, excessive nesting and missing groups without changing saved layout. Runtime tab membership and current pane focus remain session restoration state.
+
+Font options come from the bundled font catalogue. Theme options include custom themes from the Rust theme owner. Settings choice discovery is explicit: describe does not probe installed applications; refresh requests host IDE discovery. Unavailable discovery is not an empty result.
+
+### Audio device availability
+
+An empty device list means enumeration succeeded with no devices. If the audio backend cannot enumerate devices, refresh reports an error instead. Voice language and engine changes keep the existing speech runtime invalidation behavior.
+
+### Shared layout
+
+Settings uses one bounded, responsive shell across pages, with independently scrolling navigation and content. The panel is at most 1136px wide and retains its size when you select another page. Saved navigation width remains in use. Shared presentation components support consistent cards, label/control rows, source-aware status, empty states and scoped destructive actions as pages adopt the approved restyle. Save behavior and configuration ownership do not change.
+
+### Scope and operation states
+
+The page header identifies the setting owner. Repository edits remain tied to
+the selected repository; Agents uses its machine selector; plugin pages name
+the plugin that supplies their fields. A page change does not transfer settings
+between these owners. **Done** closes Settings; it is not a global Apply action.
+
+Loading, empty results and failed reads are different states. A plugin catalogue
+with no fields adds no page. While plugin values load, the editor shows a local
+loading message and keeps navigation and Done available. A failed read shows an
+alert inside the editor. Rejected writes reload the latest revision rather than
+reuse stale values for the next edit. Unloading a plugin removes its editor even
+if a read is still pending.
+
+Status words describe the reported state, not inferred connectivity. Saved
+credentials do not prove live access. Use the page's existing Refresh or recovery action;
+opening Settings does not authorize extra network or sandbox probes.
+
+Section links open the requested page and scroll after it mounts. Older
+`services` links open MCP, and `developer-tools` links open General. A missing
+section does not redirect to an unrelated control. Closing Settings cancels a
+pending section scroll.
+
+### Task-based settings presentation
+
+Dictation uses separate task cards for dictation, recognition and corrections;
+browser mode adds hands-free conversations and spoken replies. Smart Prompts retains categorized
+prompt editors and the existing execution controls. Integration pages use local
+connection, access, and service cards. Remote token regeneration requires a scoped
+confirmation because it disconnects active remote sessions.
+
+The plugin manager shows only the Installed view; Browse is hidden while there is no registry. A loaded plugin's settings
+page identifies its plugin source and uses schema-driven controls; saved credentials
+are not evidence of a live connection. Existing explicit-save and automatic-save
+boundaries still apply to each page.
+
+Loaded plugins with described settings appear in a separate **Plugin settings**
+navigation group with a plug icon. The manager offers **Settings** only when the
+loaded catalogue provides a page. That action opens the same scoped page as the
+navigation entry; it does not create a second settings service.
+
+
+Dictation keeps downloadable models and voice management in **Speech assets**.
+**Speech assets** and (in browser mode) **Spoken replies** use the same aligned label/control rows.
+Choose an installed Whisper model or (in browser mode) reply voice with the shared dropdowns;
+unavailable Whisper models remain disabled until downloaded. The configured model
+stays selected while the model catalogue loads, even if it is not downloaded. Both asset lists
+use named Download, Repair, Cancel and Remove actions where supported, shared
+status badges and the same progress display. Voice processing and save rules do
+not change. Remote Access separates connection status, Tailscale HTTPS and token revocation. Plugin rows keep secondary controls in **Manage plugin**; plugin pages identify their source and plugin-owned scope.
+Native MCP tool help stays anchored during status refreshes. Focus a `?` badge
+with the keyboard or hover over it to read the full tool description. Help
+placement follows panel scrolling, window resizing, and description size changes.
+
+### Contextual explanations
+
+Selected settings show a `?` only when the approved explanation adds decision guidance, requirements, consequences or owner-dependent defaults. Hover or focus the badge to read it. Click or press Enter/Space to pin it; click again, press Escape or click outside to dismiss it. Help does not save a setting, contact a service or run a sandbox probe. Long help scrolls inside the viewport and follows panel scroll/resize. Native MCP help retains tool-name identity while descriptions update during status polls (1928-e282).
+
+Dictation lists Whisper downloads below the active-model selector and keeps correction import/export in the card actions. Smart Prompts uses Edit to open a separate editor card; the enable switch stays visible on each library row. Custom prompt deletion remains confirmed in the final danger section.
+
+Loaded plugin pages use the same title-icon slot as other Settings pages. The
+source line identifies bundled or installed ownership without changing the
+page label, catalogue lifecycle, or scoped editor behavior.
+
+Plugin field resets sit next to their controls and appear only for non-default
+values (or a set credential). Plugin management uses compact secondary actions.
+
+### Telegram request streaming (1959-162a)
+
+Telegram replies now use TUIC-driven receipt (👀), working (👨‍💻), waiting (🤔), answered (👍) and failed (👎) reactions. An ephemeral native draft shows Italian status lines or unapproved agent previews; it refreshes while work continues and the final reply replaces it. Acknowledgement of work requires inbox Read and a new recipient turn. PTY intent/activity and AI Chat assistant chunks share request correlation; finish remains authoritative after draft retirement. Telegram-mail-woken AI Chat turns automatically send their settled assistant text if finish has not answered. Queue and no-reply notices occur at ten minutes and sixty seconds after Read respectively. Restart keeps no request history. Phone rendering requires a live check after the backend restart.
+
+Settings search includes page titles and shared card controls. Page-title results scroll to the page header; when a page and card share a title, control results use the card. Runtime status badges and summaries are not settings search targets.
+
+### Changes made through MCP
+
+An open Settings page refreshes after a durable MCP settings write. Unsaved fields stay in place; if another writer changes the same field, a warning asks you to review your edit before saving again. Incoming changes do not run startup migrations or save the snapshot back to the backend. A reconnected browser rereads its active settings sections, including after a server restart. Remote-machine changes refresh only that machine's editors, not local settings. If a write persisted but its runtime apply failed, Settings still rereads the saved state; the caller must follow the returned recovery action rather than blindly replay the write.
+
+## All settings (Expert)
+
+The **Application → All settings (Expert)** page is in the navigation only while the **Expert** switch is on. Turning Expert off while the page is open returns you to General. With Expert off, settings search still reaches its fields and opens the page for the selected one. It provides typed scalar and string-list editors from the Rust catalogue. Search results update the inspector even when this page is already open. You can also select a setting manually. Bind any stable record keys, and select a registered repository or existing Ego profile when required. The inspector edits existing records; use the dedicated domain page to create records, manage credentials or edit structured pane/forward/root data. It does not expose an opaque JSON editor.
+
+Reads show owner state and a revision. Save changes only that field with its read revision. A remote update keeps a dirty draft and its old revision, so a conflicting save cannot silently overwrite the new state. **Discard draft and reload** explicitly abandons that draft. Exposure/execution edits first return a proposal; **Ask for confirmation** uses the existing human dialog. If persistence succeeded but runtime application failed, or the transport lost the outcome, the inspector disables writes until you reload authoritative state. Read back before retrying.
+
+General also exposes content-index memory budget, attachment byte limit and background WebView unload delay as expert resource controls. Enum-backed shared selects use catalogue values while retaining their existing readable labels. Search includes the inspector descriptors. In browser mode, these results open machine-owned fields in the HTTP-capable inspector; they do not open desktop-only controls such as the native global-hotkey recorder.
+
+The explicit source ledgers distinguish read-only identities, derived credentials, legacy snapshots and separate domain controls. CircleCI credentials use the write-only `circleci.token` owner. Dictation corrections use stable heard-text keys in the machine-owned `corrections` collection; edits reuse TextCorrector and refresh open Voice pages without microphone access. Global PR visibility filters persist in config.json. Nullable repository overrides persist in repo-settings.json; null inherits the global filter and false explicitly shows matching PRs.
+
+## Assisted startup
+
+The [Settings startup contract](../backend/settings-startup.md) describes discoverable GitHub device/Enterprise workflows and Ego settings/readback. GitHub `list_accounts` discovers existing account IDs and credential presence. Typed Ego `begin_login` opens a terminal for you to authenticate; `login_status` reports process lifetime and owner credential readback separately. Native inventory completeness does not mean every onboarding or live UI check is complete.
+
+### CircleCI Settings owner (#1991-bd88)
+
+Settings discovery includes the write-only machine setting `circleci.token`.
+Typed `set_token` and `clear_token` actions share the existing token owner across
+MCP, IPC and HTTP. Readback reports stored presence only (`set`, `unset`,
+`unavailable`), never a secret. Git & GitHub keeps its effective-source status;
+removing a stored token leaves environment and CircleCI CLI fallbacks unchanged.
+
+On narrow screens, search and page selection share one compact navigation row. The workspace path in AI Chat is a read-only field; select or scroll its text to inspect the full path.
+
+### Mobile font sizes
+
+In mobile Settings, use the Terminal and Chat minus/plus controls under Appearance to set each size from 10 to 24 px. Each value is saved on this device. Terminal changes CLI output; Chat changes Session Chat and AI Chat transcripts. The defaults remain 14 px for terminal output and Chat body text. Composers, UI controls and desktop fonts stay unchanged. CLI text wraps to the available width without changing the shared terminal size.
+
+### Abandoned shells
+
+Desktop sidebar session rows and mobile session cards mark a parentless plain shell as **Abandoned** after one idle hour and show its idle age. The five-second backend sweep requires a fresh OS process inventory: the PTY child must be an interactive shell with no child processes. An unknown inventory, script, foreground command, background child, detached TUIC job, managed identity, live child session, pending input or keep-open hold prevents closure. Unsupported or incomplete OS process observations fail closed.
+
+Settings → Agents → Idle agent hibernation (Expert Mode) includes **Close abandoned shells after (hours)** (`agents.abandoned_shell_hours`). The machine-owned value defaults to **0 (off)**; whole hours from 1 to 65535 enable closure. Idle age is measured from the most recent input, output or semantic activity, including elapsed time while the machine sleeps. Closure rechecks the process inventory and activity at the destructive boundary, and uses the normal session close/tombstone path. The sweep can lag the threshold by one five-second tick. A remote daemon applies its own setting, not the desktop host's value.
+
+The monitored-repository count tracks successful snapshots in the running GitHub monitor, including repositories with no open PRs. Query-cache expiry and temporary poll failures do not reset this count. Removing a repository or stopping monitoring removes its entry.
+
+Git & GitHub access diagnostics show exact per-repository messages grouped by owner and account. For github.com OAuth accounts, use the OAuth app authorization action, then select Refresh status to clear NOT_FOUND retry delays for all accounts before the next monitoring poll. Opening Settings does not clear these delays.
+
+## Archived worktree retention
+
+Git & GitHub → Worktree Defaults includes **Archived worktree retention (days)**. `0` is Off, the default. Repository → Worktree has a nullable override: leave it empty to inherit, or enter `0` to keep that repository’s archives. Cleanup uses recorded archive age on repository refresh, preserves committed work in archive refs, and keeps dirty or otherwise unsafe archives with named reasons. See [Worktrees](worktrees.md#archived-worktree-retention).

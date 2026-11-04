@@ -76,7 +76,7 @@ export const TaskQueuePanel: Component<TaskQueuePanelProps> = (props) => {
 						>
 							{t("taskQueue.clear", "Clear")}
 						</button>
-						<button class={s.closeBtn} onClick={props.onClose}>
+						<button aria-label="Close" class={s.closeBtn} onClick={props.onClose}>
 							&times;
 						</button>
 					</div>

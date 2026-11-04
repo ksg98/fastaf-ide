@@ -12,7 +12,7 @@
 }
 
 .collapsed {
-  max-height: 26px;
+  max-height: var(--context-header-height, 26px);
 }
 
 .expanded {
@@ -25,7 +25,19 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  min-height: 26px;
+  min-height: var(--context-header-height, 26px);
+}
+
+/* The absolute CLI/Chat switch occupies the header's right-hand gutter. */
+:global([data-terminal-view-toggle]) ~ .bar .header {
+  padding-right: 116px;
+}
+
+/* Keep the shared 44px touch switch inside the same Context row in both modes. */
+@media (max-width: 600px) {
+  :global([data-terminal-view-toggle]) ~ .bar {
+    --context-header-height: 48px;
+  }
 }
 
 .label {

@@ -1,4 +1,5 @@
 import { For, Show } from "solid-js";
+import { Button } from "../../components/ui";
 import { appLogger } from "../../stores/appLogger";
 import { toastsStore } from "../../stores/toasts";
 import { rpc } from "../../transport";
@@ -27,6 +28,9 @@ export function CommandWidget(props: CommandWidgetProps) {
 				(data) => retryWrite(() => rpc("write_pty", { sessionId: props.sessionId, data })),
 				text,
 				props.agentType,
+				undefined,
+				true,
+				props.sessionId,
 			);
 			// Dismiss only once the command reached the PTY; on failure keep the
 			// sheet open so the user can retry.
@@ -77,9 +81,9 @@ export function CommandWidget(props: CommandWidgetProps) {
 						<div class={styles.commandRow}>
 							<For each={commandSet().commands}>
 								{(cmd: AgentCommand) => (
-									<button class={styles.chip} onClick={() => send(cmd.command)}>
+									<Button class={styles.chip} onClick={() => send(cmd.command)}>
 										{cmd.label}
-									</button>
+									</Button>
 								)}
 							</For>
 						</div>
@@ -90,9 +94,9 @@ export function CommandWidget(props: CommandWidgetProps) {
 						<div class={styles.commandRow}>
 							<For each={commandSet().models}>
 								{(model: string) => (
-									<button class={styles.modelChip} onClick={() => sendModel(model)}>
+									<Button class={styles.modelChip} onClick={() => sendModel(model)}>
 										{model}
-									</button>
+									</Button>
 								)}
 							</For>
 						</div>
@@ -101,9 +105,9 @@ export function CommandWidget(props: CommandWidgetProps) {
 					<Show when={hasPermissionToggle()}>
 						<div class={styles.sectionLabel}>Controls</div>
 						<div class={styles.commandRow}>
-							<button class={styles.permissionChip} onClick={sendPermissionToggle}>
+							<Button class={styles.permissionChip} onClick={sendPermissionToggle}>
 								Permission Toggle
-							</button>
+							</Button>
 						</div>
 					</Show>
 				</div>

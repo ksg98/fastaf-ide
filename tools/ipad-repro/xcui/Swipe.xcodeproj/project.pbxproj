@@ -1,0 +1,22 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		A1 = {isa = PBXBuildFile; fileRef = F1;};
+		F1 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeUITests/SwipeUITests.swift; sourceTree = "<group>";};
+		F2 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SwipeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;};
+		G0 = {isa = PBXGroup; children = (F1, G1); sourceTree = "<group>";};
+		G1 = {isa = PBXGroup; children = (F2); name = Products; sourceTree = "<group>";};
+		S1 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1); runOnlyForDeploymentPostprocessing = 0;};
+		FW = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+		T1 = {isa = PBXNativeTarget; buildConfigurationList = CL2; buildPhases = (S1, FW); buildRules = (); dependencies = (); name = SwipeUITests; productName = SwipeUITests; productReference = F2; productType = "com.apple.product-type.bundle.ui-testing";};
+		P1 = {isa = PBXProject; attributes = {LastUpgradeCheck = 2600;}; buildConfigurationList = CL1; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en); mainGroup = G0; productRefGroup = G1; projectDirPath = ""; projectRoot = ""; targets = (T1);};
+		C1 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphonesimulator; IPHONEOS_DEPLOYMENT_TARGET = 26.0; SWIFT_VERSION = 5.0;}; name = Debug;};
+		C2 = {isa = XCBuildConfiguration; buildSettings = {PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = it.straus.swipeuitests; GENERATE_INFOPLIST_FILE = YES; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_IDENTITY = ""; SUPPORTED_PLATFORMS = iphonesimulator; TARGETED_DEVICE_FAMILY = 2;}; name = Debug;};
+		CL1 = {isa = XCConfigurationList; buildConfigurations = (C1); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+		CL2 = {isa = XCConfigurationList; buildConfigurations = (C2); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+	};
+	rootObject = P1;
+}

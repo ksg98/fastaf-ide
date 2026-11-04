@@ -1,0 +1,14 @@
+// A pause that lands as `pending` while a turn is still running, and the
+// resume that takes it back to `running`. Both name the same request id the
+// client generated, because ego uses it to make the call idempotent.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"expect","method":"_ego/pause","params":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f1"},"capture":"pause"}
+{"step":"respond","to":"pause","result":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f1","state":"pending"}}
+{"step":"expect","method":"_ego/resume","params":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f1"},"capture":"resume"}
+{"step":"respond","to":"resume","result":{"v":1,"sessionId":"01932d5e-0000-7000-8000-0000000000aa","requestId":"01932d5e-0000-7000-8000-0000000000f1","state":"running"}}
+{"step":"respond","to":"prompt","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

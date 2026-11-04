@@ -165,7 +165,12 @@ pub(crate) fn load_ai_chat_config() -> AiChatConfig {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn save_ai_chat_config(config: AiChatConfig) -> Result<(), String> {
-    ConfigFile::<AiChatConfig>::new(CONFIG_FILE).save(&config)
+    // A whole-document replace under the config locks (upstream made the bare
+    // `save` test-only).
+    ConfigFile::<AiChatConfig>::new(CONFIG_FILE).update(move |current| {
+        *current = config;
+        true
+    })
 }
 
 /// Assemble terminal context string for use by conversation_engine.rs.
@@ -178,7 +183,7 @@ pub(crate) fn assemble_terminal_context_for_engine(
     let mut section = ctx.to_system_section();
 
     // Prefer OSC 133 block context; fall back to VtLogBuffer output already in section.
-    if let Some(entry) = state.session_knowledge.get(session_id) {
+    if let Some(entry) = state.engine.session_knowledge.get(session_id) {
         let knowledge = entry.lock();
         if let Some(block_ctx) = assemble_block_context(&knowledge, DEFAULT_CONTEXT_BUDGET) {
             // Replace the VtLogBuffer "Recent Terminal Output" with structured blocks.
@@ -620,13 +625,13 @@ fn assemble_terminal_context(
     }
 
     // CWD from PtySession
-    if let Some(sess) = state.sessions.get(session_id) {
+    if let Some(sess) = state.session_maps.sessions.get(session_id) {
         let sess = sess.lock();
         ctx.cwd = sess.cwd.clone();
     }
 
     // Terminal output from VtLogBuffer
-    if let Some(buf_entry) = state.vt_log_buffers.get(session_id) {
+    if let Some(buf_entry) = state.grid.vt_log_buffers.get(session_id) {
         let buf = buf_entry.lock();
         let lines = buf.lines();
         let n = context_lines as usize;
@@ -683,7 +688,7 @@ mod tests {
     fn default_config_uses_ollama() {
         let config = AiChatConfig::default();
         assert_eq!(config.provider, "ollama");
-        assert!(config.model.is_empty());
+        assert_eq!(config.model, "");
         assert!(!config.is_configured());
     }
 
@@ -761,7 +766,7 @@ mod tests {
         let loaded: AiChatConfig = serde_json::from_str(&json).unwrap();
         // Legacy fields are not serialized, so loaded has defaults.
         assert_eq!(loaded.provider, "ollama");
-        assert!(loaded.model.is_empty());
+        assert_eq!(loaded.model, "");
         assert!(loaded.base_url.is_none());
         assert!((loaded.temperature - 0.5).abs() < f32::EPSILON);
     }
@@ -783,7 +788,7 @@ mod tests {
     fn missing_fields_use_defaults() {
         let loaded: AiChatConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(loaded.provider, "ollama");
-        assert!(loaded.model.is_empty());
+        assert_eq!(loaded.model, "");
         assert!((loaded.temperature - 0.7).abs() < f32::EPSILON);
     }
 
@@ -967,7 +972,7 @@ mod tests {
         std::fs::create_dir_all(&conv_dir).unwrap();
 
         let id = new_conversation_id();
-        assert!(!id.is_empty());
+        assert_ne!(id, "");
 
         let conv = Conversation {
             meta: ConversationMeta {

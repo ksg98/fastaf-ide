@@ -17,18 +17,20 @@ concurrency:
 
 # Keep the sccache server alive across a compile longer than its 600s idle timer —
 # see the note in release.yml. RUST_VERSION pins the compiler; bump it in lockstep
-# with ci.yml, release.yml and audit.yml — see the note in ci.yml and docs/guides/ci.md.
+# with ci.yml, release.yml, remote-daemon.yml and audit.yml — see the note in
+# ci.yml and docs/guides/ci.md.
 env:
   SCCACHE_IDLE_TIMEOUT: "0"
-  RUST_VERSION: "1.98.0"
+  RUST_VERSION: "1.99.1"
 
 jobs:
   cleanup:
+    timeout-minutes: 10
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 1
 
@@ -42,7 +44,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Delete the whole rolling nightly release (KEEPING the tag we just moved) so
-          # the build matrix's tauri-action recreates it fresh — resetting published_at
+          # cleanup recreates it fresh before either matrix starts — resetting published_at
           # to the current run time. The previous approach deleted only the ASSETS and
           # left the release object intact; GitHub freezes published_at at the initial
           # draft->published transition and NEVER refreshes it on tag moves, asset swaps,
@@ -55,8 +57,17 @@ jobs:
           # stable /releases/tag/nightly URL); `|| true` tolerates the first-ever run
           # when no release exists yet.
           gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag=false --yes || true
+          gh release create nightly \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "FastAF Nightly" \
+            --notes "Rolling build from main. Assets are uploaded as builds complete." \
+            --prerelease \
+            --latest=false
 
   build:
+    # Leave 15 minutes outside the macOS build step for setup and post actions.
+    timeout-minutes: ${{ matrix.platform == 'macos-latest' && 105 || 90 }}
     needs: cleanup
     permissions:
       contents: write
@@ -78,32 +89,15 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # A no-op for FastAF, which has no `plugins` submodule. Left on so a
+          # future submodule is checked out.
+          submodules: recursive
 
       - name: Patch nightly version
         shell: bash
-        run: |
-          # Append nightly timestamp to current version (strip any existing -nightly suffix first)
-          VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
-          VERSION="${VERSION%%-nightly*}"
-          NIGHTLY="$VERSION-nightly.$(date -u +%Y%m%d).t$(date -u +%H%M)"
-          echo "Nightly version: $NIGHTLY (from $VERSION)"
-
-          # Patch tauri.conf.json: version + add nightly updater endpoint
-          python3 -c "
-          import json
-          c = json.load(open('src-tauri/tauri.conf.json'))
-          c['version'] = '$NIGHTLY'
-          nightly_ep = 'https://github.com/ksg98/fastaf/releases/download/nightly/latest.json'
-          ep = c['plugins']['updater']['endpoints']
-          if nightly_ep not in ep:
-              ep.insert(0, nightly_ep)
-          json.dump(c, open('src-tauri/tauri.conf.json','w'), indent=2)
-          print('Patched tauri.conf.json')
-          "
-
-          # Patch Cargo.toml version
-          sed "s/^version = \"$VERSION\"/version = \"$NIGHTLY\"/" src-tauri/Cargo.toml > tmp.toml && mv tmp.toml src-tauri/Cargo.toml
+        run: bash scripts/patch-nightly-version.sh
 
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'ubuntu')
@@ -127,26 +121,39 @@ jobs:
       # Studio 18 2026". Install the latest CMake, which recognises it.
       - name: Upgrade CMake (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: lukka/get-cmake@latest
+        uses: lukka/get-cmake@f86dd60acae0d132056913e248bdabf0e0580b7a # v4.4.5
 
-      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # webrtc-audio-processing builds the bundled APM (dictation echo
+      # cancellation) with meson and ninja, which no runner image ships. pip
+      # rather than apt/brew/choco so every leg gets the same version: Ubuntu
+      # 22.04 packages meson 0.61, which is older than the abseil wrap expects.
+      # The build also fetches abseil-cpp from github.com while it runs.
+      - name: Install meson and ninja
+        shell: bash
+        run: python -m pip install meson==1.11.2 ninja==1.13.2
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: './src-tauri -> target'
           cache-directories: ${{ matrix.platform == 'windows-latest' && 'C:/t' || '' }}
@@ -170,13 +177,16 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Best-effort, shared with release.yml: a missing or invalid secret builds
-      # an unsigned bundle instead of failing the nightly. The action exports the
-      # APPLE_* env tauri-action reads only when it carries a value.
+      # Best effort, unlike release.yml (which passes require: 'true'): a missing
+      # or invalid secret builds an unsigned bundle instead of failing the
+      # nightly, and the action puts a warning block in the run summary. The
+      # action exports the APPLE_* env tauri-action reads only when it carries a
+      # value.
       - name: Configure macOS signing
         if: startsWith(matrix.platform, 'macos-')
         uses: ./.github/actions/macos-signing
         with:
+          require: 'false'
           cert-base64: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
           cert-password: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
           notarize-key-base64: ${{ secrets.NOTARIZE_KEY_BASE64 }}
@@ -184,8 +194,10 @@ jobs:
           notarize-issuer-id: ${{ secrets.NOTARIZE_ISSUER_ID }}
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        timeout-minutes: 60
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        # Run 40706484667 exhausted 60m with no Cargo cache (863 Rust misses).
+        # Allow 50% more for cold macOS builds; see docs/guides/ci.md.
+        timeout-minutes: ${{ matrix.platform == 'macos-latest' && 90 || 60 }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # sccache
@@ -201,9 +213,9 @@ jobs:
           # one as "signing requested".
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # whisper.cpp build flags per platform + /Z7 for sccache MSVC compat
-          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
-          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
+          # whisper.cpp build flags per platform + -Z7 for sccache MSVC compat
+          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
+          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
         with:
           tauriScript: pnpm tauri
           tagName: nightly
@@ -212,7 +224,7 @@ jobs:
             **Rolling build from `main` — always the latest code.**
 
             Updated on every push to main. May contain experimental features.
-            For stable releases, see the [latest versioned release](https://github.com/ksg98/fastaf/releases/latest).
+            For stable releases, see the [latest versioned release](https://github.com/ksg98/fastaf-ide/releases/latest).
           releaseDraft: false
           prerelease: true
           includeUpdaterJson: true
@@ -224,14 +236,29 @@ jobs:
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           rm -f "$APPLE_API_KEY_PATH" 2>/dev/null || true
 
+  # tuic-remote + tuic-bridge for the four daemon targets, uploaded to the rolling
+  # `nightly` release under the same asset names release.yml uses. `needs: cleanup`
+  # is what keeps the old binaries out: cleanup deletes the whole release, so an
+  # upload that ran before it would be deleted with it. Cleanup recreates the
+  # prerelease before either matrix starts, so daemon uploads do not depend on
+  # desktop builds succeeding. latest.json is written by tauri-action alone.
+  remote-daemon:
+    needs: cleanup
+    permissions:
+      contents: write
+    uses: ./.github/workflows/remote-daemon.yml
+    with:
+      nightly: true
+
   update-notes:
+    timeout-minutes: 15
     needs: build
     if: always() && needs.build.result != 'cancelled'
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -243,12 +270,14 @@ jobs:
           LAST_STABLE=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           echo "Last stable tag: $LAST_STABLE"
 
-          NOTES=$(mktemp)
+          mkdir -p .tmp/tuic-tests
+          NOTES=$(mktemp .tmp/tuic-tests/nightly-notes.XXXXXX)
+          trap 'rm -f "$NOTES"' EXIT
           {
             echo '**Rolling build from `main` — always the latest code.**'
             echo ''
             echo 'Updated on every push to main. May contain experimental features.'
-            echo 'For stable releases, see the [latest versioned release](https://github.com/ksg98/fastaf/releases/latest).'
+            echo 'For stable releases, see the [latest versioned release](https://github.com/ksg98/fastaf-ide/releases/latest).'
             echo ''
             echo '---'
             echo ''
@@ -270,8 +299,9 @@ jobs:
             printf '### Other\n%s\n\n' "$OTHER" >> "$NOTES"
           fi
 
+          python3 scripts/cap-release-notes.py "$NOTES" \
+            "https://github.com/$GITHUB_REPOSITORY/compare/$LAST_STABLE...main"
           gh release edit nightly --repo "$GITHUB_REPOSITORY" --notes-file "$NOTES"
-          rm -f "$NOTES"
 
       - name: Create versioned nightly release
         if: needs.build.result == 'success'
@@ -302,10 +332,11 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "FastAF $TAG" \
-            --notes "Nightly build from \`main\`. Download the latest rolling build from the [nightly release](https://github.com/ksg98/fastaf/releases/tag/nightly)." \
+            --notes "Nightly build from \`main\`. Download the latest rolling build from the [nightly release](https://github.com/ksg98/fastaf-ide/releases/tag/nightly)." \
             --prerelease
 
   retry-failed:
+    timeout-minutes: 15
     needs: build
     if: failure()
     permissions:

@@ -5,6 +5,9 @@
   "version": "2.0.4",
   "identifier": "com.fastaf.ide",
   "build": {
+    "features": [
+      "dictation"
+    ],
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://127.0.0.1:1421",
     "beforeBuildCommand": "pnpm build && pnpm build:sidecar",
@@ -35,7 +38,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' https: http: data: blob: asset: http://asset.localhost ipc: tauri: plugin:; frame-src 'self' asset: http://asset.localhost http://127.0.0.1:* http://localhost:*",
+      "csp": "default-src 'self' 'unsafe-inline' https: http: ws: wss: data: blob: asset: http://asset.localhost ipc: tauri: plugin:",
       "dangerousDisableAssetCspModification": [
         "style-src",
         "script-src"
@@ -46,7 +49,8 @@
           "$APPDATA/**",
           "$APPDATA/**/*",
           "$HOME/**",
-          "/**"
+          "/**",
+          "$HOME/Gits/**/.tmp/**"
         ]
       }
     }
@@ -54,6 +58,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "FastAF",
+    "homepage": "https://github.com/ksg98/fastaf-ide",
+    "copyright": "Copyright 2026 The FastAF authors",
+    "license": "Apache-2.0",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -61,10 +69,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "icons/32x32.png",
-      "icons/drag-file.png"
-    ],
+    "resources": {
+      "icons/32x32.png": "icons/32x32.png",
+      "icons/drag-file.png": "icons/drag-file.png",
+      "../LICENSE": "licenses/LICENSE",
+      "../NOTICE": "licenses/NOTICE",
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md"
+    },
     "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/tuic-bridge",
@@ -82,7 +93,20 @@
       }
     ],
     "macOS": {
+      "minimumSystemVersion": "12.0",
       "entitlements": "./Entitlements.plist"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libayatana-appindicator3-1"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "libayatana-appindicator-gtk3"
+        ]
+      }
     }
   },
   "plugins": {

@@ -1,0 +1,10 @@
+.menu { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.trigger { composes: iconBtn from "../shared/controls.module.css"; flex-shrink: 0; width: 24px; height: 24px; }
+.trigger[aria-expanded="true"] { background: var(--row-selected); color: var(--fg-primary); }
+/* A menu (STYLE_GUIDE › Menus): overlay surface, hairline, radius 8, 4px inset. */
+.popup { position: absolute; top: 100%; right: 0; z-index: 10; display: flex; flex-direction: column; gap: 2px; min-width: 160px; margin-top: 4px; padding: 4px; background: var(--surface-overlay); backdrop-filter: var(--blur-overlay); -webkit-backdrop-filter: var(--blur-overlay); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); box-shadow: var(--highlight-inset), var(--shadow-dropdown); }
+.popup > button { justify-content: flex-start; border-color: transparent; background: transparent; box-shadow: none; }
+.popup > button:hover:enabled { border-color: transparent; background: var(--surface-hover); }
+.note { color: var(--fg-muted); font-size: var(--font-sm); overflow-wrap: anywhere; }
+.popup > .note { padding: 5px 8px; }
+.error { color: var(--error); font-size: var(--font-sm); overflow-wrap: anywhere; }

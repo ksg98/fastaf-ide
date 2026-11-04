@@ -21,22 +21,27 @@ import { pathStartsWith } from "./pathUtils";
 export interface RepoOwner {
 	repoPath: string;
 	/**
-	 * The linked worktree branch that owns the path, or `null` when the path was
-	 * matched at the repo root.
+	 * The workspace whose linked-worktree directory owns the path, or `null` when
+	 * the path was matched at the repo root.
 	 *
-	 * `null` is deliberate and is not the same as "the main branch". Whatever is
-	 * checked out at the repo root changes under the user's feet, so freezing a
-	 * branch name here would be a lie the moment they switch. Callers resolve the
-	 * root's branch through `activeBranch` at the time they need it.
+	 * An id, not a branch — and the distinction is the whole reason a path can
+	 * answer this question at all: two workspaces may sit on one branch, but they
+	 * cannot sit in one directory, so `path -> id` is exact where `path -> branch`
+	 * is a coin toss between them.
+	 *
+	 * `null` is deliberate and is not the same as "the main workspace". Whatever
+	 * is checked out at the repo root changes under the user's feet, so freezing a
+	 * name here would be a lie the moment they switch. Callers resolve the root's
+	 * workspace at the time they need it (`placementWorkspaceFor`).
 	 */
-	branchName: string | null;
+	workspaceId: string | null;
 }
 
 interface Candidate {
 	/** Directory depth of the prefix that matched — deepest wins. */
 	depth: number;
 	repoPath: string;
-	branchName: string | null;
+	workspaceId: string | null;
 }
 
 /** Split a path into its directory segments, ignoring separator flavour and any
@@ -47,7 +52,7 @@ function segments(path: string): string[] {
 }
 
 /** Do two paths name the same directory, trailing slash and separator aside? */
-function sameDir(left: string, right: string): boolean {
+export function sameDir(left: string, right: string): boolean {
 	const a = segments(left);
 	const b = segments(right);
 	return a.length === b.length && a.every((seg, i) => seg === b[i]);
@@ -56,8 +61,8 @@ function sameDir(left: string, right: string): boolean {
 /**
  * Resolve `path` against an explicit repo map.
  *
- * Candidates are every repo root that prefixes the path, plus every branch with a
- * linked worktree directory that does. The deepest matching prefix wins. On a tie
+ * Candidates are every repo root that prefixes the path, plus every workspace with
+ * a linked worktree directory that does. The deepest matching prefix wins. On a tie
  * the REPO ROOT wins: a directory somebody registered as a repo in its own right
  * outranks the same directory reached through a parent repo's worktree list.
  *
@@ -73,16 +78,19 @@ export function resolveRepoOwnerIn(
 	const candidates: Candidate[] = [];
 	for (const [repoPath, repo] of Object.entries(repos)) {
 		if (pathStartsWith(path, repoPath)) {
-			candidates.push({ depth: segments(repoPath).length, repoPath, branchName: null });
+			candidates.push({ depth: segments(repoPath).length, repoPath, workspaceId: null });
 		}
-		for (const branch of Object.values(repo.branches)) {
-			// A main branch records the repo root as its worktree; that case is
+		// Keyed by the map key, not by `workspace.branchName`: the key is what every
+		// id-taking store method expects, and two same-branch workspaces have the
+		// same `branchName` but different keys and different directories.
+		for (const [workspaceId, workspace] of Object.entries(repo.workspaces)) {
+			// The main workspace records the repo root as its worktree; that case is
 			// already covered by the root candidate above, and adding it again would
-			// claim a branch name for a checkout that can change at any time.
-			const worktree = branch.worktreePath;
+			// claim a workspace for a checkout that can change at any time.
+			const worktree = workspace.worktreePath;
 			if (!worktree || sameDir(worktree, repoPath)) continue;
 			if (pathStartsWith(path, worktree)) {
-				candidates.push({ depth: segments(worktree).length, repoPath, branchName: branch.name });
+				candidates.push({ depth: segments(worktree).length, repoPath, workspaceId });
 			}
 		}
 	}
@@ -90,11 +98,11 @@ export function resolveRepoOwnerIn(
 	if (candidates.length === 0) return null;
 
 	candidates.sort(
-		(left, right) => right.depth - left.depth || Number(left.branchName !== null) - Number(right.branchName !== null),
+		(left, right) => right.depth - left.depth || Number(left.workspaceId !== null) - Number(right.workspaceId !== null),
 	);
 
-	const { repoPath, branchName } = candidates[0];
-	return { repoPath, branchName };
+	const { repoPath, workspaceId } = candidates[0];
+	return { repoPath, workspaceId };
 }
 
 /**

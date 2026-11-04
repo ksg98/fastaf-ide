@@ -2,20 +2,39 @@
 
 ## What is FastAF?
 
-FastAF is a desktop terminal orchestrator for running multiple AI coding agents in parallel (Claude Code, Gemini CLI, Aider, OpenCode, Codex). Built with Tauri + SolidJS + Rust, with a native terminal engine powered by `alacritty_terminal`.
+FastAF is a desktop terminal orchestrator for running multiple AI coding agents in parallel (Claude Code, Gemini CLI, OpenCode, Codex). Built with Tauri + SolidJS + Rust, with a native terminal engine powered by `alacritty_terminal`.
 
 **Key capabilities:**
 - Up to 50 concurrent terminal sessions with split panes and detachable tabs
-- 11 AI agents supported (Claude Code, Codex, Aider, Gemini, Amp, and more)
+- 10 AI agents supported (Claude Code, Codex, Gemini, Amp, and more)
 - Git worktree isolation per branch
 - GitHub PR monitoring with CI status and notifications
-- Obsidian-style plugin system with community registry
+- Obsidian-style plugin system (install plugins from a folder or `.zip`)
 - Voice dictation with local Whisper (no cloud)
 - Command palette, configurable keybindings, prompt library
 - Built-in file browser and code editor
 - MCP HTTP server for external AI tool integration
 - Remote access from a browser on another device
 - Auto-update, 13 bundled fonts, cross-platform (macOS, Windows, Linux)
+
+## Install
+
+On macOS, [download the latest `.dmg`](https://github.com/ksg98/fastaf-ide/releases/latest/download/FastAF_aarch64.dmg)
+and drag FastAF to Applications, or install from the shell (macOS and Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/website/public/install.sh | sh
+```
+
+On macOS the installer never replaces the app with a bundle it has not checked.
+It downloads and unpacks into a private temporary directory, then runs
+`codesign --verify --deep --strict` and requires a **Developer ID Application**
+signature with TeamIdentifier **NH9933XQGX** (FastAF's). Only then does it stage
+the bundle next to the target, move the installed `/Applications/FastAF.app`
+aside (to `.FastAF.app.previous`), move the new one in, and delete the old one
+last. If a check fails it stops with "Nothing was installed." and the installed
+app is untouched; if the final move fails, it puts the previous app back and says
+so ("The previous version was restored."). On Linux it installs the `.deb`, `.rpm` or AppImage.
 
 ## First Launch
 

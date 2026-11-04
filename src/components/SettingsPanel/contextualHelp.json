@@ -1,0 +1,652 @@
+[
+  {
+    "page": "general",
+    "label": "fastaf CLI",
+    "text": "Capabilities: Open files and URLs as tabs, create/list/write/read PTY sessions and query repository status from scripts.\n\nInstall when automation needs the fastaf command. A missing or mismatched CLI can make scripts fail."
+  },
+  {
+    "page": "general",
+    "label": "Code intelligence · MDKB",
+    "text": "When to change: Manage it when you need indexed navigation or memory.\n\nIf wrong: Without an available index, those lookups are unavailable.\n\nDefault: Read the installed host state."
+  },
+  {
+    "page": "general",
+    "label": "Custom launchers",
+    "text": "When to change: Add one for an editor or tool not offered by discovery.\n\nIf wrong: A wrong executable or argument opens the wrong target or fails to launch.\n\nDefault: No custom launchers."
+  },
+  {
+    "page": "general",
+    "label": "When closing the main window",
+    "text": "When to change: Use Background to keep work running after closing visible windows.\n\nIf wrong: Choosing Quit can end live sessions; Ask gives you a choice first.\n\nDefault: \"ask\"."
+  },
+  {
+    "page": "general",
+    "label": "Tray and menu-bar icon",
+    "text": "When to change: Choose Always for a persistent Show/Quit entry point.\n\nIf wrong: Do not interpret Never as disabling background execution.\n\nDefault: \"background_only\"."
+  },
+  {
+    "page": "general",
+    "label": "Prevent sleep when busy",
+    "text": "When to change: Enable for long work that must continue without sleep.\n\nIf wrong: It can use more power; with it off, normal system sleep may interrupt work.\n\nDefault: false."
+  },
+  {
+    "page": "general",
+    "label": "Auto-Standby Timeout",
+    "text": "When to change: Increase it if background terminals must stay runnable longer.\n\nIf wrong: A short timeout pauses idle background work sooner; disabling it uses more resources.\n\nDefault: 5."
+  },
+  {
+    "page": "general",
+    "label": "Content Indexing",
+    "text": "When to change: Reduce indexing when startup or background resource use is too high.\n\nIf wrong: Disabled background indexing can delay later searches; all-repository warming uses more resources.\n\nDefault: \"active_and_switch\"."
+  },
+  {
+    "page": "general",
+    "label": "Wait for agents before restarting",
+    "text": "When to change: Keep on to avoid disrupting an active turn.\n\nIf wrong: Turning it off can restart the app before agents are ready.\n\nDefault: true."
+  },
+  {
+    "page": "general",
+    "label": "Resume all agents after an update",
+    "text": "When to change: Disable if you prefer to resume tabs only when needed.\n\nIf wrong: With it on, many eligible agents can restart; unconfirmed sessions are not invented.\n\nDefault: true."
+  },
+  {
+    "page": "general",
+    "label": "Update Channel",
+    "text": "When to change: Use Beta or Nightly only when you want prerelease changes.\n\nIf wrong: A prerelease channel can install less-tested behavior; Stable does not receive every preview.\n\nDefault: \"stable\"."
+  },
+  {
+    "page": "appearance",
+    "label": "Cycle All Tab Types",
+    "text": "When to change: Enable if keyboard navigation should reach non-terminal tabs too.\n\nIf wrong: With it off those shortcuts cycle terminals only.\n\nDefault: false."
+  },
+  {
+    "page": "appearance",
+    "label": "Nested Terminal Tabs",
+    "text": "When to change: Enable when you want to navigate a branch’s existing sessions directly.\n\nIf wrong: With it off nested rows disappear; it does not start or discover extra agents.\n\nDefault: false."
+  },
+  {
+    "page": "appearance",
+    "label": "Mute Intermediate Text",
+    "text": "When to change: Disable when all assistant text should have equal emphasis.\n\nIf wrong: With it on, intermediate explanations are easier to overlook, but Copy and Find still include them.\n\nDefault: true."
+  },
+  {
+    "page": "notifications",
+    "label": "Audio Output Device",
+    "text": "Enumeration starts only after Choose output device. On macOS, the audio scan can cause a microphone-permission prompt even though notifications never record audio.\n\nDefault: system output. Choosing a disconnected output can make alerts inaudible."
+  },
+  {
+    "page": "notifications",
+    "label": "Orchestration",
+    "text": "When to change: Leave it on for multi-agent batches; turn it off to hear worker completions.\n\nIf wrong: Turning it off can create a burst of completion sounds.\n\nDefault: true."
+  },
+  {
+    "page": "notifications",
+    "label": "Toolbar Bell",
+    "text": "When to change: Turn it off only if you prefer temporary user-action feedback.\n\nIf wrong: A dismissed ordinary toast can be harder to recover; direct agent notices remain in the bell.\n\nDefault: true."
+  },
+  {
+    "page": "notifications",
+    "label": "Show cards from the active terminal",
+    "text": "When to change: Disable to keep transient cards urgent-only on this client.\n\nIf wrong: Turning it off makes ordinary agent messages less immediately visible.\n\nDefault: On, per client."
+  },
+  {
+    "page": "notifications",
+    "label": "OS notifications for Tasks",
+    "text": "When to change: Enable when you need native task alerts; follow the tasks whose comments matter.\n\nIf wrong: Unfollowed or unrefreshed items do not notify; this does not add background polling.\n\nDefault: Off."
+  },
+  {
+    "page": "terminal",
+    "label": "Shell",
+    "text": "When to change: Override only when another installed shell is needed.\n\nIf wrong: A missing executable prevents a new terminal from starting.\n\nDefault: Inherited."
+  },
+  {
+    "page": "terminal",
+    "label": "Default Font Size",
+    "text": "When to change: Increase for readability or decrease to fit more output.\n\nIf wrong: Too small is hard to read; too large leaves fewer terminal cells.\n\nDefault: 13."
+  },
+  {
+    "page": "terminal",
+    "label": "Copy on select",
+    "text": "When to change: Disable when selection should not overwrite clipboard content.\n\nIf wrong: With it on, selecting text replaces the clipboard; with it off, copy explicitly.\n\nDefault: true."
+  },
+  {
+    "page": "terminal",
+    "label": "Allow OSC 52 clipboard writes",
+    "text": "When to change: Keep on for remote copy workflows, or disable to ignore output-driven clipboard writes.\n\nIf wrong: A displayed log or file can also overwrite the clipboard when enabled.\n\nDefault: true."
+  },
+  {
+    "page": "terminal",
+    "label": "Block folding",
+    "text": "When to change: Disable if folding interferes with reading full command output.\n\nIf wrong: Collapsed output can be overlooked; turning off does not expand already folded blocks.\n\nDefault: true."
+  },
+  {
+    "page": "terminal",
+    "label": "Show scrollbar marks",
+    "text": "When to change: Disable if history marks clutter the scrollbar.\n\nIf wrong: Without marks, command boundaries are harder to locate in long scrollback.\n\nDefault: true."
+  },
+  {
+    "page": "terminal",
+    "label": "Reflow scrollback on resize",
+    "text": "When to change: Keep enabled to read old output after opening a side panel; disable to preserve original line layout.\n\nIf wrong: Without reflow, historical lines can be truncated at a narrower width.\n\nDefault: true."
+  },
+  {
+    "page": "keyboard-shortcuts",
+    "label": "Global Hotkey (Toggle Window)",
+    "text": "When to change: Change when the current combination conflicts with another application.\n\nIf wrong: An OS shortcut conflict can make the window toggle unavailable."
+  },
+  {
+    "page": "keyboard-shortcuts",
+    "label": "Plugin Commands",
+    "text": "When to change: Set a shortcut for a plugin action you use often.\n\nIf wrong: An unloaded plugin cannot supply its action; a conflicting key can invoke another command.\n\nDefault: Plugin-provided binding or unassigned."
+  },
+  {
+    "page": "github",
+    "label": "GitHub account",
+    "text": "When to change: Sign in when GitHub operations lack an appropriate account.\n\nIf wrong: A saved credential is not proof of a current connection or permission to a private repository.\n\nDefault: Read-only account state, not a preference default."
+  },
+  {
+    "page": "github",
+    "label": "Repository bindings",
+    "text": "When to change: Bind explicitly when multiple accounts have different access.\n\nIf wrong: A wrong binding can fail repository requests or use the wrong identity.\n\nDefault: Automatic account selection when unbound."
+  },
+  {
+    "page": "github",
+    "label": "CircleCI token",
+    "text": "When to change: Set it when CircleCI logs are needed.\n\nIf wrong: An invalid token prevents log retrieval.\n\nDefault: No saved token."
+  },
+  {
+    "page": "github",
+    "label": "Auto-Delete on PR Close",
+    "text": "When to change: Change this when this repository workflow needs a different auto-delete on pr close policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: \"off\"."
+  },
+  {
+    "page": "github",
+    "label": "Copy ignored files",
+    "text": "When to change: Enable for local files needed by the new worktree.\n\nIf wrong: It can copy unwanted local data or large ignored directories.\n\nDefault: false."
+  },
+  {
+    "page": "github",
+    "label": "Copy untracked files",
+    "text": "When to change: Enable when local uncommitted files are needed in the worktree.\n\nIf wrong: It can propagate files you did not intend to copy.\n\nDefault: false."
+  },
+  {
+    "page": "github",
+    "label": "Default Setup Script",
+    "text": "When to change: Use it for dependencies or other repeatable setup.\n\nIf wrong: A wrong script can fail setup or modify the new checkout unexpectedly.\n\nDefault: \"\"."
+  },
+  {
+    "page": "github",
+    "label": "Default Run Script",
+    "text": "When to change: Change this when the described default run script behavior does not match your workflow.\n\nIf wrong: An incorrect script can fail the operation or execute unintended commands.\n\nDefault: \"\"."
+  },
+  {
+    "page": "github",
+    "label": "Default Archive Script",
+    "text": "When to change: Change this when this repository workflow needs a different default archive script policy.\n\nIf wrong: An incorrect script can fail the operation or execute unintended commands.\n\nDefault: \"\"."
+  },
+  {
+    "page": "github",
+    "label": "Storage Strategy",
+    "text": "When to change: Change this when this repository workflow needs a different storage strategy policy.\n\nIf wrong: A different location changes where worktrees are created; existing worktrees are not moved.\n\nDefault: \"sibling\"."
+  },
+  {
+    "page": "github",
+    "label": "Delete local branch when removing worktree",
+    "text": "When to change: Disable if you want to keep branches after worktree removal.\n\nIf wrong: Branch removal can make later branch reuse inconvenient; existing safeguards still apply.\n\nDefault: true."
+  },
+  {
+    "page": "github",
+    "label": "Auto-archive merged worktrees",
+    "text": "When to change: Change this when this repository workflow needs a different auto-archive merged worktrees policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: false."
+  },
+  {
+    "page": "github",
+    "label": "Orphan Worktree Cleanup",
+    "text": "When to change: Change this when the described orphan worktree cleanup behavior does not match your workflow.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: \"ask\"."
+  },
+  {
+    "page": "github",
+    "label": "Safe orphan cleanup countdown",
+    "text": "When to change: Change this when the described safe orphan cleanup countdown behavior does not match your workflow.\n\nIf wrong: An unsuitable selection changes the displayed behavior, not the underlying Git data.\n\nDefault: 10."
+  },
+  {
+    "page": "github",
+    "label": "PR Merge Strategy",
+    "text": "When to change: Change this when this repository workflow needs a different pr merge strategy policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: \"squash\"."
+  },
+  {
+    "page": "github",
+    "label": "After Merge Behavior",
+    "text": "When to change: Change this when this repository workflow needs a different after merge behavior policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: \"archive\"."
+  },
+  {
+    "page": "github",
+    "label": "Auto-Fetch Interval",
+    "text": "When to change: Change this when this repository workflow needs a different auto-fetch interval policy.\n\nIf wrong: A short interval creates more Git/network work; disabling fetch can leave upstream information stale.\n\nDefault: 0."
+  },
+  {
+    "page": "github",
+    "label": "Add Enterprise account",
+    "text": "When to change: Use it for repositories on your Enterprise host.\n\nIf wrong: A wrong host or token prevents account verification.\n\nDefault: No Enterprise account."
+  },
+  {
+    "page": "agents",
+    "label": "Codex",
+    "text": "When to change: Expand to review the editable command, arguments and bypass warning.\n\nIf wrong: A configured approval bypass affects new launches; availability does not prove sign-in.\n\nDefault: Host-discovered state; no fixed availability default."
+  },
+  {
+    "page": "agents",
+    "label": "ego · terminal CLI",
+    "text": "When to change: Use this page for PTY launch settings.\n\nIf wrong: Changing PTY options does not configure AI Chat access.\n\nDefault: Host-discovered state."
+  },
+  {
+    "page": "agents",
+    "label": "Name, command and model",
+    "text": "When to change: Create a configuration for a repeatable launch task and save it explicitly.\n\nIf wrong: Wrong commands or arguments can prevent launch; a model alias does not prove entitlement.\n\nDefault: Agent-specific default run configuration."
+  },
+  {
+    "page": "agents",
+    "label": "Environment variables",
+    "text": "When to change: Add only variables required by that executable or profile.\n\nIf wrong: Duplicate keys are rejected; wrong values can select an unintended configuration.\n\nDefault: No per-configuration overrides unless configured."
+  },
+  {
+    "page": "agents",
+    "label": "Launch instructions",
+    "text": "When to change: Edit when you need a different launch instruction contract.\n\nIf wrong: Removing required markers can hide intent or follow-up actions; empty disables injection.\n\nDefault: Inherited."
+  },
+  {
+    "page": "agents",
+    "label": "MCP integrations and hooks",
+    "text": "When to change: Install missing integrations only for the CLI you use.\n\nIf wrong: Missing signals can reduce state detection; unsupported integrations cannot be installed.\n\nDefault: Native status signals on for supported Claude/Codex; global hook installation off."
+  },
+  {
+    "page": "agents",
+    "label": "Close idle managed child after",
+    "text": "When to change: Increase the time when follow-up work is likely.\n\nIf wrong: A short time closes eligible children sooner; unread mail or background work keeps them open.\n\nDefault: 15."
+  },
+  {
+    "page": "agents",
+    "label": "Configure agents on",
+    "text": "When to change: Switch before changing agents on a different host.\n\nIf wrong: Editing the wrong machine changes the wrong launch configuration.\n\nDefault: Current local machine unless a remote is selected."
+  },
+  {
+    "page": "agents",
+    "label": "Collect project progress",
+    "text": "When to change: Change this when the described collect project progress behavior does not match your workflow.\n\nIf wrong: An unsuitable selection changes the displayed behavior, not the underlying Git data.\n\nDefault: true."
+  },
+  {
+    "page": "agents",
+    "label": "Launch instructions",
+    "text": "When to change: Edit when you need a different launch instruction contract.\n\nIf wrong: Removing required markers can hide intent or follow-up actions; empty disables injection.\n\nDefault: Inherited."
+  },
+  {
+    "page": "agents",
+    "label": "Permissions",
+    "text": "When to change: Choose a mode only when you need a launch-specific approval policy.\n\nIf wrong: Approval policy does not prove filesystem isolation or change an already running process.\n\nDefault: Inherited."
+  },
+  {
+    "page": "agents",
+    "label": "Filesystem sandbox",
+    "text": "When to change: Set it only when the next run needs a different confinement mode.\n\nIf wrong: The wrong mode can block required file access or leave execution less confined; it is not an approval mode.\n\nDefault: Inherited."
+  },
+  {
+    "page": "agents",
+    "label": "Hibernate idle agents after",
+    "text": "When to change: Increase when agents should remain live longer.\n\nIf wrong: An eligible idle tab can stop sooner; unverifiable sessions and pending work remain live.\n\nDefault: 60."
+  },
+  {
+    "page": "agents",
+    "label": "Hibernate scope",
+    "text": "When to change: Use always only if foreground idle tabs should also release resources.\n\nIf wrong: An idle visible agent can hibernate with always.\n\nDefault: \"background_only\"."
+  },
+  {
+    "page": "voice",
+    "label": "Whisper models",
+    "text": "When to change: Download a larger model for accuracy or a smaller one for lower resource use.\n\nIf wrong: A missing model prevents transcription; larger models consume more memory and storage.\n\nDefault: large-v3-turbo is recommended and selected by default."
+  },
+  {
+    "page": "voice",
+    "label": "Pocket TTS voices",
+    "text": "When to change: Download a bundle for local spoken replies in that language.\n\nIf wrong: Missing assets prevent Pocket replies for that language.\n\nDefault: No universal installed-asset state; bundles depend on downloads."
+  },
+  {
+    "page": "voice",
+    "label": "Test recording",
+    "text": "When to change: Use it to adjust speech gates and check the microphone.\n\nIf wrong: Denied microphone permission or an unsuitable input can produce no recording.\n\nDefault: Not recording until explicitly started."
+  },
+  {
+    "page": "voice",
+    "label": "Auto-send",
+    "text": "When to change: Turn it off to review transcription before sending.\n\nIf wrong: With it on, a recognition mistake can be submitted before review.\n\nDefault: true."
+  },
+  {
+    "page": "voice",
+    "label": "Input device",
+    "text": "When to change: Choose another microphone if the system input is unsuitable.\n\nIf wrong: The wrong input captures silence or unrelated audio.\n\nDefault: Inherited."
+  },
+  {
+    "page": "voice",
+    "label": "Language",
+    "text": "When to change: Set an explicit language when recognition chooses the wrong one.\n\nIf wrong: A wrong language reduces recognition accuracy; languages without a voice bundle cannot use local spoken replies.\n\nDefault: \"auto\"."
+  },
+  {
+    "page": "voice",
+    "label": "Level gate",
+    "text": "When to change: Raise above room noise or lower when quiet speech is rejected.\n\nIf wrong: Too high loses quiet speech; too low can transcribe noise.\n\nDefault: 0.0010000000474974513."
+  },
+  {
+    "page": "voice",
+    "label": "Speech confidence gate",
+    "text": "When to change: Lower for stricter rejection; 100% disables this gate.\n\nIf wrong: Too strict discards real words; too permissive admits hallucinated speech.\n\nDefault: 0.6000000238418579."
+  },
+  {
+    "page": "voice",
+    "label": "Speech engine",
+    "text": "When to change: Use Pocket for offline speech or External for your own engine.\n\nIf wrong: Edge requires network access and sends reply text to Microsoft; Pocket requires assets.\n\nDefault: \"\"."
+  },
+  {
+    "page": "voice",
+    "label": "Speech command",
+    "text": "When to change: Configure it only when External command is selected.\n\nIf wrong: An invalid program or arguments prevent replies from being spoken.\n\nDefault: []."
+  },
+  {
+    "page": "voice",
+    "label": "Activation phrase",
+    "text": "When to change: Set one to avoid sending unrelated room speech.\n\nIf wrong: An empty phrase sends every recognized utterance; an unrecognized phrase drops the turn.\n\nDefault: \"\"."
+  },
+  {
+    "page": "voice",
+    "label": "Hold-back before sending",
+    "text": "When to change: Increase when you need more review time.\n\nIf wrong: Too short leaves less time to stop a mistake; activation phrases impose at least five seconds.\n\nDefault: 1500."
+  },
+  {
+    "page": "voice",
+    "label": "Hands-free listening",
+    "text": "When to change: Turn it off when you want spoken replies without an open microphone.\n\nIf wrong: With it on, speech is captured for the bound terminal, not whichever tab later has focus.\n\nDefault: true."
+  },
+  {
+    "page": "voice",
+    "label": "Notify model when hands-free changes",
+    "text": "When to change: Disable only if the model must not receive mode notices.\n\nIf wrong: Without the notice, the model may not know it can answer aloud; stopping still revokes speech.\n\nDefault: true."
+  },
+  {
+    "page": "voice",
+    "label": "Start notice",
+    "text": "When to change: Customize when the model needs different spoken-response instructions.\n\nIf wrong: Misleading instructions can change its response style; line breaks become spaces.\n\nDefault: \"\"."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Title, category and prompt template",
+    "text": "When to change: Customize a built-in or create a named action.\n\nIf wrong: Misspelled variables cannot supply the expected context.\n\nDefault: Prompt-specific shipped values or a new empty custom draft."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Placement and execution",
+    "text": "When to change: Match the mode to whether you need an interactive agent or a direct operation.\n\nIf wrong: Shell mode executes code rather than asking an agent; the wrong mode changes the effect.\n\nDefault: Inject for a new prompt; placements belong to the prompt."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Agent override and auto-execute",
+    "text": "When to change: Disable auto-execute when you need to review the resolved text first.\n\nIf wrong: The wrong agent or immediate execution can run a prompt before review.\n\nDefault: Prompt-specific values; otherwise use the headless-agent preference."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Content *",
+    "text": "When to change: Edit when the instructions or operation need to change.\n\nIf wrong: Shell mode runs this as code; incorrect variables can supply the wrong context.\n\nDefault: Prompt-specific template or empty new draft."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Execution Mode",
+    "text": "When to change: Use injection for an interactive agent and shell only for a program you intend to execute.\n\nIf wrong: Choosing shell runs the content as code without an agent interpreting it.\n\nDefault: Inject for a new prompt."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Target",
+    "text": "When to change: Change when the prompt belongs to another available target.\n\nIf wrong: The wrong target can receive unintended instructions.\n\nDefault: Editor-selected target; source does not specify a universal default."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Auto-execute",
+    "text": "Off leaves the resolved text editable and does not require the agent to be idle. On submits once through the agent-aware path with the idle check. Explicit Insert & Run and double-click still submit once regardless of this saved switch.\n\nDefault: prompt-specific; review before enabling for an unfamiliar template."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Preferred Agent",
+    "text": "When to change: Choose one only when this action requires a particular CLI.\n\nIf wrong: A missing or unavailable agent prevents execution.\n\nDefault: Inherit the selected headless agent."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Output Target",
+    "text": "When to change: Change when the result belongs somewhere other than the current output destination.\n\nIf wrong: Clipboard output can replace clipboard content; transient output can be missed.\n\nDefault: Prompt-specific editor value; no universal default verified."
+  },
+  {
+    "page": "smart-prompts",
+    "label": "Headless Agent",
+    "text": "When to change: Choose an installed agent before using headless execution.\n\nIf wrong: A missing agent cannot run the prompt; individual prompts can override this choice.\n\nDefault: Inherited."
+  },
+  {
+    "page": "mcp",
+    "label": "MCP Connection",
+    "text": "When to change: Copy the manual configuration only for a client that is not auto-configured.\n\nIf wrong: An incorrect bridge path prevents the client from connecting.\n\nDefault: Host-generated bridge path, not a fixed preference."
+  },
+  {
+    "page": "mcp",
+    "label": "Collapse tools — Speakeasy MCP (reduces AI context ~98%)",
+    "text": "When to change: Enable for clients that support lazy tool discovery and need less baseline context.\n\nIf wrong: Clients that ignore tool-list changes may need to reconnect; tool actions themselves do not change.\n\nDefault: false."
+  },
+  {
+    "page": "mcp",
+    "label": "Capabilities",
+    "text": "When to change: Disable a capability when agents should not use that domain or action group.\n\nIf wrong: Denied actions disappear from discovery and cannot be called. Additional restrictions preserve migrated denials; a parent denial also blocks its grouped actions.\n\nDefault: Settings access and Diagnostics / JS inspection are denied."
+  },
+  {
+    "page": "mcp",
+    "label": "Upstreams on",
+    "text": "When to change: Switch before editing an upstream on a remote host.\n\nIf wrong: The wrong host selection changes another machine rather than this one.\n\nDefault: Local machine unless a connected remote is selected."
+  },
+  {
+    "page": "mcp",
+    "label": "Authentication",
+    "text": "When to change: Use the method required by its server.\n\nIf wrong: Wrong authentication makes requests fail; sign-in state is not a successful tool call.\n\nDefault: Bearer is the initial HTTP editor method."
+  },
+  {
+    "page": "mcp",
+    "label": "Timeout (s):",
+    "text": "When to change: Increase only for tools that legitimately need longer to finish.\n\nIf wrong: Too short fails slow calls; 0 can leave a mute tool waiting indefinitely.\n\nDefault: 30."
+  },
+  {
+    "page": "mcp",
+    "label": "URL",
+    "text": "When to change: Use the endpoint supplied by the server operator.\n\nIf wrong: A wrong path fails connection; a different credential origin requires a new upstream."
+  },
+  {
+    "page": "mcp",
+    "label": "Bearer token",
+    "text": "When to change: Replace when the server rotates or revokes it.\n\nIf wrong: An invalid token prevents authentication; stored values are not read back."
+  },
+  {
+    "page": "mcp",
+    "label": "Client Secret",
+    "text": "When to change: Leave it unset for public clients that do not use a secret.\n\nIf wrong: A wrong secret makes token exchange fail; it must not be exposed as plain diagnostic text."
+  },
+  {
+    "page": "mcp",
+    "label": "Scopes",
+    "text": "When to change: Change only when the server requires different permissions.\n\nIf wrong: Missing scopes can deny tools; excess scopes ask for unnecessary access.\n\nDefault: []."
+  },
+  {
+    "page": "mcp",
+    "label": "Command",
+    "text": "When to change: Use the installed server command, not an HTTP URL.\n\nIf wrong: A missing command cannot launch; the named program runs as the current user."
+  },
+  {
+    "page": "mcp",
+    "label": "Working directory",
+    "text": "When to change: Set when the server needs project-relative files.\n\nIf wrong: A missing or wrong folder can prevent startup or select the wrong project.\n\nDefault: Inherited."
+  },
+  {
+    "page": "remote-access",
+    "label": "Tailscale HTTPS",
+    "text": "When to change: Recheck after Tailscale or its certificate setup changes.\n\nIf wrong: Without a usable HTTPS address, remote push registration may not work.\n\nDefault: Runtime status, read from this machine."
+  },
+  {
+    "page": "remote-access",
+    "label": "Regenerate remote token",
+    "text": "When to change: Use when you need to revoke existing device access.\n\nIf wrong: Previously shared token URLs and active sessions stop working.\n\nDefault: Action, not a persistent value; requires explicit confirmation."
+  },
+  {
+    "page": "remote-access",
+    "label": "Password",
+    "text": "When to change: Replace when rotating remote login access.\n\nIf wrong: A wrong password prevents login; an empty editor must not be mistaken for a readable saved secret."
+  },
+  {
+    "page": "remote-access",
+    "label": "Network Interface",
+    "text": "When to change: Use loopback for this host only or reachable interfaces for other devices.\n\nIf wrong: Loopback-only blocks other devices; the wrong interface can leave the desired address unreachable.\n\nDefault: Saved interface."
+  },
+  {
+    "page": "remote-access",
+    "label": "Session Token Duration",
+    "text": "When to change: Shorten to require more frequent reauthentication on unused devices.\n\nIf wrong: Too short interrupts occasional clients; a longer duration keeps unused logins valid longer.\n\nDefault: 2592000."
+  },
+  {
+    "page": "remote-access",
+    "label": "Enable IPv6 (dual-stack)",
+    "text": "When to change: Enable when remote clients need IPv6; save and restart the server.\n\nIf wrong: Changing without the required restart leaves the old listener configuration active.\n\nDefault: false."
+  },
+  {
+    "page": "remote-access",
+    "label": "Enable cloud relay",
+    "text": "When to change: Enable only when you need relay-based access.\n\nIf wrong: A wrong endpoint or bearer token prevents connection; the relay remains a trusted operator.\n\nDefault: false."
+  },
+  {
+    "page": "remote-access",
+    "label": "Bearer Token",
+    "text": "When to change: Replace when registering or rotating relay access.\n\nIf wrong: A wrong token prevents relay authentication; it does not provide end-to-end secrecy."
+  },
+  {
+    "page": "remote-machines",
+    "label": "Deployment and lifetime",
+    "text": "When to change: Enable deployment or updates only for the daemon you intend to manage.\n\nIf wrong: The wrong lifetime can stop an unattended daemon; updates wait for no live PTY sessions.\n\nDefault: Deploy never; survive 1800 seconds; auto-update off."
+  },
+  {
+    "page": "remote-machines",
+    "label": "SSH discovery",
+    "text": "When to change: Use a discovered host as a starting point for a connection.\n\nIf wrong: Discovery does not establish a successful login or a running daemon.\n\nDefault: Read-only discovery; no host is probed."
+  },
+  {
+    "page": "remote-machines",
+    "label": "User",
+    "text": "When to change: Choose the account that owns the daemon and repositories.\n\nIf wrong: A wrong user can fail login or select another home directory.\n\nDefault: Host-specific SSH configuration; no account default verified."
+  },
+  {
+    "page": "telegram",
+    "label": "Polling owner",
+    "text": "When to change: Reload when pairing is unavailable or another owner may have taken over.\n\nIf wrong: No active poller means Link chat cannot accept a pairing message."
+  },
+  {
+    "page": "telegram",
+    "label": "Bot token",
+    "text": "When to change: Replace when configuring a bot or rotating its token.\n\nIf wrong: An invalid token prevents Telegram polling; it is never read back into Settings.\n\nDefault: No token configured."
+  },
+  {
+    "page": "telegram",
+    "label": "Authorized chats",
+    "text": "When to change: Link only chats that should communicate with registered agents.\n\nIf wrong: An unlinked chat cannot send agent messages; removing a chat revokes that access.\n\nDefault: No authorized chats."
+  },
+  {
+    "page": "telegram",
+    "label": "Registered agent",
+    "text": "When to change: Ask the desired agent to register when none is shown.\n\nIf wrong: A configured bot alone does not choose a recipient agent.\n\nDefault: No agent registered until it opts in."
+  },
+  {
+    "page": "telegram",
+    "label": "Bot token",
+    "text": "When to change: Replace when configuring a bot or rotating its token.\n\nIf wrong: An invalid token prevents Telegram polling; it is never read back into Settings.\n\nDefault: No token configured."
+  },
+  {
+    "page": "telegram",
+    "label": "Authorized chats",
+    "text": "When to change: Link only chats that should communicate with registered agents.\n\nIf wrong: An unlinked chat cannot send agent messages; removing a chat revokes that access.\n\nDefault: No authorized chats."
+  },
+  {
+    "page": "plugins",
+    "label": "Local install",
+    "text": "When to change: Use it for a plugin not installed through the registry.\n\nIf wrong: A wrong package can fail to load; browser clients cannot use native file installation.\n\nDefault: No local plugin selected."
+  },
+  {
+    "page": "github-work",
+    "label": "Account",
+    "text": "When to change: Choose an identity with access to the intended projects.\n\nIf wrong: A saved sign-in is not proof of live access or entitlement.\n\nDefault: No account selected."
+  },
+  {
+    "page": "jira",
+    "label": "Account",
+    "text": "When to change: Choose an identity with access to the intended projects.\n\nIf wrong: A saved sign-in is not proof of live access or entitlement.\n\nDefault: No account selected."
+  },
+  {
+    "page": "gitlab",
+    "label": "Account",
+    "text": "When to change: Choose an identity with access to the intended projects.\n\nIf wrong: A saved sign-in is not proof of live access or entitlement.\n\nDefault: No account selected."
+  },
+  {
+    "page": "repository",
+    "label": "Effective defaults",
+    "text": "When to change: Review the source before changing an override.\n\nIf wrong: A team .tuic.json value takes priority over a per-repository app value.\n\nDefault: Inherit global defaults unless a higher-priority source supplies a value."
+  },
+  {
+    "page": "repository",
+    "label": "Share with team",
+    "text": "When to change: Use when teammates need the same supported repository defaults.\n\nIf wrong: Exporting the wrong overrides changes shared behavior; review the resulting file.\n\nDefault: Action; no export until requested."
+  },
+  {
+    "page": "repository",
+    "label": "Reset repository overrides",
+    "text": "When to change: Reset when the repository should follow common defaults again.\n\nIf wrong: Customized repository behavior is lost; team-file precedence remains.\n\nDefault: Action with scoped confirmation."
+  },
+  {
+    "page": "repository",
+    "label": "File Handling",
+    "text": "When to change: Override when this repository needs different local setup files.\n\nIf wrong: Copying unwanted local files can propagate data or large directories.\n\nDefault: Inherit global copy flags; both global defaults are off."
+  },
+  {
+    "page": "repository",
+    "label": "Orphan Worktree Cleanup",
+    "text": "When to change: Change this when the described orphan worktree cleanup behavior does not match your workflow.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "PR Merge Strategy",
+    "text": "When to change: Change this when this repository workflow needs a different pr merge strategy policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "After Merge Behavior",
+    "text": "When to change: Change this when this repository workflow needs a different after merge behavior policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "Auto-Delete on PR Close",
+    "text": "When to change: Change this when this repository workflow needs a different auto-delete on pr close policy.\n\nIf wrong: An unsuitable cleanup or merge choice can remove local branches or archive a worktree earlier than intended; preserve the existing confirmation and safety checks.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "Dev Server URL",
+    "text": "When to change: Change this when the described dev server url behavior does not match your workflow.\n\nIf wrong: An unsuitable selection changes the displayed behavior, not the underlying Git data.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "Setup Script",
+    "text": "When to change: Use it for repository-specific setup.\n\nIf wrong: A failing or incorrect script can leave setup incomplete.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "Run Script",
+    "text": "When to change: Set it for a repeatable development command.\n\nIf wrong: A wrong script starts the wrong command in the repository.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  },
+  {
+    "page": "repository",
+    "label": "Archive Script",
+    "text": "When to change: Use it when cleanup is required before removal.\n\nIf wrong: A failing script prevents archive or deletion; an incorrect successful script can modify files.\n\nDefault: Inherit the global value unless overridden; a team .tuic.json value has higher priority."
+  }
+]

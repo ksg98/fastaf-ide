@@ -26,13 +26,13 @@ const {
 }));
 
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: mockGetVersion }));
-vi.mock("@tauri-apps/api/window", () => ({
-	getCurrentWindow: () => ({ onCloseRequested: vi.fn().mockResolvedValue(undefined) }),
-}));
 vi.mock("../../deep-link-handler", () => ({ initDeepLinkHandler: mockDeepLink }));
 vi.mock("../../invoke", () => ({ invoke: mockInvoke }));
 vi.mock("../../platform", () => ({ applyPlatformClass: vi.fn(() => "macos") }));
-vi.mock("../../transport", () => ({ isTauri: () => mockIsTauri.value }));
+vi.mock("../../transport", () => ({
+	isTauri: () => mockIsTauri.value,
+	subscribeEvents: vi.fn().mockResolvedValue(vi.fn()),
+}));
 vi.mock("../../hooks/useAppInit", () => ({ initApp: mockInitApp }));
 vi.mock("../../hooks/useAutoFetch", () => ({ startAutoFetch: vi.fn() }));
 vi.mock("../../stores/appLogger", () => ({ appLogger: mockLogger }));
@@ -41,13 +41,15 @@ vi.mock("../../stores/updater", () => ({ updaterStore: { checkForUpdate: mockUpd
 vi.mock("../../stores/registryStore", () => ({ registryStore: { fetch: mockRegistryFetch } }));
 vi.mock("../../stores/github", () => ({ githubStore: { startPolling: vi.fn(), stopPolling: vi.fn() } }));
 vi.mock("../../stores/prNotifications", () => ({ prNotificationsStore: { startFocusTimer: vi.fn() } }));
-vi.mock("../../stores/dictation", () => ({
-	dictationStore: {
+const { mockDictation } = vi.hoisted(() => ({
+	mockDictation: {
 		state: { enabled: false },
 		refreshConfig: vi.fn().mockResolvedValue(undefined),
 		refreshStatus: vi.fn(),
+		refreshHandsFree: vi.fn(),
 	},
 }));
+vi.mock("../../stores/dictation", () => ({ dictationStore: mockDictation }));
 vi.mock("../../stores/userActivity", () => ({ userActivityStore: { startListening: vi.fn() } }));
 
 import { type AppBootstrapOptions, runAppBootstrap } from "../../hooks/useAppBootstrap";
@@ -55,16 +57,13 @@ import { type AppBootstrapOptions, runAppBootstrap } from "../../hooks/useAppBoo
 function makeOptions(overrides: Partial<AppBootstrapOptions> = {}): AppBootstrapOptions {
 	return {
 		pty: { listActiveSessions: vi.fn().mockResolvedValue([]), close: vi.fn().mockResolvedValue(undefined) },
-		setQuitDialogVisible: vi.fn(),
 		setStatusInfo: vi.fn(),
-		setCurrentRepoPath: vi.fn(),
-		setCurrentBranch: vi.fn(),
 		handleBranchSelect: vi.fn().mockResolvedValue(undefined),
 		refreshAllBranchStats: vi.fn(),
-		handleWorktreeCreateFailed: vi.fn(),
 		getDefaultFontSize: () => 14,
 		detectAgents: vi.fn().mockResolvedValue(undefined),
 		restoreDetachedPanels: vi.fn(),
+		resumeAgentTabsAfterUpdate: vi.fn().mockResolvedValue(undefined),
 		setWhatsNewVersion: vi.fn(),
 		openSettings: vi.fn(),
 		openRepoPath: vi.fn().mockResolvedValue(undefined),
@@ -110,6 +109,39 @@ describe("runAppBootstrap", () => {
 		expect(mockRegistryFetch).toHaveBeenCalledOnce();
 		expect(options.setWhatsNewVersion).toHaveBeenCalledWith("2.0.0");
 		expect(mockDeepLink).toHaveBeenCalledWith(expect.objectContaining({ openSettings: options.openSettings }));
+	});
+
+	// Catches: the post-update sweep never starting, or starting before the initial
+	// branch select, so the selected branch's tabs are restored twice.
+	it("resumes the other branches' agent tabs only after application initialization", async () => {
+		const order: string[] = [];
+		mockInitApp.mockImplementationOnce(async () => {
+			await Promise.resolve();
+			order.push("init");
+		});
+		const resumeAgentTabsAfterUpdate = vi.fn(async () => {
+			order.push("resume");
+		});
+
+		await runAppBootstrap(makeOptions({ resumeAgentTabsAfterUpdate }));
+		await flushPromises();
+
+		expect(order).toEqual(["init", "resume"]);
+	});
+
+	it("finds a hands-free conversation still armed across a reload, only when dictation is on", async () => {
+		const refreshWith = async (enabled: boolean) => {
+			mockDictation.state.enabled = enabled;
+			mockDictation.refreshHandsFree.mockClear();
+			mockInitApp.mockImplementationOnce(async (deps) => deps.stores.refreshDictationConfig());
+			await runAppBootstrap(makeOptions());
+			await flushPromises();
+			return mockDictation.refreshHandsFree.mock.calls.length;
+		};
+
+		expect(await refreshWith(true)).toBe(1);
+		expect(await refreshWith(false)).toBe(0);
+		mockDictation.state.enabled = false;
 	});
 
 	it("starts agent detection only after splash-gating hydration completes", async () => {

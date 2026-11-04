@@ -1,4 +1,3 @@
-use alacritty_terminal::grid::ReflowMode;
 use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -12,51 +11,176 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
 
+pub(crate) use tuic_terminal::vt_log::{ChangedRow, LogLine, VT_LOG_BUFFER_CAPACITY, VtLogBuffer};
+
 /// A submission waiting for the agent's next safe idle window.
 ///
-/// Peer messages and user-composed commands share one FIFO so acceptance order
-/// is preserved across producers. The variant is an ownership boundary: Compose
-/// count/clear operations must never consume the peer wake path.
+/// Server-authored notices, a child's own initial prompt and user-composed
+/// commands share one FIFO so acceptance order is preserved across producers.
+///
+/// What is NOT in here is the point: peer `send` payloads never enter this
+/// queue. They are agent-authored text of arbitrary content, and typing them
+/// into a recipient's composer turns mail into keystrokes — the recipient's TUI
+/// renders it as something the user typed, and an unsubmitted remainder leaves
+/// the composer partial. Peer mail lives in the inbox; the only thing this
+/// queue may carry on its behalf is the payload-free `PEER_MAIL_WAKE` notice.
+///
+/// Every variant carries an id. Non-user entries used to be invisible to the
+/// Compose count/list, which is how a single parked entry blocked `submit` with
+/// `queued_commands_pending` for minutes against an empty composer and no
+/// visible pending work. Everything parked here is now listable and removable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingInjection {
-    PeerMessage(String),
+    /// Server-authored one-liner: the payload-free mail wake, or a child
+    /// lifecycle summary. Never carries peer `send` content.
+    Notice { id: u64, text: String },
+    /// A spawned child's own task prompt, withheld from argv for prefill-only
+    /// TUIs (codex) and typed once the child's TUI reaches its ready prompt.
+    InitialPrompt { id: u64, text: String },
     /// The id is what the Compose panel deletes by: a queue position would shift
     /// under the caller as the FIFO drains on the next idle window.
     UserCommand {
         id: u64,
         text: String,
+        queued_at: std::time::Instant,
+        overdue_reported: bool,
     },
 }
 
 /// Ids are unique per process, not per session — a Compose delete carries both.
-static NEXT_USER_COMMAND_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_INJECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_injection_id() -> u64 {
+    NEXT_INJECTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 impl PendingInjection {
-    pub(crate) fn peer_message(text: impl Into<String>) -> Self {
-        Self::PeerMessage(text.into())
+    pub(crate) fn notice(text: impl Into<String>) -> Self {
+        Self::Notice {
+            id: next_injection_id(),
+            text: text.into(),
+        }
+    }
+
+    pub(crate) fn initial_prompt(text: impl Into<String>) -> Self {
+        Self::InitialPrompt {
+            id: next_injection_id(),
+            text: text.into(),
+        }
     }
 
     pub(crate) fn user_command(text: impl Into<String>) -> Self {
         Self::UserCommand {
-            id: NEXT_USER_COMMAND_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            id: next_injection_id(),
             text: text.into(),
+            queued_at: std::time::Instant::now(),
+            overdue_reported: false,
+        }
+    }
+
+    /// Claim diagnostic ownership, never delivery ownership. Requeue keeps this metadata.
+    pub(crate) fn claim_overdue_bg_wake(&mut self, now: std::time::Instant) -> Option<u64> {
+        let Self::UserCommand {
+            text,
+            queued_at,
+            overdue_reported,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let age = now.saturating_duration_since(*queued_at);
+        if *overdue_reported || !text.starts_with("BG DONE exit=") || age.as_secs() < 60 {
+            return None;
+        }
+        *overdue_reported = true;
+        Some(age.as_secs())
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        match self {
+            Self::Notice { id, .. }
+            | Self::InitialPrompt { id, .. }
+            | Self::UserCommand { id, .. } => *id,
         }
     }
 
     pub(crate) fn text(&self) -> &str {
         match self {
-            Self::PeerMessage(text) | Self::UserCommand { text, .. } => text,
+            Self::Notice { text, .. }
+            | Self::InitialPrompt { text, .. }
+            | Self::UserCommand { text, .. } => text,
         }
     }
 
-    pub(crate) fn is_user_command(&self) -> bool {
-        matches!(self, Self::UserCommand { .. })
+    /// Stable wire label. The submit rejection and the Compose list both report
+    /// it, so an operator can tell whose work is blocking the composer.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Notice { .. } => "notice",
+            Self::InitialPrompt { .. } => "initial_prompt",
+            Self::UserCommand { .. } => "user_command",
+        }
+    }
+}
+
+/// A spawned child's initial prompt that has not reached its composer yet.
+///
+/// `notified` makes the delivery watchdog idempotent without dropping the
+/// prompt: the parent is told once that delivery has not happened, and the
+/// prompt stays queued so the child's next ready window still types it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingInitialPrompt {
+    pub(crate) prompt: String,
+    pub(crate) notified: bool,
+}
+
+impl PendingInitialPrompt {
+    pub(crate) fn new(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            notified: false,
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // AppEvent — unified event bus for all backend events
 // ---------------------------------------------------------------------------
+
+/// Wire payload of `worktree-created`, on both transports.
+///
+/// The workspace is named by its id; `branch` rides along for display only. A
+/// consumer that wants the branch reads this field rather than parsing the id.
+///
+/// Typed rather than a hand-written `json!` at each emit site: the desktop
+/// `emit` and the SSE arm serialize this same struct, so the two transports
+/// cannot spell a field differently.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct WorktreeCreatedPayload {
+    /// Live PTY resolved from the authenticated MCP caller, never request arguments.
+    pub(crate) creator_session: Option<String>,
+    /// An explicit spawn keeps the creator in its existing workspace.
+    pub(crate) spawn_session: bool,
+    pub(crate) repo_path: String,
+    pub(crate) workspace_id: String,
+    pub(crate) branch: String,
+    pub(crate) worktree_path: String,
+    /// Workspace kind, kept explicit on the shared event payload.
+    pub(crate) kind: crate::worktree::WorkspaceKind,
+}
+
+/// Wire payload of `worktree-removed`, on both transports.
+///
+/// `branch` must be captured *before* the checkout is disposed of — the id stops
+/// resolving the moment the worktree is gone, so a consumer cannot look it up
+/// and neither can this event.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct WorktreeRemovedPayload {
+    pub(crate) repo_path: String,
+    pub(crate) workspace_id: String,
+    pub(crate) branch: String,
+}
 
 /// Events broadcast to SSE/WebSocket consumers via `tokio::sync::broadcast`.
 /// All event producers (PTY reader, watchers, session lifecycle, plugins) send
@@ -65,6 +189,17 @@ impl PendingInjection {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "event", content = "payload")]
 pub enum AppEvent {
+    #[serde(rename = "work-item-provider-request")]
+    WorkItemProviderRequest {
+        request_id: String,
+        request: crate::work_items::provider_bridge::ProviderRequest,
+    },
+    #[serde(rename = "close-dialog")]
+    CloseDialog { payload: serde_json::Value },
+    #[serde(rename = "background-mode-changed")]
+    BackgroundModeChanged { payload: serde_json::Value },
+    #[serde(rename = "automation-run-changed")]
+    AutomationRunChanged { payload: serde_json::Value },
     #[serde(rename = "head-changed")]
     HeadChanged { repo_path: String, branch: String },
     #[serde(rename = "repo-changed")]
@@ -86,12 +221,23 @@ pub enum AppEvent {
     #[serde(rename = "session-created")]
     SessionCreated {
         session_id: String,
+        tuic_session: Option<String>,
         cwd: Option<String>,
         agent_type: Option<String>,
         display_name: Option<String>,
+        /// `$TUIC_SESSION` of the agent that spawned this PTY, so every client can
+        /// mark it as a sub-agent. `None` for tabs a user or plain client opened.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_session: Option<String>,
     },
     #[serde(rename = "session-closed")]
     SessionClosed { session_id: String, reason: String },
+    #[serde(rename = "design-mode-changed")]
+    DesignModeChanged {
+        repo_path: String,
+        session_id: String,
+        status: String,
+    },
     #[serde(rename = "pty-parsed")]
     PtyParsed {
         session_id: String,
@@ -116,12 +262,21 @@ pub enum AppEvent {
     /// Working directory reported by the shell through OSC 7.
     #[serde(rename = "pty-cwd")]
     PtyCwd { session_id: String, cwd: String },
+    /// Terminal title set (or reset to empty) through OSC 0/2.
+    #[serde(rename = "pty-title")]
+    PtyTitle { session_id: String, title: String },
+    #[serde(rename = "pty-bell")]
+    PtyBell { session_id: String },
     /// "This session produced output." Payload-free on purpose: the only
     /// consumers are a last-seen timestamp and an unread flag, neither of which
     /// needs a byte of the output itself. Throttled at the producer — see
     /// [`crate::pty::ACTIVITY_PULSE_WINDOW`] for why dropping pulses is sound.
     #[serde(rename = "pty-activity")]
     PtyActivity { session_id: String },
+    ShellAbandoned {
+        session_id: String,
+        since_ms: Option<u64>,
+    },
     /// Assembled PTY lines for the plugin OutputWatchers, carrying the ids Rust
     /// already matched. The frontend re-runs the real `RegExp` on the cleaned
     /// text to hand the plugin a genuine `RegExpExecArray`, and scans the line
@@ -131,13 +286,34 @@ pub enum AppEvent {
         session_id: String,
         lines: Vec<crate::output_watchers::WatcherLine>,
     },
+    /// A tab's display name changed from the backend (MCP `session action=rename`).
+    /// IPC/HTTP renames start in the frontend and do not emit it.
+    #[serde(rename = "session-renamed")]
+    SessionRenamed {
+        session_id: String,
+        name: String,
+        is_custom: bool,
+    },
+    /// A durable Rust suspend record was saved; clients preserve the tab before EOF.
+    #[serde(rename = "session-suspended")]
+    SessionSuspended {
+        record: Box<crate::suspended_sessions::SuspendedSession>,
+    },
     /// Orchestrator-supplied description of the work currently assigned to a PTY.
+    /// The chat view of a Claude terminal has new entries. Wake only: the entries
+    /// stay behind `chat_view_snapshot`, so a client that missed this event reads
+    /// the same truth as one that did not.
+    #[serde(rename = "chat-view-changed")]
+    ChatViewChanged { session_id: String, seq: u64 },
     #[serde(rename = "pty-description-changed")]
     PtyDescriptionChanged {
         session_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
+    /// The address other agents reach a terminal by (e.g. `tu-3`).
+    #[serde(rename = "term-alias-assigned")]
+    TermAliasAssigned { session_id: String, alias: String },
     #[serde(rename = "plugin-changed")]
     #[allow(dead_code)] // reserved for future plugin hot-reload notifications
     PluginChanged { plugin_ids: Vec<String> },
@@ -161,6 +337,9 @@ pub enum AppEvent {
         message: Option<String>,
         level: String,
         sound: Option<String>,
+        /// `normal` (bell only) or `urgent` (bell plus a transient card), the
+        /// same names `agent action=send` uses.
+        urgency: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         origin_repo_path: Option<String>,
         /// The TUIC session that raised the toast, when the caller is bound to
@@ -191,6 +370,19 @@ pub enum AppEvent {
     /// request must dismiss it; `confirmed` is the answer that won.
     #[serde(rename = "mcp-confirm-resolved")]
     McpConfirmResolved { request_id: String, confirmed: bool },
+    /// Something happened on an ACP connection that a client may want to look at.
+    ///
+    /// Only the wake signal rides this bus. The ordered frames of a turn stay on
+    /// the per-connection Channel/WebSocket, because a single turn emits more of
+    /// them per second than this 256-entry broadcast can carry without lagging
+    /// every unrelated subscriber in the app.
+    ///
+    /// The payload keeps the ACP surface's camelCase field names rather than the
+    /// snake_case used by the PTY events around it: it is the same object the
+    /// `/acp` routes and the desktop commands return, and renaming it here would
+    /// give a client two spellings for one thing.
+    #[serde(rename = "acp-notice")]
+    AcpNotice(crate::acp::AcpNotice),
     /// `repositories.json` was written by some client.
     ///
     /// Payload-free on purpose. One backend serves the desktop WebView, the
@@ -200,20 +392,27 @@ pub enum AppEvent {
     /// every save — including the client that just wrote it.
     #[serde(rename = "repositories-changed")]
     RepositoriesChanged,
+    #[serde(rename = "ideas-changed")]
+    IdeasChanged,
+    #[serde(rename = "settings-changed")]
+    SettingsChanged(crate::settings::changes::SettingsChanged),
+    #[serde(rename = "open-markdown-tabs-changed")]
+    OpenMarkdownTabsChanged,
+    #[serde(rename = "ai-chat-selection-changed")]
+    AiChatSelectionChanged,
     /// Directory contents changed (non-git filesystem watcher)
     #[serde(rename = "dir-changed")]
     DirChanged { dir_path: String },
     /// A worktree was created via MCP — frontend may offer to switch to it
     #[serde(rename = "worktree-created")]
-    WorktreeCreated {
-        repo_path: String,
-        branch: String,
-        worktree_path: String,
-    },
+    WorktreeCreated(WorktreeCreatedPayload),
+    /// Caller-only placement; the directory already exists.
+    #[serde(rename = "session-worktree-declared")]
+    SessionWorktreeDeclared(WorktreeCreatedPayload),
     /// A worktree was removed (UI, MCP, HTTP, or merge&archive) — frontend must
     /// drop its sidebar row and close any terminal still living in it.
     #[serde(rename = "worktree-removed")]
-    WorktreeRemoved { repo_path: String, branch: String },
+    WorktreeRemoved(WorktreeRemovedPayload),
     /// A peer agent registered for inter-agent messaging
     #[serde(rename = "peer-registered")]
     PeerRegistered { tuic_session: String, name: String },
@@ -234,6 +433,8 @@ pub enum AppEvent {
         /// is working in, not to whichever repo has focus in the frontend.
         #[serde(skip_serializing_if = "Option::is_none")]
         origin_repo_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        opener_tuic_session: Option<String>,
     },
     /// GitHub PR statuses updated for a repo (from Rust poller)
     #[serde(rename = "github-pr-update")]
@@ -246,7 +447,13 @@ pub enum AppEvent {
     GitHubTransition {
         transition: crate::github_poller::PrTransition,
     },
-    /// GitHub issues updated for a repo (from Rust poller)
+    /// Internal machine-owned intake; excluded from client transports.
+    #[serde(rename = "internal-github-intake-issues-update")]
+    GitHubIntakeIssuesUpdate {
+        repo_path: String,
+        issues: Vec<crate::github::GitHubIssue>,
+    },
+    /// GitHub issues updated for a repo (from Rust poller).
     #[serde(rename = "github-issues-update")]
     GitHubIssuesUpdate {
         repo_path: String,
@@ -255,55 +462,149 @@ pub enum AppEvent {
     /// Close HTML tabs owned by a session (emitted on session exit)
     #[serde(rename = "close-html-tabs")]
     CloseHtmlTabs { tab_ids: Vec<String> },
-    /// Scheduled agent job completed (from Scheduler)
+    /// A FastAF scheduled agent task finished or timed out
+    /// (`ai_agent::scheduler`). `payload` is `{ job_id, goal, timed_out }`,
+    /// built once and also emitted to the desktop window under the same name.
     #[serde(rename = "scheduled-job-completed")]
-    ScheduledJobCompleted {
-        job_id: String,
-        goal: String,
-        timed_out: bool,
-    },
-    /// Diff-triage classification progress — browser/SSE parity for the desktop
-    /// `triage-progress` window event. Low-frequency (a handful of phases per
-    /// triage), safe on the global bus.
-    #[serde(rename = "triage-progress")]
-    DiffTriageProgress {
-        repo_path: String,
-        summary: Option<String>,
-        files: Vec<crate::diff_triage::FileClassification>,
-        phase: String,
-        done: bool,
-        llm_used: bool,
-        llm_model: Option<String>,
-    },
-    /// Reserved lifecycle events for GitHub Ops workflows. Producers are wired
-    /// incrementally as each workflow graduates from primitive to runtime flow.
-    #[allow(dead_code)]
-    #[serde(rename = "review-progress")]
-    ReviewProgress {
-        repo_path: String,
-        payload: serde_json::Value,
-    },
+    ScheduledJobCompleted { payload: serde_json::Value },
+    /// A FastAF scheduled agent task is waiting for approval of a command
+    /// (`ai_agent::scheduler`). `payload` is `{ job_id, goal, session_id,
+    /// command, reason }`, also emitted to the desktop window under this name.
+    #[serde(rename = "scheduled-job-needs-approval")]
+    ScheduledJobNeedsApproval { payload: serde_json::Value },
+    /// A failed or timed-out command in a session with AI suggestions on
+    /// (`ai_agent::triggers`). `payload` is `{ session_id, trigger_reason,
+    /// proposed_goal }`, also emitted to the desktop window under this name.
+    #[serde(rename = "ai-suggestion")]
+    AiSuggestion { payload: serde_json::Value },
+    /// Reserved lifecycle event for a GitHub Ops workflow. The producer is
+    /// wired when the workflow graduates from primitive to runtime flow.
     #[allow(dead_code)]
     #[serde(rename = "conflict-assist-status")]
     ConflictAssistStatus {
         repo_path: String,
         payload: serde_json::Value,
     },
-    #[allow(dead_code)]
+    /// A Progress event was durably persisted (`progress` MCP tool, or the
+    /// equivalent Tauri command/HTTP route). `repo_path` is the *owning
+    /// project root* the event was written under, which may differ from the
+    /// reporting workspace for a managed linked or nested workspace. Never
+    /// sent for a `duplicate` or `paused` outcome — only a receipt actually
+    /// backed by a new row reaches this bus.
+    #[serde(rename = "progress-recorded")]
+    ProgressRecorded {
+        repo_path: String,
+        payload: serde_json::Value,
+    },
+    #[serde(rename = "workflow-run-changed")]
+    WorkflowRunChanged {
+        repo_path: String,
+        payload: serde_json::Value,
+    },
+    /// An ego PR review started or finished.
+    ///
+    /// Two events per review and not one per file: the review is a single
+    /// unattended ego turn (`acp::oneshot`), so there is no per-file phase to
+    /// report and a payload that claimed one would be inventing it. The
+    /// dashboard column needs to know a review is running and what it found;
+    /// that is exactly what this carries.
+    #[serde(rename = "review-progress")]
+    ReviewProgress {
+        repo_path: String,
+        payload: serde_json::Value,
+    },
+    /// An ego improvement scan produced its proposals.
+    ///
+    /// Pushed rather than returned only, because a scan started from the
+    /// dashboard must also reach a dashboard open on another transport.
     #[serde(rename = "proposals-ready")]
     ProposalsReady {
         repo_path: String,
         payload: serde_json::Value,
     },
-    /// Background recreation of a stale worktree directory failed. Emitted on the
-    /// bus (SSE) AND the Tauri window so browser/PWA/remote clients learn the
-    /// outcome, not just the desktop app.
-    #[serde(rename = "worktree-create-failed")]
-    WorktreeCreateFailed {
-        repo_path: String,
-        branch: String,
-        reason: String,
+    /// A session's derived lifecycle state moved (working / idle / awaiting).
+    ///
+    /// The only OUTPUT of the session-state accumulator, and the only variant
+    /// nothing feeds back into it — see the no-op arm in
+    /// `apply_event_to_session_state`. Published once per real transition so the
+    /// desktop can render badges from a push instead of a 1 Hz
+    /// `list_active_sessions` poll (#687-be9d).
+    ///
+    /// The payload is field-for-field an entry of that command's response
+    /// (`SessionInfo`'s `session_id` + `state`), and the same object the
+    /// browser-mode WebSocket already sends as `{"type":"state","state":…}`, so
+    /// one frontend applier serves every transport.
+    #[serde(rename = "session-state-changed")]
+    SessionStateChanged {
+        session_id: String,
+        /// Boxed: `SessionState` is ~528 bytes against ~144 for the next-largest
+        /// arm, and `AppEvent` is cloned once per broadcast subscriber, so an
+        /// inline copy makes every *other* event pay for this one.
+        state: Box<SessionState>,
     },
+    /// A remote connection's status, base URL or token moved.
+    ///
+    /// The payload is the whole client view of that connection, not a delta: a
+    /// client that missed an event must never be left holding a base URL the
+    /// backend has retracted.
+    #[serde(rename = "remote-connection-status")]
+    RemoteConnectionStatusChanged { payload: serde_json::Value },
+    /// An event a remote daemon published, repeated verbatim on this bus.
+    ///
+    /// `event` is the daemon's own event name and `payload` its own body, so a
+    /// consumer cannot tell a mirrored event from a local one — which is the
+    /// point: a remote session must raise the same badge, the same notification
+    /// and the same queue gate as a local one, with no second code path to keep
+    /// in step. It also means a new event type crosses for free.
+    ///
+    /// It is a no-op for the session-state accumulator: the daemon ran its own
+    /// accumulator already and this is its output, not an input (#791-055e).
+    #[serde(rename = "remote-mirrored")]
+    RemoteMirrored {
+        connection_id: String,
+        event: String,
+        payload: serde_json::Value,
+    },
+    /// A Whisper model download moved. `payload` is the body the desktop
+    /// `dictation-download-progress` emit carries, built once so the two
+    /// transports cannot describe the same download differently.
+    #[cfg(feature = "dictation")]
+    #[serde(rename = "dictation-download-progress")]
+    DictationDownloadProgress { payload: serde_json::Value },
+    /// A speech asset download moved — the runtime library or one language
+    /// bundle. Keyed by asset inside the payload, because a user can start two
+    /// downloads at once and one shared percent would show each of them the
+    /// other's.
+    #[cfg(feature = "dictation")]
+    #[serde(rename = "speech-download-progress")]
+    SpeechDownloadProgress { payload: serde_json::Value },
+    /// A spoken reply changed state: queued, rendering, speaking, finished,
+    /// interrupted or failed.
+    ///
+    /// `payload` is a serialized `dictation::commands::SpokenReply`, the same
+    /// shape `speak` returns and `speech_status` nests. Carried as a value
+    /// rather than as fields for the reason above: one serializer, so a client
+    /// polling the status and a client reading the stream cannot be told two
+    /// different things about one reply.
+    ///
+    /// Pushed from the speaker's own transitions, never from `speak` — the
+    /// interesting ones (`finished`, `interrupted`) happen on the render thread
+    /// long after `speak` returned, and a consumer that had to discover them
+    /// would be polling.
+    #[cfg(feature = "dictation")]
+    #[serde(rename = "speech-utterance")]
+    SpeechUtterance { payload: serde_json::Value },
+}
+
+/// The wire body of [`AppEvent::SessionStateChanged`], shared by the desktop
+/// window event and the `/events` SSE arm.
+///
+/// One builder rather than two: the payload has to be byte-identical across the
+/// transports for the same frontend applier to consume both, and the pairs this
+/// codebase builds from separate code in separate files are exactly the ones
+/// that drift.
+pub(crate) fn session_state_payload(session_id: &str, state: &SessionState) -> serde_json::Value {
+    serde_json::json!({ "session_id": session_id, "state": state })
 }
 
 impl AppEvent {
@@ -318,9 +619,14 @@ impl AppEvent {
             | AppEvent::PluginWatcherLines { session_id, .. }
             | AppEvent::PtyExit { session_id }
             | AppEvent::PtyActivity { session_id }
+            | AppEvent::ShellAbandoned { session_id, .. }
+            | AppEvent::PtyTitle { session_id, .. }
+            | AppEvent::PtyBell { session_id }
             | AppEvent::PtyOsc133 { session_id, .. }
             | AppEvent::PtyCwd { session_id, .. }
             | AppEvent::PtyDescriptionChanged { session_id, .. }
+            | AppEvent::SessionRenamed { session_id, .. }
+            | AppEvent::TermAliasAssigned { session_id, .. }
             | AppEvent::SessionClosed { session_id, .. } => Some(session_id),
             _ => None,
         }
@@ -338,8 +644,19 @@ fn is_zero(v: &u32) -> bool {
 /// Per-session state accumulated from broadcast events.
 /// Updated by a background task that subscribes to the event bus.
 /// Read by `GET /sessions` to enrich the response for REST-polling clients.
-#[derive(Clone, Debug, Default, Serialize)]
+///
+/// `Deserialize` because a remote daemon's `GET /sessions` row carries this
+/// state back to the machine that mirrors it (#791-055e). `serde(default)` is
+/// load-bearing there: most fields are `skip_serializing_if`, so the wire form
+/// omits everything the remote had nothing to say about.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct SessionState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_recovery: Option<crate::output_parser::ProviderRecovery>,
+    /// Validated native hook identity; never a discovery heuristic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_binding: Option<crate::codex_binding::CodexBinding>,
     /// True when a Question parsed event is pending (no subsequent user-input or pty-exit)
     pub awaiting_input: bool,
     /// The question text, if awaiting input
@@ -374,6 +691,9 @@ pub(crate) struct SessionState {
     /// are excluded by the PTY process-tree classifier.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub background_work: bool,
+    /// Last I/O time of a freshly verified abandoned shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abandoned_since_ms: Option<u64>,
     /// Turn whose confirmed-ready observation is waiting for a process snapshot
     /// newer than `background_probe_after_generation`.
     #[serde(skip)]
@@ -394,6 +714,31 @@ pub(crate) struct SessionState {
     /// Detected agent type, if known
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// Run-config identity is armed before first observation; discovered identity
+    /// is revoked when a shell returns to the foreground.
+    #[serde(skip)]
+    pub(crate) agent_type_from_run_config: bool,
+    /// A preset is armed during shell startup only. Once its agent has been
+    /// observed, shell foreground means it has exited and cannot receive input.
+    #[serde(skip)]
+    pub(crate) agent_foreground_observed: bool,
+    /// Telegram opt-in lifetime, retired synchronously on observed agent exit.
+    #[serde(skip)]
+    pub(crate) telegram_registration_lifetime: Option<Arc<()>>,
+    /// Accepted OS foreground snapshot order; late completion cannot overwrite
+    /// a newer observation from another timer/IPC/HTTP caller.
+    #[serde(skip)]
+    pub(crate) foreground_probe_generation: u64,
+    #[serde(skip)]
+    pub(crate) spawn_root_role: SpawnRootRole,
+    /// A direct agent child owns foreground, or root observation is unavailable.
+    #[serde(skip)]
+    pub(crate) foreground_input_blocked: bool,
+    #[serde(skip)]
+    pub(crate) foreground_probe_result: Option<String>,
+    /// Keep the foreground detection warning to one record per session.
+    #[serde(skip)]
+    pub(crate) unknown_foreground_warned: bool,
     /// True when this agent has native-hook instrumentation enabled, so heuristic
     /// question-detection is suppressed (awaiting comes from OSC 7770 instead).
     /// Resolved from config when `agent_type` is set; internal, not serialized.
@@ -429,6 +774,12 @@ pub(crate) struct SessionState {
     /// were parsed so the async accumulator cannot restore prior-turn completion.
     #[serde(skip)]
     pub(crate) turn_epoch: u64,
+    /// One draft may interrupt this turn until the next native input write.
+    #[serde(skip)]
+    pub(crate) turn_interrupt: Option<Arc<()>>,
+    /// Native input retired this epoch; late drafts cannot rearm it.
+    #[serde(skip)]
+    pub(crate) turn_interrupt_retired_epoch: Option<u64>,
     /// Slash command menu items (from slash-menu parsed events)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slash_menu_items: Option<Vec<crate::output_parser::SlashMenuItem>>,
@@ -444,10 +795,25 @@ pub(crate) struct SessionState {
     pub last_push_ms: Option<u64>,
 }
 
+/// Immutable spawn metadata; unknown mirrors cannot authorize local injection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SpawnRootRole {
+    #[default]
+    Unknown,
+    Shell,
+    DirectProgram,
+}
+
 impl SessionState {
     pub(crate) fn has_pending_background_probe(&self) -> bool {
         self.background_probe_turn_epoch == Some(self.turn_epoch)
     }
+}
+
+struct SessionStateEvent {
+    event: AppEvent,
+    /// Spawn parentage captured before asynchronous exit teardown drops it.
+    parented: bool,
 }
 
 /// Lossless lane for events that mutate the authoritative per-session state.
@@ -455,8 +821,16 @@ impl SessionState {
 /// transitions cannot, because losing either SET or CLEAR strands clients in a
 /// state that never existed or never ended.
 pub(crate) struct SessionStateEventQueue {
-    tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>>,
+    tx: tokio::sync::mpsc::UnboundedSender<SessionStateEvent>,
+    rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<SessionStateEvent>>>,
+    /// Events sent and not yet applied, counted on both ends. See [`Self::depth`].
+    depth: AtomicUsize,
+}
+
+impl Default for SessionStateEventQueue {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionStateEventQueue {
@@ -465,22 +839,67 @@ impl SessionStateEventQueue {
         Self {
             tx,
             rx: Mutex::new(Some(rx)),
+            depth: AtomicUsize::new(0),
         }
+    }
+
+    /// Queue `event`, counting it as outstanding until the accumulator applies it.
+    fn send(&self, event: AppEvent, parented: bool) {
+        // Counted BEFORE the send, never after: the accumulator runs on another task and
+        // can receive and decrement before `send` even returns here. An increment after
+        // that would leave the depth permanently one too high, and a `fetch_sub` reaching
+        // zero first would wrap a `usize` to `usize::MAX`.
+        self.depth
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.tx.send(SessionStateEvent { event, parented }).is_err() {
+            // The receiver is gone, so nothing will ever apply this one.
+            self.depth
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Record that the accumulator finished applying one event.
+    fn applied(&self) {
+        self.depth
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Events queued on the lane and not yet applied.
+    ///
+    /// The lane is deliberately unbounded, so a stalled accumulator is invisible until
+    /// it is a memory problem; the Diagnostics snapshot reports this and nothing acts on
+    /// it. Counted on both ends rather than read off the channel for two reasons. Tokio
+    /// puts `len()` on the RECEIVER, not the sender, and the receiver is `take()`n by
+    /// `spawn_session_state_accumulator` so no other caller can reach it. More
+    /// importantly, publishing `rx.len()` from inside that task would only refresh while
+    /// the task still runs — it would report a stale small number exactly when the task
+    /// wedges, which is the failure this metric exists to reveal.
+    pub(crate) fn depth(&self) -> usize {
+        self.depth.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 pub(crate) fn resolve_choice_prompt_input(state: &AppState, session_id: &str, data: &str) -> bool {
     {
-        let Some(mut session) = state.session_states.get_mut(session_id) else {
+        let Some(mut session) = state.session_maps.session_states.get_mut(session_id) else {
             return false;
         };
         let Some(prompt) = session.choice_prompt.as_ref() else {
             return false;
         };
-        let resolves = prompt.options.iter().any(|option| option.key == data)
+        let resolves = (prompt.selection_mode.is_none()
+            && prompt.options.iter().any(|option| option.key == data))
             || matches!(data, "\r" | "\n")
-            || (data == "\x1b" && prompt.dismiss_key.is_some())
-            || (data == "\t" && prompt.amend_key.is_some());
+            || match prompt.dismiss_key.as_deref() {
+                Some("cancel") => data == "\x1b",
+                Some("ctrl+]") => data == "\x1d",
+                _ => false,
+            }
+            || match prompt.amend_key.as_deref() {
+                Some("amend") => data == "\t",
+                Some("shift+right") => data == "\x1b[1;2C",
+                _ => false,
+            };
         if !resolves {
             return false;
         }
@@ -488,6 +907,12 @@ pub(crate) fn resolve_choice_prompt_input(state: &AppState, session_id: &str, da
         session.awaiting_input = false;
         session.question_text = None;
         session.question_confident = false;
+    }
+    // #744-138c: clear the shared awaiting evidence too, outside the
+    // session_states lock just dropped above (SilenceState → SessionState
+    // lock order — see apply_event_to_session_state's PtyParsed arm).
+    if let Some(silence) = state.session_maps.silence_states.get(session_id) {
+        silence.lock().clear_awaiting();
     }
     state.emit_pty_event(AppEvent::PtyParsed {
         session_id: session_id.to_string(),
@@ -497,10 +922,21 @@ pub(crate) fn resolve_choice_prompt_input(state: &AppState, session_id: &str, da
 }
 
 /// PartialEq excludes last_activity_ms (telemetry, not logical state).
+impl SessionState {
+    /// Seed configured identity synchronously, before readers/events can use it.
+    pub(crate) fn seed_configured_agent(&mut self, agent_type: Option<String>) {
+        self.agent_type_from_run_config = agent_type.is_some();
+        self.agent_foreground_observed = false;
+        self.codex_binding = None;
+        self.agent_type = agent_type;
+    }
+}
+
 /// Used by WS dedup to avoid sending identical state frames.
 impl PartialEq for SessionState {
     fn eq(&self, other: &Self) -> bool {
-        self.awaiting_input == other.awaiting_input
+        self.provider_recovery == other.provider_recovery
+            && self.awaiting_input == other.awaiting_input
             && self.question_text == other.question_text
             && self.question_confident == other.question_confident
             && self.rate_limited == other.rate_limited
@@ -509,7 +945,9 @@ impl PartialEq for SessionState {
             && self.shell_state == other.shell_state
             && self.agent_state == other.agent_state
             && self.background_work == other.background_work
+            && self.abandoned_since_ms == other.abandoned_since_ms
             && self.agent_type == other.agent_type
+            && self.codex_binding == other.codex_binding
             && self.last_error == other.last_error
             && self.agent_intent == other.agent_intent
             && self.current_task == other.current_task
@@ -531,6 +969,37 @@ pub(crate) const GIT_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// TTL for GitHub operations (network): aligned with poller BASE_INTERVAL
 pub(crate) const GITHUB_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Connect timeout for the shared HTTP client. A TCP handshake to GitHub that
+/// has not completed in 10s is a dead route — a dropped VPN, a captive portal,
+/// a black-holed SYN — not a slow one. Without it the OS default applies
+/// (~75s on macOS) and every caller inherits that stall.
+pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Total timeout for one request on the shared HTTP client, matching
+/// `plugin_http::DEFAULT_TIMEOUT_SECS`. It covers the whole exchange, including
+/// reading the body, so it bounds the half-open socket a VPN drop leaves
+/// behind: the peer keeps the connection open and simply never answers, which
+/// no connect timeout can catch. The GitHub poller awaits these requests inline
+/// in its `select!`, so an unbounded one wedges the poller itself.
+pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build the shared HTTP client with explicit timeouts.
+///
+/// Split from [`build_http_client`] so tests can drive the same builder with
+/// timeouts short enough to observe.
+fn http_client_with_timeouts(connect: Duration, request: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .timeout(request)
+        .build()
+        .expect("Failed to build shared HTTP client")
+}
+
+/// The shared async HTTP client used for every GitHub API call.
+pub(crate) fn build_http_client() -> reqwest::Client {
+    http_client_with_timeouts(HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT)
+}
 
 /// Buffer that handles UTF-8 characters split across read boundaries.
 /// Carries incomplete trailing bytes from one read to the next.
@@ -784,6 +1253,9 @@ pub struct OutputRingBuffer {
     write_pos: usize,
     /// Total bytes ever written (monotonic). Consumers use this to detect missed data.
     pub total_written: u64,
+    /// Caller-computed secrets of the whole ring, valid while `total_written`
+    /// is unchanged.
+    secret_cache: Option<(u64, Vec<String>)>,
 }
 
 impl OutputRingBuffer {
@@ -793,7 +1265,28 @@ impl OutputRingBuffer {
             capacity,
             write_pos: 0,
             total_written: 0,
+            secret_cache: None,
         }
+    }
+
+    /// `compute()` for the ring's current content, recomputed only after a
+    /// write: polling agents read far more often than the ring changes.
+    pub fn cached_secrets(&mut self, compute: impl FnOnce() -> Vec<String>) -> Vec<String> {
+        if let Some((written, secrets)) = &self.secret_cache
+            && *written == self.total_written
+        {
+            return secrets.clone();
+        }
+        let secrets = compute();
+        self.secret_cache = Some((self.total_written, secrets.clone()));
+        secrets
+    }
+
+    /// Bytes this ring holds. The buffer is allocated full at construction, so
+    /// this — not `len` — is what `memory_report` must count: `len` reads zero
+    /// on a ring that has already reserved its whole capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Append data to the ring buffer using bulk copy to avoid per-byte overhead.
@@ -845,6 +1338,18 @@ impl OutputRingBuffer {
         }
 
         (result, self.total_written)
+    }
+
+    /// Number of bytes currently readable, which saturates at `capacity` once
+    /// the ring wraps — unlike `total_written`, which keeps climbing. Returns a
+    /// count rather than making callers do `read_last(usize::MAX).0.len()`,
+    /// which copies the whole ring just to measure it.
+    ///
+    /// Test-only for now, like `total_written()` below: the production readers
+    /// all want the bytes, not the count.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        std::cmp::min(self.total_written as usize, self.capacity)
     }
 
     /// Read bytes written after `since_offset` (based on `total_written`).
@@ -1012,19 +1517,13 @@ pub(crate) fn strip_kitty_sequences(input: &str) -> (Cow<'_, str>, Vec<KittyActi
     (Cow::Owned(output), actions)
 }
 
-/// Represents a git worktree
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WorktreeInfo {
-    pub name: String,
-    pub path: PathBuf,
-    pub branch: Option<String>,
-    pub base_repo: PathBuf,
-}
+pub use tuic_git::worktree::WorktreeInfo;
 
 /// Represents a PTY session with optional worktree
 pub type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
 pub struct PtySession {
+    pub(crate) launch_receipt: Option<crate::prompt_receipt::PromptReceipt>,
     /// Kept outside the session mutex so terminal-generated replies can wait
     /// for an in-flight user write without blocking the reader thread.
     pub writer: SharedPtyWriter,
@@ -1032,17 +1531,36 @@ pub struct PtySession {
     pub(crate) _child: Box<dyn portable_pty::Child + Send + Sync>,
     pub(crate) paused: Arc<AtomicBool>,
     pub worktree: Option<WorktreeInfo>,
+    /// Immutable launch directory used for repository ownership, independent of OSC 7.
+    pub(crate) initial_cwd: Option<String>,
     pub cwd: Option<String>,
     /// Display name set by the desktop UI, agent launch, or intent title.
     pub display_name: Option<String>,
     /// Only explicit user renames are protected from OSC/intent title updates.
     pub display_name_is_custom: bool,
+    /// The name was given by the agent spawn that created the session. The UI
+    /// reads it on reload to keep the agent's own OSC title from replacing that
+    /// name; the row's other fields cannot tell it apart from a synced OSC title.
+    pub display_name_from_spawn: bool,
     /// Created through HTTP/MCP rather than the local desktop UI.
     pub is_remote: bool,
     /// Resolved shell command used to spawn the PTY (e.g. "/bin/zsh",
     /// "C:\\Program Files\\Git\\bin\\bash.exe", "wsl.exe -d Ubuntu").
     /// Kept so `get_session_shell_family` can classify without re-resolving.
     pub shell: String,
+}
+
+impl PtySession {
+    /// Record the tab name the UI synced, from either transport. A non-custom
+    /// name is an OSC or intent title, which refines a spawn name without
+    /// replacing it; only a user rename (`is_custom`) ends the spawn origin.
+    pub(crate) fn set_display_name(&mut self, name: Option<String>, is_custom: bool) {
+        self.display_name = name;
+        self.display_name_is_custom = is_custom;
+        if is_custom {
+            self.display_name_from_spawn = false;
+        }
+    }
 }
 
 /// Configuration for agent orchestration
@@ -1074,6 +1592,7 @@ impl SessionMetrics {
 /// Stored per session_id so tool handlers can check client identity at call time.
 #[derive(Debug, Clone)]
 pub struct McpSessionMeta {
+    pub(crate) prompt_instructions: Option<crate::prompt_receipt::PromptReceipt>,
     /// Last time the session was used (any request); reaper checks this.
     pub last_activity: Instant,
     /// Whether the client identified as Claude Code (or tuic-bridge) at initialize time
@@ -1096,10 +1615,10 @@ pub struct McpSessionMeta {
 }
 
 /// A registered peer agent in the inter-agent messaging system.
-/// Keyed by `tuic_session` (the stable tab UUID from TUIC_SESSION env var).
+/// Keyed by `tuic_session` (a stable peer UUID from TUIC_SESSION env var).
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerAgent {
-    /// Stable tab UUID (from TUIC_SESSION env var) — primary identifier
+    /// Stable peer UUID (from TUIC_SESSION env var) — primary identifier
     pub tuic_session: String,
     /// MCP session ID (for routing notifications via SSE)
     pub mcp_session_id: String,
@@ -1152,6 +1671,26 @@ pub(crate) enum AgentDeliveryAssignment {
     Terminal,
     InboxOnly,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UrgentNoticeReservation {
+    AlreadyRead,
+    InFlight,
+    Written,
+    Reserved,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UrgentNotice {
+    first_through: u64,
+    through: u64,
+    written: bool,
+    reserved_at: std::time::Instant,
+}
+
+// Two 6s confirmation windows and split writes fit inside this lease. A stalled
+// writer must not suppress later notices forever; the mailbox remains durable.
+const URGENT_NOTICE_LEASE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OrchestratorDeliveryAssignment {
@@ -1209,12 +1748,15 @@ pub(crate) struct AgentDeliveryGate {
     next_lease: u64,
     active_waiters: std::collections::HashSet<u64>,
     owners: HashMap<String, AgentDeliveryOwner>,
+    urgent_notices: HashMap<String, UrgentNotice>,
     orchestrator_wake_pending_through: Option<u64>,
     orchestrator_wake_needed_through: Option<u64>,
     orchestrator_observed_through: u64,
     orchestrator_wake_attempt: u64,
     orchestrator_wake_attempts_in_group: u8,
     inbox_revision: u64,
+    eviction_watermark: u64,
+    acknowledged_eviction_watermark: u64,
     inbox_events: tokio::sync::watch::Sender<u64>,
 }
 
@@ -1225,12 +1767,15 @@ impl Default for AgentDeliveryGate {
             next_lease: 0,
             active_waiters: std::collections::HashSet::new(),
             owners: HashMap::new(),
+            urgent_notices: HashMap::new(),
             orchestrator_wake_pending_through: None,
             orchestrator_wake_needed_through: None,
             orchestrator_observed_through: 0,
             orchestrator_wake_attempt: 0,
             orchestrator_wake_attempts_in_group: 0,
             inbox_revision: 0,
+            eviction_watermark: 0,
+            acknowledged_eviction_watermark: 0,
             inbox_events,
         }
     }
@@ -1279,11 +1824,41 @@ pub(crate) enum MarkerKind {
 /// Max messages per agent inbox before FIFO eviction.
 pub(crate) const AGENT_INBOX_CAPACITY: usize = 100;
 
-/// Message-id prefix marking auto-generated lifecycle/system notifications
-/// (child exited/idle/died). These are low-volume and critical — losing one
-/// silently strands the orchestrator waiting on a child it thinks is alive —
-/// so `push_agent_inbox` protects them from eviction by chatty peer `send`s.
+/// Message-id prefix marking auto-generated lifecycle/system notifications.
 pub(crate) const LIFECYCLE_MSG_ID_PREFIX: &str = "tuic-auto-";
+
+/// Move one retained message to the end of the logical stream, stamped after
+/// both the newest entry and `floor` (a read position it must land beyond).
+/// False when the inbox no longer holds it.
+fn requeue_beyond(inbox: &mut VecDeque<AgentMessage>, message_id: &str, floor: u64) -> bool {
+    let Some(index) = inbox.iter().position(|message| message.id == message_id) else {
+        return false;
+    };
+    let Some(mut message) = inbox.remove(index) else {
+        return false;
+    };
+    let after_newest = inbox.back().map_or(0, |m| m.timestamp.saturating_add(1));
+    message.timestamp = message
+        .timestamp
+        .max(after_newest)
+        .max(floor.saturating_add(1));
+    inbox.push_back(message);
+    true
+}
+
+fn lifecycle_notice_kind(message: &AgentMessage) -> Option<String> {
+    if !message.id.starts_with(LIFECYCLE_MSG_ID_PREFIX) || message.from_name != "tuic" {
+        return None;
+    }
+    let payload = serde_json::from_str::<serde_json::Value>(&message.content).ok()?;
+    let kind = payload.get("type")?.as_str()?;
+    // Each answered question can start a new wait. Keep those notices even if
+    // ordinary lifecycle updates from the same child are coalesced.
+    if kind == "state_change" && payload.get("state")?.as_str()? == "awaiting_input" {
+        return None;
+    }
+    Some(kind.to_string())
+}
 
 /// Max message body size in bytes (64 KB).
 pub(crate) const AGENT_MESSAGE_MAX_BYTES: usize = 64 * 1024;
@@ -1293,94 +1868,124 @@ pub(crate) const AGENT_MESSAGE_MAX_BYTES: usize = 64 * 1024;
 /// storm that a repo-changed burst across many repos would otherwise cause.
 pub(crate) const MONITORING_GIT_CONCURRENCY: usize = 8;
 
-/// Global state for managing PTY sessions and worktrees
-pub struct AppState {
-    pub sessions: DashMap<String, Mutex<PtySession>>,
-    pub(crate) data_dir: PathBuf,
-    pub(crate) worktrees_dir: PathBuf,
-    pub(crate) metrics: SessionMetrics,
-    /// Ring buffers for MCP output access (one per session)
-    pub output_buffers: DashMap<String, Mutex<OutputRingBuffer>>,
-    /// Active MCP Streamable HTTP sessions (session_id -> metadata for TTL reaping + client identity)
-    pub mcp_sessions: DashMap<String, McpSessionMeta>,
-    /// WebSocket clients per PTY session for streaming output
-    pub ws_clients: DashMap<String, Vec<WsClientTx>>,
-    /// Cached AppConfig to avoid re-reading from disk on every request
-    pub(crate) config: parking_lot::RwLock<crate::config::AppConfig>,
-    /// TTL caches for git and GitHub query results
-    pub(crate) git_cache: GitCacheState,
-    /// Raw file watchers per repo (keyed by repo path), with per-category
-    /// debounce. macOS/Windows: one recursive `notify::RecommendedWatcher` over
-    /// the repo root. Linux: pruned non-recursive working-tree watches + targeted
-    /// `.git` watches (issue #82). Stored behind `Arc` so the Linux event callback
-    /// can clone a stable handle and add watches for newly created dirs without
-    /// holding a `DashMap` ref across the blocking `watch()` call.
-    pub(crate) repo_watchers: DashMap<String, Arc<crate::repo_watcher::RepoWatchHandle>>,
-    /// Last emitted git-state fingerprint per repo path. The repo watcher skips
-    /// the `repo-changed` (git-state) emit when the fingerprint is unchanged, so a
-    /// no-op `.git` touch (e.g. a `--no-optional-locks` status refreshing the index
-    /// stat cache) doesn't trigger the full ~20-panel frontend re-render cascade.
-    pub(crate) repo_git_fingerprints: DashMap<String, u64>,
-    /// Last emitted resolved-HEAD target per repo path (`resolve_head_target`
-    /// output). The repo watcher skips the `head-changed` emit when this is
-    /// unchanged, suppressing the Linux inotify storm where `.git/HEAD` events
-    /// recur without HEAD actually moving (issue #82).
-    pub(crate) repo_head_targets: DashMap<String, String>,
-    /// Count of `head-changed` emits suppressed by the `repo_head_targets`
-    /// guard — surfaced in diagnostic snapshots to quantify watcher storm
-    /// volume in production (issue #82).
-    pub(crate) repo_head_emits_suppressed: AtomicU64,
-    /// File watchers for directory contents (keyed by absolute dir path)
-    pub(crate) dir_watchers: DashMap<String, crate::repo_watcher::WatchHandle>,
-    /// File watcher for the themes/ directory — kept alive for the app lifetime.
-    pub(crate) theme_watcher: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
-    /// Shared mdkb daemon client for AST navigation (outline, goto-def, references).
-    pub(crate) mdkb_daemon: crate::mdkb_daemon::SharedMdkbDaemon,
-    /// Shared async HTTP client for GitHub API requests.
-    pub(crate) http_client: reqwest::Client,
+/// The GitHub half of [`AppState`], grouped so the 116-field struct reads as
+/// subsystems rather than a flat list (#678-9a75).
+///
+/// Every field is constructible without arguments, so the group carries its own
+/// `Default` and `AppState::new` names it once instead of seven times.
+pub(crate) struct GitHubState {
+    pub(crate) login_epoch: std::sync::atomic::AtomicU64,
+    pub(crate) login_commit: tokio::sync::Mutex<()>,
     /// GitHub API token — updated on fallback when a 401 triggers candidate rotation
-    pub(crate) github_token: parking_lot::RwLock<Option<String>>,
+    pub(crate) token: parking_lot::RwLock<Option<String>>,
     /// Where the current GitHub token came from (env, OAuth keyring, gh CLI)
-    pub(crate) github_token_source: parking_lot::RwLock<crate::github_auth::TokenSource>,
+    pub(crate) token_source: parking_lot::RwLock<crate::github_auth::TokenSource>,
+    /// Explicit runtime disconnect; read/write while holding the token lock.
+    /// Prevents lazy resolution from restoring credentials.
+    pub(crate) disconnected: std::sync::atomic::AtomicBool,
     /// Circuit breaker for GitHub API calls
-    pub(crate) github_circuit_breaker: crate::github::GitHubCircuitBreaker,
+    pub(crate) circuit_breaker: crate::github::GitHubCircuitBreaker,
     /// Background GitHub poller task handle
-    pub(crate) github_poller: parking_lot::Mutex<Option<crate::github_poller::GitHubPoller>>,
+    pub(crate) poller: parking_lot::Mutex<Option<crate::github_poller::GitHubPoller>>,
     /// Cached GitHub viewer login (authenticated user) for issue filtering.
-    pub(crate) github_viewer_login: parking_lot::RwLock<Option<String>>,
+    pub(crate) viewer_login: parking_lot::RwLock<Option<String>>,
     /// Remaining GraphQL points from last poll — used for proactive throttling.
     /// Initialized to u32::MAX (no constraint). Written by each successful batch poll.
     /// This is the github.com budget; GHE accounts track their own in `ghe_state`.
-    pub(crate) github_rate_limit_remaining: std::sync::atomic::AtomicU32,
+    pub(crate) rate_limit_remaining: std::sync::atomic::AtomicU32,
     /// Per-account runtime state for non-github.com (GHE) accounts: breaker +
     /// viewer-login cache + rate budget, keyed by account id. github.com uses the
     /// global fields above, so a github.com-only user is byte-for-byte unchanged.
     pub(crate) ghe_state: DashMap<String, crate::github::GheAccountState>,
-    /// Shutdown sender for the HTTP server — send () to gracefully stop it.
-    /// Only the TCP listener + TLS renewal task listen to this signal now;
-    /// IPC listeners (Unix socket / named pipe) and the session reaper live
-    /// for the whole app lifetime regardless of TCP restarts.
-    pub(crate) server_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    /// One-shot guard: IPC listeners (Unix socket / named pipe), MCP session
-    /// reaper, and upstream health checker are spawned the first time
-    /// `start_server` runs and persist across restarts. Prevents a ~200ms
-    /// socket-rebind window on `save_config` / TLS state changes that was
-    /// tripping the MCP bridge's 3-failure / 9s health threshold and flipping
-    /// it offline.
-    pub(crate) ipc_started: std::sync::atomic::AtomicBool,
-    /// Random session token for browser cookie auth — generated once when empty,
-    /// then persisted in config and reused across server starts (not regenerated
-    /// per start). Browsers auto-send cookies in fetch(), unlike stored Basic Auth.
-    /// Behind RwLock so it can be regenerated at runtime (invalidating all sessions).
-    pub(crate) session_token: parking_lot::RwLock<String>,
-    pub(crate) auth_rate_limits: DashMap<std::net::IpAddr, (u32, Instant)>,
-    #[cfg(feature = "desktop")]
-    pub(crate) app_handle: parking_lot::RwLock<Option<AppHandle>>,
-    /// Plugin filesystem watchers: watch_id → (plugin_id, watcher)
-    pub plugin_watchers: DashMap<String, (String, notify::RecommendedWatcher)>,
-    /// Current ANSI color overrides from the frontend theme (indices 0-15).
-    /// Applied to new VtLogBuffers at creation time.
-    pub(crate) ansi_colors: parking_lot::RwLock<Option<[[u8; 3]; 16]>>,
+}
+
+impl Default for GitHubState {
+    fn default() -> Self {
+        Self {
+            login_epoch: std::sync::atomic::AtomicU64::new(0),
+            login_commit: tokio::sync::Mutex::new(()),
+            token: parking_lot::RwLock::new(None),
+            token_source: parking_lot::RwLock::new(Default::default()),
+            disconnected: std::sync::atomic::AtomicBool::new(false),
+            circuit_breaker: crate::github::GitHubCircuitBreaker::new(),
+            poller: parking_lot::Mutex::new(None),
+            viewer_login: parking_lot::RwLock::new(None),
+            // u32::MAX means "no constraint known yet", not "no budget left".
+            rate_limit_remaining: std::sync::atomic::AtomicU32::new(u32::MAX),
+            ghe_state: dashmap::DashMap::new(),
+        }
+    }
+}
+
+/// The MCP half of [`AppState`] (#678-9a75): Streamable-HTTP sessions, the
+/// upstream proxy registry, OAuth flows, and the tool-search index they feed.
+pub struct McpState {
+    pub(crate) call_audit: parking_lot::Mutex<crate::mcp_http::mcp_call_audit::Audit>,
+    pub(crate) response_pages: parking_lot::Mutex<crate::mcp_http::response_pages::ResponsePages>,
+    /// Active MCP Streamable HTTP sessions (session_id -> metadata for TTL reaping + client identity)
+    pub sessions: DashMap<String, McpSessionMeta>,
+    /// Upstream MCP proxy registry — aggregates tools from all connected upstreams.
+    pub(crate) upstream_registry: Arc<crate::mcp_proxy::registry::UpstreamRegistry>,
+    /// Orchestrator for in-flight OAuth 2.1 authorization flows. Flows run
+    /// concurrently — each one owns its `state` nonce, PKCE verifier and
+    /// callback port, so there is nothing to serialize.
+    pub(crate) oauth_flow_manager: Arc<crate::mcp_oauth::flow::OAuthFlowManager>,
+    /// Broadcast channel for MCP `notifications/tools/list_changed`.
+    /// Fired when native tools are toggled or upstream tool lists change.
+    pub(crate) tools_changed: tokio::sync::broadcast::Sender<()>,
+    /// MCP session → PTY session mapping for caller identity resolution.
+    /// Populated at agent spawn time; used by self-close guard in session(close).
+    pub to_session: DashMap<String, String>,
+    /// Immutable ACP channel fence; never reconstructed from a peer's latest process.
+    pub(crate) acp_origins: DashMap<String, crate::acp::AcpMcpOrigin>,
+    /// Reverse index of `to_session`: tuic_session → list of mcp_session_ids.
+    /// Populated alongside `to_session` at agent(register). Lets
+    /// `tombstone_transient_cleanup` remove entries in O(1) instead of scanning
+    /// every entry of `to_session` on each session exit.
+    pub session_to_mcp: DashMap<String, Vec<String>>,
+    /// Cached BM25 search index over the full tool corpus (native + upstream),
+    /// filtered by `disabled_native_tools`. Used by the MCP `search_tools` /
+    /// `get_tool_schema` meta-handlers and the Command Palette. Rebuilt on
+    /// every `tools_changed` signal by the updater task in
+    /// `mcp_http::mcp_transport::spawn_tool_search_index_updater`.
+    pub(crate) tool_search_index: Arc<parking_lot::RwLock<crate::tool_search::ToolSearchIndex>>,
+}
+
+impl Default for McpState {
+    fn default() -> Self {
+        Self {
+            call_audit: parking_lot::Mutex::default(),
+            response_pages: parking_lot::Mutex::default(),
+            sessions: DashMap::new(),
+            upstream_registry: Arc::new(crate::mcp_proxy::registry::UpstreamRegistry::new()),
+            oauth_flow_manager: Arc::new(crate::mcp_oauth::flow::OAuthFlowManager::new()),
+            tools_changed: tokio::sync::broadcast::channel(16).0,
+            to_session: DashMap::new(),
+            acp_origins: DashMap::new(),
+            session_to_mcp: DashMap::new(),
+            // Empty until the updater task builds the real corpus.
+            tool_search_index: Arc::new(parking_lot::RwLock::new(
+                crate::tool_search::ToolSearchIndex::build(&[]),
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) struct DesktopGridChannel {
+    pub(crate) channel: tauri::ipc::Channel<tauri::ipc::Response>,
+    pub(crate) webview_label: String,
+    pub(crate) epoch: u64,
+    pub(crate) visible: AtomicBool,
+}
+
+/// The rendering half of [`AppState`] (#678-9a75): one VT grid per session,
+/// the raw-byte flight recorder beside it, and the channels and gates that
+/// deliver frames to a frontend.
+///
+/// Every field is an empty map at startup, so the group derives its `Default`.
+#[derive(Default)]
+pub(crate) struct GridState {
     /// Per-session VT100 log buffers for clean mobile/REST output (session_id → buffer).
     /// Separate DashMap to avoid writer contention on PtySession.
     pub(crate) vt_log_buffers: DashMap<String, Mutex<VtLogBuffer>>,
@@ -1390,37 +1995,55 @@ pub struct AppState {
     /// the wild, GET /sessions/{id}/raw-ring dumps the exact byte stream for
     /// offline replay (terminal_grid.rs `replay_capture_from_env`).
     pub(crate) pty_raw_rings: DashMap<String, Mutex<std::collections::VecDeque<u8>>>,
-    #[cfg(feature = "desktop")]
     /// Binary on purpose: `Channel<Vec<u8>>` serialises to a JSON number array,
     /// `Channel<Response>` keeps the raw bytes. See `send_grid_frame`.
-    pub(crate) grid_channels: DashMap<String, tauri::ipc::Channel<tauri::ipc::Response>>,
+    #[cfg(feature = "desktop")]
+    pub(crate) channels: DashMap<String, DesktopGridChannel>,
     /// Watch channel for WebSocket grid streaming (session_id → sender).
     /// Uses latest-frame-wins semantics: slow WS clients skip intermediate frames.
-    pub(crate) grid_watch: DashMap<String, crate::grid_gate::GridWatchTx>,
+    pub(crate) watch: DashMap<String, crate::grid_watch::GridWatchTx>,
     /// Flow control: frames sent vs frames the frontend reported receiving. While
     /// the gate is closed the ticker skips sending — damage accumulates in
     /// alacritty. See [`crate::grid_gate::GridGate`] for why it counts instead of
     /// holding a bool.
-    pub(crate) grid_gates: DashMap<String, Arc<crate::grid_gate::GridGate>>,
+    pub(crate) gates: DashMap<String, Arc<crate::grid_gate::GridGate>>,
     /// Dirty flag: set by PTY reader when new data is processed, cleared by frame ticker.
     /// Decouples read() from frame serialization to coalesce rapid writes (spinners).
-    pub(crate) grid_frame_dirty: DashMap<String, Arc<AtomicBool>>,
+    pub(crate) frame_dirty: DashMap<String, Arc<AtomicBool>>,
+    /// Bounded input wake hint; owned and removed by the reader/ticker lifecycle.
+    pub(crate) input_frame_priority:
+        DashMap<String, Arc<crate::pty::frame_priority::InputFramePriority>>,
     /// Hint: true while a DEC 2026 synchronized update is open on this session.
     /// Written by the PTY reader after each `process()`, read by the frame ticker
     /// so an idle tick only takes the vt lock for sessions that can actually have
     /// a stalled update to flush.
     pub(crate) sync_update_active: DashMap<String, Arc<AtomicBool>>,
-    /// Pending coalesced scroll target (absolute display offset, -1 = none).
+    /// Pending coalesced scroll: >=0 offset, -1 none, <=-2 all-time anchor (-2 - row).
     /// Set by `terminal_scroll_to_offset` without taking the vt lock; applied by the
     /// frame ticker under the lock it already holds, so scroll never blocks on the
     /// PTY output processor.
     pub(crate) pending_scroll: DashMap<String, Arc<AtomicI64>>,
+}
+
+/// The per-session side tables of [`AppState`] (#678-9a75).
+///
+/// Every one is keyed by session id and starts empty, so the group derives its
+/// own `Default` and `AppState::new` names it once instead of 28 times.
+#[derive(Default)]
+pub struct SessionMaps {
+    pub sessions: DashMap<String, Mutex<PtySession>>,
+    /// Session-scoped directory provisioned at launch; absent for legacy agents.
+    pub(crate) attachment_launch_dirs: DashMap<String, PathBuf>,
+    /// Ring buffers for MCP output access (one per session)
+    pub output_buffers: DashMap<String, Mutex<OutputRingBuffer>>,
     /// Per-session kitty keyboard protocol state (session_id → state).
     /// Separate DashMap (not inside PtySession) to avoid writer contention.
     pub(crate) kitty_states: DashMap<String, Mutex<KittyKeyboardState>>,
     /// Per-session input line buffers for reconstructing user input from PTY writes.
     /// Separate DashMap (like kitty_states) to avoid writer lock contention.
     pub(crate) input_buffers: DashMap<String, Mutex<crate::input_line_buffer::InputLineBuffer>>,
+    /// Serializes guarded automated submissions with raw input and its bookkeeping.
+    pub(crate) input_transactions: DashMap<String, Arc<parking_lot::ReentrantMutex<()>>>,
     /// Last relevant user prompt per session (>= 10 words).
     /// Updated on each qualifying user input line, read by the Activity Dashboard.
     pub(crate) last_prompts: DashMap<String, String>,
@@ -1431,65 +2054,10 @@ pub struct AppState {
     /// Per-session silence state for fallback question detection.
     /// Shared between the reader thread and write_pty so user-typed lines can be suppressed.
     pub(crate) silence_states: DashMap<String, Arc<Mutex<crate::pty::SilenceState>>>,
-    /// Incremental cache for Claude session transcript parsing.
-    /// Loaded from disk on startup, persisted after each scan.
-    pub(crate) claude_usage_cache: Mutex<crate::claude_usage::SessionStatsCache>,
-    /// Centralized application log ring buffer (1000 entries).
-    /// Frontend pushes via push_log, reads via get_logs.
-    /// Wrapped in Arc so the tracing subscriber layer can share the same buffer.
-    pub(crate) log_buffer: Arc<Mutex<crate::app_logger::LogRingBuffer>>,
-    /// Broadcast channel for all backend events (SSE, WebSocket, live consumers).
-    /// Capacity 256 — lagged receivers get `RecvError::Lagged` and should reconnect.
-    pub(crate) event_bus: tokio::sync::broadcast::Sender<AppEvent>,
-    /// Monotonic counter for SSE event IDs.
-    pub(crate) event_counter: Arc<AtomicU64>,
-    /// Live type filters of the open `/events` streams, so a browser that starts
-    /// listening for a new event type widens its stream in place instead of
-    /// reconnecting — a reconnect drops every event published between the close
-    /// and the new subscription, and nothing replays them.
-    pub(crate) sse_filters: crate::mcp_http::sse_routes::SseFilters,
     /// Per-session state accumulated from broadcast events (for REST polling).
     pub(crate) session_states: DashMap<String, SessionState>,
     /// Lossless single-consumer lane for PTY events that mutate `session_states`.
     pub(crate) session_state_events: SessionStateEventQueue,
-    /// Upstream MCP proxy registry — aggregates tools from all connected upstreams.
-    pub(crate) mcp_upstream_registry: Arc<crate::mcp_proxy::registry::UpstreamRegistry>,
-    /// Orchestrator for in-flight OAuth 2.1 authorization flows. Shares the
-    /// `auth_semaphore` with `mcp_upstream_registry` so concurrent browser
-    /// flows are serialized.
-    pub(crate) oauth_flow_manager: Arc<crate::mcp_oauth::flow::OAuthFlowManager>,
-    /// Broadcast channel for MCP `notifications/tools/list_changed`.
-    /// Fired when native tools are toggled or upstream tool lists change.
-    pub(crate) mcp_tools_changed: tokio::sync::broadcast::Sender<()>,
-    /// Cached BM25 search index over the full tool corpus (native + upstream),
-    /// filtered by `disabled_native_tools`. Used by the MCP `search_tools` /
-    /// `get_tool_schema` meta-handlers and the Command Palette. Rebuilt on
-    /// every `mcp_tools_changed` signal by the updater task in
-    /// `mcp_http::mcp_transport::spawn_tool_search_index_updater`.
-    pub(crate) tool_search_index: Arc<parking_lot::RwLock<crate::tool_search::ToolSearchIndex>>,
-    /// Per-repo BM25 content index for sub-millisecond file content search.
-    /// Built in background on first search or repo load, rebuilt on `RepoChanged`.
-    pub(crate) content_indices:
-        DashMap<String, Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>>,
-    /// Cooperative CPU throttle for content-index builders. Search handlers
-    /// acquire a guard here so indexers pause and yield priority to the user.
-    pub(crate) indexer_throttle: Arc<crate::content_index::IndexerThrottle>,
-    /// Repos whose content index build is currently in-flight (shared by
-    /// `ensure_index` and `rebuild_index` to prevent duplicate concurrent builds).
-    pub(crate) index_in_flight: Arc<DashSet<String>>,
-    /// Stale-dir worktree recreate tasks in-flight. Key: `${base_repo}::${task_name}`.
-    /// Prevents double-spawn racing on the same path when a user triggers two
-    /// concurrent create_worktree calls before the first background recreate finishes.
-    pub(crate) worktree_recreate_in_flight: Arc<DashSet<String>>,
-    /// Global semaphore limiting concurrent index builds to 1. Prevents startup
-    /// pre-warm from spawning N simultaneous BM25 builds that saturate the CPU.
-    pub(crate) index_build_sem: Arc<tokio::sync::Semaphore>,
-    /// Global semaphore bounding concurrent *monitoring* git subprocesses
-    /// (repo summary/structure/diff-stats fan-out, poller batch). On a
-    /// repo-changed burst these would otherwise spawn hundreds of git pipes at
-    /// once → FD spikes (EMFILE) and CPU/IPC storms that stall the WebView.
-    /// Operational (user-initiated) git is NEVER gated by this.
-    pub(crate) monitoring_git_sem: Arc<tokio::sync::Semaphore>,
     /// Per-session slash command mode (true when input starts with `/`).
     /// Used to suppress false-positive slash menu detection on PTY output.
     pub(crate) slash_mode: DashMap<String, std::sync::atomic::AtomicBool>,
@@ -1528,73 +2096,10 @@ pub struct AppState {
     /// Updated by `pty::try_shell_transition` on every successful CAS.
     /// Used by `session(status)` to compute idle_since_ms / busy_duration_ms.
     pub(crate) shell_state_since_ms: DashMap<String, std::sync::atomic::AtomicU64>,
-    /// Loaded plugin capabilities: plugin_id → list of capability strings.
-    /// Populated by the frontend via `register_loaded_plugin` on plugin load.
-    /// Used by Rust plugin commands to enforce capability checks server-side.
-    pub(crate) loaded_plugins: DashMap<String, Vec<String>>,
-    /// Compiled plugin OutputWatcher patterns, one set per connected frontend,
-    /// pushed via `set_plugin_output_watchers`. The PTY reader assembles lines
-    /// and matches them here, so the WebView main thread only hears about the
-    /// lines that matched — and, while some pattern could not be compiled,
-    /// about every line, which it then scans itself.
-    ///
-    /// Whether raw lines are needed lives inside the set, not beside it: two
-    /// pieces of state published separately let a line slip through the window
-    /// between them and be seen by neither matcher.
-    pub(crate) plugin_output_watchers:
-        parking_lot::RwLock<crate::output_watchers::OutputWatcherRegistry>,
-    /// Cloud relay client state
-    pub(crate) relay: RelayState,
-    /// Registered peer agents for inter-agent messaging (tuic_session → PeerAgent)
-    pub peer_agents: DashMap<String, PeerAgent>,
-    /// Message inbox per agent (tuic_session → VecDeque<AgentMessage>).
-    /// Capped at AGENT_INBOX_CAPACITY messages per agent, old messages evicted FIFO.
-    pub agent_inbox: DashMap<String, VecDeque<AgentMessage>>,
-    /// Cumulative eviction count per agent since last inbox read (tuic_session → count).
-    /// Incremented on each FIFO eviction; consumed and reset by the inbox action.
-    pub(crate) agent_inbox_evictions: DashMap<String, u64>,
-    /// Last read position per agent (tuic_session → logical unix-millis cursor).
-    ///
-    /// `since` used to be entirely the caller's problem, and a wait that timed out
-    /// answered without a `next_since` — leaving `since=0` as the only recoverable
-    /// value and replaying the whole inbox on the next call. The server remembers
-    /// the position instead: an omitted `since` resumes from here, an explicit one
-    /// overrides it, and `since=0` stays the deliberate replay escape hatch.
-    pub(crate) agent_read_cursor: DashMap<String, u64>,
-    /// Per-session marker tallies, so "the agents are ignoring the markers" can be
-    /// answered with a number instead of by grepping scrollback — which counts any
-    /// mention of the word and is capped by buffer size (#4421).
-    pub(crate) marker_stats: DashMap<String, MarkerStats>,
-    /// Peer messages and Compose commands waiting for a recipient's next safe
-    /// idle window. Entries share one typed FIFO so delivery order is global,
-    /// while Compose count/clear operations can select only `UserCommand`.
-    /// The inbox remains the authoritative copy of every peer message.
-    pub(crate) pending_injections: DashMap<String, VecDeque<PendingInjection>>,
-    /// Initial prompts awaiting successful PTY submission. Used only by the
-    /// one-shot delivery watchdog; successful delivery removes the marker and
-    /// emits nothing, while timeout emits one parent notification.
-    pub(crate) pending_initial_prompts: DashMap<String, String>,
-    /// Per-peer atomic handoff between blocking waiters and terminal delivery.
-    /// Each message has exactly one wake-up owner while remaining visible in
-    /// the authoritative inbox for backward-compatible reads.
-    pub(crate) active_agent_waiters: DashMap<String, Mutex<AgentDeliveryGate>>,
-    /// Peers that have successfully spawned at least one managed child during
-    /// their current registration lifetime. Only these registered parents use
-    /// inbox-only delivery while working and generic, coalesced wake notices
-    /// while idle; ordinary managed agents retain direct message delivery.
-    pub(crate) orchestrator_peers: DashSet<String>,
     /// HTML tab IDs (pluginIds) created by each session (tuic_session → [tab_id]).
     /// Populated by ui(tab) calls from registered agents; cleared on session exit
     /// so orphan tabs can be auto-closed by the frontend.
     pub(crate) session_html_tabs: DashMap<String, Vec<String>>,
-    /// MCP session → PTY session mapping for caller identity resolution.
-    /// Populated at agent spawn time; used by self-close guard in session(close).
-    pub mcp_to_session: DashMap<String, String>,
-    /// Reverse index of `mcp_to_session`: tuic_session → list of mcp_session_ids.
-    /// Populated alongside `mcp_to_session` at agent(register). Lets
-    /// `tombstone_transient_cleanup` remove entries in O(1) instead of scanning
-    /// every entry of `mcp_to_session` on each session exit.
-    pub session_to_mcp: DashMap<String, Vec<String>>,
     /// `$TUIC_SESSION` → the PTY session key that currently backs it.
     ///
     /// These are two independently minted UUIDs: `create_pty` keys `sessions` by a
@@ -1610,21 +2115,6 @@ pub struct AppState {
     /// Populated at spawn time when caller_tuic is set. Used to route auto-notifications
     /// (state_change messages) to the orchestrator's inbox on exit and idle transitions.
     pub(crate) session_parent: DashMap<String, String>,
-    /// Actual bound socket path (may differ from default if another instance holds mcp.sock).
-    /// Updated by `start_server` after successful bind.
-    #[cfg(unix)]
-    pub(crate) bound_socket_path: parking_lot::RwLock<std::path::PathBuf>,
-    /// Tailscale daemon state (detected at server startup)
-    pub(crate) tailscale_state: parking_lot::RwLock<crate::tailscale::TailscaleState>,
-    /// Push notification subscription store
-    pub(crate) push_store: crate::push::PushStore,
-    /// When true, the desktop window is currently focused and the user is at
-    /// their machine — suppress mobile push notifications to avoid duplicate
-    /// alerts. Set to true on focus and at startup; set to false on blur or
-    /// window minimize. Push notifications fire only when this is false.
-    pub(crate) desktop_window_focused: std::sync::atomic::AtomicBool,
-    /// Server start time for uptime calculation in health endpoint.
-    pub(crate) server_start_time: std::time::Instant,
     /// Per-MCP-session broadcast channels for inter-agent messaging notifications.
     /// Each SSE listener subscribes; `send` action pushes here for real-time delivery.
     pub(crate) messaging_channels: DashMap<String, tokio::sync::broadcast::Sender<String>>,
@@ -1636,25 +2126,10 @@ pub struct AppState {
     /// every other session's WS receiver. Created on-demand when a WS handler
     /// subscribes; reaped in `cleanup_session`/`tombstone_transient_cleanup`.
     pub(crate) pty_event_channels: DashMap<String, tokio::sync::broadcast::Sender<AppEvent>>,
-    /// Per-session command outcome + error/fix knowledge store.
-    /// Populated by pty.rs OSC 133 hooks and SessionState transitions.
-    /// Consumed by the agent loop for context injection.
-    pub(crate) session_knowledge:
-        DashMap<String, Mutex<crate::ai_agent::knowledge::SessionKnowledge>>,
-    /// Sessions with unpersisted knowledge changes. Flushed to disk every 2s
-    /// by the background knowledge-persist task.
-    pub(crate) knowledge_dirty: DashMap<String, ()>,
     /// Sessions whose shell has emitted at least one OSC 133 marker. Presence
     /// here suppresses the Inferred-outcome fallback, since the shell-integration
     /// path is authoritative once wired.
     pub(crate) has_osc133_integration: DashMap<String, ()>,
-    /// Per-session filesystem sandbox for the L2 agent's file/shell tools.
-    /// Keyed by session_id. Populated when the agent loop starts, rooted at the
-    /// session's git repo root or CWD. See `ai_agent::sandbox::FileSandbox`.
-    pub(crate) file_sandboxes: DashMap<String, crate::ai_agent::sandbox::FileSandbox>,
-    /// Sessions running in unrestricted (TrustLevel::Unrestricted) mode.
-    /// Present = unrestricted; absent = standard safety gates apply.
-    pub(crate) unrestricted_sessions: DashMap<String, ()>,
     /// session_id → human alias (e.g. "tc-1", "nr-2"). Assigned on session creation/restore.
     pub(crate) term_aliases: DashMap<String, String>,
     /// Per-prefix counter for alias numbering (e.g. "tc" → 2 means next is tc-3).
@@ -1663,13 +2138,269 @@ pub struct AppState {
     /// frontend on tab focus changes. Read by the watcher engine to evaluate
     /// the Unseen trigger (fires only when the terminal tab is not visible).
     pub(crate) session_visibility: DashMap<String, bool>,
-    /// Terminal watcher engine handle — initialized once at startup.
-    /// Commands access the shared config via `engine.config()`.
-    pub(crate) watcher_engine: std::sync::OnceLock<Arc<crate::ai_agent::watcher::WatcherEngine>>,
-    /// Evaluates CommandOutcome records and emits suggestions for AI investigation.
-    pub(crate) trigger_classifier: crate::ai_agent::triggers::TriggerClassifier,
-    /// Per-session opt-in for AI suggestions. Present + true = enabled.
-    pub(crate) ai_suggestions_enabled: DashMap<String, bool>,
+    /// Sessions currently in standby (SIGSTOP'd). session_id → exact stopped pgid.
+    #[cfg(unix)]
+    pub(crate) standby_sessions: DashMap<String, i32>,
+    /// Per-session marker tallies, so "the agents are ignoring the markers" can be
+    /// answered with a number instead of by grepping scrollback — which counts any
+    /// mention of the word and is capped by buffer size (#4421).
+    pub(crate) marker_stats: DashMap<String, MarkerStats>,
+}
+
+/// Global state for managing PTY sessions and worktrees
+pub struct AppState {
+    pub(crate) telegram_recent: Arc<parking_lot::Mutex<crate::telegram::recent::Recent>>,
+    pub(crate) workflow_runtime: crate::workflows::WorkflowRuntime,
+    pub(crate) automation_runtime: crate::automations::runtime::AutomationRuntime,
+    pub(crate) secrets: crate::secrets::SecretStore,
+    /// Every per-session side table, keyed by session id.
+    pub(crate) session_maps: SessionMaps,
+    pub(crate) open_markdown_tabs:
+        parking_lot::RwLock<Vec<crate::open_markdown_tabs::DesktopMarkdownTab>>,
+    pub(crate) data_dir: PathBuf,
+    pub(crate) worktrees_dir: PathBuf,
+    pub(crate) metrics: SessionMetrics,
+    /// Everything MCP: HTTP sessions, the proxy registry, OAuth flows and
+    /// the tool-search index.
+    pub mcp: McpState,
+    /// WebSocket clients per PTY session for streaming output
+    pub ws_clients: DashMap<String, Vec<WsClientTx>>,
+    pub(crate) webview_unloaded: AtomicBool,
+    pub(crate) background_visibility: Mutex<crate::background_mode::hidden::Visibility>,
+    /// Cached AppConfig to avoid re-reading from disk on every request
+    pub(crate) config: parking_lot::RwLock<crate::config::AppConfig>,
+    /// TTL caches for git and GitHub query results
+    pub(crate) git_cache: GitCacheState,
+    /// Raw file watchers per repo (keyed by repo path), with per-category
+    /// debounce. macOS/Windows: one recursive `notify::RecommendedWatcher` over
+    /// the repo root. Linux: pruned non-recursive working-tree watches + targeted
+    /// `.git` watches (issue #82). Stored behind `Arc` so the Linux event callback
+    /// can clone a stable handle and add watches for newly created dirs without
+    /// holding a `DashMap` ref across the blocking `watch()` call.
+    pub(crate) repo_watchers: DashMap<String, Arc<crate::repo_watcher::RepoWatchHandle>>,
+    /// Last emitted git-state fingerprint per repo path. The repo watcher skips
+    /// the `repo-changed` (git-state) emit when the fingerprint is unchanged, so a
+    /// no-op `.git` touch (e.g. a `--no-optional-locks` status refreshing the index
+    /// stat cache) doesn't trigger the full ~20-panel frontend re-render cascade.
+    pub(crate) repo_git_fingerprints: DashMap<String, u64>,
+    /// Last emitted resolved-HEAD target per repo path (`resolve_head_target`
+    /// output). The repo watcher skips the `head-changed` emit when this is
+    /// unchanged, suppressing the Linux inotify storm where `.git/HEAD` events
+    /// recur without HEAD actually moving (issue #82).
+    pub(crate) repo_head_targets: DashMap<String, String>,
+    /// Count of `head-changed` emits suppressed by the `repo_head_targets`
+    /// guard — surfaced in diagnostic snapshots to quantify watcher storm
+    /// volume in production (issue #82).
+    pub(crate) repo_head_emits_suppressed: AtomicU64,
+    pub(crate) pending_orphan_cleanup: DashMap<String, crate::worktree::PendingOrphanCleanup>,
+    /// Shared directory watches with acquire/release counts (keyed by absolute path).
+    pub(crate) dir_watchers: DashMap<String, crate::dir_watcher::DirectoryWatch>,
+    /// File watcher for the themes/ directory — kept alive for the app lifetime.
+    pub(crate) theme_watcher: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
+    /// Byte cursors and per-subagent summaries behind the Progress Flow view,
+    /// so each refresh parses only what Claude appended to a subagent
+    /// transcript since the last one. Stays empty until Flow is first shown.
+    pub(crate) subagent_map_cache: parking_lot::Mutex<crate::subagent_map::MapCache>,
+    /// Per-terminal chat view tails, created on first read and dropped when no
+    /// client has read for a while.
+    pub(crate) chat_views: crate::chat_view::ChatViews,
+    /// FastAF's built-in AI engine: per-session knowledge, file sandboxes and
+    /// trust levels for the conversation loop (`ai_agent`).
+    pub(crate) engine: crate::ai_agent::EngineState,
+    /// Shared mdkb daemon client for AST navigation (outline, goto-def, references).
+    pub(crate) mdkb_daemon: crate::mdkb_daemon::SharedMdkbDaemon,
+    /// Shared async HTTP client for GitHub API requests.
+    /// Built by [`build_http_client`] — always with timeouts, never
+    /// `reqwest::Client::new()`.
+    pub(crate) http_client: reqwest::Client,
+    /// Everything GitHub: credentials, the poller, and per-account budgets.
+    pub(crate) github: GitHubState,
+    /// Shutdown sender for the HTTP server — send () to gracefully stop it.
+    /// Only the TCP listener + TLS renewal task listen to this signal now;
+    /// IPC listeners (Unix socket / named pipe) and the session reaper live
+    /// for the whole app lifetime regardless of TCP restarts.
+    pub(crate) server_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// One-shot guard: IPC listeners (Unix socket / named pipe), MCP session
+    /// reaper, and upstream health checker are spawned the first time
+    /// `start_server` runs and persist across restarts. Prevents a ~200ms
+    /// socket-rebind window on `save_config` / TLS state changes that was
+    /// tripping the MCP bridge's 3-failure / 9s health threshold and flipping
+    /// it offline.
+    pub(crate) ipc_started: std::sync::atomic::AtomicBool,
+    /// Random session token for browser cookie auth — generated once when empty,
+    /// then persisted in config and reused across server starts (not regenerated
+    /// per start). Browsers auto-send cookies in fetch(), unlike stored Basic Auth.
+    /// Behind RwLock so it can be regenerated at runtime (invalidating all sessions).
+    pub(crate) session_token: parking_lot::RwLock<String>,
+    pub(crate) auth_rate_limits:
+        DashMap<std::net::IpAddr, Arc<crate::mcp_http::auth::AuthRateLimit>>,
+    #[cfg(feature = "desktop")]
+    pub(crate) app_handle: parking_lot::RwLock<Option<AppHandle>>,
+    #[cfg(feature = "desktop")]
+    pub(crate) design_mode: tokio::sync::OnceCell<crate::design_mode::manager::DesignModeManager>,
+    /// Last time the desktop WebView's main JS thread proved it was running.
+    /// Read by the diagnostics thread; see `frontend_liveness`.
+    pub(crate) frontend_liveness: crate::frontend_liveness::FrontendLiveness,
+    /// The last URL the main WebView was seen holding while healthy — the only
+    /// address a recovery can aim at once the frame is on `about:`. Written by
+    /// the webview-recovery thread; see `webview_recovery`.
+    pub(crate) webview_boot_url: parking_lot::RwLock<Option<url::Url>>,
+    /// Plugin filesystem watchers: watch_id → (plugin_id, watcher)
+    pub plugin_watchers: DashMap<String, (String, notify::RecommendedWatcher)>,
+    /// Current ANSI color overrides from the frontend theme (indices 0-15).
+    /// Applied to new VtLogBuffers at creation time.
+    pub(crate) ansi_colors: parking_lot::RwLock<Option<[[u8; 3]; 16]>>,
+    /// Everything the renderer reads: the VT grids, the raw-byte flight
+    /// recorder, and the per-session frame delivery channels and gates.
+    pub(crate) grid: GridState,
+    /// Incremental cache for Claude session transcript parsing.
+    /// Loaded from disk on startup, persisted after each scan.
+    ///
+    /// NOT desktop-gated: `/claude/usage/timeline` is mounted unconditionally in
+    /// `build_router`, so `tuic-remote` needs this field to compile at all.
+    pub(crate) claude_usage_cache: Mutex<crate::claude_usage::SessionStatsCache>,
+    pub(crate) claude_usage_scan: Mutex<crate::claude_usage::UsageScan>,
+    /// Centralized application log ring buffer (1000 entries).
+    /// Frontend pushes via push_log, reads via get_logs.
+    /// Wrapped in Arc so the tracing subscriber layer can share the same buffer.
+    pub(crate) log_buffer: Arc<Mutex<crate::app_logger::LogRingBuffer>>,
+    /// Broadcast channel for all backend events (SSE, WebSocket, live consumers).
+    /// Capacity 256 — lagged receivers get `RecvError::Lagged` and should reconnect.
+    pub(crate) event_bus: tokio::sync::broadcast::Sender<AppEvent>,
+    /// Idle lifetime advertised by a deployed remote daemon.
+    pub(crate) remote_survive_secs: Option<u64>,
+    pub(crate) remote_update: Option<crate::remote_update::RemoteUpdateState>,
+    /// Open HTTP event streams. Unlike `event_bus.receiver_count()`, this does
+    /// not include permanent backend subscribers such as repo watchers.
+    pub(crate) sse_client_count: AtomicUsize,
+    /// Advances whenever an SSE or terminal WebSocket client arrives. The
+    /// lifetime timer observes this even when the client connects and leaves
+    /// between two polling ticks.
+    pub(crate) remote_client_generation: AtomicU64,
+    /// Monotonic counter for SSE event IDs.
+    pub(crate) event_counter: Arc<AtomicU64>,
+    /// Live type filters of the open `/events` streams, so a browser that starts
+    /// listening for a new event type widens its stream in place instead of
+    /// reconnecting — a reconnect drops every event published between the close
+    /// and the new subscription, and nothing replays them.
+    pub(crate) sse_filters: crate::mcp_http::sse_routes::SseFilters,
+    /// Per-repo BM25 content index for sub-millisecond file content search.
+    /// Built in background on first search or repo load, rebuilt on `RepoChanged`.
+    pub(crate) content_indices:
+        DashMap<String, Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>>,
+    /// Cooperative CPU throttle for content-index builders. Search handlers
+    /// acquire a guard here so indexers pause and yield priority to the user.
+    pub(crate) indexer_throttle: Arc<crate::content_index::IndexerThrottle>,
+    /// Repos whose content index build is currently in-flight (shared by
+    /// `ensure_index` and `rebuild_index` to prevent duplicate concurrent builds).
+    pub(crate) index_in_flight: Arc<DashSet<String>>,
+    /// Global semaphore limiting concurrent index builds to 1. Prevents startup
+    /// pre-warm from spawning N simultaneous BM25 builds that saturate the CPU.
+    pub(crate) index_build_sem: Arc<tokio::sync::Semaphore>,
+    /// Global semaphore bounding concurrent *monitoring* git subprocesses
+    /// (repo summary/structure/diff-stats fan-out, poller batch). On a
+    /// repo-changed burst these would otherwise spawn hundreds of git pipes at
+    /// once → FD spikes (EMFILE) and CPU/IPC storms that stall the WebView.
+    /// Operational (user-initiated) git is NEVER gated by this.
+    pub(crate) monitoring_git_sem: Arc<tokio::sync::Semaphore>,
+    /// Loaded plugin capabilities: plugin_id → list of capability strings.
+    /// Populated by the frontend via `register_loaded_plugin` on plugin load.
+    /// Used by Rust plugin commands to enforce capability checks server-side.
+    pub(crate) loaded_plugins: DashMap<String, Vec<String>>,
+    pub(crate) plugin_http_requests: crate::plugin_http::HttpRequests,
+    pub(crate) plugin_settings: crate::settings::plugins::PluginSettings,
+    /// Compiled plugin OutputWatcher patterns, one set per connected frontend,
+    /// pushed via `set_plugin_output_watchers`. The PTY reader assembles lines
+    /// and matches them here, so the WebView main thread only hears about the
+    /// lines that matched — and, while some pattern could not be compiled,
+    /// about every line, which it then scans itself.
+    ///
+    /// Whether raw lines are needed lives inside the set, not beside it: two
+    /// pieces of state published separately let a line slip through the window
+    /// between them and be seen by neither matcher.
+    pub(crate) plugin_output_watchers:
+        parking_lot::RwLock<crate::output_watchers::OutputWatcherRegistry>,
+    /// Cloud relay client state
+    pub(crate) relay: RelayState,
+    /// Registered peer agents for inter-agent messaging (tuic_session → PeerAgent)
+    pub peer_agents: DashMap<String, PeerAgent>,
+    /// Explicit opt-out for managed children; removed with the PTY.
+    pub(crate) keep_open_sessions: DashSet<String>,
+    /// Managed children whose last mail to their parent starts with BLOCKED and
+    /// that nothing has mailed since. Kept outside the bounded inboxes so
+    /// overflow cannot drop the hold; removed by the idle sweep with the PTY.
+    pub(crate) blocked_children: DashSet<String>,
+    /// Message inbox per agent (tuic_session → VecDeque<AgentMessage>).
+    /// Capped at AGENT_INBOX_CAPACITY messages per agent. Matching lifecycle
+    /// notices coalesce; other messages evict FIFO at capacity.
+    pub agent_inbox: DashMap<String, VecDeque<AgentMessage>>,
+    /// Unread eviction count per agent since last inbox read (tuic_session → count).
+    /// Consumed and reset by the inbox action.
+    pub(crate) agent_inbox_evictions: DashMap<String, u64>,
+    /// Last read position per agent (tuic_session → logical unix-millis cursor).
+    ///
+    /// `since` used to be entirely the caller's problem, and a wait that timed out
+    /// answered without a `next_since` — leaving `since=0` as the only recoverable
+    /// value and replaying the whole inbox on the next call. The server remembers
+    /// the position instead: an omitted `since` resumes from here, an explicit one
+    /// overrides it, and `since=0` stays the deliberate replay escape hatch.
+    pub(crate) agent_read_cursor: DashMap<String, u64>,
+    pub(crate) mail_subscriptions: crate::mail_subscriptions::MailSubscriptions,
+    /// Server notices, initial prompts and Compose commands waiting for a
+    /// recipient's next safe idle window. Entries share one typed FIFO so
+    /// delivery order is global. Peer `send` payloads are never in here — see
+    /// `PendingInjection`. The inbox is the authoritative copy of every message.
+    pub(crate) pending_injections: DashMap<String, VecDeque<PendingInjection>>,
+    /// Last 128 accepted queue keys per PTY, including entries already drained.
+    pub(crate) recent_queue_keys: DashMap<String, VecDeque<String>>,
+    /// Initial prompts awaiting successful PTY submission. Successful delivery
+    /// removes the marker; the delivery watchdog notifies the parent once and
+    /// leaves the prompt in place so a child that was blocked on a startup
+    /// dialog still receives it when it becomes ready.
+    pub(crate) pending_initial_prompts: DashMap<String, PendingInitialPrompt>,
+    pub(crate) launch_transaction_lock: tokio::sync::Mutex<()>,
+    /// Claude MCP children allowed to answer their one startup trust dialog.
+    pub(crate) managed_trust_dialogs: DashSet<String>,
+    /// Per-peer atomic handoff between blocking waiters and terminal delivery.
+    /// Each message has exactly one wake-up owner while remaining visible in
+    /// the authoritative inbox for backward-compatible reads.
+    pub(crate) active_agent_waiters: DashMap<String, Mutex<AgentDeliveryGate>>,
+    /// Peers that have successfully spawned at least one managed child during
+    /// their current registration lifetime. Only these registered parents use
+    /// inbox-only delivery while working and generic, coalesced wake notices
+    /// while idle; ordinary managed agents retain direct message delivery.
+    pub(crate) orchestrator_peers: DashSet<String>,
+    /// Actual bound socket path (may differ from default if another instance holds mcp.sock).
+    /// Updated by `start_server` after successful bind.
+    #[cfg(unix)]
+    pub(crate) bound_socket_path: parking_lot::RwLock<std::path::PathBuf>,
+    /// A live TLS serving task owns the strong token; capability detection does not.
+    pub(crate) tls_listener: parking_lot::RwLock<std::sync::Weak<()>>,
+    /// What the remote-access listener is doing, set by `mcp_http::start_server`;
+    /// the Remote Access panel reads it through `mcp_http::remote_bind_status`.
+    pub(crate) remote_bind: parking_lot::RwLock<crate::mcp_http::RemoteBindState>,
+    /// Tailscale daemon state (detected at server startup)
+    pub(crate) tailscale_state: parking_lot::RwLock<crate::tailscale::TailscaleState>,
+    /// Push notification subscription store
+    pub(crate) push_store: crate::push::PushStore,
+    /// Live ACP connections to ego, one supervised child process each.
+    ///
+    /// Not keyed by PTY session and deliberately unrelated to one: an ACP
+    /// connection is a JSON-RPC peer this host drives, and nothing about it
+    /// belongs in terminal state. The executable it may launch is not held
+    /// here — it is read from configuration at each connect, so a changed
+    /// setting takes effect without a restart.
+    pub(crate) acp: crate::acp::AcpClientManager,
+    pub(crate) one_shot_requests: crate::acp::oneshot::OneShotRequests,
+    /// Mobile alert windows for ACP conversations, separate from PTY state.
+    acp_push_last_ms: DashMap<String, Option<u64>>,
+    /// When true, the desktop window is currently focused and the user is at
+    /// their machine — suppress mobile push notifications to avoid duplicate
+    /// alerts. Set to true on focus and at startup; set to false on blur or
+    /// window minimize. Push notifications fire only when this is false.
+    pub(crate) desktop_window_focused: std::sync::atomic::AtomicBool,
+    /// Server start time for uptime calculation in health endpoint.
+    pub(crate) server_start_time: std::time::Instant,
     /// SSH tunnel manager — owns running tunnel supervisors.
     /// No outer Mutex needed: `TunnelManager` uses `DashMap` for interior mutability
     /// and all its methods take `&self`. Wrapping in `Mutex` would prevent holding
@@ -1677,6 +2408,14 @@ pub struct AppState {
     pub(crate) tunnel_manager: Arc<crate::tunnels::manager::TunnelManager>,
     /// SSH tunnel audit log — persisted event history for all tunnels.
     pub(crate) tunnel_audit: Arc<parking_lot::Mutex<crate::tunnels::audit::AuditLog>>,
+    /// Live state of every remote connection: status, base URL, session token.
+    /// `connections.json` says what is configured; this says what is up.
+    pub(crate) remote: crate::remote_runtime::RemoteRuntime,
+    /// Sessions running on connected remote machines, mirrored from their own
+    /// `GET /sessions` and `/events` so they raise the same badges as local ones.
+    pub(crate) remote_sessions: crate::remote_mirror::RemoteSessions,
+    /// Duplex, authenticated agent mail links through this desktop hub.
+    pub(crate) remote_mail: crate::mcp_http::remote_peer::RemoteMail,
     /// Task registry for long-running MCP orchestration. Survives client
     /// reconnects, so an orchestrator is not bound by the 300s wait ceiling.
     pub(crate) tasks: Arc<crate::tasks::TaskRegistry>,
@@ -1684,7 +2423,14 @@ pub struct AppState {
     pub(crate) connections_lock: tokio::sync::Mutex<()>,
     /// Pending screenshot requests: request_id → oneshot sender for base64 image data.
     /// Populated by MCP `ui(action=screenshot)`, consumed by `screenshot_response` command.
+    pub(crate) work_item_requests:
+        DashMap<String, crate::work_items::provider_bridge::PendingProviderRequest>,
     pub(crate) screenshot_responses: DashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
+    /// Serialize durable suspend/resume transitions and retain frontend-discovered metadata.
+    pub(crate) suspend_metadata: DashMap<String, serde_json::Value>,
+    pub(crate) suspend_lock: Mutex<()>,
+    /// Identities retained while a durable tab has no live PTY.
+    pub(crate) hibernated_peers: dashmap::DashSet<String>,
     /// Pending confirmation requests: request_id → oneshot sender for the human's answer.
     /// Populated by MCP `ui(action=confirm)`, consumed by `mcp_confirm_response`.
     ///
@@ -1692,24 +2438,39 @@ pub struct AppState {
     /// the same request and the first answer wins, because a remote human must be
     /// able to unblock an agent that a native desktop dialog would have pinned to
     /// whoever is sitting at the machine.
+    pub(crate) settings_policy: Arc<crate::settings::policy::Policy>,
+    pub(crate) settings_api: tokio::sync::OnceCell<crate::settings::api::Settings>,
+    pub(crate) plugin_keybinding_actions: Arc<parking_lot::RwLock<Option<Vec<String>>>>,
     pub(crate) confirm_responses: DashMap<String, tokio::sync::oneshot::Sender<bool>>,
-    /// Sessions currently in standby (SIGSTOP'd). session_id → epoch ms when stopped.
-    #[cfg(unix)]
-    pub(crate) standby_sessions: DashMap<String, u64>,
     /// App-wide process-tree snapshot shared by agent lifecycle polling.
     pub(crate) process_snapshot_cache: crate::pty::ProcessSnapshotCache,
     /// Repos with active terminals — used to throttle watcher/polling for cold repos.
     pub(crate) hot_repo_paths: parking_lot::RwLock<std::collections::HashSet<String>>,
+    /// Owns the fixture's data directory through normal drop and panic unwind.
+    #[cfg(test)]
+    _test_data_dir: Option<tempfile::TempDir>,
 }
 
 impl AppState {
+    pub(crate) fn input_transaction(
+        &self,
+        session_id: &str,
+    ) -> Arc<parking_lot::ReentrantMutex<()>> {
+        self.session_maps
+            .input_transactions
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(parking_lot::ReentrantMutex::new(())))
+            .clone()
+    }
+
     /// Clone a session's independently serialized PTY writer.
     ///
     /// The session mutex is held only long enough to clone the handle. Callers
     /// must release it before locking the writer so a blocked kernel write can
     /// never prevent the reader from queuing a mandatory terminal reply.
     pub(crate) fn pty_writer(&self, session_id: &str) -> Option<SharedPtyWriter> {
-        self.sessions
+        self.session_maps
+            .sessions
             .get(session_id)
             .map(|session| session.lock().writer.clone())
     }
@@ -1721,6 +2482,9 @@ impl AppState {
             .pty_writer(session_id)
             .ok_or_else(|| "Session not found".to_string())?;
         let mut writer = writer.lock();
+        if parts.iter().any(|part| !part.is_empty()) {
+            self.retire_turn_interrupt(session_id);
+        }
         for part in parts {
             writer
                 .write_all(part)
@@ -1729,6 +2493,14 @@ impl AppState {
         writer
             .flush()
             .map_err(|error| format!("Flush failed: {error}"))
+    }
+
+    /// Called only under the PTY writer lock, before any user input escapes.
+    pub(crate) fn retire_turn_interrupt(&self, session_id: &str) {
+        if let Some(mut session) = self.session_maps.session_states.get_mut(session_id) {
+            session.turn_interrupt = None;
+            session.turn_interrupt_retired_epoch = Some(session.turn_epoch);
+        }
     }
 
     /// Emit a PTY-scoped lifecycle event to
@@ -1749,13 +2521,80 @@ impl AppState {
     pub(crate) fn emit_pty_event(&self, event: AppEvent) {
         // State is authoritative and sticky, so it gets a lossless lane. The
         // broadcast copies remain best-effort transports for live consumers.
-        let _ = self.session_state_events.tx.send(event.clone());
+        // Titles are presentation only; do not grow the lossless state lane
+        // for an agent that animates its OSC title.
+        if !matches!(&event, AppEvent::PtyTitle { .. }) {
+            let parented = self.event_is_parented(&event);
+            self.session_maps
+                .session_state_events
+                .send(event.clone(), parented);
+        }
         if let Some(sid) = event.pty_session_id()
-            && let Some(tx) = self.pty_event_channels.get(sid)
+            && let Some(tx) = self.session_maps.pty_event_channels.get(sid)
         {
             let _ = tx.send(event.clone());
         }
         let _ = self.event_bus.send(event);
+    }
+
+    /// Tell every UI a terminal's chat view has entries past `seq`. Bus only
+    /// for non-desktop clients, plus the window event: there is no bus->window
+    /// forwarder, so the producer dual-emits.
+    pub(crate) fn notify_chat_view_changed(&self, session_id: &str, seq: u64) {
+        let _ = self.event_bus.send(AppEvent::ChatViewChanged {
+            session_id: session_id.to_string(),
+            seq,
+        });
+        #[cfg(feature = "desktop")]
+        if let Some(app) = self.app_handle.read().as_ref() {
+            let _ = app.emit(
+                "chat-view-changed",
+                serde_json::json!({ "session_id": session_id, "seq": seq }),
+            );
+        }
+    }
+
+    /// Rename a tab from the backend and tell every UI. Only for renames that
+    /// start here (MCP `session action=rename`): IPC/HTTP renames come from the
+    /// frontend, and emitting for them would echo every OSC title back. Returns
+    /// false when the session does not exist.
+    pub(crate) fn rename_session_from_backend(
+        &self,
+        session_id: &str,
+        name: String,
+        is_custom: bool,
+    ) -> bool {
+        let Some(entry) = self.session_maps.sessions.get(session_id) else {
+            return false;
+        };
+        entry.lock().set_display_name(Some(name.clone()), is_custom);
+        drop(entry);
+        self.emit_pty_event(AppEvent::SessionRenamed {
+            session_id: session_id.to_string(),
+            name: name.clone(),
+            is_custom,
+        });
+        #[cfg(feature = "desktop")]
+        if let Some(app) = self.app_handle.read().as_ref() {
+            let _ = app.emit(
+                "session-renamed",
+                serde_json::json!({ "session_id": session_id, "name": name, "is_custom": is_custom }),
+            );
+        }
+        true
+    }
+
+    pub(crate) fn notify_session_suspended(
+        &self,
+        record: &crate::suspended_sessions::SuspendedSession,
+    ) {
+        self.emit_pty_event(AppEvent::SessionSuspended {
+            record: Box::new(record.clone()),
+        });
+        #[cfg(feature = "desktop")]
+        if let Some(app) = self.app_handle.read().as_ref() {
+            let _ = app.emit("session-suspended", serde_json::json!({"record": record}));
+        }
     }
 
     /// Set or clear the orchestrator-owned description shown above a PTY.
@@ -1764,17 +2603,23 @@ impl AppState {
     pub(crate) fn set_pty_description(&self, session_id: &str, description: Option<String>) {
         let changed = match description.as_deref() {
             Some(value) if !value.is_empty() => {
-                self.pty_descriptions
+                self.session_maps
+                    .pty_descriptions
                     .insert(session_id.to_string(), value.to_string())
                     .as_deref()
                     != Some(value)
             }
-            _ => self.pty_descriptions.remove(session_id).is_some(),
+            _ => self
+                .session_maps
+                .pty_descriptions
+                .remove(session_id)
+                .is_some(),
         };
         if !changed {
             return;
         }
         let description = self
+            .session_maps
             .pty_descriptions
             .get(session_id)
             .map(|value| value.value().clone());
@@ -1808,25 +2653,65 @@ impl AppState {
         session_id: &str,
     ) -> tokio::sync::broadcast::Receiver<AppEvent> {
         const CHANNEL_CAPACITY: usize = 256;
-        self.pty_event_channels
+        self.session_maps
+            .pty_event_channels
             .entry(session_id.to_string())
             .or_insert_with(|| tokio::sync::broadcast::channel(CHANNEL_CAPACITY).0)
             .subscribe()
     }
 
-    /// Buffer a message into `recipient`'s inbox with bounded, lifecycle-aware
-    /// FIFO eviction. Single source of truth for BOTH push sites (peer `send`
-    /// and auto lifecycle notifications) so the two can't drift in how they
-    /// handle overflow.
-    ///
-    /// On overflow we evict the oldest *non-lifecycle* message first, so peer
-    /// chatter can never silently drop a `tuic-auto-*` lifecycle notification;
-    /// we only fall back to evicting the oldest message overall when the inbox
-    /// is entirely lifecycle notifications (orchestrator badly stuck). Every
-    /// genuine eviction bumps `agent_inbox_evictions`, surfaced as
-    /// `missed_count` on the next `inbox` read — nothing is dropped silently.
-    pub(crate) fn push_agent_inbox(&self, recipient: &str, mut msg: AgentMessage) -> u64 {
-        let (evicted_id, stored_timestamp) = {
+    /// Buffer a message into `recipient`'s bounded inbox. Replace an older
+    /// lifecycle notice for the same child and kind, except question waits;
+    /// otherwise evict FIFO at capacity.
+    /// Mail from its parent ends a child's BLOCKED hold; the child's own BLOCKED mail to
+    /// its parent starts one. Lifecycle notices are TUIC's, not either party's.
+    fn track_blocked_hold(&self, recipient: &str, msg: &AgentMessage) {
+        if msg.id.starts_with(LIFECYCLE_MSG_ID_PREFIX) {
+            return;
+        }
+        if self
+            .session_maps
+            .session_parent
+            .get(recipient)
+            .is_some_and(|parent| parent.value() == &msg.from_tuic_session)
+        {
+            self.blocked_children.remove(recipient);
+        }
+        let to_parent = self
+            .session_maps
+            .session_parent
+            .get(&msg.from_tuic_session)
+            .is_some_and(|parent| parent.value() == recipient);
+        if !to_parent {
+            return;
+        }
+        if msg.content.trim_start().starts_with("BLOCKED") {
+            self.blocked_children.insert(msg.from_tuic_session.clone());
+        } else {
+            self.blocked_children.remove(&msg.from_tuic_session);
+        }
+    }
+
+    pub(crate) fn push_agent_inbox(&self, recipient: &str, msg: AgentMessage) -> u64 {
+        self.track_blocked_hold(recipient, &msg);
+        let timestamp = self.store_agent_inbox(recipient, msg);
+        crate::mcp_http::remote_peer::notice_stored(self, recipient);
+        timestamp
+    }
+
+    /// `push_agent_inbox` without touching BLOCKED holds, for replaying mail that
+    /// was already seen once (identity handoff).
+    pub(crate) fn store_agent_inbox(&self, recipient: &str, mut msg: AgentMessage) -> u64 {
+        let gate_entry = self
+            .active_agent_waiters
+            .entry(recipient.to_string())
+            .or_default();
+        let mut gate = gate_entry.lock();
+        let read_cursor = self
+            .agent_read_cursor
+            .get(recipient)
+            .map(|entry| *entry.value());
+        let (evicted, stored_timestamp) = {
             let mut inbox = self.agent_inbox.entry(recipient.to_string()).or_default();
             if let Some(last_timestamp) = inbox.back().map(|message| message.timestamp)
                 && msg.timestamp <= last_timestamp
@@ -1836,35 +2721,90 @@ impl AppState {
                 // the theoretical u64 ceiling.
                 msg.timestamp = last_timestamp.saturating_add(1);
             }
-            let evicted = if inbox.len() >= AGENT_INBOX_CAPACITY {
-                let evict_idx = inbox
-                    .iter()
-                    .position(|m| !m.id.starts_with(LIFECYCLE_MSG_ID_PREFIX))
-                    .unwrap_or(0);
-                inbox.remove(evict_idx).map(|message| message.id)
-            } else {
-                None
-            };
+            let replaced = lifecycle_notice_kind(&msg).and_then(|kind| {
+                let index = inbox.iter().position(|message| {
+                    message.from_tuic_session == msg.from_tuic_session
+                        && lifecycle_notice_kind(message).as_deref() == Some(kind.as_str())
+                })?;
+                inbox
+                    .remove(index)
+                    .map(|message| (message.id, message.timestamp, false))
+            });
+            let evicted = replaced.or_else(|| {
+                if inbox.len() < AGENT_INBOX_CAPACITY {
+                    return None;
+                }
+                inbox.pop_front().map(|message| {
+                    let observed = read_cursor.is_some_and(|cursor| message.timestamp <= cursor)
+                        || gate.owners.get(&message.id)
+                            == Some(&AgentDeliveryOwner::WaiterObserved);
+                    (message.id, message.timestamp, !observed)
+                })
+            });
             let stored_timestamp = msg.timestamp;
+            self.mail_subscriptions
+                .append(&self.data_dir, recipient, &msg);
             inbox.push_back(msg);
             (evicted, stored_timestamp)
         };
-        if let Some(evicted_id) = evicted_id {
-            *self
-                .agent_inbox_evictions
-                .entry(recipient.to_string())
-                .or_insert(0) += 1;
-            if let Some(gate) = self.active_agent_waiters.get(recipient) {
-                gate.lock().owners.remove(&evicted_id);
+        if let Some((evicted_id, evicted_through, missed)) = evicted {
+            if missed {
+                gate.eviction_watermark = gate.eviction_watermark.saturating_add(1);
+                *self
+                    .agent_inbox_evictions
+                    .entry(recipient.to_string())
+                    .or_insert(0) += 1;
             }
+            gate.owners.remove(&evicted_id);
+            gate.urgent_notices
+                .retain(|_, notice| notice.through > evicted_through);
         }
-        if let Some(gate) = self.active_agent_waiters.get(recipient) {
-            let mut gate = gate.lock();
-            gate.inbox_revision = gate.inbox_revision.wrapping_add(1);
-            let revision = gate.inbox_revision;
-            gate.inbox_events.send_replace(revision);
-        }
+        gate.inbox_revision = gate.inbox_revision.wrapping_add(1);
+        let revision = gate.inbox_revision;
+        gate.inbox_events.send_replace(revision);
         stored_timestamp
+    }
+
+    pub(crate) fn add_inbox_evictions(&self, recipient: &str, count: u64) {
+        let entry = self
+            .active_agent_waiters
+            .entry(recipient.to_string())
+            .or_default();
+        let mut gate = entry.lock();
+        gate.eviction_watermark = gate.eviction_watermark.saturating_add(count);
+        let mut pending = self
+            .agent_inbox_evictions
+            .entry(recipient.to_string())
+            .or_default();
+        *pending = pending.saturating_add(count);
+    }
+
+    pub(crate) fn notify_mail_subscription_change(&self, recipient: &str) {
+        let entry = self
+            .active_agent_waiters
+            .entry(recipient.to_owned())
+            .or_default();
+        let mut gate = entry.lock();
+        gate.inbox_revision = gate.inbox_revision.wrapping_add(1);
+        let revision = gate.inbox_revision;
+        gate.inbox_events.send_replace(revision);
+    }
+
+    /// Hear every change to one peer's inbox without waiting on it.
+    ///
+    /// Unlike [`Self::begin_agent_wait_with_events`] this takes no waiter
+    /// lease, so it never becomes the owner that delivery assigns mail to: it
+    /// only learns that the inbox moved.
+    pub(crate) fn subscribe_agent_inbox(
+        &self,
+        tuic_session: &str,
+    ) -> tokio::sync::watch::Receiver<u64> {
+        self.active_agent_waiters
+            .entry(tuic_session.to_string())
+            .or_default()
+            .lock()
+            .inbox_events
+            .subscribe()
     }
 
     #[cfg(test)]
@@ -1941,6 +2881,9 @@ impl AppState {
                 .map(|message| message.timestamp)
                 .max()
                 .unwrap_or(since);
+            self.requeue_unread_terminal_mail(&mut gate, tuic_session, since, read_through);
+            gate.urgent_notices
+                .retain(|_, notice| notice.through > read_through);
             gate.orchestrator_observed_through =
                 gate.orchestrator_observed_through.max(read_through);
             if read_through == 0
@@ -1960,6 +2903,116 @@ impl AppState {
             gate.reset_orchestrator_wake_budget_if_observed();
         }
         finish
+    }
+
+    /// A wait that returns mail up to `read_through` moves the implicit cursor
+    /// there. Mail the terminal owns (a payload-free wake the agent has not acted
+    /// on) sits in `(since, read_through)` unreturned, and the cursor would skip it
+    /// for good. Put it behind the new cursor and drop the terminal ownership, so
+    /// the next wait returns it once; its id stays stable (#1818-3fe7).
+    fn requeue_unread_terminal_mail(
+        &self,
+        gate: &mut AgentDeliveryGate,
+        tuic_session: &str,
+        since: u64,
+        read_through: u64,
+    ) {
+        let Some(mut inbox) = self.agent_inbox.get_mut(tuic_session) else {
+            return;
+        };
+        let skipped: Vec<String> = inbox
+            .iter()
+            .filter(|message| message.timestamp > since && message.timestamp < read_through)
+            .filter(|message| {
+                matches!(
+                    gate.owners.get(&message.id),
+                    Some(
+                        AgentDeliveryOwner::TerminalPending
+                            | AgentDeliveryOwner::TerminalDispatched
+                    )
+                )
+            })
+            .map(|message| message.id.clone())
+            .collect();
+        for id in skipped {
+            if requeue_beyond(&mut inbox, &id, read_through) {
+                gate.owners.remove(&id);
+            }
+        }
+    }
+
+    /// Reserve one unread urgent notice per sender and recipient. This shares
+    /// the inbox delivery gate so reads and concurrent sends agree on the
+    /// covered logical cursor.
+    pub(crate) fn reserve_urgent_notice(
+        &self,
+        recipient: &str,
+        sender: &str,
+        through: u64,
+    ) -> UrgentNoticeReservation {
+        let gate_entry = self
+            .active_agent_waiters
+            .entry(recipient.to_string())
+            .or_default();
+        let mut gate = gate_entry.lock();
+        if self
+            .agent_read_cursor
+            .get(recipient)
+            .is_some_and(|cursor| *cursor >= through)
+        {
+            return UrgentNoticeReservation::AlreadyRead;
+        }
+        if gate.urgent_notices.get(sender).is_some_and(|notice| {
+            !notice.written && notice.reserved_at.elapsed() >= URGENT_NOTICE_LEASE
+        }) {
+            gate.urgent_notices.remove(sender);
+        }
+        match gate.urgent_notices.get_mut(sender) {
+            Some(notice) => {
+                notice.through = notice.through.max(through);
+                if notice.written {
+                    UrgentNoticeReservation::Written
+                } else {
+                    UrgentNoticeReservation::InFlight
+                }
+            }
+            None => {
+                gate.urgent_notices.insert(
+                    sender.to_string(),
+                    UrgentNotice {
+                        first_through: through,
+                        through,
+                        written: false,
+                        reserved_at: std::time::Instant::now(),
+                    },
+                );
+                UrgentNoticeReservation::Reserved
+            }
+        }
+    }
+
+    pub(crate) fn finish_urgent_notice(
+        &self,
+        recipient: &str,
+        sender: &str,
+        first_through: u64,
+        written: bool,
+    ) {
+        let Some(gate_entry) = self.active_agent_waiters.get(recipient) else {
+            return;
+        };
+        let mut gate = gate_entry.lock();
+        if gate
+            .urgent_notices
+            .get(sender)
+            .is_some_and(|notice| notice.first_through == first_through)
+        {
+            if written {
+                gate.urgent_notices.get_mut(sender).unwrap().written = true;
+            } else {
+                gate.urgent_notices.remove(sender);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2003,12 +3056,12 @@ impl AppState {
         }
     }
 
-    pub(crate) fn assign_agent_delivery_with_terminal_attempt<F>(
+    pub(crate) fn assign_agent_delivery_with_channel_attempt<F>(
         &self,
         tuic_session: &str,
         message_id: &str,
         terminal_fallback_available: bool,
-        attempt_terminal_delivery: F,
+        attempt_channel_delivery: F,
     ) -> (AgentDeliveryAssignment, bool)
     where
         F: FnOnce() -> bool,
@@ -2032,11 +3085,12 @@ impl AppState {
                 .insert(message_id.to_string(), AgentDeliveryOwner::Waiter);
             return (AgentDeliveryAssignment::Waiter, false);
         }
-        if attempt_terminal_delivery() {
-            gate.owners.insert(
-                message_id.to_string(),
-                AgentDeliveryOwner::TerminalDispatched,
-            );
+        if attempt_channel_delivery() {
+            // An SSE channel push is a best-effort notification, not an inbox
+            // observation. Leave the retained message unowned so a later wait
+            // can claim and return it. Treating the push as terminal delivery
+            // hid it from wait and let an unrelated lifecycle message advance
+            // the implicit cursor past the unread mail.
             return (AgentDeliveryAssignment::Terminal, true);
         }
         if terminal_fallback_available {
@@ -2237,7 +3291,19 @@ impl AppState {
         tuic_session: &str,
         since: u64,
         limit: usize,
-    ) -> Vec<AgentMessage> {
+    ) -> (Vec<AgentMessage>, bool, u64) {
+        let (messages, has_more, missed_count, _) =
+            self.read_agent_inbox(tuic_session, since, limit, true);
+        (messages, has_more, missed_count)
+    }
+
+    pub(crate) fn read_agent_inbox(
+        &self,
+        tuic_session: &str,
+        since: u64,
+        limit: usize,
+        acknowledge: bool,
+    ) -> (Vec<AgentMessage>, bool, u64, u64) {
         let gate_entry = self
             .active_agent_waiters
             .entry(tuic_session.to_string())
@@ -2249,28 +3315,167 @@ impl AppState {
             .map(|inbox| {
                 inbox
                     .iter()
-                    .rev()
                     .filter(|message| message.timestamp > since)
-                    .take(limit)
+                    .take(limit.saturating_add(1))
                     .cloned()
                     .collect()
             })
             .unwrap_or_default();
-        messages.reverse();
+        let has_more = messages.len() > limit;
+        if has_more {
+            messages.pop();
+        }
+        if !acknowledge {
+            let missed_count = self
+                .agent_inbox_evictions
+                .get(tuic_session)
+                .map(|n| *n)
+                .unwrap_or(0);
+            return (messages, has_more, missed_count, gate.eviction_watermark);
+        }
+        let missed_count = self
+            .agent_inbox_evictions
+            .remove(tuic_session)
+            .map(|(_, count)| count)
+            .unwrap_or(0);
+        gate.acknowledged_eviction_watermark = gate.eviction_watermark;
         let read_through = messages
             .iter()
             .map(|message| message.timestamp)
             .max()
             .unwrap_or(since);
+        let message_ids: Vec<_> = messages.iter().map(|message| message.id.clone()).collect();
+        self.acknowledge_agent_snapshot_locked(
+            tuic_session,
+            read_through,
+            &message_ids,
+            true,
+            &mut gate,
+        );
+        (messages, has_more, missed_count, gate.eviction_watermark)
+    }
+
+    /// Durable ACK and live delivery observation share the recipient gate used by
+    /// insertions and snapshot ACKs. Independent subscriptions never advance the
+    /// legacy read cursor or acknowledge its separate loss watermark.
+    pub(crate) fn apply_mail_subscription_action(
+        &self,
+        peer: &str,
+        args: &serde_json::Value,
+    ) -> serde_json::Value {
+        let entry = self
+            .active_agent_waiters
+            .entry(peer.to_owned())
+            .or_default();
+        let mut gate = entry.lock();
+        let (reply, observed) =
+            self.mail_subscriptions
+                .action_with_observation(&self.data_dir, peer, args);
+        if !observed.is_empty() {
+            self.acknowledge_agent_snapshot_locked(peer, 0, &observed, false, &mut gate);
+        }
+        reply
+    }
+
+    /// A byte-paged read acknowledges only the immutable snapshot, never newer mail.
+    pub(crate) fn acknowledge_agent_snapshot(
+        &self,
+        tuic_session: &str,
+        cursor: u64,
+        message_ids: &[String],
+        eviction_watermark: u64,
+    ) {
+        let entry = self
+            .active_agent_waiters
+            .entry(tuic_session.to_string())
+            .or_default();
+        let mut gate = entry.lock();
+        // Overlapping snapshots may acknowledge the same historical losses. Only
+        // the newly covered watermark range may clear the live pending counter.
+        let newly_acknowledged =
+            eviction_watermark.saturating_sub(gate.acknowledged_eviction_watermark);
+        if let Some(mut count) = self.agent_inbox_evictions.get_mut(tuic_session) {
+            *count = count.saturating_sub(newly_acknowledged);
+        }
+        gate.acknowledged_eviction_watermark =
+            gate.acknowledged_eviction_watermark.max(eviction_watermark);
+        self.acknowledge_agent_snapshot_locked(tuic_session, cursor, message_ids, true, &mut gate);
+    }
+
+    fn acknowledge_agent_snapshot_locked(
+        &self,
+        tuic_session: &str,
+        mut read_through: u64,
+        message_ids: &[String],
+        advance_legacy_cursor: bool,
+        gate: &mut AgentDeliveryGate,
+    ) {
+        // Publish the read position while holding the delivery gate. A sender
+        // cannot see a full inbox between this observation and cursor advancement.
+        if advance_legacy_cursor {
+            let mut cursor = self
+                .agent_read_cursor
+                .entry(tuic_session.to_string())
+                .or_insert(0);
+            if read_through > *cursor {
+                *cursor = read_through;
+            }
+        }
+        // Reading is delivery, even when a terminal wake was queued first or a
+        // sender has buffered mail but has not yet assigned its wake owner.
+        for id in message_ids {
+            if advance_legacy_cursor
+                || self
+                    .agent_inbox
+                    .get(tuic_session)
+                    .is_some_and(|inbox| inbox.iter().any(|message| message.id == *id))
+            {
+                gate.owners
+                    .insert(id.clone(), AgentDeliveryOwner::WaiterObserved);
+            }
+        }
+        if !advance_legacy_cursor {
+            // Filtered ACKs prove delivery only for their IDs. Advance the wake
+            // observation through the contiguous observed prefix, not past gaps.
+            read_through = self
+                .agent_inbox
+                .get(tuic_session)
+                .and_then(|inbox| {
+                    inbox
+                        .iter()
+                        .take_while(|message| {
+                            gate.owners.get(&message.id)
+                                == Some(&AgentDeliveryOwner::WaiterObserved)
+                        })
+                        .last()
+                        .map(|message| message.timestamp)
+                })
+                .unwrap_or(0);
+        }
+        gate.urgent_notices
+            .retain(|_, notice| notice.through > read_through);
+        let no_pending_mail = self.agent_inbox.get(tuic_session).is_none_or(|inbox| {
+            inbox.iter().all(|message| {
+                gate.owners.get(&message.id) != Some(&AgentDeliveryOwner::TerminalPending)
+            })
+        });
+        if no_pending_mail
+            && let Some(pty_session) = self.live_pty_for_peer(tuic_session)
+            && let Some(mut queue) = self.pending_injections.get_mut(&pty_session)
+        {
+            queue.retain(|entry| {
+                !matches!(entry, PendingInjection::Notice { text, .. } if text == crate::pty::PEER_MAIL_WAKE)
+            });
+        }
         gate.orchestrator_observed_through = gate.orchestrator_observed_through.max(read_through);
-        if read_through == 0
+        if (advance_legacy_cursor && read_through == 0)
             || gate
                 .orchestrator_wake_pending_through
                 .is_some_and(|pending| read_through >= pending)
         {
             gate.orchestrator_wake_pending_through = None;
         }
-        if read_through == 0
+        if (advance_legacy_cursor && read_through == 0)
             || gate
                 .orchestrator_wake_needed_through
                 .is_some_and(|needed| read_through >= needed)
@@ -2278,12 +3483,15 @@ impl AppState {
             gate.orchestrator_wake_needed_through = None;
         }
         gate.reset_orchestrator_wake_budget_if_observed();
-        messages
     }
 
     /// Record one marker emission or one submitted turn for `session_id`.
     pub(crate) fn note_marker(&self, session_id: &str, kind: MarkerKind) {
-        let mut stats = self.marker_stats.entry(session_id.to_string()).or_default();
+        let mut stats = self
+            .session_maps
+            .marker_stats
+            .entry(session_id.to_string())
+            .or_default();
         let counter = match kind {
             MarkerKind::Intent => &mut stats.intent,
             MarkerKind::Suggest => &mut stats.suggest,
@@ -2296,10 +3504,20 @@ impl AppState {
     /// deliberately the same shape as all-zero: a session that never ran is not
     /// evidence of an agent ignoring anything.
     pub(crate) fn marker_stats_for(&self, session_id: &str) -> MarkerStats {
-        self.marker_stats
+        self.session_maps
+            .marker_stats
             .get(session_id)
             .map(|entry| *entry.value())
             .unwrap_or_default()
+    }
+
+    /// Reservation sequence, including attempts refused before any PTY write.
+    #[cfg(all(test, unix))]
+    pub(crate) fn orchestrator_wake_attempt_sequence(&self, tuic_session: &str) -> u64 {
+        self.active_agent_waiters
+            .get(tuic_session)
+            .map(|gate| gate.lock().orchestrator_wake_attempt)
+            .unwrap_or(0)
     }
 
     pub(crate) fn orchestrator_wake_needed_through(&self, tuic_session: &str) -> Option<u64> {
@@ -2310,6 +3528,29 @@ impl AppState {
                 gate.orchestrator_wake_needed_through
                     .or(gate.orchestrator_wake_pending_through)
             })
+    }
+
+    /// Grant the outstanding wake group a fresh attempt budget because the
+    /// recipient reached a new idle edge.
+    ///
+    /// A `NotStarted` attempt burns the whole budget on purpose: repeating it
+    /// against an unchanged lifecycle writes no byte and costs a reclaim each
+    /// time. But `agent_state` reading idle is not the same fact as
+    /// `should_inject_now`, so the first attempt can fail on a composer draft,
+    /// an open question or an unconfirmed idle — and the burn then outlives its
+    /// cause. Without this, `reevaluate_orchestrator_mail_wake` is a no-op for
+    /// the rest of the session and the mail is never announced at all, which is
+    /// the one thing the idle-edge retry exists to prevent.
+    ///
+    /// A reservation in flight is never disturbed: a notice being typed still
+    /// owns its attempt.
+    pub(crate) fn rearm_orchestrator_wake_budget(&self, tuic_session: &str) {
+        if let Some(gate) = self.active_agent_waiters.get(tuic_session) {
+            let mut gate = gate.lock();
+            if gate.orchestrator_wake_pending_through.is_none() {
+                gate.orchestrator_wake_attempts_in_group = 0;
+            }
+        }
     }
 
     pub(crate) fn clear_orchestrator_delivery(&self, tuic_session: &str) {
@@ -2383,13 +3624,14 @@ impl AppState {
     /// Resolved per call rather than cached on the peer, so a respawn under the same
     /// `$TUIC_SESSION` is picked up without anyone re-registering.
     pub(crate) fn live_pty_for_peer(&self, peer_id: &str) -> Option<String> {
-        if self.sessions.contains_key(peer_id) {
+        if self.session_maps.sessions.contains_key(peer_id) {
             return Some(peer_id.to_string());
         }
-        self.live_pty_by_tuic_session
+        self.session_maps
+            .live_pty_by_tuic_session
             .get(peer_id)
             .map(|entry| entry.value().clone())
-            .filter(|session_id| self.sessions.contains_key(session_id))
+            .filter(|session_id| self.session_maps.sessions.contains_key(session_id))
     }
 
     /// Whether a peer identity may be dropped when its MCP protocol session is
@@ -2402,7 +3644,7 @@ impl AppState {
     /// agent that spends a long turn thinking, without calling a TUIC tool, had
     /// its address deleted out from under it while it was still running.
     ///
-    /// Two things keep an identity addressable:
+    /// Three things keep an identity addressable:
     ///
     /// - it owns a live PTY. The agent is sitting right there mid-turn and will
     ///   call `agent action=send` when the turn ends.
@@ -2410,11 +3652,14 @@ impl AppState {
     ///   child's handoff permanently: re-registering a headerless caller mints a
     ///   fresh UUID, and nothing tells the child what the new one is.
     ///
-    /// Both conditions are bounded by live sessions, so retention cannot grow
-    /// without bound — a reaped identity with neither is genuinely unreachable.
+    /// - a durable suspended tab retains it until resume or explicit forget.
+    ///
+    /// Retention is bounded by live sessions and retained tabs.
     pub(crate) fn peer_identity_is_reapable(&self, peer_id: &str) -> bool {
-        self.live_pty_for_peer(peer_id).is_none()
+        !self.hibernated_peers.contains(peer_id)
+            && self.live_pty_for_peer(peer_id).is_none()
             && !self
+                .session_maps
                 .session_parent
                 .iter()
                 .any(|entry| entry.value() == peer_id)
@@ -2422,7 +3667,8 @@ impl AppState {
 
     /// Record the PTY now backing a `$TUIC_SESSION`. Called at spawn.
     pub(crate) fn bind_live_pty(&self, tuic_session: &str, session_id: &str) {
-        self.live_pty_by_tuic_session
+        self.session_maps
+            .live_pty_by_tuic_session
             .insert(tuic_session.to_string(), session_id.to_string());
     }
 
@@ -2435,13 +3681,14 @@ impl AppState {
     /// one more thing to keep consistent for no measurable gain.
     pub(crate) fn unbind_live_pty(&self, session_id: &str) -> Vec<String> {
         let orphaned: Vec<String> = self
+            .session_maps
             .live_pty_by_tuic_session
             .iter()
             .filter(|entry| entry.value() == session_id)
             .map(|entry| entry.key().clone())
             .collect();
         for identity in &orphaned {
-            self.live_pty_by_tuic_session.remove(identity);
+            self.session_maps.live_pty_by_tuic_session.remove(identity);
         }
         orphaned
     }
@@ -2471,7 +3718,38 @@ impl AppState {
         if let Some(gate) = self.active_agent_waiters.get(tuic_session) {
             let mut gate = gate.lock();
             if gate.owners.get(message_id) == Some(&AgentDeliveryOwner::TerminalPending) {
+                // The cursor may already have advanced past this message because a
+                // newer waiter-owned message returned first. Put the same durable
+                // mail at the end of the logical stream before releasing terminal
+                // ownership, so an omitted-since wait can recover this failed PTY
+                // delivery. The id stays stable for recipient-side deduplication.
+                // Beyond the stored read cursor as well as the other entries: a
+                // plain inbox poll may already have read this very message.
+                let cursor = self
+                    .agent_read_cursor
+                    .get(tuic_session)
+                    .map(|entry| *entry.value());
+                let requeued = self
+                    .agent_inbox
+                    .get_mut(tuic_session)
+                    .is_some_and(|mut inbox| {
+                        requeue_beyond(&mut inbox, message_id, cursor.unwrap_or(0))
+                    });
                 gate.owners.remove(message_id);
+                if requeued {
+                    gate.inbox_revision = gate.inbox_revision.wrapping_add(1);
+                    let revision = gate.inbox_revision;
+                    gate.inbox_events.send_replace(revision);
+                } else {
+                    // The inbox no longer holds it (evicted at capacity, or the
+                    // recipient is gone): the failed delivery cannot be recovered.
+                    tracing::warn!(
+                        source = "agent",
+                        recipient = %tuic_session,
+                        message_id = %message_id,
+                        "failed terminal mail could not be requeued; it is no longer in the inbox"
+                    );
+                }
             }
         }
     }
@@ -2498,13 +3776,13 @@ impl AppState {
             .expect("monitoring_git_sem is never closed")
     }
 
-    pub fn new(
+    pub(crate) fn new(
         data_dir: PathBuf,
         worktrees_dir: PathBuf,
         config: crate::config::AppConfig,
         log_buffer: Arc<Mutex<crate::app_logger::LogRingBuffer>>,
     ) -> Self {
-        let mcp_upstream_registry = Arc::new(crate::mcp_proxy::registry::UpstreamRegistry::new());
+        crate::attachments::cleanup_orphans(&data_dir);
         let session_token = config.services.auth.session_token.clone();
         let push_store = crate::push::PushStore::load(&data_dir);
         let audit_path = data_dir.join("tunnel_audit.db");
@@ -2516,150 +3794,161 @@ impl AppState {
             tunnel_audit.clone(),
         ));
         Self {
-            sessions: DashMap::new(),
+            telegram_recent: Default::default(),
+            workflow_runtime: Default::default(),
+            automation_runtime: Default::default(),
+            secrets: crate::secrets::SecretStore::default(),
+            session_maps: SessionMaps::default(),
+            open_markdown_tabs: Default::default(),
             data_dir,
             worktrees_dir,
             metrics: SessionMetrics::new(),
-            output_buffers: DashMap::new(),
-            mcp_sessions: DashMap::new(),
+            mcp: McpState::default(),
             ws_clients: DashMap::new(),
+            webview_unloaded: AtomicBool::new(false),
+            background_visibility: Mutex::new(Default::default()),
             config: parking_lot::RwLock::new(config),
             git_cache: GitCacheState::new(),
             repo_watchers: DashMap::new(),
             repo_git_fingerprints: DashMap::new(),
             repo_head_targets: DashMap::new(),
             repo_head_emits_suppressed: AtomicU64::new(0),
+            pending_orphan_cleanup: DashMap::new(),
             dir_watchers: DashMap::new(),
             theme_watcher: parking_lot::Mutex::new(None),
+            subagent_map_cache: parking_lot::Mutex::new(Default::default()),
+            chat_views: Default::default(),
+            engine: Default::default(),
             mdkb_daemon: crate::mdkb_daemon::create_shared_daemon(),
-            http_client: reqwest::Client::new(),
-            github_token: parking_lot::RwLock::new(None),
-            github_token_source: parking_lot::RwLock::new(Default::default()),
-            github_circuit_breaker: crate::github::GitHubCircuitBreaker::new(),
-            github_poller: parking_lot::Mutex::new(None),
-            github_viewer_login: parking_lot::RwLock::new(None),
-            github_rate_limit_remaining: std::sync::atomic::AtomicU32::new(u32::MAX),
-            ghe_state: dashmap::DashMap::new(),
+            http_client: build_http_client(),
+            github: GitHubState::default(),
             server_shutdown: parking_lot::Mutex::new(None),
             ipc_started: std::sync::atomic::AtomicBool::new(false),
             session_token: parking_lot::RwLock::new(session_token),
             auth_rate_limits: DashMap::new(),
             #[cfg(feature = "desktop")]
             app_handle: parking_lot::RwLock::new(None),
+            #[cfg(feature = "desktop")]
+            design_mode: tokio::sync::OnceCell::new(),
+            frontend_liveness: Default::default(),
+            webview_boot_url: parking_lot::RwLock::new(None),
             plugin_watchers: DashMap::new(),
             ansi_colors: parking_lot::RwLock::new(None),
-            vt_log_buffers: DashMap::new(),
-            pty_raw_rings: DashMap::new(),
-            #[cfg(feature = "desktop")]
-            grid_channels: DashMap::new(),
-            grid_watch: DashMap::new(),
-            grid_gates: DashMap::new(),
-            grid_frame_dirty: DashMap::new(),
-            sync_update_active: DashMap::new(),
-            pending_scroll: DashMap::new(),
-            kitty_states: DashMap::new(),
-            input_buffers: DashMap::new(),
-            last_prompts: DashMap::new(),
-            pty_descriptions: DashMap::new(),
-            silence_states: DashMap::new(),
+            grid: GridState::default(),
             claude_usage_cache: parking_lot::Mutex::new(crate::claude_usage::load_cache_from_disk()),
+            claude_usage_scan: Default::default(),
             log_buffer,
             event_bus: tokio::sync::broadcast::channel(256).0,
+            remote_survive_secs: None,
+            remote_update: None,
+            sse_client_count: AtomicUsize::new(0),
+            remote_client_generation: AtomicU64::new(0),
             event_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sse_filters: Default::default(),
-            session_states: DashMap::new(),
-            session_state_events: SessionStateEventQueue::new(),
-            oauth_flow_manager: Arc::new(crate::mcp_oauth::flow::OAuthFlowManager::new(
-                mcp_upstream_registry.auth_semaphore.clone(),
-            )),
-            mcp_upstream_registry,
-            mcp_tools_changed: tokio::sync::broadcast::channel(16).0,
-            tool_search_index: Arc::new(parking_lot::RwLock::new(
-                crate::tool_search::ToolSearchIndex::build(&[]),
-            )),
             content_indices: DashMap::new(),
             indexer_throttle: Arc::new(crate::content_index::IndexerThrottle::default()),
             index_in_flight: Arc::new(DashSet::new()),
-            worktree_recreate_in_flight: Arc::new(DashSet::new()),
             index_build_sem: Arc::new(tokio::sync::Semaphore::new(1)),
             monitoring_git_sem: Arc::new(tokio::sync::Semaphore::new(MONITORING_GIT_CONCURRENCY)),
-            slash_mode: DashMap::new(),
-            last_output_ms: DashMap::new(),
-            last_input_ms: DashMap::new(),
-            shell_states: DashMap::new(),
-            terminal_rows: DashMap::new(),
-            resize_locks: DashMap::new(),
-            exit_codes: DashMap::new(),
-            shell_state_since_ms: DashMap::new(),
             loaded_plugins: DashMap::new(),
+            plugin_http_requests: Default::default(),
+            plugin_settings: Default::default(),
             plugin_output_watchers: parking_lot::RwLock::new(Default::default()),
             relay: RelayState::new(),
             peer_agents: DashMap::new(),
+            keep_open_sessions: DashSet::new(),
+            blocked_children: DashSet::new(),
             agent_inbox: DashMap::new(),
             agent_inbox_evictions: DashMap::new(),
             agent_read_cursor: DashMap::new(),
-            marker_stats: DashMap::new(),
+            mail_subscriptions: Default::default(),
             pending_injections: DashMap::new(),
+            recent_queue_keys: DashMap::new(),
             pending_initial_prompts: DashMap::new(),
+            launch_transaction_lock: tokio::sync::Mutex::new(()),
+            managed_trust_dialogs: DashSet::new(),
             active_agent_waiters: DashMap::new(),
             orchestrator_peers: DashSet::new(),
-            session_html_tabs: DashMap::new(),
-            mcp_to_session: DashMap::new(),
-            session_to_mcp: DashMap::new(),
-            live_pty_by_tuic_session: DashMap::new(),
-            session_parent: DashMap::new(),
-            messaging_channels: DashMap::new(),
-            pty_event_channels: DashMap::new(),
-            session_knowledge: DashMap::new(),
-            knowledge_dirty: DashMap::new(),
-            has_osc133_integration: DashMap::new(),
-            file_sandboxes: DashMap::new(),
-            unrestricted_sessions: DashMap::new(),
             #[cfg(unix)]
             bound_socket_path: parking_lot::RwLock::new(std::path::PathBuf::new()),
+            tls_listener: parking_lot::RwLock::new(std::sync::Weak::new()),
+            remote_bind: parking_lot::RwLock::new(Default::default()),
             tailscale_state: parking_lot::RwLock::new(
                 crate::tailscale::TailscaleState::NotInstalled,
             ),
+            acp: crate::acp::AcpClientManager::new(),
+            one_shot_requests: Default::default(),
+            acp_push_last_ms: DashMap::new(),
             push_store,
-            desktop_window_focused: std::sync::atomic::AtomicBool::new(true),
+            desktop_window_focused: std::sync::atomic::AtomicBool::new(cfg!(feature = "desktop")),
             server_start_time: std::time::Instant::now(),
-            term_aliases: DashMap::new(),
-            term_alias_counters: DashMap::new(),
-            session_visibility: DashMap::new(),
-            watcher_engine: std::sync::OnceLock::new(),
-            trigger_classifier: crate::ai_agent::triggers::TriggerClassifier::new(),
-            ai_suggestions_enabled: DashMap::new(),
             tunnel_manager,
+            remote: Default::default(),
+            remote_sessions: Default::default(),
+            remote_mail: Default::default(),
             tunnel_audit,
             tasks: Arc::new(crate::tasks::TaskRegistry::new()),
             connections_lock: tokio::sync::Mutex::new(()),
+            work_item_requests: DashMap::new(),
             screenshot_responses: DashMap::new(),
+            suspend_metadata: DashMap::new(),
+            suspend_lock: Mutex::new(()),
+            hibernated_peers: dashmap::DashSet::new(),
+            settings_policy: Arc::new(crate::settings::policy::Policy::default()),
+            settings_api: tokio::sync::OnceCell::new(),
+            plugin_keybinding_actions: Default::default(),
             confirm_responses: DashMap::new(),
-            #[cfg(unix)]
-            standby_sessions: DashMap::new(),
             process_snapshot_cache: crate::pty::ProcessSnapshotCache::default(),
             hot_repo_paths: parking_lot::RwLock::new(std::collections::HashSet::new()),
+            #[cfg(test)]
+            _test_data_dir: None,
         }
     }
 
     /// Wire event bus and MCP registry after construction.
     /// Must be called after wrapping in `Arc`.
     pub fn wire_event_bus(self: &Arc<Self>) {
-        self.mcp_upstream_registry
+        let settings_publisher = crate::settings::changes::Publisher::new(self);
+        *self.mcp.upstream_registry.settings_publisher.write() = settings_publisher.clone();
+        *self.mcp.oauth_flow_manager.settings_publisher.write() = settings_publisher;
+        self.mcp
+            .upstream_registry
             .set_event_bus(self.event_bus.clone());
-        self.mcp_upstream_registry
-            .set_mcp_tools_tx(self.mcp_tools_changed.clone());
-        self.mcp_upstream_registry
-            .set_oauth_flow_manager(self.oauth_flow_manager.clone());
+        self.mcp
+            .upstream_registry
+            .set_mcp_tools_tx(self.mcp.tools_changed.clone());
+        self.mcp
+            .upstream_registry
+            .set_oauth_flow_manager(self.mcp.oauth_flow_manager.clone());
     }
 
     /// Assign a human-friendly alias based on the repo/cwd name.
-    /// E.g. `tuicommander` → `tc-1`, `night-recovery` → `nr-1`, no repo → `sh-1`.
+    /// E.g. `tuicommander` → `tu-1`, `night-recovery` → `nr-1`, no repo → `sh-1`.
     ///
     /// If the same repo name already has a prefix in `term_alias_counters`, reuse it.
     /// Collision resolution only runs for new repo names whose base acronym clashes.
-    pub(crate) fn assign_term_alias(&self, session_id: &str) -> String {
+    ///
+    /// `requested` is the alias a restored tab was saved with. It is honoured
+    /// verbatim and the prefix counter is moved past its number, so the next fresh
+    /// tab in that repo cannot be handed the same address. A malformed request, or
+    /// one a live session already holds, is dropped — see
+    /// [`reservable_alias`]. The alias is a routable address, so an untrusted
+    /// value must never be able to point two tabs at one name.
+    pub(crate) fn assign_term_alias(&self, session_id: &str, requested: Option<&str>) -> String {
+        if let Some((prefix, number)) = requested.and_then(|alias| self.reservable_alias(alias)) {
+            let alias = format!("{prefix}-{number}");
+            let mut counter = self
+                .session_maps
+                .term_alias_counters
+                .entry(prefix)
+                .or_insert(0);
+            *counter = (*counter).max(number);
+            drop(counter);
+            self.record_term_alias(session_id, alias.clone());
+            return alias;
+        }
         let cwd = self
+            .session_maps
             .sessions
             .get(session_id)
             .and_then(|s| s.lock().cwd.clone());
@@ -2674,14 +3963,53 @@ impl AppState {
         let prefix = if let Some(existing) = self.find_prefix_for_repo(&repo_name) {
             existing
         } else {
-            repo_name_to_prefix(&repo_name, &self.term_aliases)
+            repo_name_to_prefix(&repo_name, &self.session_maps.term_aliases)
         };
 
-        let mut counter = self.term_alias_counters.entry(prefix.clone()).or_insert(0);
+        let mut counter = self
+            .session_maps
+            .term_alias_counters
+            .entry(prefix.clone())
+            .or_insert(0);
         *counter += 1;
         let alias = format!("{prefix}-{}", *counter);
-        self.term_aliases
+        drop(counter);
+        self.record_term_alias(session_id, alias.clone());
+        alias
+    }
+
+    /// Split a requested alias into `(prefix, number)` when it is a shape this
+    /// map can address and nothing live already answers to it.
+    ///
+    /// `prefix` must be non-empty and carry no `-` (the separator the resolver
+    /// splits on) and the number must be a positive `u32`, because that is
+    /// exactly what [`assign_term_alias`] generates and what the counter counts.
+    fn reservable_alias(&self, alias: &str) -> Option<(String, u32)> {
+        let (prefix, number) = alias.rsplit_once('-')?;
+        if prefix.is_empty() || prefix.contains('-') {
+            return None;
+        }
+        let number: u32 = number.parse().ok()?;
+        if number == 0 {
+            return None;
+        }
+        if self.resolve_alias(alias).is_some() {
+            return None;
+        }
+        Some((prefix.to_string(), number))
+    }
+
+    /// File an alias against a session and tell the UI, so the tab shows the
+    /// address other agents can reach it by. Dual-emitted: the bus carries it
+    /// to browser/PWA clients over `/events`, the window emit to the desktop.
+    fn record_term_alias(&self, session_id: &str, alias: String) {
+        self.session_maps
+            .term_aliases
             .insert(session_id.to_string(), alias.clone());
+        self.emit_pty_event(AppEvent::TermAliasAssigned {
+            session_id: session_id.to_string(),
+            alias: alias.clone(),
+        });
         #[cfg(feature = "desktop")]
         if let Some(ref app) = *self.app_handle.read() {
             let _ = app.emit(
@@ -2692,15 +4020,15 @@ impl AppState {
                 }),
             );
         }
-        alias
     }
 
     /// Find an existing prefix used by a session with the same repo name.
     fn find_prefix_for_repo(&self, repo_name: &str) -> Option<String> {
-        for entry in self.term_aliases.iter() {
+        for entry in self.session_maps.term_aliases.iter() {
             let sid = entry.key();
             let alias = entry.value();
             let other_cwd = self
+                .session_maps
                 .sessions
                 .get(sid.as_str())
                 .and_then(|s| s.lock().cwd.clone());
@@ -2720,77 +4048,146 @@ impl AppState {
 
     /// Look up session_id by alias (e.g. "tc-1" → UUID).
     pub(crate) fn resolve_alias(&self, alias: &str) -> Option<String> {
-        self.term_aliases
+        self.session_maps
+            .term_aliases
             .iter()
             .find(|e| e.value() == alias)
             .map(|e| e.key().clone())
     }
 
-    /// This session's knowledge record, read off disk when it is not resident.
+    /// Resolve any address a caller may hold for a terminal into the live PTY key.
     ///
-    /// The startup load is capped at `MAX_RESIDENT_SESSIONS`, so a session with
-    /// a file on disk is not necessarily in memory. Starting a blank record for
-    /// it is how resuming an older session erased its own history: the next
-    /// flush persists what is in memory, over a file nothing had read.
-    pub(crate) fn knowledge_entry(
+    /// Three names reach the same session and callers do not get to know which one
+    /// they were handed: the PTY key the server minted, the `$TUIC_SESSION` a
+    /// desktop tab persists across restarts, and the short repo alias the tab menu
+    /// shows. Every tool that takes a `session_id` goes through here, so "notify
+    /// tu-1" works without a UUID lookup.
+    ///
+    /// `None` means no live session answers to that name — never a guess.
+    ///
+    /// Exact addresses win. A short UUID prefix and a display name are accepted
+    /// only when they identify exactly one live session.
+    pub(crate) fn resolve_session_ref_checked(
         &self,
-        session_id: &str,
-    ) -> dashmap::mapref::one::RefMut<'_, String, Mutex<crate::ai_agent::knowledge::SessionKnowledge>>
-    {
-        self.session_knowledge
-            .entry(session_id.to_string())
-            .or_insert_with(|| {
-                Mutex::new(crate::ai_agent::knowledge::load_or_start_fresh(session_id))
+        reference: &str,
+    ) -> Result<Option<String>, String> {
+        let exact = self
+            .session_maps
+            .sessions
+            .contains_key(reference)
+            .then(|| reference.to_string())
+            .or_else(|| self.live_pty_for_peer(reference))
+            .or_else(|| self.resolve_alias(reference));
+        if let Some(session_id) = exact.filter(|id| self.session_maps.sessions.contains_key(id)) {
+            return Ok(Some(session_id));
+        }
+
+        let matches: Vec<String> = self
+            .session_maps
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                let session_id = entry.key();
+                let session = entry.value().lock();
+                (session_id.starts_with(reference)
+                    || session.display_name.as_deref() == Some(reference))
+                .then(|| session_id.clone())
             })
+            .collect();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [session_id] => Ok(Some(session_id.clone())),
+            _ => Err(format!(
+                "Session reference '{reference}' is ambiguous; matches {}",
+                matches.join(", ")
+            )),
+        }
     }
 
-    /// Record a command outcome into this session's knowledge store and mark it
-    /// dirty for the background persister. Creates the entry on first use.
-    pub(crate) fn record_outcome(
+    /// Resolve any address into the key a peer's mail is filed under.
+    ///
+    /// [`resolve_session_ref_checked`] travels towards the terminal; mail travels the other
+    /// way, because `peer_agents` is keyed by `tuic_session`. An alias or a PTY key
+    /// therefore has to be walked back to the peer that owns that terminal.
+    /// Resolve a peer address while retaining an ambiguity error from the
+    /// terminal address resolver.
+    pub(crate) fn resolve_peer_ref_checked(
         &self,
-        session_id: &str,
-        outcome: crate::ai_agent::knowledge::CommandOutcome,
-    ) -> u64 {
-        // Evaluate trigger before recording (needs the outcome by ref).
-        let suggestion = {
-            let enabled = self
-                .ai_suggestions_enabled
-                .get(session_id)
-                .map(|v| *v)
-                .unwrap_or_else(|| {
-                    self.session_states
-                        .get(session_id)
-                        .map(|s| s.agent_type.is_some())
-                        .unwrap_or(false)
-                });
-            if enabled {
-                self.trigger_classifier.evaluate(session_id, &outcome)
+        reference: &str,
+    ) -> Result<Option<String>, String> {
+        if reference.is_empty() {
+            return Ok(None);
+        }
+        if self.peer_agents.contains_key(reference) {
+            return Ok(Some(reference.to_string()));
+        }
+        // Terminal addresses win over the register name: a peer must not be able
+        // to capture another terminal's alias, PTY key or display name by
+        // registering it as its name.
+        if let Some(session_id) = self.resolve_session_ref_checked(reference)?
+            && let Some(peer) = self.peer_agents.iter().find(|entry| {
+                self.live_pty_for_peer(entry.key()).as_deref() == Some(session_id.as_str())
+            })
+        {
+            return Ok(Some(peer.key().clone()));
+        }
+        self.resolve_peer_name(reference)
+    }
+
+    /// The register `name` list_peers prints, as an address. Live peers (a live
+    /// PTY or a known MCP session) shadow dead ones, so a restart that reuses
+    /// the default name is not made ambiguous by its dead predecessor; with no
+    /// live peer the dead ones still answer. Identities of one PTY are one
+    /// owner. Two owners with one name are refused with the candidates.
+    fn resolve_peer_name(&self, name: &str) -> Result<Option<String>, String> {
+        let mut live = std::collections::BTreeSet::new();
+        let mut dead = std::collections::BTreeSet::new();
+        for entry in self.peer_agents.iter().filter(|e| e.value().name == name) {
+            let key = entry.key();
+            if self.live_pty_for_peer(key).is_some() {
+                live.extend(self.peer_identity_for_live_pty(key));
+            } else if self
+                .mcp
+                .sessions
+                .contains_key(&entry.value().mcp_session_id)
+            {
+                live.insert(key.clone());
             } else {
-                None
-            }
-        };
-
-        let id = self.knowledge_entry(session_id).lock().record(outcome);
-        self.knowledge_dirty.insert(session_id.to_string(), ());
-
-        #[cfg(feature = "desktop")]
-        if let Some(suggestion) = suggestion {
-            use tauri::Emitter as _;
-            if let Some(ref app) = *self.app_handle.read() {
-                let _ = app.emit("ai-suggestion", &suggestion);
+                dead.insert(key.clone());
             }
         }
-        #[cfg(not(feature = "desktop"))]
-        let _ = suggestion;
+        let owners: Vec<String> = if live.is_empty() { dead } else { live }
+            .into_iter()
+            .collect();
+        match owners.as_slice() {
+            [] => Ok(None),
+            [owner] => Ok(Some(owner.clone())),
+            _ => Err(format!(
+                "Peer name '{name}' is ambiguous; matches {}",
+                owners.join(", ")
+            )),
+        }
+    }
 
-        id
+    /// A managed PTY has one mailbox even if two bridges assert different UUIDs
+    /// for it (for example, a persisted tab UUID and the PTY key). Choose the
+    /// first registered peer so the mailbox address stays stable on reconnect.
+    /// Callers that create a binding hold PEER_IDENTITY_BIND_LOCK while using it.
+    pub(crate) fn peer_identity_for_live_pty(&self, asserted: &str) -> Option<String> {
+        let pty = self.live_pty_for_peer(asserted)?;
+        self.peer_agents
+            .iter()
+            .filter(|peer| self.live_pty_for_peer(peer.key()).as_deref() == Some(pty.as_str()))
+            .map(|peer| (peer.registered_at, peer.key().clone()))
+            .min()
+            .map(|(_, identity)| identity)
     }
 }
 
 /// Derive a short prefix from a repo directory name.
 ///
 /// Split by `-`, `_`, `.`, and camelCase boundaries, then take initials.
-/// - Multi-word: `tuicommander` → `tc` (camel split), `night-recovery` → `nr`
+/// - Multi-word: `tuiCommander` → `tc` (camel split), `night-recovery` → `nr`
 /// - Single word < 3 chars: use as-is (`go` → `go`)
 /// - Single word >= 3 chars: first 2 letters (`server` → `se`)
 /// - Empty/no repo: `sh`
@@ -2890,10 +4287,15 @@ fn split_name_segments(name: &str) -> Vec<String> {
 
 /// Cloud relay client state (connection + shutdown handle).
 pub(crate) struct RelayState {
-    /// Shutdown sender — send () to gracefully stop the relay client
+    /// Shutdown sender — send () to gracefully stop the relay supervisor
     pub(crate) shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Whether the relay client is currently connected
     pub(crate) connected: std::sync::atomic::AtomicBool,
+    /// Bumped after every committed config change so the relay supervisor
+    /// re-reads its settings without an app restart. A `watch` rather than a
+    /// broadcast: a burst of saves needs one re-read, not one per save, and a
+    /// subscriber that was busy cannot lag out of a coalescing channel.
+    pub(crate) config_revision: tokio::sync::watch::Sender<u64>,
 }
 
 impl RelayState {
@@ -2901,6 +4303,7 @@ impl RelayState {
         Self {
             shutdown: parking_lot::Mutex::new(None),
             connected: std::sync::atomic::AtomicBool::new(false),
+            config_revision: tokio::sync::watch::Sender::new(0),
         }
     }
 }
@@ -2943,20 +4346,62 @@ pub(crate) fn build_git_cache<T: Send + Sync + 'static>(
         .build()
 }
 
+/// A full review-thread walk of one PR, valid for the PR state it was taken at.
+#[derive(Clone)]
+pub(crate) struct SettledReviewThreads {
+    pub(crate) updated_at: String,
+    pub(crate) head_ref_oid: String,
+    pub(crate) unresolved: u32,
+    pub(crate) complete: bool,
+    /// The walk failed: the entry only stops a re-walk on every poll, it carries no count.
+    pub(crate) failed: bool,
+    pub(crate) walked_at: Instant,
+}
+
+/// Only storage settings participate: unrelated settings saves must keep inventory hot.
+#[derive(PartialEq)]
+struct WorktreeStorageSettings {
+    default: crate::config::WorktreeStorage,
+    overrides: std::collections::BTreeMap<String, crate::config::WorktreeStorage>,
+}
+
+impl WorktreeStorageSettings {
+    fn load() -> Self {
+        let default = crate::config::load_repo_defaults().worktree_storage;
+        let overrides = crate::config::load_repo_settings()
+            .repos
+            .into_iter()
+            .filter_map(|(path, entry)| {
+                entry
+                    .worktree_storage
+                    .filter(|strategy| strategy != &default)
+                    .map(|strategy| (path, strategy))
+            })
+            .collect();
+        Self { default, overrides }
+    }
+}
+
 /// TTL caches for git and GitHub query results, keyed by repo path.
 pub(crate) struct GitCacheState {
+    worktree_storage_settings: Mutex<WorktreeStorageSettings>,
     pub(crate) repo_info: GitCache<crate::git::RepoInfo>,
     pub(crate) merged_branches: GitCache<Vec<String>>,
+    pub(crate) repo_diff_stats: GitCache<crate::git::RepoDiffStats>,
     pub(crate) branches_detail: GitCache<Vec<crate::git::BranchDetail>>,
     pub(crate) github_status: GitCache<Vec<crate::github::BranchPrStatus>>,
     pub(crate) git_status: GitCache<crate::github::GitHubStatus>,
-    pub(crate) git_panel_context: GitCache<crate::git::GitPanelContext>,
-    pub(crate) worktree_paths: GitCache<std::collections::HashMap<String, String>>,
-    /// Repos that returned null from GitHub GraphQL (not found / no access).
+    pub(crate) worktree_paths: GitCache<crate::worktree::WorktreeInventory>,
+    /// Repos explicitly reported NOT_FOUND by GitHub GraphQL.
     /// Keyed by "owner/name", value is the cooldown expiry time.
-    /// Excluded from batch queries until the cooldown expires (1 hour).
+    /// Excluded from batch queries until the cooldown expires (24 hours).
     /// NOT a TTL value cache — kept as a plain `DashMap` set with custom expiry.
     pub(crate) github_repo_cooldown: DashMap<String, Instant>,
+    pub(crate) github_repo_access_errors: DashMap<String, crate::github::RepoAccessFailure>,
+    /// Settled review-thread totals of PRs with more threads than the batch poll reads, keyed by
+    /// "host/owner/name#number". Not a TTL cache: an entry is valid while the PR's `updatedAt` and head
+    /// are unchanged and it is younger than `SETTLED_THREADS_TTL`.
+    pub(crate) settled_review_threads: DashMap<String, SettledReviewThreads>,
     /// Count of entries evicted by TTL expiry (watcher-miss observability).
     /// Shared across all git caches; surfaced in the cpu_watchdog snapshot.
     pub(crate) ttl_fallbacks: Arc<AtomicU64>,
@@ -2966,15 +4411,30 @@ impl GitCacheState {
     pub(crate) fn new() -> Self {
         let ttl_fallbacks = Arc::new(AtomicU64::new(0));
         Self {
+            worktree_storage_settings: Mutex::new(WorktreeStorageSettings::load()),
             repo_info: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
             merged_branches: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
+            repo_diff_stats: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
             branches_detail: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
             github_status: build_git_cache(GITHUB_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
             git_status: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
-            git_panel_context: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
             worktree_paths: build_git_cache(GIT_CACHE_TTL, Arc::clone(&ttl_fallbacks)),
             github_repo_cooldown: DashMap::new(),
+            github_repo_access_errors: DashMap::new(),
+            settled_review_threads: DashMap::new(),
             ttl_fallbacks,
+        }
+    }
+
+    /// Called after durable repository settings saves, never from the inventory read path.
+    pub(crate) fn refresh_worktree_storage_settings(&self) {
+        let mut previous = self.worktree_storage_settings.lock();
+        let current = WorktreeStorageSettings::load();
+        if *previous != current {
+            *previous = current;
+            // Both caches derive their workspace set from the configured recycling pool.
+            self.worktree_paths.invalidate_all();
+            self.repo_diff_stats.invalidate_all();
         }
     }
 
@@ -2986,10 +4446,10 @@ impl GitCacheState {
     pub(crate) fn clear_all(&self) {
         self.repo_info.invalidate_all();
         self.merged_branches.invalidate_all();
+        self.repo_diff_stats.invalidate_all();
         self.branches_detail.invalidate_all();
         self.github_status.invalidate_all();
         self.git_status.invalidate_all();
-        self.git_panel_context.invalidate_all();
         self.worktree_paths.invalidate_all();
     }
 
@@ -2997,12 +4457,12 @@ impl GitCacheState {
     pub(crate) fn invalidate_repo(&self, path: &str) {
         self.repo_info.invalidate(path);
         self.merged_branches.invalidate(path);
+        self.repo_diff_stats.invalidate(path);
         self.branches_detail.invalidate(path);
         // github_status (remote PR/CI data) is NOT invalidated here — local git
         // changes don't affect remote PRs. The poller and head-changed → pollRepo
         // handle remote refreshes on their own cadence.
         self.git_status.invalidate(path);
-        self.git_panel_context.invalidate(path);
         self.worktree_paths.invalidate(path);
     }
 }
@@ -3082,19 +4542,84 @@ pub(crate) fn broadcast_to_ws_clients(
     }
 }
 
+const MOBILE_PUSH_HID_IDLE_SECS: f64 = 120.0;
+
+pub(crate) fn mobile_push_away(window_focused: bool, hid_idle_secs: Option<f64>) -> bool {
+    !window_focused
+        || hid_idle_secs.is_some_and(|secs| secs.is_finite() && secs >= MOBILE_PUSH_HID_IDLE_SECS)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn hid_idle_seconds() -> Option<f64> {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state_id: i32, event_type: u32) -> f64;
+    }
+    // CoreGraphics defines HIDSystemState as 1 and AnyInputEventType as ~0.
+    // SAFETY: this OS API reads global input idle time and retains no pointers.
+    let seconds = unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) };
+    (seconds.is_finite() && seconds >= 0.0).then_some(seconds)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn hid_idle_seconds() -> Option<f64> {
+    None
+}
+
 impl AppState {
     /// Invalidate all operation caches (git + GitHub).
+    /// Build a session's VT log buffer with the settings that apply to every
+    /// session.
+    ///
+    /// The palette override and the scrollback-reflow flag were both being
+    /// applied per creation site — the palette at three of the five, the reflow
+    /// flag at none of them, which is why `scrollback_reflow` was a setting with
+    /// no consumer (#660-d087). One constructor means a sixth site cannot be
+    /// added that silently misses either.
+    pub(crate) fn new_vt_log_buffer(&self, rows: u16, cols: u16, capacity: usize) -> VtLogBuffer {
+        let mut vt = VtLogBuffer::new(rows, cols, capacity);
+        if let Some(colors) = self.ansi_colors.read().as_ref() {
+            vt.set_ansi_colors(colors);
+        }
+        vt.set_reflow_history(self.config.read().scrollback_reflow);
+        vt
+    }
+
+    /// Push a changed `scrollback_reflow` into every session that already exists.
+    ///
+    /// Called from `config::commit_config_change`, not from the `save_config`
+    /// callers: `ConfigSaveEffects` is only actioned by the callers that remember
+    /// to, and a toggle that silently needs a restart is the failure this whole
+    /// story is about.
+    pub(crate) fn apply_reflow_history(&self, on: bool) {
+        for entry in self.grid.vt_log_buffers.iter() {
+            entry.value().lock().set_reflow_history(on);
+        }
+    }
+
     pub(crate) fn clear_caches(&self) {
+        crate::monitoring_status::CACHE.clear();
         self.git_cache.clear_all();
     }
 
     /// Invalidate caches for a specific repo path.
     pub(crate) fn invalidate_repo_caches(&self, path: &str) {
+        crate::monitoring_status::CACHE.invalidate_checkout(std::path::Path::new(path));
+        self.invalidate_repo_caches_from_watch(path);
+    }
+
+    /// Raw watcher callbacks already invalidate only the checkout that changed.
+    pub(crate) fn invalidate_repo_caches_from_watch(&self, path: &str) {
         self.git_cache.invalidate_repo(path);
         crate::prompt::invalidate_repo_vars(path);
     }
 
-    /// Announce that `branch`'s worktree is gone, so the sidebar drops its row.
+    /// Announce that the workspace `workspace_id` names is gone, so the sidebar
+    /// drops its row.
+    ///
+    /// Addressed by workspace id, not branch: the row the frontend must drop is
+    /// keyed by id, and two workspaces may share a branch — so a branch-keyed
+    /// event cannot say which of them died (#726-5ac7).
     ///
     /// Every removal path must call this — UI, MCP `repo worktree_remove`, the HTTP
     /// route, and merge&archive. Without it a backend-initiated removal leaves a
@@ -3104,19 +4629,50 @@ impl AppState {
     ///
     /// Caches are invalidated first, so any refresh the event triggers reads
     /// post-removal worktree state.
-    pub(crate) fn notify_worktree_removed(&self, repo_path: &str, branch: &str) {
-        self.invalidate_repo_caches(repo_path);
-        let _ = self.event_bus.send(AppEvent::WorktreeRemoved {
-            repo_path: repo_path.to_string(),
-            branch: branch.to_string(),
-        });
+    pub(crate) fn notify_worktree_removed(&self, payload: WorktreeRemovedPayload) {
+        self.invalidate_repo_caches(&payload.repo_path);
+        match crate::config::retract_removed_workspace(&payload.repo_path, &payload.workspace_id) {
+            Ok(true) => self.notify_repositories_changed(),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(source = "config", %error, "Failed to retract removed workspace restore records")
+            }
+        }
+        crate::workitem_links::drop_link_of_removed_worktree(&payload.repo_path, &payload.branch);
         #[cfg(feature = "desktop")]
         if let Some(ref app) = *self.app_handle.read() {
-            let _ = app.emit(
-                "worktree-removed",
-                serde_json::json!({ "repo_path": repo_path, "branch": branch }),
-            );
+            let _ = app.emit("worktree-removed", &payload);
         }
+        let _ = self.event_bus.send(AppEvent::WorktreeRemoved(payload));
+    }
+
+    /// Announce persisted caller placement over both transports.
+    pub(crate) fn notify_session_worktree_declared(&self, payload: WorktreeCreatedPayload) {
+        #[cfg(feature = "desktop")]
+        if let Some(app) = self.app_handle.read().as_ref() {
+            use tauri::Emitter;
+            let _ = app.emit("session-worktree-declared", &payload);
+        }
+        let _ = self
+            .event_bus
+            .send(AppEvent::SessionWorktreeDeclared(payload));
+    }
+
+    /// Announce a newly created workspace, so the frontend can offer to switch
+    /// to it.
+    ///
+    /// The mirror of `notify_worktree_removed`, and it exists for the same
+    /// reason: creation used to emit the bus event and the desktop event by hand
+    /// at each producer (the HTTP/MCP route and the session-with-worktree route),
+    /// which is two implementations of one transition — one of them could forget
+    /// the cache invalidation, mint a different id, or fire at a different moment.
+    pub(crate) fn notify_worktree_created(&self, payload: WorktreeCreatedPayload) {
+        self.invalidate_repo_caches(&payload.repo_path);
+        #[cfg(feature = "desktop")]
+        if let Some(ref app) = *self.app_handle.read() {
+            let _ = app.emit("worktree-created", &payload);
+        }
+        let _ = self.event_bus.send(AppEvent::WorktreeCreated(payload));
     }
 
     /// Announce that `repositories.json` was written, so every other client
@@ -3134,6 +4690,32 @@ impl AppState {
         }
     }
 
+    /// Ideas are persisted before either transport is told to reload.
+    pub(crate) fn notify_ideas_changed(&self) {
+        let _ = self.event_bus.send(AppEvent::IdeasChanged);
+        #[cfg(feature = "desktop")]
+        if let Some(ref app) = *self.app_handle.read() {
+            let _ = app.emit("ideas-changed", serde_json::json!({}));
+        }
+    }
+
+    /// Dual-emit the same value-free payload; there is no bus-to-window forwarder.
+    pub(crate) fn publish_settings_changed(
+        &self,
+        notice: crate::settings::changes::SettingsChanged,
+    ) {
+        if matches!(notice.section.as_str(), "voice" | "telegram") {
+            let _ = self.mcp.tools_changed.send(());
+        }
+        let _ = self
+            .event_bus
+            .send(AppEvent::SettingsChanged(notice.clone()));
+        #[cfg(feature = "desktop")]
+        if let Some(app) = self.app_handle.read().as_ref() {
+            let _ = app.emit("settings-changed", &notice);
+        }
+    }
+
     /// Default rate limit expiry when no retry_after_ms is provided (120s).
     const RATE_LIMIT_DEFAULT_EXPIRY_MS: u64 = 120_000;
 
@@ -3141,7 +4723,7 @@ impl AppState {
     /// Also expires stale rate limits based on retry_after_ms + timestamp.
     pub(crate) fn session_state_with_shell(&self, session_id: &str) -> Option<SessionState> {
         // Expire stale rate limits in-place before building the snapshot.
-        if let Some(mut entry) = self.session_states.get_mut(session_id)
+        if let Some(mut entry) = self.session_maps.session_states.get_mut(session_id)
             && entry.rate_limited
             && entry.rate_limit_set_ms > 0
         {
@@ -3161,33 +4743,63 @@ impl AppState {
         // Clone before consulting SilenceState so no session_states shard guard
         // is held across that mutex. Completion emission uses the inverse order
         // to serialize against a newly submitted input epoch.
-        let mut state = self.session_states.get(session_id).map(|s| s.clone())?;
+        let mut state = self
+            .session_maps
+            .session_states
+            .get(session_id)
+            .map(|s| s.clone())?;
+        crate::codex_binding::validate_snapshot(self, session_id, &mut state);
         state.queued_commands = crate::pty::queued_command_count(self, session_id) as u32;
-        state.shell_state = self.shell_states.get(session_id).and_then(|atom| {
-            crate::pty::shell_state_wire(atom.load(std::sync::atomic::Ordering::Relaxed))
-                .map(str::to_string)
-        });
-        let completion_declared = state.suggested_actions.is_some()
-            || self.silence_states.get(session_id).is_some_and(|silence| {
-                silence
-                    .lock()
-                    .completion_declared_for_epoch(state.turn_epoch)
+        state.shell_state = self
+            .session_maps
+            .shell_states
+            .get(session_id)
+            .and_then(|atom| {
+                crate::pty::shell_state_wire(atom.load(std::sync::atomic::Ordering::Relaxed))
+                    .map(str::to_string)
             });
-        let background_work = state.has_pending_background_probe() || state.background_work;
+        let completion_settled = state.suggested_actions.is_some()
+            || self
+                .session_maps
+                .silence_states
+                .get(session_id)
+                .is_some_and(|silence| {
+                    let silence = silence.lock();
+                    if state.agent_type.as_deref() == Some("claude")
+                        && state.shell_state.as_deref() != Some("idle")
+                    {
+                        silence.completion_settled_for_epoch(state.turn_epoch)
+                    } else {
+                        silence.completion_declared_for_epoch(state.turn_epoch)
+                    }
+                });
+        // Ego reports turn boundaries through OSC 7770. Descendants (including
+        // pending background jobs) describe process ownership, not an active turn.
+        // Keep that metadata for suspend/standby safety, but never promote a
+        // confirmed idle ego turn back to working because of those processes.
+        let ego_turn_idle = state.agent_type.as_deref() == Some("ego")
+            && state.shell_state.as_deref() == Some("idle");
+        let background_work =
+            !ego_turn_idle && (state.has_pending_background_probe() || state.background_work);
         // A current-turn completion marker is stronger than a stale BUSY atom
         // (for example a completed Codex screen that still contains its last
         // Working row). Keep real background work authoritative, but normalize
-        // the terminal state once the agent has explicitly ended the turn.
-        if completion_declared && !background_work {
+        // the terminal state once the agent has settled its explicit end-of-turn marker.
+        // Claude can retain that marker while blocking Stop hooks still run.
+        if completion_settled && !background_work {
             state.shell_state = Some("idle".to_string());
         }
         state.agent_state = if state.agent_type.is_none() {
             None
+        } else if state.foreground_input_blocked {
+            // A direct program's child owns the terminal even if the retained
+            // ready screen or completion marker still describes the parent.
+            Some("working".to_string())
         } else if state.awaiting_input || state.choice_prompt.is_some() {
             Some("awaiting_input".to_string())
         } else if background_work {
             Some("working".to_string())
-        } else if completion_declared {
+        } else if completion_settled {
             Some("completed".to_string())
         } else if state.shell_state.as_deref() == Some("busy") {
             Some("working".to_string())
@@ -3196,7 +4808,164 @@ impl AppState {
         } else {
             Some("starting".to_string())
         };
+        if state.agent_type.is_some()
+            || crate::idle_close::shell_last_io_ms(self, session_id) != state.abandoned_since_ms
+        {
+            state.abandoned_since_ms = None;
+        }
         Some(state)
+    }
+
+    /// Spawn a background task that turns ACP wake signals into `AppEvent`s.
+    ///
+    /// The ACP client cannot emit them itself: it is a field of this state, so
+    /// it can hold neither the event bus nor the desktop window without a
+    /// cycle. It publishes notices on its own bus instead, and this is the one
+    /// place that mirrors them onto both delivery routes — so a phone on
+    /// `/events` and the desktop window are told the same thing at the same
+    /// time. Call once at startup, after constructing AppState.
+    pub(crate) fn spawn_acp_notice_pump(state: Arc<AppState>) -> tokio::task::AbortHandle {
+        let mut notices = state.acp.notices();
+        let task = tokio::spawn(async move {
+            loop {
+                match notices.recv().await {
+                    Ok(notice) => {
+                        #[cfg(feature = "desktop")]
+                        if let Some(app) = state.app_handle.read().as_ref() {
+                            use tauri::Emitter;
+                            let _ = app.emit("acp-notice", &notice);
+                        }
+                        let _ = state.event_bus.send(AppEvent::AcpNotice(notice.clone()));
+                        if notice.kind == crate::acp::AcpNoticeKind::InteractionPending {
+                            let pending = state
+                                .acp
+                                .pending_interactions(notice.connection_id)
+                                .await
+                                .ok()
+                                .and_then(|interactions| {
+                                    interactions.into_iter().find(|interaction| {
+                                        Some(interaction.request_id()) == notice.request_id
+                                            && Some(interaction.session_id())
+                                                == notice.session_id.as_ref()
+                                    })
+                                })
+                                .and_then(|interaction| {
+                                    let snapshot = state.acp.snapshot(notice.connection_id).ok()?;
+                                    let attachment =
+                                        snapshot.attachments.into_iter().find(|attachment| {
+                                            attachment.session_id == *interaction.session_id()
+                                                && (attachment
+                                                    .pending_permission_ids
+                                                    .contains(&interaction.request_id())
+                                                    || attachment
+                                                        .pending_elicitation_ids
+                                                        .contains(&interaction.request_id()))
+                                        })?;
+                                    Some((
+                                        interaction.request_id(),
+                                        attachment.cwd.to_str()?.to_owned(),
+                                    ))
+                                });
+                            if let Some((url, body)) = Self::mobile_push_for_acp_notice(
+                                &state,
+                                &notice,
+                                pending
+                                    .as_ref()
+                                    .map(|(request_id, repo)| (*request_id, repo.as_str())),
+                            ) {
+                                Self::send_mobile_push_url(&state, url, &body);
+                            }
+                        } else if notice.kind == crate::acp::AcpNoticeKind::Card {
+                            let repo = state
+                                .acp
+                                .snapshot(notice.connection_id)
+                                .ok()
+                                .filter(|snapshot| snapshot.generation == notice.generation)
+                                .and_then(|snapshot| {
+                                    snapshot.attachments.into_iter().find(|attachment| {
+                                        Some(&attachment.session_id) == notice.session_id.as_ref()
+                                    })
+                                })
+                                .and_then(|attachment| attachment.cwd.to_str().map(str::to_owned));
+                            if let Some((url, body)) = repo.as_deref().and_then(|repo| {
+                                Self::mobile_push_for_acp_session(&state, &notice, repo)
+                            }) {
+                                Self::send_mobile_push_url(&state, url, &body);
+                            }
+                        }
+                    }
+                    // A notice carries nothing that cannot be re-read: a client
+                    // that missed one still finds the truth in the connection
+                    // snapshot and the pending interactions.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(source = "acp", lagged = n, "ACP notice bus lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        task.abort_handle()
+    }
+
+    fn mobile_push_for_acp_notice(
+        state: &Arc<AppState>,
+        notice: &crate::acp::AcpNotice,
+        pending: Option<(crate::acp::AcpHostRequestId, &str)>,
+    ) -> Option<(String, String)> {
+        if notice.kind != crate::acp::AcpNoticeKind::InteractionPending
+            || notice.request_id.is_none()
+            || notice.request_id != pending.map(|(request_id, _)| request_id)
+        {
+            return None;
+        }
+        let (_, repo) = pending?;
+        Self::mobile_push_for_acp_session(state, notice, repo)
+    }
+
+    /// Questions and ego cards spend the same conversation budget.
+    fn mobile_push_for_acp_session(
+        state: &Arc<AppState>,
+        notice: &crate::acp::AcpNotice,
+        repo: &str,
+    ) -> Option<(String, String)> {
+        let session_id = notice.session_id.as_ref()?;
+        let ready = {
+            let config = state.config.read();
+            config.services.push.enabled
+                && !config.services.push.vapid_private_key.is_empty()
+                && !state.push_store.is_empty()
+        };
+        let focused = state
+            .desktop_window_focused
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let away = mobile_push_away(focused, if focused { hid_idle_seconds() } else { None });
+        if !ready || !away {
+            return None;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut last = state
+            .acp_push_last_ms
+            .entry(session_id.to_string())
+            .or_default();
+        if !crate::push::reserve_push_slot(&mut last, now_ms, true) {
+            return None;
+        }
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("repo", repo)
+            .append_pair("session", &session_id.to_string())
+            .finish();
+        Some((
+            format!("/mobile?{query}"),
+            if notice.kind == crate::acp::AcpNoticeKind::Card {
+                "AI Chat: new notice"
+            } else {
+                "AI Chat: response needed"
+            }
+            .to_string(),
+        ))
     }
 
     /// Spawn a background task that subscribes to the event bus and updates
@@ -3204,16 +4973,28 @@ impl AppState {
     pub(crate) fn spawn_session_state_accumulator(state: Arc<AppState>) {
         let mut broadcast_rx = state.event_bus.subscribe();
         let mut state_rx = state
+            .session_maps
             .session_state_events
             .rx
             .lock()
             .take()
             .expect("session state accumulator must be spawned exactly once");
         tokio::spawn(async move {
+            // Last state published per session, so a repaint that changes nothing
+            // publishes nothing. Task-local because this task is the sole writer
+            // of `session_states` and therefore the sole source of these pushes.
+            let mut published: HashMap<String, SessionState> = HashMap::new();
             loop {
                 tokio::select! {
                     event = state_rx.recv() => match event {
-                        Some(event) => Self::apply_event_to_session_state(&state, &event),
+                        Some(queued) => {
+                            Self::apply_session_state_event(&state, &queued.event, queued.parented);
+                            Self::publish_session_state_change(&state, &queued.event, &mut published);
+                            // After the apply, not before: the depth counts events the
+                            // authoritative state has not absorbed yet, and an event
+                            // being applied right now is still one of them.
+                            state.session_maps.session_state_events.applied();
+                        }
                         None => break,
                     },
                     event = broadcast_rx.recv() => match event {
@@ -3232,9 +5013,105 @@ impl AppState {
         });
     }
 
-    /// Send a push notification to all mobile subscribers, deep-linking a session.
-    fn send_mobile_push(state: &Arc<AppState>, session_id: &str, body: &str) {
-        Self::send_mobile_push_url(state, format!("/mobile/session/{session_id}"), body);
+    /// Publish `SessionStateChanged` for the session `event` just mutated, when
+    /// the state a client renders actually moved.
+    ///
+    /// Called from the accumulator and nowhere else, because only the
+    /// accumulator can see a transition: it owns every write to `session_states`,
+    /// and `session_state_with_shell` folds in the three fields derived at read
+    /// time (`shell_state`, `queued_commands`, `agent_state`). Dedup is
+    /// `SessionState`'s `PartialEq`, which excludes `last_activity_ms` — the one
+    /// field a silent repaint does move.
+    ///
+    /// Only PTY-scoped events are considered: they are the only variants
+    /// `apply_event_to_session_state` writes state for, so a global event can
+    /// never hide a transition here.
+    fn publish_session_state_change(
+        state: &Arc<AppState>,
+        event: &AppEvent,
+        published: &mut HashMap<String, SessionState>,
+    ) {
+        let Some(session_id) = event.pty_session_id() else {
+            return;
+        };
+        #[cfg(feature = "desktop")]
+        if let Some(app) = state.app_handle.read().as_ref() {
+            crate::background_mode::tray::desktop::schedule_sync(app);
+        }
+        let Some(current) = state.session_state_with_shell(session_id) else {
+            // The row is gone (`SessionClosed`). Drop the baseline too: a reused
+            // id must not be deduped against the state of a dead session.
+            published.remove(session_id);
+            return;
+        };
+        if published.get(session_id) == Some(&current) {
+            return;
+        }
+        published.insert(session_id.to_string(), current.clone());
+        // Dual-emit. Nothing forwards the bus to the desktop window, so the
+        // window listener is fed here and the bus feeds `/events` SSE — the
+        // IPC/HTTP parity rule in AGENTS.md. Both carry the same payload.
+        #[cfg(feature = "desktop")]
+        if let Some(app) = state.app_handle.read().as_ref() {
+            let _ = app.emit(
+                "session-state-changed",
+                session_state_payload(session_id, &current),
+            );
+        }
+        let _ = state.event_bus.send(AppEvent::SessionStateChanged {
+            session_id: session_id.to_string(),
+            state: Box::new(current),
+        });
+    }
+
+    fn event_is_parented(&self, event: &AppEvent) -> bool {
+        event.pty_session_id().is_some_and(|id| {
+            self.session_maps
+                .session_parent
+                .get(id)
+                .is_some_and(|parent| {
+                    !crate::mcp_http::mcp_transport::is_pending_parent(parent.value())
+                })
+        })
+    }
+
+    /// Use the host preference at consumption time, but the event's spawn ancestry.
+    fn session_push_ready(state: &AppState, parented: bool) -> bool {
+        let push_enabled = {
+            let config = state.config.read();
+            config.services.push.enabled
+                && !config.services.push.vapid_private_key.is_empty()
+                && !state.push_store.is_empty()
+        };
+        push_enabled
+            && (!parented
+                || !crate::config::load_notification_config_in(&state.data_dir)
+                    .silence_remote_completions)
+    }
+
+    /// Send a push with a readable label while retaining the PTY navigation id.
+    fn send_mobile_push(state: &Arc<AppState>, session_id: &str, prompt: &str) {
+        let identity = state.session_maps.sessions.get(session_id).map(|session| {
+            let session = session.lock();
+            (
+                session.display_name.clone(),
+                session.initial_cwd.clone().or_else(|| session.cwd.clone()),
+            )
+        });
+        let agent_type = state
+            .session_maps
+            .session_states
+            .get(session_id)
+            .and_then(|session| session.agent_type.clone());
+        let (name, cwd) = identity.unwrap_or_default();
+        let (body, url) = crate::push::session_push_payload(
+            session_id,
+            name.as_deref(),
+            agent_type.as_deref(),
+            cwd.as_deref(),
+            prompt,
+        );
+        Self::send_mobile_push_url(state, url, &body);
     }
 
     /// Send a push notification to all mobile subscribers at an arbitrary deep link.
@@ -3248,10 +5125,10 @@ impl AppState {
         let push_state = Arc::clone(state);
         let body = body.to_owned();
         tokio::spawn(async move {
-            let stale =
+            let result =
                 crate::push::send_push_batch(subs, &config, &http_client, "FastAF", &body, &url)
                     .await;
-            for endpoint in &stale {
+            for endpoint in &result.stale_endpoints {
                 push_state.push_store.remove(endpoint);
             }
         });
@@ -3259,6 +5136,19 @@ impl AppState {
 
     /// Apply a single event to the session state accumulator.
     fn apply_event_to_session_state(state: &Arc<AppState>, event: &AppEvent) {
+        let parented = state.event_is_parented(event);
+        Self::apply_session_state_event(state, event, parented);
+    }
+
+    fn apply_session_state_event(state: &Arc<AppState>, event: &AppEvent, parented: bool) {
+        // #744-138c: awaiting-evidence side effect on the session's
+        // SilenceState, applied outside the session_states entry lock (see
+        // the PtyParsed arm below) to preserve the SilenceState → SessionState
+        // lock order used throughout pty.rs.
+        enum AwaitingEvidenceOp {
+            Clear,
+            RecordChoicePrompt,
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3271,19 +5161,32 @@ impl AppState {
                 ..
             } => {
                 state
-                    .session_states
+                    .session_maps.session_states
                     .entry(session_id.clone())
                     .and_modify(|session| {
                         session.last_activity_ms = now_ms;
-                        session.agent_type = agent_type.clone();
+                        // Creation may be applied after foreground discovery.
+                        // Never re-arm a preset whose agent was already seen.
+                        if session.agent_type.is_none() && !session.agent_foreground_observed {
+                            session.seed_configured_agent(agent_type.clone());
+                        }
                     })
-                    .or_insert_with(|| SessionState {
-                        last_activity_ms: now_ms,
-                        agent_type: agent_type.clone(),
-                        ..Default::default()
+                    .or_insert_with(|| {
+                        let mut session = SessionState { last_activity_ms: now_ms, ..Default::default() };
+                        session.seed_configured_agent(agent_type.clone());
+                        session
                     });
             }
+            AppEvent::ShellAbandoned { session_id, since_ms } => {
+                if let Some(mut session) = state.session_maps.session_states.get_mut(session_id) {
+                    session.abandoned_since_ms = *since_ms;
+                }
+            }
             AppEvent::PtyDescriptionChanged { .. } => {}
+            AppEvent::ChatViewChanged { .. } => {}
+            AppEvent::SessionRenamed { .. } => {}
+            AppEvent::SessionSuspended { .. } => {}
+            AppEvent::TermAliasAssigned { .. } => {}
             // A watcher hit says nothing about the session's own state — it is a
             // plugin-facing signal that rides the bus for browser clients only.
             AppEvent::PluginWatcherLines { .. } => {}
@@ -3294,14 +5197,14 @@ impl AppState {
             // answers the different question "are bytes flowing right now", which
             // is true throughout a `tail -f` that produces no semantic event at
             // all. Folding the two would silently redefine the mobile column.
-            AppEvent::PtyActivity { .. } => {}
+            AppEvent::PtyActivity { .. } | AppEvent::PtyTitle { .. } | AppEvent::PtyBell { .. } => {}
             // Shell-integration markers and the OSC 7 cwd are terminal-rendering
             // signals, not session state. The cwd that state cares about is
             // written straight onto the `sessions` entry at the emit site; this
             // event exists to reach clients, not to be accumulated.
             AppEvent::PtyOsc133 { .. } | AppEvent::PtyCwd { .. } => {}
             AppEvent::SessionClosed { session_id, .. } => {
-                state.session_states.remove(session_id);
+                state.session_maps.session_states.remove(session_id);
             }
             AppEvent::PtyParsed { session_id, parsed } => {
                 let event_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -3312,9 +5215,102 @@ impl AppState {
                 // Wait metadata for a session that just parked, routed to the
                 // spawning orchestrator's inbox outside the lock below.
                 let mut parked_wait: Option<(String, bool, &'static str)> = None;
+                let mut recovery_notice = None;
+
+                // Ranked awaiting evidence (#744-138c): resolved through the
+                // session's SilenceState BEFORE the session_states entry is
+                // taken below. Lock order is SilenceState → SessionState
+                // everywhere in pty.rs (see note_submitted_input_with_hook);
+                // taking session_states first and reaching into silence_states
+                // while still holding it would invert that order against a
+                // thread that already follows it, and could deadlock.
+                let current_turn_epoch = state
+                    .session_maps
+                    .session_states
+                    .get(session_id)
+                    .map(|s| s.turn_epoch);
+                let epoch_matches =
+                    event_turn_epoch.is_none_or(|epoch| epoch == current_turn_epoch.unwrap_or(0));
+                // Don't let a low-confidence (silence-heuristic) question
+                // overwrite an already-active high-confidence one — e.g. grok
+                // signals an approval prompt via its "Action Required" title
+                // (confident) while its on-screen status line is also parsed as
+                // a low-confidence question. The generic rank gate reproduces
+                // this: a confident (`Protocol`-rank) verdict rejects a
+                // heuristic (`Screen`-rank) one, same-or-higher rank updates.
+                let question_admitted = (event_type == "question" && epoch_matches).then(|| {
+                    let new_confident = parsed
+                        .get("confident")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let (rank, source) = if new_confident {
+                        // Kept apart so `progress-superseded` can tell a
+                        // blocked report from a dialog it must never clear.
+                        let source = if parsed.get("source").and_then(|v| v.as_str())
+                            == Some("progress-blocked")
+                        {
+                            "progress-blocked"
+                        } else {
+                            "question-confident"
+                        };
+                        (crate::pty::EvidenceRank::Protocol, source)
+                    } else {
+                        (crate::pty::EvidenceRank::Screen, "question-heuristic")
+                    };
+                    state
+                        .session_maps
+                        .silence_states
+                        .get(session_id)
+                        .map(|sl| {
+                            let mut silence = sl.lock();
+                            // Progress is a conversational wait, not ownership of
+                            // native dialog controls. A late report must not
+                            // relabel a live approval as a queued-answer target.
+                            if source == "progress-blocked"
+                                && silence.awaiting_rank() == Some(crate::pty::EvidenceRank::Protocol)
+                                && silence.awaiting_source() != Some("progress-blocked")
+                            {
+                                return false;
+                            }
+                            silence.record_awaiting(rank, source)
+                        })
+                        .unwrap_or(true)
+                });
+                let push_ready = matches!(event_type, "question" | "choice-prompt") && Self::session_push_ready(state, parented);
+                let window_focused = state
+                    .desktop_window_focused
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let desktop_away = matches!(event_type, "question" | "choice-prompt")
+                    && mobile_push_away(
+                        window_focused,
+                        if window_focused { hid_idle_seconds() } else { None },
+                    );
+                // "status-line" and "question-cleared" only clear a non-confident
+                // awaiting verdict — the old `!question_confident` sticky guard,
+                // read off the same ranked evidence instead of a raw bool.
+                let awaiting_is_confident = matches!(event_type, "status-line" | "question-cleared")
+                    && state
+                        .session_maps
+                        .silence_states
+                        .get(session_id)
+                        .is_some_and(|sl| {
+                            sl.lock().awaiting_rank() == Some(crate::pty::EvidenceRank::Protocol)
+                        });
+                // A later progress entry from the same PTY retracts only the
+                // badge a `progress blocked` raised; a dialog, a choice prompt
+                // or any other confident question records another source.
+                let awaiting_from_progress = event_type == "progress-superseded"
+                    && state
+                        .session_maps
+                        .silence_states
+                        .get(session_id)
+                        .is_some_and(|sl| sl.lock().awaiting_source() == Some("progress-blocked"));
+                // Applied to the session's SilenceState AFTER `s` (below) is
+                // dropped, for the same lock-order reason.
+                let mut awaiting_evidence_op: Option<AwaitingEvidenceOp> = None;
 
                 let mut s = state
-                    .session_states
+                    .session_maps.session_states
                     .entry(session_id.clone())
                     .or_insert_with(|| SessionState {
                         last_activity_ms: now_ms,
@@ -3322,20 +5318,26 @@ impl AppState {
                     });
                 s.last_activity_ms = now_ms;
                 match event_type {
-                    "question" if event_turn_epoch.is_none_or(|epoch| epoch == s.turn_epoch) => {
+                    "provider-recovery" => {
+                        let recovery = parsed.get("recovery").filter(|v| !v.is_null())
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
+                        if s.provider_recovery != recovery {
+                            if s.provider_recovery.is_none() || recovery.is_none() {
+                                recovery_notice = Some(serde_json::json!({
+                                    "type": "state_change", "session_id": session_id,
+                                    "state": if recovery.is_some() { "recovering" } else { "recovery-ended" },
+                                    "provider_recovery": recovery,
+                                }));
+                            }
+                            s.provider_recovery = recovery;
+                        }
+                    }
+                    "question" if epoch_matches => {
                         let new_confident = parsed
                             .get("confident")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                        // Don't let a low-confidence (silence-heuristic) question
-                        // overwrite an already-active high-confidence one — e.g. grok
-                        // signals an approval prompt via its "Action Required" title
-                        // (confident) while its on-screen status line is also parsed as
-                        // a low-confidence question. Downgrading question_confident here
-                        // would let the next busy status-line clear awaiting_input,
-                        // making the approval state flicker. The confident question
-                        // clears on user-input instead.
-                        if !(s.awaiting_input && s.question_confident && !new_confident) {
+                        if question_admitted == Some(true) {
                             let was_awaiting = s.awaiting_input;
                             s.awaiting_input = true;
                             s.question_text = parsed
@@ -3343,6 +5345,15 @@ impl AppState {
                                 .and_then(|t| t.as_str())
                                 .map(|t| t.to_string());
                             s.question_confident = new_confident;
+                            tracing::debug!(
+                                session_id = %session_id,
+                                turn_epoch = s.turn_epoch,
+                                confident = new_confident,
+                                hook_instrumented = s.hook_instrumented,
+                                generic_claude_notify = s.question_text.as_deref()
+                                    == Some("Claude is waiting for your input"),
+                                "awaiting_input set from question"
+                            );
 
                             // Confidence is metadata, not a routing gate. A
                             // managed child has nobody at its keyboard, so every
@@ -3357,27 +5368,48 @@ impl AppState {
                             }
 
                             // Rate limit: skip if last push for this session was < 30s ago
-                            let should_push = !state.push_store.is_empty()
-                                && s.last_push_ms
-                                    .is_none_or(|t| now_ms.saturating_sub(t) >= 30_000);
+                            let eligible = push_ready
+                                && desktop_away
+                                && s.question_text.as_deref().is_some_and(|text| !text.trim().is_empty());
+                            let should_push = crate::push::reserve_push_slot(
+                                &mut s.last_push_ms,
+                                now_ms,
+                                eligible,
+                            );
                             if should_push {
-                                s.last_push_ms = Some(now_ms);
                                 let prompt = s.question_text.clone().unwrap_or_default();
                                 push_data = Some((session_id.clone(), prompt));
                             }
                         }
                     }
-                    "question-cleared"
-                        if event_turn_epoch.is_none_or(|epoch| epoch == s.turn_epoch) =>
-                    {
+                    "question-cleared" if epoch_matches => {
                         // The silence timer saw the question leave the
                         // screen. It only fires for the heuristic state,
                         // but re-check here: a confident question may
                         // have landed between the check and this event.
-                        if !s.question_confident {
+                        if !awaiting_is_confident {
                             s.awaiting_input = false;
                             s.question_text = None;
+                            awaiting_evidence_op = Some(AwaitingEvidenceOp::Clear);
                         }
+                    }
+                    "protocol-question-cleared" if epoch_matches => {
+                        let expected = parsed
+                            .get("expected_question_text")
+                            .and_then(|value| value.as_str());
+                        if expected.is_none_or(|text| s.question_text.as_deref() == Some(text)) {
+                            s.awaiting_input = false;
+                            s.question_text = None;
+                            s.question_confident = false;
+                            s.choice_prompt = None;
+                            awaiting_evidence_op = Some(AwaitingEvidenceOp::Clear);
+                        }
+                    }
+                    "progress-superseded" if awaiting_from_progress => {
+                        s.awaiting_input = false;
+                        s.question_text = None;
+                        s.question_confident = false;
+                        awaiting_evidence_op = Some(AwaitingEvidenceOp::Clear);
                     }
                     "user-input" => {
                         // User responded — agent will start working
@@ -3386,6 +5418,7 @@ impl AppState {
                         s.question_confident = false;
                         s.slash_menu_items = None;
                         s.choice_prompt = None;
+                        awaiting_evidence_op = Some(AwaitingEvidenceOp::Clear);
                         // Capture as last_prompt if >= 10 words
                         if let Some(content) = parsed.get("content").and_then(|v| v.as_str())
                             && content.split_whitespace().count() >= 10
@@ -3423,9 +5456,10 @@ impl AppState {
                         // awaiting_input flickers. It clears on user-input (the user
                         // answered, state.rs user-input arm). Low-confidence
                         // silence-heuristic questions still yield to the busy signal.
-                        if !s.question_confident {
+                        if !awaiting_is_confident {
                             s.awaiting_input = false;
                             s.question_text = None;
+                            awaiting_evidence_op = Some(AwaitingEvidenceOp::Clear);
                         }
                         s.rate_limited = false;
                         s.retry_after_ms = None;
@@ -3477,6 +5511,18 @@ impl AppState {
                             as serde::Deserialize>::deserialize(&**parsed)
                         .ok();
                         s.awaiting_input = true;
+                        if let Some(title) = s.choice_prompt.as_ref().map(|choice| choice.title.clone()) {
+                            s.question_text = Some(title.clone());
+                            s.question_confident = true;
+                            if crate::push::reserve_push_slot(
+                                &mut s.last_push_ms,
+                                now_ms,
+                                push_ready && desktop_away && !title.trim().is_empty(),
+                            ) {
+                                push_data = Some((session_id.clone(), title));
+                            }
+                        }
+                        awaiting_evidence_op = Some(AwaitingEvidenceOp::RecordChoicePrompt);
                         if !was_awaiting {
                             parked_wait = Some((
                                 parsed
@@ -3492,6 +5538,7 @@ impl AppState {
                     "choice-cleared" => {
                         s.choice_prompt = None;
                         s.awaiting_input = false;
+                        awaiting_evidence_op = Some(AwaitingEvidenceOp::Clear);
                         s.question_text = None;
                         s.question_confident = false;
                     }
@@ -3515,6 +5562,21 @@ impl AppState {
                 }
                 drop(s);
 
+                // Applied outside the session_states entry lock — same
+                // lock-order reason as `question_admitted`/`awaiting_is_confident`
+                // above (#744-138c).
+                if let Some(op) = awaiting_evidence_op
+                    && let Some(sl) = state.session_maps.silence_states.get(session_id)
+                {
+                    let mut sl = sl.lock();
+                    match op {
+                        AwaitingEvidenceOp::Clear => sl.clear_awaiting(),
+                        AwaitingEvidenceOp::RecordChoicePrompt => {
+                            sl.record_awaiting(crate::pty::EvidenceRank::Protocol, "choice-prompt");
+                        }
+                    }
+                }
+
                 // Unblock-triggered flush (story 091): user-input just cleared
                 // question_confident. If the agent answered a confident question but
                 // stays idle, there is no BUSY→IDLE transition to drain its queued
@@ -3528,6 +5590,9 @@ impl AppState {
                 // Route the parked prompt to the spawning orchestrator, outside the
                 // session_states entry lock: delivery reaches into the PARENT's
                 // SilenceState and re-entering this shard would deadlock.
+                if let Some(notice) = recovery_notice {
+                    crate::pty::push_state_change_to_parent(state, session_id, notice);
+                }
                 if let Some((prompt, confident, source)) = parked_wait {
                     crate::pty::push_state_change_to_parent(
                         state,
@@ -3544,26 +5609,30 @@ impl AppState {
                 }
 
                 // Spawn push notification outside the DashMap lock
-                if let Some((sid, prompt)) = push_data
-                    && !state
-                        .desktop_window_focused
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    let session_name = state
-                        .sessions
-                        .get(&sid)
-                        .and_then(|s| s.value().lock().display_name.clone())
-                        .unwrap_or_else(|| sid.clone());
-                    let body = if prompt.is_empty() {
-                        format!("{session_name}: awaiting input")
-                    } else {
-                        format!("{session_name}: {prompt}")
-                    };
-                    Self::send_mobile_push(state, &sid, &body);
+                if let Some((sid, prompt)) = push_data {
+                    Self::send_mobile_push(state, &sid, &prompt);
                 }
             }
             AppEvent::PtyExit { session_id } => {
-                if let Some(mut entry) = state.session_states.get_mut(session_id) {
+                if let Some(mut session) = state.session_maps.session_states.get_mut(session_id) {
+                    session.provider_recovery = None;
+                }
+                crate::codex_binding::revoke(state, session_id);
+                let push_ready = Self::session_push_ready(state, parented);
+                let window_focused = state
+                    .desktop_window_focused
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let desktop_away = mobile_push_away(
+                    window_focused,
+                    if window_focused { hid_idle_seconds() } else { None },
+                );
+                let mut should_push = false;
+                {
+                    let mut entry = state
+                        .session_maps
+                        .session_states
+                        .entry(session_id.clone())
+                        .or_default();
                     entry.awaiting_input = false;
                     entry.question_text = None;
                     entry.question_confident = false;
@@ -3573,26 +5642,22 @@ impl AppState {
                     entry.active_sub_tasks = 0;
                     entry.choice_prompt = None;
                     entry.last_activity_ms = now_ms;
+                    // Completion and questions share the same per-session window.
+                    if crate::push::reserve_push_slot(
+                        &mut entry.last_push_ms,
+                        now_ms,
+                        push_ready && desktop_away,
+                    ) {
+                        should_push = true;
+                    }
                 }
-                // Push "session completed" to mobile (unseen)
-                if !state
-                    .desktop_window_focused
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    let session_name = state
-                        .sessions
-                        .get(session_id)
-                        .and_then(|s| s.value().lock().display_name.clone())
-                        .unwrap_or_else(|| session_id.clone());
-                    Self::send_mobile_push(
-                        state,
-                        session_id,
-                        &format!("{session_name}: completed"),
-                    );
+                if should_push {
+                    Self::send_mobile_push(state, session_id, "completed");
                 }
             }
             // Global events don't affect per-session state
-            AppEvent::HeadChanged { .. }
+            AppEvent::WorkItemProviderRequest { .. }
+            | AppEvent::HeadChanged { .. }
             | AppEvent::RepoChanged { .. }
             | AppEvent::PluginChanged { .. }
             | AppEvent::UpstreamStatusChanged { .. }
@@ -3600,8 +5665,13 @@ impl AppState {
             | AppEvent::McpToast { .. }
             | AppEvent::McpConfirm { .. }
             | AppEvent::McpConfirmResolved { .. }
+            | AppEvent::AiChatSelectionChanged
+            | AppEvent::OpenMarkdownTabsChanged
+            | AppEvent::SettingsChanged(_)
+            | AppEvent::IdeasChanged
             | AppEvent::RepositoriesChanged
             | AppEvent::DirChanged { .. }
+            | AppEvent::SessionWorktreeDeclared { .. }
             | AppEvent::WorktreeCreated { .. }
             | AppEvent::WorktreeRemoved { .. }
             | AppEvent::PeerRegistered { .. }
@@ -3609,20 +5679,47 @@ impl AppState {
             | AppEvent::UiTab { .. }
             | AppEvent::GitHubPrUpdate { .. }
             | AppEvent::GitHubTransition { .. }
+            | AppEvent::GitHubIntakeIssuesUpdate { .. }
             | AppEvent::GitHubIssuesUpdate { .. }
             | AppEvent::CloseHtmlTabs { .. }
             | AppEvent::ScheduledJobCompleted { .. }
-            | AppEvent::DiffTriageProgress { .. }
-            | AppEvent::ReviewProgress { .. }
+            | AppEvent::ScheduledJobNeedsApproval { .. }
+            | AppEvent::AiSuggestion { .. }
+            | AppEvent::DesignModeChanged { .. }
             | AppEvent::ConflictAssistStatus { .. }
+            | AppEvent::ProgressRecorded { .. }
+            | AppEvent::WorkflowRunChanged { .. }
+            | AppEvent::AutomationRunChanged { .. }
+            | AppEvent::CloseDialog { .. }
+            | AppEvent::BackgroundModeChanged { .. }
+            | AppEvent::ReviewProgress { .. }
             | AppEvent::ProposalsReady { .. }
-            | AppEvent::WorktreeCreateFailed { .. } => {}
+            // This accumulator's own output. Feeding it back in would make the
+            // session state a function of itself; it is a report, not an input.
+            | AppEvent::SessionStateChanged { .. }
+            // An ACP connection is not a PTY session and has no row here.
+            | AppEvent::AcpNotice(_)
+            // A remote daemon coming up or going down says nothing about any
+            // session: the sessions it holds report themselves, over the bridge
+            // that connection carries.
+            | AppEvent::RemoteConnectionStatusChanged { .. }
+            // A mirrored event is the far end's accumulator output. Feeding it
+            // in here would build a second, local row for a session this
+            // machine does not run.
+            | AppEvent::RemoteMirrored { .. } => {}
+            // Dictation is bound to a session but says nothing about it: a
+            // download belongs to the installation, and a spoken reply belongs
+            // to the conversation rather than to the terminal it will reach.
+            #[cfg(feature = "dictation")]
+            AppEvent::DictationDownloadProgress { .. }
+            | AppEvent::SpeechDownloadProgress { .. }
+            | AppEvent::SpeechUtterance { .. } => {}
         }
     }
 
     /// Build orchestrator stats snapshot from current state.
     pub(crate) fn orchestrator_stats(&self) -> OrchestratorStats {
-        let active = self.sessions.len();
+        let active = self.session_maps.sessions.len();
         OrchestratorStats {
             active_sessions: active,
             max_sessions: MAX_CONCURRENT_SESSIONS,
@@ -3669,6 +5766,11 @@ pub(crate) struct PtyConfig {
     /// symlinks, wrapper scripts).
     #[serde(default)]
     pub(crate) agent_type: Option<String>,
+    /// Terminal alias this tab held before the restart (e.g. `tu-3`). Reserved
+    /// verbatim so the address other agents already know keeps working; a
+    /// malformed or taken value is ignored. See `AppState::assign_term_alias`.
+    #[serde(default)]
+    pub(crate) alias: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -3683,597 +5785,19 @@ pub(crate) struct AgentConfig {
     pub(crate) args: Option<Vec<String>>,
 }
 
-// ---------------------------------------------------------------------------
-// VtLogBuffer — VT100-aware log extractor for mobile/REST consumers
-// ---------------------------------------------------------------------------
-
-/// Default maximum log lines retained per session.
-pub(crate) const VT_LOG_BUFFER_CAPACITY: usize = 10_000;
-
-/// Terminal color extracted from vt100 cells.
-///
-/// Serializes as `{"idx": N}` for 256-color palette or `{"rgb": [r,g,b]}` for
-/// 24-bit color.  Default color is omitted (serialized as `null` / skipped).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogColor {
-    Idx(u8),
-    Rgb(u8, u8, u8),
-}
-
-impl LogColor {
-    pub(crate) fn from_ansi_color(c: alacritty_terminal::vte::ansi::Color) -> Option<Self> {
-        use alacritty_terminal::vte::ansi::{Color, NamedColor};
-        match c {
-            Color::Named(n) => match n {
-                NamedColor::Foreground
-                | NamedColor::Background
-                | NamedColor::Cursor
-                | NamedColor::BrightForeground
-                | NamedColor::DimForeground => None,
-                NamedColor::Black => Some(LogColor::Idx(0)),
-                NamedColor::Red => Some(LogColor::Idx(1)),
-                NamedColor::Green => Some(LogColor::Idx(2)),
-                NamedColor::Yellow => Some(LogColor::Idx(3)),
-                NamedColor::Blue => Some(LogColor::Idx(4)),
-                NamedColor::Magenta => Some(LogColor::Idx(5)),
-                NamedColor::Cyan => Some(LogColor::Idx(6)),
-                NamedColor::White => Some(LogColor::Idx(7)),
-                NamedColor::BrightBlack => Some(LogColor::Idx(8)),
-                NamedColor::BrightRed => Some(LogColor::Idx(9)),
-                NamedColor::BrightGreen => Some(LogColor::Idx(10)),
-                NamedColor::BrightYellow => Some(LogColor::Idx(11)),
-                NamedColor::BrightBlue => Some(LogColor::Idx(12)),
-                NamedColor::BrightMagenta => Some(LogColor::Idx(13)),
-                NamedColor::BrightCyan => Some(LogColor::Idx(14)),
-                NamedColor::BrightWhite => Some(LogColor::Idx(15)),
-                NamedColor::DimBlack => Some(LogColor::Idx(0)),
-                NamedColor::DimRed => Some(LogColor::Idx(1)),
-                NamedColor::DimGreen => Some(LogColor::Idx(2)),
-                NamedColor::DimYellow => Some(LogColor::Idx(3)),
-                NamedColor::DimBlue => Some(LogColor::Idx(4)),
-                NamedColor::DimMagenta => Some(LogColor::Idx(5)),
-                NamedColor::DimCyan => Some(LogColor::Idx(6)),
-                NamedColor::DimWhite => Some(LogColor::Idx(7)),
-            },
-            Color::Indexed(i) => Some(LogColor::Idx(i)),
-            Color::Spec(rgb) => Some(LogColor::Rgb(rgb.r, rgb.g, rgb.b)),
-        }
-    }
-}
-
-/// A contiguous run of text with uniform formatting attributes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct LogSpan {
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fg: Option<LogColor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bg: Option<LogColor>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub bold: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub italic: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub underline: bool,
-}
-
-/// A single log line composed of styled spans.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct LogLine {
-    pub spans: Vec<LogSpan>,
-    #[serde(skip_serializing_if = "is_zero_u16")]
-    pub cols: u16,
-    /// True when this line is agent UI chrome (prompt box, footer, status bar)
-    /// rather than agent output. Set once, at capture time, by
-    /// [`mark_agent_chrome`]; readers skip these lines instead of the buffer
-    /// dropping them, so a misclassification hides text rather than destroying
-    /// it. Never serialized — consumers receive the already-filtered view.
-    #[serde(skip)]
-    pub chrome: bool,
-}
-
-fn is_zero_u16(v: &u16) -> bool {
-    *v == 0
-}
-
-impl LogLine {
-    /// Returns the plain-text content (all span texts concatenated).
-    pub fn text(&self) -> String {
-        let mut s = String::new();
-        for span in &self.spans {
-            s.push_str(&span.text);
-        }
-        s
-    }
-
-    /// Strip structural tokens (`intent: ...`, `suggest: ...`) from span text.
-    /// These tokens are parsed by the output parser for state updates but should not
-    /// appear in rendered log output (PWA/REST consumers).
-    pub fn strip_structural_tokens(&mut self) {
-        lazy_static::lazy_static! {
-            // Match intent:/suggest: with optional leading whitespace and Ink
-            // bullet glyph (● U+25CF / ⏺ U+23FA) — mirrors the output parser
-            // regexes so scrollback lines that the parser detected are also
-            // stripped from the log delivered to PWA/REST consumers.
-            static ref PLAIN_PREFIX_RE: regex::Regex = regex::Regex::new(
-                r"(?m)^[\t ]*(?:[\x{25CF}\x{23FA}][\t ]+)?(?:intent|suggest):[\t ]+.*$"
-            ).unwrap();
-        }
-        for span in &mut self.spans {
-            if span.text.contains("intent:") || span.text.contains("suggest:") {
-                let replaced = PLAIN_PREFIX_RE.replace_all(&span.text, "");
-                span.text = replaced.into_owned();
-            }
-        }
-        // Remove spans that became empty after stripping
-        self.spans.retain(|s| !s.text.is_empty());
-    }
-}
-
-/// A screen row that changed after a `VtLogBuffer::process()` call.
-///
-/// Consumers (output parsers) iterate these to detect status lines, intent
-/// tokens, and other structured events — regardless of whether the terminal
-/// is in normal or alternate screen mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangedRow {
-    /// Zero-based row index on the visible screen.
-    pub row_index: usize,
-    /// Clean text content of the row (ANSI sequences stripped by the vt100 parser).
-    pub text: String,
-}
-
-/// Per-session VT-aware log buffer.
-///
-/// Wraps a `TerminalGrid` (backed by `alacritty_terminal`) with scrollback
-/// capture. Lines that scroll off the top of the screen are captured from the
-/// grid's history and stored in a bounded `VecDeque<LogLine>` for REST and
-/// WebSocket consumers.
-///
-/// **Thread safety:** Not `Sync` — lives behind `Mutex<VtLogBuffer>` in `AppState`.
-pub struct VtLogBuffer {
-    grid: crate::terminal_grid::TerminalGrid,
-    /// Finalized log lines (oldest first).
-    log: VecDeque<LogLine>,
-    /// Maximum number of log lines retained in our own buffer.
-    capacity: usize,
-    /// Whether the previous `process()` call saw the alternate screen active.
-    was_alternate: bool,
-    /// Number of scrollback lines already read from the grid.
-    /// Used to detect new scrollback lines after each `process()`.
-    scrollback_read: usize,
-    /// Monotonically increasing count of all log lines ever pushed (not bounded
-    /// by capacity). Used as stable cursor for paginated reads.
-    total_pushed: usize,
-    /// Widest cols seen so far. The grid never shrinks below this —
-    /// prevents Ink re-renders from fragmenting scrollback mid-word.
-    max_cols: u16,
-    /// Actual PTY cols (what the child process / Ink sees). May be smaller
-    /// than grid cols when a side panel narrows the terminal. Stamped
-    /// onto LogLine.cols so the frontend can detect narrow-captured lines.
-    pty_cols: u16,
-    /// When true, scrollback capture is paused — a side panel just
-    /// narrowed the terminal and Ink is flooding scrollback with
-    /// narrow re-renders. Cleared when pty_cols widens again.
-    suppress_capture: bool,
-}
-
-/// Internal scrollback capacity for the terminal grid. Must be large enough
-/// that it never fills up between consecutive `process()` calls — in practice
-/// even a `cat huge_file` sends data in ~4KB PTY read chunks.
-const GRID_SCROLLBACK: usize = 10_000;
-
-impl VtLogBuffer {
-    pub fn new(rows: u16, cols: u16, capacity: usize) -> Self {
-        let grid = crate::terminal_grid::TerminalGrid::new(rows, cols, GRID_SCROLLBACK);
-        Self {
-            grid,
-            log: VecDeque::new(),
-            capacity,
-            was_alternate: false,
-            scrollback_read: 0,
-            total_pushed: 0,
-            max_cols: cols,
-            pty_cols: cols,
-            suppress_capture: false,
-        }
-    }
-
-    pub fn set_ansi_colors(&mut self, colors: &[[u8; 3]; 16]) {
-        self.grid.set_ansi_colors(colors);
-    }
-
-    /// Feed raw PTY bytes into the terminal grid.
-    ///
-    /// Returns the screen rows that changed since the previous call.  Changed
-    /// rows are detected for **both** normal and alternate screen so that
-    /// output parsers can match status lines and intent tokens emitted by
-    /// agents that use the alternate screen (e.g. Claude Code / Ink).
-    ///
-    /// Log extraction reads new primary-screen scrollback lines from the grid's
-    /// history. Alternate history may exist for interactive scrolling, but it is
-    /// deliberately excluded from the durable log. The same exclusion applies
-    /// while mouse reporting is on the primary screen (`grok --no-alt-screen`):
-    /// the app owns the viewport and its SU/line dumps are not shell output.
-    pub fn process(&mut self, data: &[u8]) -> Vec<ChangedRow> {
-        let is_alternate = self.grid.is_alternate_screen();
-
-        // TerminalGrid::process handles changed-row detection internally,
-        // but we need to detect screen switches for prev_rows reset.
-        if is_alternate != self.was_alternate {
-            // Force full diff by clearing TerminalGrid's prev_rows
-            self.grid.clear_prev_rows();
-        }
-
-        let changed = self.grid.process(data);
-
-        let is_alternate = self.grid.is_alternate_screen();
-        let inline_tui = !is_alternate && self.grid.is_mouse_reporting();
-
-        // --- Log extraction: read new scrollback lines from grid ---
-        // The grid accumulates scrollback automatically when lines scroll
-        // off the top of the normal screen. We just read the delta.
-        //
-        // When suppress_capture is set (side panel halved the terminal
-        // width), Ink re-renders push fragmented junk into scrollback.
-        // Skip capture but keep scrollback_read in sync. Inline TUIs use
-        // the same keep-cursor-in-sync path so disabling mouse mode does
-        // not flush the TUI history into the log.
-        if !is_alternate {
-            let total_sb = self.grid.scrollback_count();
-            let delta = total_sb.saturating_sub(self.scrollback_read);
-            if delta > 0 {
-                if !self.suppress_capture && !inline_tui {
-                    let mut new_lines = self.grid.read_scrollback_log_lines(delta);
-                    mark_agent_chrome(&mut new_lines);
-                    let pty_cols = self.pty_cols;
-                    for mut ll in new_lines {
-                        ll.cols = pty_cols;
-                        self.push_log_line(ll);
-                    }
-                }
-                self.scrollback_read = total_sb;
-            }
-        }
-
-        self.was_alternate = is_alternate;
-        changed
-    }
-
-    /// Resize with reflow. The reflow_wrap flag on Row prevents stale
-    /// natural wraps from merging — only shrink-produced wraps get merged.
-    /// Alt screen and reflow_history=false disable reflow entirely.
-    pub fn resize(&mut self, rows: u16, cols: u16) {
-        let prev = self.pty_cols;
-        self.pty_cols = cols;
-        if cols > self.max_cols {
-            self.max_cols = cols;
-        }
-        // Suppress scrollback capture when cols drops by >50% (side panel).
-        // Ignore the very first resize (total_pushed==0, xterm fit addon).
-        if cols.saturating_mul(2) < prev && self.total_pushed > 0 {
-            self.suppress_capture = true;
-        } else if cols.saturating_mul(2) >= self.max_cols {
-            self.suppress_capture = false;
-        }
-        let mode = if !self.grid.reflow_history || self.grid.is_alternate_screen() {
-            ReflowMode::None
-        } else {
-            ReflowMode::All
-        };
-        self.grid.resize_with_mode(rows, cols, mode);
-        // A resize can change the inactive primary grid's history length while an
-        // alternate-screen app is active. Keep the durable-log cursor in the
-        // primary coordinate space; syncing it to alt history suppresses normal
-        // shell capture after exit until primary history catches up.
-        self.scrollback_read = self.grid.primary_scrollback_count();
-    }
-
-    /// All finalized log lines (oldest first).
-    #[allow(dead_code)]
-    pub fn lines(&self) -> &VecDeque<LogLine> {
-        &self.log
-    }
-
-    /// Returns log lines starting at absolute `offset`, up to `limit` lines.
-    /// Offset is in the same coordinate space as `total_lines()` — monotonically
-    /// increasing, not relative to the current buffer contents.
-    /// Returns `(lines, new_offset)` where `new_offset = total_lines()`.
-    ///
-    /// Chrome lines (agent prompt box and footer) occupy offset slots but are
-    /// omitted from the result, so the returned count can be smaller than
-    /// `limit`. Callers deriving a window start from the result length must use
-    /// [`Self::oldest_offset`] instead.
-    pub fn lines_since_owned(&self, offset: usize, limit: usize) -> (Vec<LogLine>, usize) {
-        let oldest = self.oldest_offset();
-        let total = self.total_pushed;
-        if offset >= total {
-            return (Vec::new(), total);
-        }
-        // Clamp to oldest retained line if the requested offset was evicted
-        let effective = offset.max(oldest);
-        let skip = effective - oldest;
-        let mut slice: Vec<LogLine> = self
-            .log
-            .iter()
-            .skip(skip)
-            .take(limit)
-            .filter(|line| !line.chrome)
-            .cloned()
-            .collect();
-        for line in &mut slice {
-            line.strip_structural_tokens();
-        }
-        (slice, total)
-    }
-
-    /// Current visible screen rows.
-    ///
-    /// Returns the cached snapshot from the grid (from the last `process()` call)
-    /// when available — no re-parsing needed.
-    pub fn screen_rows(&self) -> Vec<String> {
-        self.grid.screen_text_rows()
-    }
-
-    /// Borrowed view of cached screen rows — avoids cloning when caller holds the lock.
-    pub fn screen_rows_ref(&self) -> Option<&[String]> {
-        self.grid.screen_text_rows_ref()
-    }
-
-    pub(crate) fn cursor_point(&self) -> (usize, usize) {
-        self.grid.cursor_point()
-    }
-
-    pub(crate) fn logical_prefix_at_cursor(&self) -> Option<crate::terminal_grid::LogicalPrefix> {
-        self.grid.logical_prefix_at_cursor()
-    }
-
-    pub(crate) fn physical_prefix_at_cursor(&self) -> Option<crate::terminal_grid::LogicalPrefix> {
-        self.grid.physical_prefix_at_cursor()
-    }
-
-    /// Current visible screen rows as styled LogLines (with ANSI color attributes).
-    /// Used by mobile/REST to render screen content with colors.
-    pub fn screen_log_lines(&self) -> Vec<LogLine> {
-        let mut lines = self.grid.screen_log_lines();
-        for line in &mut lines {
-            line.strip_structural_tokens();
-        }
-        // Trim trailing empty lines
-        while let Some(last) = lines.last() {
-            if last.spans.is_empty() {
-                lines.pop();
-            } else {
-                break;
-            }
-        }
-        lines
-    }
-
-    /// Extract the user-typed text from the prompt line, excluding ghost/suggestion text.
-    /// Uses the cursor position as the boundary — everything after the cursor is suggestion.
-    /// Falls back to dim-detection when the cursor is not on a prompt row.
-    pub fn prompt_input_text(&self) -> Option<String> {
-        self.grid.prompt_input_text()
-    }
-
-    /// Total log lines ever pushed (monotonically increasing).
-    /// Use as a stable cursor for paginated reads — does not decrease when
-    /// old lines are evicted from the bounded buffer.
-    pub fn total_lines(&self) -> usize {
-        self.total_pushed
-    }
-
-    /// Absolute offset of the oldest retained line. Lines before this have
-    /// been evicted by buffer rotation and are no longer available.
-    pub fn oldest_offset(&self) -> usize {
-        self.total_pushed - self.log.len()
-    }
-
-    /// Serialize damaged grid rows into a binary frame for Tauri Channel streaming.
-    /// Delegates to the inner TerminalGrid; returns empty Vec when no rows changed.
-    pub(crate) fn serialize_dirty_rows(&mut self) -> Vec<u8> {
-        self.grid.serialize_dirty_rows()
-    }
-
-    /// Whether a DEC 2026 synchronized update is currently open.
-    pub(crate) fn is_sync_update_active(&self) -> bool {
-        self.grid.is_sync_update_active()
-    }
-
-    /// Flush a synchronized update whose deadline has passed; `true` when it
-    /// produced new damage to serialize.
-    pub(crate) fn flush_sync_timeout_if_needed(&mut self) -> bool {
-        self.grid.flush_sync_timeout_if_needed()
-    }
-
-    /// Drain a still-buffered synchronized update regardless of its deadline.
-    pub(crate) fn force_stop_sync_if_buffered(&mut self) -> bool {
-        self.grid.force_stop_sync_if_buffered()
-    }
-
-    pub(crate) fn is_alternate_screen(&self) -> bool {
-        self.grid.is_alternate_screen()
-    }
-
-    pub(crate) fn is_mouse_reporting(&self) -> bool {
-        self.grid.is_mouse_reporting()
-    }
-
-    pub(crate) fn is_cursor_visible(&self) -> bool {
-        self.grid.is_cursor_visible()
-    }
-
-    pub(crate) fn grid_force_full_damage(&mut self) {
-        self.grid.force_full_damage();
-    }
-
-    pub(crate) fn grid_drain_events(&self) -> Vec<crate::terminal_grid::TermEvent> {
-        self.grid.drain_events()
-    }
-
-    // --- Scroll delegates ---
-
-    pub(crate) fn grid_scroll(&mut self, delta: i32) {
-        self.grid.scroll(delta);
-    }
-
-    pub(crate) fn grid_scroll_to_line(&mut self, line: usize) {
-        self.grid.scroll_to_line(line);
-    }
-
-    pub(crate) fn grid_scroll_to_offset(&mut self, offset: usize) {
-        self.grid.scroll_to_offset(offset);
-    }
-
-    pub(crate) fn grid_display_offset(&self) -> usize {
-        self.grid.display_offset()
-    }
-
-    pub(crate) fn grid_serialize_styled_range(&self, start_abs: usize, count: usize) -> Vec<u8> {
-        self.grid.serialize_styled_range(start_abs, count)
-    }
-
-    pub(crate) fn grid_total_lines(&self) -> usize {
-        self.grid.total_lines()
-    }
-
-    pub(crate) fn read_rows_in_range(&self, start_abs: usize, end_abs: usize) -> Vec<String> {
-        self.grid.read_rows_in_range(start_abs, end_abs)
-    }
-
-    pub(crate) fn grid_screen_lines(&self) -> usize {
-        self.grid.screen_lines()
-    }
-
-    pub(crate) fn grid_columns(&self) -> usize {
-        self.grid.columns()
-    }
-
-    pub(crate) fn grid_history_size(&self) -> usize {
-        self.grid.scrollback_count()
-    }
-
-    // --- Search delegate ---
-
-    pub(crate) fn grid_search(&self, query: &str) -> Vec<crate::terminal_grid::SearchMatch> {
-        self.grid.search(query)
-    }
-
-    pub(crate) fn grid_search_buffer(
-        &self,
-        query: &str,
-    ) -> Vec<crate::terminal_grid::BufferSearchMatch> {
-        self.grid.search_buffer(query)
-    }
-
-    pub(crate) fn grid_enumerate_hyperlinks(&self) -> Vec<(usize, usize, usize, String)> {
-        self.grid.enumerate_visible_hyperlinks()
-    }
-
-    pub(crate) fn grid_extract_semantic_zones(&self) -> Vec<(String, usize, usize, String)> {
-        self.grid.extract_semantic_zones()
-    }
-
-    // --- Row text delegate ---
-
-    pub(crate) fn grid_get_row_text(&self, row: usize) -> String {
-        self.grid.get_row_text(row)
-    }
-
-    pub(crate) fn grid_get_logical_line(&self, row: usize) -> (usize, String) {
-        self.grid.get_logical_line(row)
-    }
-
-    pub(crate) fn grid_get_cursor_line(&self) -> String {
-        self.grid.get_cursor_row_text()
-    }
-
-    pub(crate) fn grid_get_selection_text(
-        &self,
-        start_row: usize,
-        start_col: usize,
-        end_row: usize,
-        end_col: usize,
-    ) -> String {
-        self.grid
-            .get_selection_text(start_row, start_col, end_row, end_col)
-    }
-
-    pub(crate) fn grid_get_lines(&self, start: usize, end: usize) -> Vec<String> {
-        // `start`/`end` are ABSOLUTE row indices (0 = oldest scrollback line),
-        // end-exclusive. get_row_text() treats its arg as a viewport-relative
-        // screen row, so it returned the wrong lines whenever scrollback existed.
-        // read_rows_in_range does the correct absolute→grid conversion (inclusive end).
-        let total = self.grid.total_lines();
-        let clamped_end = end.min(total);
-        if start >= clamped_end {
-            return Vec::new();
-        }
-        self.grid.read_rows_in_range(start, clamped_end - 1)
-    }
-
-    pub(crate) fn grid_hyperlink_at(&self, row: usize, col: usize) -> Option<String> {
-        self.grid.hyperlink_at(row, col)
-    }
-
-    pub(crate) fn grid_hyperlink_span(
-        &self,
-        row: usize,
-        col: usize,
-    ) -> Option<(usize, usize, String)> {
-        self.grid.hyperlink_span(row, col)
-    }
-
-    // --- private helpers ---
-
-    fn push_log_line(&mut self, line: LogLine) {
-        if self.log.len() >= self.capacity {
-            self.log.pop_front();
-        }
-        self.log.push_back(line);
-        self.total_pushed += 1;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Agent chrome trimming — removes prompt lines and UI chrome from full-screen
-// redraw batches so they don't pollute the mobile log.
-// ---------------------------------------------------------------------------
-
-use crate::chrome::find_scrollback_chrome_cutoff;
-
-/// Flags the agent prompt box and footer in a batch of scrolled-off lines.
-///
-/// When a prompt row is found in the last [`crate::chrome::CHROME_SCAN_ROWS`]
-/// rows, it and everything below it (plus the separator/blank rows directly
-/// above) are marked [`LogLine::chrome`]. Every CLI agent renders context info
-/// below its prompt that has no place in the log.
-///
-/// Marking, not truncating: the lines stay in the buffer and readers skip them.
-/// The previous implementation dropped them at capture, so a false positive —
-/// a markdown blockquote, a table rule — silently deleted the rest of the batch
-/// from history, and the mobile log showed paragraphs starting mid-sentence.
-fn mark_agent_chrome(lines: &mut [LogLine]) {
-    let texts: Vec<String> = lines.iter().map(|l| l.text()).collect();
-    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    if let Some(cutoff) = find_scrollback_chrome_cutoff(&refs) {
-        for line in &mut lines[cutoff..] {
-            line.chrome = true;
-        }
-    }
-}
-
 /// Test helper: construct a minimal `AppState` for unit tests in other modules.
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
 
+    /// Replay the production accumulator synchronously, without scheduling races.
+    pub(crate) fn apply_replay_event(state: &Arc<AppState>, event: &AppEvent) {
+        AppState::apply_event_to_session_state(state, event);
+    }
+
     /// A live `sessions` entry backed by a real PTY. `live_pty_for_peer` filters on
     /// liveness, so a resolver test needs a session that genuinely exists rather
     /// than a stub the filter would reject.
-    #[cfg(unix)]
     pub fn insert_dummy_session(state: &AppState, session_id: &str) {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
         let pair = native_pty_system()
@@ -4284,45 +5808,78 @@ pub(crate) mod tests_support {
                 pixel_height: 0,
             })
             .expect("openpty");
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "sleep 30"]);
+        let (shell, flag) = crate::test_support::host_shell();
+        let mut command = CommandBuilder::new(shell);
+        command.args([flag, &tuic_test_support::wait_for_stdin_script()]);
         let child = pair.slave.spawn_command(command).expect("spawn shell");
         let writer = pair.master.take_writer().expect("writer");
-        state.sessions.insert(
+        state.session_maps.sessions.insert(
             session_id.to_string(),
             parking_lot::Mutex::new(PtySession {
+                launch_receipt: None,
                 writer: std::sync::Arc::new(parking_lot::Mutex::new(writer)),
                 master: pair.master,
                 _child: child,
                 paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 worktree: None,
+                initial_cwd: None,
                 cwd: None,
                 display_name: None,
                 display_name_is_custom: false,
+                display_name_from_spawn: false,
                 is_remote: false,
-                shell: "/bin/sh".to_string(),
+                shell: shell.to_string(),
             }),
         );
     }
 
+    /// Give a live test session a working directory, which is what the alias
+    /// prefix is derived from.
+    #[cfg(unix)]
+    pub fn set_session_cwd(state: &AppState, session_id: &str, cwd: &str) {
+        state
+            .session_maps
+            .sessions
+            .get(session_id)
+            .expect("session exists")
+            .lock()
+            .cwd = Some(cwd.to_string());
+    }
+
     pub fn make_test_app_state() -> AppState {
+        make_test_app_state_in(&crate::test_support::test_temp_root())
+    }
+
+    pub fn make_test_app_state_in(root: &std::path::Path) -> AppState {
         // Unique data dir per call: AppState::new eagerly opens
         // `data_dir/tunnel_audit.db`, so a shared path makes parallel tests
         // collide on the SQLite file (concurrent opens → SQLITE_BUSY
-        // "database is locked"). The pid + monotonic seq keeps each test's
-        // on-disk DB isolated.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let data_dir =
-            std::env::temp_dir().join(format!("test-tuic-data-{}-{}", std::process::id(), seq));
-        let _ = std::fs::create_dir_all(&data_dir);
+        // "database is locked"). The guard keeps every DB isolated and
+        // removes it when the state drops, including during panic unwind.
+        let data_guard = tempfile::Builder::new()
+            .prefix("test-tuic-data-")
+            .tempdir_in(root)
+            .expect("create test AppState data dir");
+        let data_dir = data_guard.path().to_path_buf();
         let log_buffer = Arc::new(parking_lot::Mutex::new(
             crate::app_logger::LogRingBuffer::new(crate::app_logger::LOG_RING_CAPACITY),
         ));
+        // `AppState::new` takes `data_dir` explicitly for exactly this reason
+        // (an isolated path per test), but `claude_usage::load_cache_from_disk`
+        // reads `config::config_dir()` instead of the directory it was handed
+        // — in production the two are the same value (`lib.rs` passes
+        // `config::config_dir()` as `data_dir`), so this only diverges in
+        // tests. `config_dir()`'s own process-safe test fallback (never the
+        // real platform directory — see `config.rs`) covers it without this
+        // function needing its own override: setting one here deadlocked
+        // every test that first calls `isolated_config()`-style helpers and
+        // THEN `make_test_app_state()` on the same thread, since
+        // `set_config_dir_override`'s exclusive lock is not reentrant
+        // (`finalize_deletes_once_the_user_confirms` and six siblings in
+        // `worktree.rs` hung until nextest's timeout before this was reverted).
         let mut state = AppState::new(
             data_dir,
-            std::env::temp_dir().join("test-worktrees"),
+            data_guard.path().join("worktrees"),
             crate::config::AppConfig::default(),
             log_buffer,
         );
@@ -4330,7 +5887,104 @@ pub(crate) mod tests_support {
         state.session_token = parking_lot::RwLock::new(String::from("test-token"));
         // Skip disk I/O for claude_usage in tests
         state.claude_usage_cache = parking_lot::Mutex::new(std::collections::HashMap::new());
+        state._test_data_dir = Some(data_guard);
         state
+    }
+}
+
+#[cfg(test)]
+mod worktree_event_payloads {
+    use super::*;
+
+    fn created() -> WorktreeCreatedPayload {
+        WorktreeCreatedPayload {
+            creator_session: Some("creator-pty".into()),
+            spawn_session: false,
+            repo_path: "/repo".to_string(),
+            workspace_id: "feature/x".to_string(),
+            branch: "feature/x".to_string(),
+            worktree_path: "/repo__wt/feature-x".to_string(),
+            kind: crate::worktree::WorkspaceKind::Worktree,
+        }
+    }
+
+    fn removed() -> WorktreeRemovedPayload {
+        WorktreeRemovedPayload {
+            repo_path: "/repo".to_string(),
+            workspace_id: "feature/x".to_string(),
+            branch: "feature/x".to_string(),
+        }
+    }
+
+    /// The wire contract, spelled out. This is the load-bearing assertion: the
+    /// two transports now serialize one struct, so comparing them to each other
+    /// can no longer catch a rename — comparing both to a literal can.
+    #[test]
+    fn the_created_payload_spells_its_wire_fields() {
+        assert_eq!(
+            serde_json::to_value(created()).unwrap(),
+            serde_json::json!({
+                "repo_path": "/repo",
+                "workspace_id": "feature/x",
+                "branch": "feature/x",
+                "worktree_path": "/repo__wt/feature-x",
+                "creator_session": "creator-pty",
+                "spawn_session": false,
+                "kind": "worktree",
+            })
+        );
+    }
+
+    #[test]
+    fn the_removed_payload_spells_its_wire_fields() {
+        assert_eq!(
+            serde_json::to_value(removed()).unwrap(),
+            serde_json::json!({
+                "repo_path": "/repo",
+                "workspace_id": "feature/x",
+                "branch": "feature/x",
+            })
+        );
+    }
+
+    /// The desktop Tauri payload and the SSE payload are the SAME object for the
+    /// same event — the frontend store reads one field name on both transports.
+    #[test]
+    fn the_tauri_payload_and_the_sse_payload_agree() {
+        assert_eq!(
+            serde_json::to_value(created()).unwrap(),
+            crate::mcp_http::sse_routes::event_payload_for_test(&AppEvent::WorktreeCreated(
+                created()
+            )),
+        );
+        assert_eq!(
+            serde_json::to_value(removed()).unwrap(),
+            crate::mcp_http::sse_routes::event_payload_for_test(&AppEvent::WorktreeRemoved(
+                removed()
+            )),
+        );
+    }
+
+    /// The event names are the strings the frontend narrows on. A rename here is
+    /// a silent no-op at every listener, so it is asserted rather than reviewed.
+    #[test]
+    fn the_event_names_are_the_kebab_case_ones_the_frontend_listens_for() {
+        let created_event = serde_json::to_value(AppEvent::WorktreeCreated(created())).unwrap();
+        let removed_event = serde_json::to_value(AppEvent::WorktreeRemoved(removed())).unwrap();
+        assert_eq!(
+            created_event["event"],
+            serde_json::json!("worktree-created")
+        );
+        assert_eq!(
+            removed_event["event"],
+            serde_json::json!("worktree-removed")
+        );
+        // The tagged form nests the very same payload under `payload`, so a
+        // WebSocket consumer of the bus and an SSE consumer see one shape.
+        assert_eq!(
+            created_event["payload"],
+            serde_json::to_value(created()).unwrap()
+        );
     }
 }
 
@@ -4349,30 +6003,245 @@ mod tests {
         }
     }
 
-    // ── push_agent_inbox: lifecycle notifications survive peer-send flooding ──
+    fn lifecycle_msg(child: &str, kind: &str, state: &str, id: &str) -> AgentMessage {
+        AgentMessage {
+            id: format!("tuic-auto-{id}"),
+            from_tuic_session: child.to_string(),
+            from_name: "tuic".to_string(),
+            content: serde_json::json!({"type": kind, "state": state}).to_string(),
+            timestamp: 1,
+            delivered_via_channel: false,
+        }
+    }
+
+    // ── scrollback_reflow: the config toggle reaches the grids ──
+
+    /// Fill a buffer's scrollback, then shrink it. With reflow the wrapped rows
+    /// are re-split and history grows; without it they are truncated in place.
+    fn history_after_shrink(vt: &mut VtLogBuffer) -> (usize, usize) {
+        vt.process(b"AAAAAAAAAABBBBBBBBBB\r\n");
+        vt.process(b"CCCCCCCCCCDDDDDDDDDD\r\n");
+        vt.process(b"EEEEEEEEEEFFFFFFFFFF\r\n");
+        vt.process(b"line4\r\nline5\r\nline6");
+        let before = vt.grid_history_size();
+        vt.resize(3, 10);
+        (before, vt.grid_history_size())
+    }
 
     #[test]
-    fn push_agent_inbox_protects_lifecycle_from_send_eviction() {
+    fn new_vt_log_buffer_honors_scrollback_reflow_off() {
+        let state = tests_support::make_test_app_state();
+        state.config.write().scrollback_reflow = false;
+
+        let mut vt = state.new_vt_log_buffer(3, 20, 4096);
+        let (before, after) = history_after_shrink(&mut vt);
+
+        assert_eq!(
+            after, before,
+            "with the toggle off a resize must truncate history, not reflow it"
+        );
+    }
+
+    #[test]
+    fn new_vt_log_buffer_honors_scrollback_reflow_on() {
+        let state = tests_support::make_test_app_state();
+        state.config.write().scrollback_reflow = true;
+
+        let mut vt = state.new_vt_log_buffer(3, 20, 4096);
+        let (before, after) = history_after_shrink(&mut vt);
+
+        assert!(
+            after > before,
+            "with the toggle on a shrink must re-split history rows: {before} -> {after}"
+        );
+    }
+
+    /// The toggle has to reach sessions that already exist — a config change that
+    /// only affects the next session is the bug this story was opened for.
+    #[test]
+    fn apply_reflow_history_reaches_live_buffers() {
+        let state = tests_support::make_test_app_state();
+        state.config.write().scrollback_reflow = true;
+        state.grid.vt_log_buffers.insert(
+            "s1".to_string(),
+            Mutex::new(state.new_vt_log_buffer(3, 20, 4096)),
+        );
+
+        state.apply_reflow_history(false);
+
+        let buffer = state.grid.vt_log_buffers.get("s1").expect("buffer exists");
+        let (before, after) = history_after_shrink(&mut buffer.lock());
+        assert_eq!(
+            after, before,
+            "a live buffer must pick up the toggle without being recreated"
+        );
+    }
+
+    // ── push_agent_inbox: one FIFO for peer and lifecycle mail ──
+
+    #[test]
+    fn lifecycle_churn_for_three_children_preserves_unread_peer_result() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        state.push_agent_inbox(recipient, make_msg("peer-result"));
+
+        for index in 0..150 {
+            let child = format!("child-{}", index % 3);
+            let notice = lifecycle_msg(&child, "state_change", "working", &index.to_string());
+            state.push_agent_inbox(recipient, notice);
+        }
+
+        let (messages, has_more, missed_count) = state.observe_agent_inbox(recipient, 0, 100);
+        assert!(!has_more);
+        assert_eq!(missed_count, 0);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].id, "peer-result");
+        for child in 0..3 {
+            assert!(messages.iter().any(|message| {
+                message.from_tuic_session == format!("child-{child}")
+                    && message.id == format!("tuic-auto-{}", 147 + child)
+            }));
+        }
+    }
+
+    #[test]
+    fn lifecycle_replacement_is_scoped_to_child_and_kind() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        for notice in [
+            lifecycle_msg("child-a", "state_change", "working", "a-working"),
+            lifecycle_msg("child-b", "state_change", "idle", "b-idle"),
+            lifecycle_msg("child-a", "prompt_delivered", "done", "a-prompt"),
+            lifecycle_msg("child-a", "state_change", "idle", "a-idle"),
+        ] {
+            state.push_agent_inbox(recipient, notice);
+        }
+
+        let (messages, _, missed_count) = state.observe_agent_inbox(recipient, 0, 100);
+        assert_eq!(missed_count, 0);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].id, "tuic-auto-b-idle");
+        assert_eq!(messages[1].id, "tuic-auto-a-prompt");
+        assert_eq!(messages[2].id, "tuic-auto-a-idle");
+    }
+
+    #[test]
+    fn separate_confident_questions_remain_visible_after_state_churn() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        for notice in [
+            lifecycle_msg(
+                "child-a",
+                "state_change",
+                "awaiting_input",
+                "first-question",
+            ),
+            lifecycle_msg("child-a", "state_change", "working", "working"),
+            lifecycle_msg(
+                "child-a",
+                "state_change",
+                "awaiting_input",
+                "second-question",
+            ),
+        ] {
+            state.push_agent_inbox(recipient, notice);
+        }
+
+        let (messages, has_more, missed_count) = state.observe_agent_inbox(recipient, 0, 100);
+        assert!(!has_more);
+        assert_eq!(missed_count, 0);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "tuic-auto-first-question",
+                "tuic-auto-working",
+                "tuic-auto-second-question",
+            ],
+            "a later state change must not erase either question"
+        );
+    }
+
+    #[test]
+    fn peer_only_overflow_keeps_fifo_and_counts_unread_loss() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        for index in 0..101 {
+            state.push_agent_inbox(recipient, make_msg(&format!("peer-{index}")));
+        }
+
+        let (messages, has_more, missed_count) = state.observe_agent_inbox(recipient, 0, 100);
+        assert!(!has_more);
+        assert_eq!(missed_count, 1);
+        assert_eq!(messages.len(), 100);
+        assert_eq!(messages[0].id, "peer-1");
+        assert_eq!(messages[99].id, "peer-100");
+    }
+
+    #[test]
+    fn replaced_lifecycle_notice_releases_existing_delivery_owners() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        let first = lifecycle_msg("child-a", "state_change", "working", "first");
+        state.push_agent_inbox(recipient, first);
+        let lease = state.begin_agent_wait(recipient);
+        assert_eq!(state.waiter_fresh_message_count(recipient, 0), 1);
+        assert_eq!(
+            state.finish_agent_wait(recipient, lease, 0, true).messages[0].id,
+            "tuic-auto-first"
+        );
+        state.push_agent_inbox(
+            recipient,
+            lifecycle_msg("child-a", "state_change", "idle", "second"),
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "tuic-auto-first"),
+            None
+        );
+
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "tuic-auto-second", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        state.mark_terminal_delivery_dispatched(recipient, "tuic-auto-second");
+        state.push_agent_inbox(
+            recipient,
+            lifecycle_msg("child-a", "state_change", "completed", "third"),
+        );
+
+        let (messages, _, missed_count) = state.observe_agent_inbox(recipient, 0, 100);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "tuic-auto-third");
+        assert_eq!(missed_count, 0);
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "tuic-auto-second"),
+            None
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_evicts_oldest_across_peer_and_lifecycle_mail() {
         let state = tests_support::make_test_app_state();
         let rcpt = "orchestrator";
 
-        // A single critical lifecycle notification arrives first.
-        state.push_agent_inbox(rcpt, make_msg("tuic-auto-child-exit-1"));
-
-        // Then a peer floods the inbox well past capacity with chatter.
-        for i in 0..(AGENT_INBOX_CAPACITY + 50) {
-            state.push_agent_inbox(rcpt, make_msg(&format!("send-{i}")));
+        state.push_agent_inbox(rcpt, make_msg("oldest-peer"));
+        for i in 0..(AGENT_INBOX_CAPACITY - 1) {
+            state.push_agent_inbox(rcpt, make_msg(&format!("tuic-auto-state-{i}")));
         }
+        state.push_agent_inbox(rcpt, make_msg("tuic-auto-state-overflow"));
 
         let inbox = state.agent_inbox.get(rcpt).expect("inbox exists");
-        // Hard bound respected …
         assert_eq!(inbox.len(), AGENT_INBOX_CAPACITY);
-        // … but the lifecycle message was NOT the one evicted.
         assert!(
-            inbox.iter().any(|m| m.id == "tuic-auto-child-exit-1"),
-            "lifecycle notification must survive send flooding"
+            !inbox.iter().any(|m| m.id == "oldest-peer"),
+            "the oldest peer message must be evicted before newer lifecycle mail"
         );
-        // Evictions are counted (nothing dropped silently).
+        assert!(
+            inbox.iter().any(|m| m.id == "tuic-auto-state-0"),
+            "a newer lifecycle notice must remain"
+        );
         assert!(
             *state.agent_inbox_evictions.get(rcpt).unwrap() > 0,
             "genuine evictions must bump the missed-count counter"
@@ -4380,7 +6249,7 @@ mod tests {
     }
 
     #[test]
-    fn push_agent_inbox_falls_back_to_oldest_when_all_lifecycle() {
+    fn push_agent_inbox_evicts_oldest_when_all_lifecycle() {
         let state = tests_support::make_test_app_state();
         let rcpt = "orchestrator";
 
@@ -4396,6 +6265,273 @@ mod tests {
         assert_eq!(
             inbox.back().unwrap().id,
             format!("tuic-auto-{AGENT_INBOX_CAPACITY}")
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_evicts_oldest_terminal_pending_mail() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+
+        state.push_agent_inbox(recipient, make_msg("terminal-pending"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "terminal-pending", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        for index in 0..(AGENT_INBOX_CAPACITY - 1) {
+            state.push_agent_inbox(recipient, make_msg(&format!("returned-{index}")));
+        }
+
+        state.push_agent_inbox(recipient, make_msg("overflow"));
+
+        assert!(
+            !state
+                .agent_inbox
+                .get(recipient)
+                .is_some_and(|inbox| inbox.iter().any(|message| message.id == "terminal-pending")),
+            "the oldest message must leave the bounded inbox"
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "terminal-pending"),
+            None
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_evicts_peer_only_overflow_after_waiter_delivery() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+
+        state.push_agent_inbox(recipient, make_msg("terminal-pending"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "terminal-pending", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        state.push_agent_inbox(recipient, make_msg("waiter-observed"));
+        let lease = state.begin_agent_wait(recipient);
+        assert_eq!(state.waiter_fresh_message_count(recipient, 1), 1);
+        // The read position is already past the terminal mail (timestamp 1): a wait
+        // that would skip it unread requeues it instead (#1818-3fe7).
+        assert_eq!(
+            state.finish_agent_wait(recipient, lease, 1, true).messages[0].id,
+            "waiter-observed"
+        );
+        for index in 0..(AGENT_INBOX_CAPACITY - 2) {
+            state.push_agent_inbox(recipient, make_msg(&format!("returned-{index}")));
+        }
+
+        state.push_agent_inbox(recipient, make_msg("overflow"));
+
+        let inbox = state.agent_inbox.get(recipient).expect("inbox exists");
+        assert!(!inbox.iter().any(|message| message.id == "terminal-pending"));
+        assert!(
+            inbox.iter().any(|message| message.id == "waiter-observed"),
+            "newer mail remains after the oldest is evicted"
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_accepts_overflow_when_every_message_is_in_flight() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+
+        for index in 0..AGENT_INBOX_CAPACITY {
+            let message_id = format!("pending-{index}");
+            state.push_agent_inbox(recipient, make_msg(&message_id));
+            assert_eq!(
+                state.assign_agent_delivery(recipient, &message_id, true),
+                AgentDeliveryAssignment::Terminal
+            );
+        }
+
+        state.push_agent_inbox(recipient, make_msg("overflow"));
+        let inbox = state.agent_inbox.get(recipient).expect("inbox exists");
+        assert_eq!(inbox.len(), AGENT_INBOX_CAPACITY);
+        assert_eq!(inbox.front().unwrap().id, "pending-1");
+        assert_eq!(inbox.back().unwrap().id, "overflow");
+    }
+
+    #[test]
+    fn inbox_eviction_is_per_recipient_and_paging_skips_only_evicted_mail() {
+        let state = tests_support::make_test_app_state();
+        state.push_agent_inbox("other", make_msg("other-oldest"));
+        for index in 0..AGENT_INBOX_CAPACITY {
+            state.push_agent_inbox("peer", make_msg(&format!("mail-{index}")));
+        }
+        let (first, has_more, missed_count) = state.observe_agent_inbox("peer", 0, 2);
+        assert!(has_more);
+        assert_eq!(missed_count, 0);
+        assert_eq!(
+            first.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["mail-0", "mail-1"]
+        );
+        for index in AGENT_INBOX_CAPACITY..(AGENT_INBOX_CAPACITY + 3) {
+            state.push_agent_inbox("peer", make_msg(&format!("mail-{index}")));
+        }
+        let cursor = first.last().unwrap().timestamp;
+        let (second, has_more, missed_count) = state.observe_agent_inbox("peer", cursor, 2);
+        assert!(has_more);
+        assert_eq!(missed_count, 1);
+        assert_eq!(
+            second.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["mail-3", "mail-4"]
+        );
+        assert_eq!(
+            state.agent_inbox.get("other").unwrap()[0].id,
+            "other-oldest"
+        );
+        assert!(!state.agent_inbox_evictions.contains_key("peer"));
+        assert!(!state.agent_inbox_evictions.contains_key("other"));
+    }
+
+    /// Catches: a lost urgent-notice writer suppresses every later urgent notice forever.
+    #[test]
+    fn urgent_notice_in_flight_expires_without_settling_its_replacement() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "urgent-expiry";
+        let first = state.push_agent_inbox(recipient, make_msg("first"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", first),
+            UrgentNoticeReservation::Reserved
+        );
+        let second = state.push_agent_inbox(recipient, make_msg("second"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", second),
+            UrgentNoticeReservation::InFlight
+        );
+        // The lease is 30s, longer than both 6s submission confirmation windows.
+        // Use the public clock here so the regression also runs on pre-fix code.
+        std::thread::sleep(Duration::from_secs(31));
+        let third = state.push_agent_inbox(recipient, make_msg("third"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", third),
+            UrgentNoticeReservation::Reserved,
+            "an abandoned writer must not suppress future urgent notices"
+        );
+        state.finish_urgent_notice(recipient, "sender", first, true);
+        let fourth = state.push_agent_inbox(recipient, make_msg("fourth"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", fourth),
+            UrgentNoticeReservation::InFlight,
+            "a late old writer must not mark the replacement as written"
+        );
+        state.finish_urgent_notice(recipient, "sender", third, true);
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", fourth),
+            UrgentNoticeReservation::Written
+        );
+    }
+
+    #[test]
+    fn urgent_notice_reservation_survives_partial_read_and_clears_after_eviction() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+        let first_through = state.push_agent_inbox(recipient, make_msg("urgent-0"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", first_through),
+            UrgentNoticeReservation::Reserved
+        );
+        state.finish_urgent_notice(recipient, "sender", first_through, true);
+        let second_through = state.push_agent_inbox(recipient, make_msg("urgent-1"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", second_through),
+            UrgentNoticeReservation::Written
+        );
+        state.observe_agent_inbox(recipient, 0, 1);
+        let third_through = state.push_agent_inbox(recipient, make_msg("urgent-2"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", third_through),
+            UrgentNoticeReservation::Written
+        );
+        state.observe_agent_inbox(recipient, first_through, 2);
+        let fourth_through = state.push_agent_inbox(recipient, make_msg("urgent-3"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", fourth_through),
+            UrgentNoticeReservation::Reserved
+        );
+
+        for index in 0..AGENT_INBOX_CAPACITY {
+            state.push_agent_inbox(recipient, make_msg(&format!("filler-{index}")));
+        }
+        let after_eviction = state.push_agent_inbox(recipient, make_msg("urgent-after-eviction"));
+        assert_eq!(
+            state.reserve_urgent_notice(recipient, "sender", after_eviction),
+            UrgentNoticeReservation::Reserved
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_reclaims_read_mail_and_settles_delivery_leases() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+        state.push_agent_inbox("other-peer", make_msg("other-mail"));
+
+        state.push_agent_inbox(recipient, make_msg("terminal-pending"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "terminal-pending", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        let lease = state.begin_agent_wait(recipient);
+        state.push_agent_inbox(recipient, make_msg("waiter-owned"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "waiter-owned", true),
+            AgentDeliveryAssignment::Waiter
+        );
+        state.push_agent_inbox(recipient, make_msg("consumed"));
+        let (observed, has_more, missed_count) = state.observe_agent_inbox(recipient, 0, 3);
+        assert!(!has_more);
+        assert_eq!(missed_count, 0);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(observed[2].id, "consumed");
+
+        for index in 0..(AGENT_INBOX_CAPACITY - 3) {
+            state.push_agent_inbox(recipient, make_msg(&format!("unread-{index}")));
+        }
+        state.push_agent_inbox(recipient, make_msg("new-mail"));
+
+        let inbox = state.agent_inbox.get(recipient).expect("inbox exists");
+        assert_eq!(inbox.len(), AGENT_INBOX_CAPACITY);
+        assert!(inbox.iter().all(|message| message.id != "terminal-pending"));
+        assert!(inbox.iter().any(|message| message.id == "waiter-owned"));
+        assert!(inbox.iter().any(|message| message.id == "consumed"));
+        assert!(inbox.iter().any(|message| message.id == "unread-0"));
+        assert!(inbox.iter().any(|message| message.id == "new-mail"));
+        assert!(!state.agent_inbox_evictions.contains_key(recipient));
+        assert_eq!(
+            state.agent_inbox.get("other-peer").unwrap()[0].id,
+            "other-mail"
+        );
+        drop(inbox);
+        let finish = state.finish_agent_wait(recipient, lease, 0, false);
+        assert_eq!(finish.terminal_handoff, [] as [std::string::String; 0]);
+    }
+
+    #[test]
+    fn terminal_pending_mail_requeues_after_eviction_pressure() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+
+        state.push_agent_inbox(recipient, make_msg("oldest-lifecycle"));
+        state.push_agent_inbox(recipient, make_msg("terminal-pending"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "terminal-pending", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        for index in 0..(AGENT_INBOX_CAPACITY - 2) {
+            state.push_agent_inbox(recipient, make_msg(&format!("tuic-auto-state-{index}")));
+        }
+        state.push_agent_inbox(recipient, make_msg("tuic-auto-state-overflow"));
+
+        state.release_terminal_delivery(recipient, "terminal-pending");
+
+        let inbox = state.agent_inbox.get(recipient).expect("inbox exists");
+        assert_eq!(
+            inbox.back().map(|message| message.id.as_str()),
+            Some("terminal-pending")
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "terminal-pending"),
+            None
         );
     }
 
@@ -4709,6 +6845,87 @@ mod tests {
         assert_eq!(wakes.get(), 1);
     }
 
+    /// A wake that could not start must not silence the idle-edge retry.
+    ///
+    /// `wake_allowed` is decided from the canonical lifecycle, which reads idle
+    /// while the composer still refuses an injection. Burning the group budget
+    /// on that failure is right for the unchanged lifecycle and wrong forever
+    /// after: nothing else announces the mail.
+    #[test]
+    fn a_wake_that_never_started_is_retried_at_the_next_idle_edge() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        state.push_agent_inbox(recipient, make_msg("stranded"));
+        assert_eq!(
+            state.assign_orchestrator_delivery_with_wake_outcome(
+                recipient,
+                "stranded",
+                1,
+                true,
+                |_group| OrchestratorWakeAttemptOutcome::NotStarted
+            ),
+            OrchestratorDeliveryAssignment::InboxOnly
+        );
+        assert_eq!(
+            state.assign_orchestrator_delivery_with_wake_outcome(
+                recipient,
+                "stranded",
+                1,
+                true,
+                |_group| panic!("an unchanged lifecycle must not be reclaimed")
+            ),
+            OrchestratorDeliveryAssignment::InboxOnly
+        );
+
+        state.rearm_orchestrator_wake_budget(recipient);
+        let wakes = std::cell::Cell::new(0);
+        assert_eq!(
+            state.assign_orchestrator_delivery_with_wake_outcome(
+                recipient,
+                "stranded",
+                1,
+                true,
+                |_group| {
+                    wakes.set(wakes.get() + 1);
+                    OrchestratorWakeAttemptOutcome::Submitted
+                }
+            ),
+            OrchestratorDeliveryAssignment::WakeSubmitted,
+            "a new idle edge must be able to announce mail a failed attempt left stranded"
+        );
+        assert_eq!(wakes.get(), 1);
+    }
+
+    /// The re-arm may not steal a reservation from the notice being typed.
+    #[test]
+    fn rearming_never_disturbs_a_wake_in_flight() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        state.push_agent_inbox(recipient, make_msg("in-flight"));
+        let assignment = state.assign_orchestrator_delivery_with_wake_outcome(
+            recipient,
+            "in-flight",
+            1,
+            true,
+            |_group| {
+                // Mid-write: a concurrent idle edge lands here.
+                state.rearm_orchestrator_wake_budget(recipient);
+                OrchestratorWakeAttemptOutcome::NotStarted
+            },
+        );
+        assert_eq!(assignment, OrchestratorDeliveryAssignment::InboxOnly);
+        assert_eq!(
+            state.assign_orchestrator_delivery_with_wake_outcome(
+                recipient,
+                "in-flight",
+                1,
+                true,
+                |_group| panic!("the in-flight attempt still owns the budget")
+            ),
+            OrchestratorDeliveryAssignment::InboxOnly
+        );
+    }
+
     #[test]
     fn empty_and_cursor_inbox_reads_acknowledge_pending_wake() {
         let state = tests_support::make_test_app_state();
@@ -4881,18 +7098,18 @@ mod tests {
         let finish = state.finish_agent_wait(recipient, lease, 0, true);
         assert_eq!(finish.fresh_count, 1);
         assert_eq!(finish.messages, vec![make_msg("during-wait")]);
-        assert!(finish.terminal_handoff.is_empty());
+        assert_eq!(finish.terminal_handoff, [] as [std::string::String; 0]);
         assert_eq!(
             state.agent_delivery_owner(recipient, "during-wait"),
             Some(AgentDeliveryOwner::WaiterObserved)
         );
 
         let lease = state.begin_agent_wait(recipient);
-        assert!(
+        assert_eq!(
             state
                 .finish_agent_wait(recipient, lease, 1, false)
-                .terminal_handoff
-                .is_empty()
+                .terminal_handoff,
+            [] as [std::string::String; 0]
         );
         state.push_agent_inbox(
             recipient,
@@ -5064,11 +7281,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_attempt_assigns_exact_owner_for_success_failure_and_waiter() {
+    fn channel_attempt_keeps_mail_available_for_wait_after_a_successful_push() {
         let state = tests_support::make_test_app_state();
         state.push_agent_inbox("failed-peer", make_msg("failed-sse"));
         assert_eq!(
-            state.assign_agent_delivery_with_terminal_attempt(
+            state.assign_agent_delivery_with_channel_attempt(
                 "failed-peer",
                 "failed-sse",
                 false,
@@ -5088,7 +7305,7 @@ mod tests {
 
         state.push_agent_inbox("live-peer", make_msg("live-sse"));
         assert_eq!(
-            state.assign_agent_delivery_with_terminal_attempt(
+            state.assign_agent_delivery_with_channel_attempt(
                 "live-peer",
                 "live-sse",
                 false,
@@ -5098,14 +7315,15 @@ mod tests {
         );
         assert_eq!(
             state.agent_delivery_owner("live-peer", "live-sse"),
-            Some(AgentDeliveryOwner::TerminalDispatched)
+            None,
+            "an SSE push is not an inbox read and must remain visible to wait"
         );
 
         let waiter = state.begin_agent_wait("waiting-peer");
         state.push_agent_inbox("waiting-peer", make_msg("waiter-owned"));
         let terminal_attempted = std::cell::Cell::new(false);
         assert_eq!(
-            state.assign_agent_delivery_with_terminal_attempt(
+            state.assign_agent_delivery_with_channel_attempt(
                 "waiting-peer",
                 "waiter-owned",
                 true,
@@ -5206,6 +7424,37 @@ mod tests {
         );
     }
 
+    /// Catches: title animation re-stamps semantic activity or enters the lossless state queue.
+    #[test]
+    fn remote_title_keeps_semantic_activity_and_state_queue_unchanged() {
+        let state = Arc::new(tests_support::make_test_app_state());
+        state.session_maps.session_states.insert(
+            "title-session".into(),
+            SessionState {
+                last_activity_ms: 123,
+                agent_state: Some("idle".into()),
+                ..Default::default()
+            },
+        );
+        let event = AppEvent::PtyTitle {
+            session_id: "title-session".into(),
+            title: "Claude Code".into(),
+        };
+        let mut bus = state.event_bus.subscribe();
+        let before = state.session_maps.session_state_events.depth();
+        state.emit_pty_event(event.clone());
+        assert!(matches!(bus.try_recv().unwrap(), AppEvent::PtyTitle { .. }));
+        assert_eq!(state.session_maps.session_state_events.depth(), before);
+        AppState::apply_event_to_session_state(&state, &event);
+        let session = state
+            .session_maps
+            .session_states
+            .get("title-session")
+            .unwrap();
+        assert_eq!(session.last_activity_ms, 123);
+        assert_eq!(session.agent_state.as_deref(), Some("idle"));
+    }
+
     // ── emit_pty_event: per-session channel + global-bus parity (story 140) ──
 
     #[tokio::test]
@@ -5214,6 +7463,7 @@ mod tests {
 
         // A session-scoped WS handler for "a" creates + subscribes to its channel.
         let mut rx_a = state
+            .session_maps
             .pty_event_channels
             .entry("a".to_string())
             .or_insert_with(|| tokio::sync::broadcast::channel(16).0)
@@ -5257,6 +7507,7 @@ mod tests {
         // consumers that mostly read one `type` field and drop the rest.
         let state = tests_support::make_test_app_state();
         let mut rx_session = state
+            .session_maps
             .pty_event_channels
             .entry("a".to_string())
             .or_insert_with(|| tokio::sync::broadcast::channel(16).0)
@@ -5288,6 +7539,7 @@ mod tests {
         // broadcast drains buffered messages before signalling Closed.
         let state = tests_support::make_test_app_state();
         let mut rx = state
+            .session_maps
             .pty_event_channels
             .entry("s".to_string())
             .or_insert_with(|| tokio::sync::broadcast::channel(16).0)
@@ -5298,7 +7550,7 @@ mod tests {
             reason: "process_exit".to_string(),
         });
         // Simulate cleanup_session/tombstone_transient_cleanup dropping the sender.
-        state.pty_event_channels.remove("s");
+        state.session_maps.pty_event_channels.remove("s");
 
         match rx.recv().await {
             Ok(AppEvent::SessionClosed { reason, .. }) => assert_eq!(reason, "process_exit"),
@@ -5315,10 +7567,13 @@ mod tests {
     #[test]
     fn test_state_has_data_dir() {
         let state = tests_support::make_test_app_state();
-        // make_test_app_state assigns a unique per-call dir under temp (named
-        // `test-tuic-data-<pid>-<seq>`) so parallel tests don't share the
-        // tunnel_audit.db SQLite file.
-        assert!(state.data_dir.starts_with(std::env::temp_dir()));
+        // The test fixture belongs to this checkout, even when the caller
+        // did not set TMPDIR before invoking Cargo.
+        assert!(
+            state
+                .data_dir
+                .starts_with(crate::test_support::test_temp_root())
+        );
         assert!(
             state
                 .data_dir
@@ -5328,6 +7583,49 @@ mod tests {
             "unexpected data_dir: {:?}",
             state.data_dir
         );
+    }
+
+    #[test]
+    fn test_state_data_dir_is_removed_on_drop_and_panic() {
+        let scratch =
+            tempfile::tempdir_in(crate::test_support::test_temp_root()).expect("scratch test root");
+        let entries = || {
+            std::fs::read_dir(scratch.path())
+                .expect("read scratch root")
+                .count()
+        };
+        let before = entries();
+        let state = tests_support::make_test_app_state_in(scratch.path());
+        let normal_path = state.data_dir.clone();
+        let worktrees_path = state.worktrees_dir.clone();
+        std::fs::create_dir_all(&worktrees_path).expect("create fixture worktrees");
+        std::fs::write(worktrees_path.join("probe"), b"fixture").expect("write fixture worktree");
+        assert!(normal_path.exists());
+        drop(state);
+        assert!(
+            !normal_path.exists(),
+            "fixture survived normal drop: {normal_path:?}"
+        );
+        assert!(!worktrees_path.exists(), "fixture worktree survived drop");
+        assert_eq!(entries(), before, "fixture left an entry after normal drop");
+
+        let mut panic_path = None;
+        // The panic is the point of the test; keep it off stderr.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = tests_support::make_test_app_state_in(scratch.path());
+            panic_path = Some(state.data_dir.clone());
+            panic!("exercise fixture cleanup during unwind");
+        }));
+        std::panic::set_hook(hook);
+        assert!(outcome.is_err());
+        let panic_path = panic_path.expect("fixture was created before panic");
+        assert!(
+            !panic_path.exists(),
+            "fixture survived panic: {panic_path:?}"
+        );
+        assert_eq!(entries(), before, "fixture left an entry after panic");
     }
 
     // ── split_name_segments ──────────────────────────────────
@@ -5545,18 +7843,394 @@ mod tests {
         }
     }
 
+    // ── alias reservation + session reference resolution ──
+
+    /// A tab that comes back from disk brings its alias with it. Without a
+    /// reservation the restored tab is handed `tc-1` while an older tab in the
+    /// same repo already answers to that address, so a `send` reaches the wrong
+    /// terminal — and the counter has to move past the restored number, or the
+    /// next fresh tab collides with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_restored_alias_is_reserved_and_the_counter_moves_past_it() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "restored");
+        tests_support::set_session_cwd(&state, "restored", "/repos/tuicommander");
+
+        assert_eq!(
+            state.assign_term_alias("restored", Some("tc-3")),
+            "tc-3",
+            "a restored tab keeps the alias it was saved with"
+        );
+
+        tests_support::insert_dummy_session(&state, "fresh");
+        tests_support::set_session_cwd(&state, "fresh", "/repos/tuicommander");
+
+        assert_eq!(
+            state.assign_term_alias("fresh", None),
+            "tc-4",
+            "the counter must resume past the restored alias, not re-issue it"
+        );
+    }
+
+    /// The requested alias arrives from persisted client state, so it is input:
+    /// a shape the resolver cannot address, or one another live tab already owns,
+    /// is dropped in favour of a generated alias rather than trusted.
+    #[cfg(unix)]
+    #[test]
+    fn a_requested_alias_that_is_malformed_or_taken_is_not_honoured() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "first");
+        tests_support::set_session_cwd(&state, "first", "/repos/tuicommander");
+        let first = state.assign_term_alias("first", Some("tc-1"));
+        assert_eq!(first, "tc-1");
+
+        for rejected in ["garbage", "tc-", "-1", "tc-0", "tc-x", "", "tc-1"] {
+            tests_support::insert_dummy_session(&state, rejected);
+            tests_support::set_session_cwd(&state, rejected, "/repos/tuicommander");
+            let assigned = state.assign_term_alias(rejected, Some(rejected));
+            assert_ne!(
+                assigned, rejected,
+                "'{rejected}' is not a reservable alias and must not be honoured"
+            );
+            assert!(
+                assigned.starts_with("tc-"),
+                "the fallback must still be a generated alias: got {assigned}"
+            );
+        }
+    }
+
+    /// One address book for everything a human or an agent can name a terminal
+    /// by: the PTY key, the `$TUIC_SESSION` the tab persists, or the short alias
+    /// shown in the tab menu.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_session_ref_checked_accepts_pty_id_tuic_session_and_alias() {
+        let state = tests_support::make_test_app_state();
+        let session_id = "01234567-89ab-cdef-0123-456789abcdef";
+        tests_support::insert_dummy_session(&state, session_id);
+        state.bind_live_pty("tuic-uuid", session_id);
+        state
+            .session_maps
+            .sessions
+            .get(session_id)
+            .expect("test session")
+            .lock()
+            .set_display_name(Some("reviewer".to_string()), true);
+        let alias = state.assign_term_alias(session_id, None);
+
+        for reference in [
+            session_id,
+            "tuic-uuid",
+            alias.as_str(),
+            "01234567",
+            "reviewer",
+        ] {
+            assert_eq!(
+                state.resolve_session_ref_checked(reference).unwrap(),
+                Some(session_id.to_string()),
+                "'{reference}' must address the terminal behind it"
+            );
+        }
+        assert_eq!(
+            state.resolve_session_ref_checked("never-seen").unwrap(),
+            None,
+            "an unknown reference resolves to nothing rather than to a guess"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_session_ref_reports_ambiguous_display_names() {
+        let state = tests_support::make_test_app_state();
+        for session_id in [
+            "11111111-89ab-cdef-0123-456789abcdef",
+            "11111111-89ab-cdef-0123-456789abcdef0",
+        ] {
+            tests_support::insert_dummy_session(&state, session_id);
+            state
+                .session_maps
+                .sessions
+                .get(session_id)
+                .expect("test session")
+                .lock()
+                .set_display_name(Some("reviewer".to_string()), true);
+        }
+
+        let error = state
+            .resolve_session_ref_checked("reviewer")
+            .expect_err("duplicate display names must not pick a session");
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(error.contains("reviewer"), "{error}");
+
+        let error = state
+            .resolve_session_ref_checked("11111111")
+            .expect_err("duplicate short IDs must not pick a session");
+        assert!(error.contains("ambiguous"), "{error}");
+    }
+
+    /// Browser/PWA clients learn a tab's alias from the bus (`/events` SSE),
+    /// not from the desktop-only window emit — a spawn seen live in browser mode
+    /// otherwise shows no alias until the next reload lists it.
+    #[test]
+    fn assign_term_alias_publishes_the_alias_on_the_event_bus() {
+        let state = tests_support::make_test_app_state();
+        let mut bus = state.event_bus.subscribe();
+
+        let alias = state.assign_term_alias("pty-key", Some("tu-9"));
+
+        assert_eq!(alias, "tu-9");
+        match bus.try_recv() {
+            Ok(AppEvent::TermAliasAssigned { session_id, alias }) => {
+                assert_eq!(session_id, "pty-key");
+                assert_eq!(alias, "tu-9");
+            }
+            other => panic!("expected term-alias-assigned on the bus, got {other:?}"),
+        }
+    }
+
+    /// Mail is filed under the peer key, so an address that names the terminal
+    /// has to travel back the other way before a message can be delivered.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_peer_ref_checked_maps_a_terminal_address_back_to_its_peer() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "pty-key");
+        state.bind_live_pty("tuic-uuid", "pty-key");
+        let alias = state.assign_term_alias("pty-key", None);
+        state.peer_agents.insert(
+            "tuic-uuid".to_string(),
+            PeerAgent {
+                tuic_session: "tuic-uuid".to_string(),
+                mcp_session_id: "mcp-1".to_string(),
+                name: "worker".to_string(),
+                project: None,
+                registered_at: 0,
+            },
+        );
+
+        for reference in ["tuic-uuid", "pty-key", alias.as_str()] {
+            assert_eq!(
+                state.resolve_peer_ref_checked(reference).unwrap(),
+                Some("tuic-uuid".to_string()),
+                "'{reference}' must resolve to the peer that owns that terminal"
+            );
+        }
+        assert_eq!(state.resolve_peer_ref_checked("never-seen").unwrap(), None);
+    }
+
+    /// list_peers prints the register `name`; a name that cannot be sent to is a
+    /// trap. Catches: name resolving to nothing, or silently picking one of two
+    /// peers that share it.
+    #[test]
+    fn resolve_peer_ref_checked_accepts_the_register_name_and_refuses_duplicates() {
+        let state = tests_support::make_test_app_state();
+        for (key, name) in [("peer-a", "alpha"), ("peer-b", "twin"), ("peer-c", "twin")] {
+            state.peer_agents.insert(
+                key.to_string(),
+                PeerAgent {
+                    tuic_session: key.to_string(),
+                    mcp_session_id: format!("mcp-{key}"),
+                    name: name.to_string(),
+                    project: None,
+                    registered_at: 0,
+                },
+            );
+        }
+
+        assert_eq!(
+            state.resolve_peer_ref_checked("alpha").unwrap(),
+            Some("peer-a".to_string())
+        );
+        let error = state
+            .resolve_peer_ref_checked("twin")
+            .expect_err("a shared name must not pick a peer");
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(
+            error.contains("peer-b") && error.contains("peer-c"),
+            "{error}"
+        );
+    }
+
+    #[cfg(test)]
+    fn insert_named_peer(state: &AppState, key: &str, name: &str, registered_at: u64) {
+        state.peer_agents.insert(
+            key.to_string(),
+            PeerAgent {
+                tuic_session: key.to_string(),
+                mcp_session_id: format!("mcp-{key}"),
+                name: name.to_string(),
+                project: None,
+                registered_at,
+            },
+        );
+    }
+
+    /// Critic 1372. Catches: a peer that registers the name `tu-1` captures mail
+    /// meant for the terminal whose alias is `tu-1` (name checked before alias,
+    /// silently, with no ambiguity error).
+    #[cfg(unix)]
+    #[test]
+    fn critic_1372_peer_name_equal_to_another_terminals_alias_is_not_silently_preferred() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "pty-owner");
+        state.bind_live_pty("owner-uuid", "pty-owner");
+        let alias = state.assign_term_alias("pty-owner", None);
+        insert_named_peer(&state, "owner-uuid", "worker", 1);
+        insert_named_peer(&state, "squatter-uuid", &alias, 2);
+
+        let resolved = state.resolve_peer_ref_checked(&alias);
+
+        assert_ne!(
+            resolved,
+            Ok(Some("squatter-uuid".to_string())),
+            "alias '{alias}' of the owner's terminal was captured by a peer that merely registered that name"
+        );
+    }
+
+    /// Critic 1372. Catches: a peer named like another terminal's PTY key captures
+    /// mail addressed to that PTY key.
+    #[cfg(unix)]
+    #[test]
+    fn critic_1372_peer_name_equal_to_another_terminals_pty_key_is_not_silently_preferred() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "pty-owner");
+        state.bind_live_pty("owner-uuid", "pty-owner");
+        insert_named_peer(&state, "owner-uuid", "worker", 1);
+        insert_named_peer(&state, "squatter-uuid", "pty-owner", 2);
+
+        assert_ne!(
+            state.resolve_peer_ref_checked("pty-owner"),
+            Ok(Some("squatter-uuid".to_string())),
+            "PTY key of the owner's terminal was captured by a peer that merely registered that name"
+        );
+    }
+
+    /// Critic 1372. Catches: an exact peer key losing to a name, i.e. a peer named
+    /// with another peer's full UUID redirecting UUID-addressed mail.
+    #[test]
+    fn critic_1372_exact_peer_key_beats_a_name_equal_to_it() {
+        let state = tests_support::make_test_app_state();
+        insert_named_peer(&state, "uuid-real", "real", 1);
+        insert_named_peer(&state, "uuid-squat", "uuid-real", 2);
+
+        assert_eq!(
+            state.resolve_peer_ref_checked("uuid-real"),
+            Ok(Some("uuid-real".to_string()))
+        );
+    }
+
+    /// Critic 1372. Catches: the name branch matching an empty reference against a
+    /// peer registered with an empty name (workflow wake path passes whatever
+    /// string the run log holds).
+    #[test]
+    fn critic_1372_empty_reference_never_matches_an_empty_peer_name() {
+        let state = tests_support::make_test_app_state();
+        insert_named_peer(&state, "peer-empty", "", 1);
+
+        assert_ne!(
+            state.resolve_peer_ref_checked(""),
+            Ok(Some("peer-empty".to_string()))
+        );
+    }
+
+    /// Critic 1372. Catches: names compared case-insensitively or trimmed, which
+    /// would merge `Coordinator` and `coordinator` into one ambiguous address, or
+    /// route to the wrong one.
+    #[test]
+    fn critic_1372_name_match_is_exact_not_case_folded() {
+        let state = tests_support::make_test_app_state();
+        insert_named_peer(&state, "peer-upper", "Coordinator", 1);
+        insert_named_peer(&state, "peer-lower", "coordinator", 2);
+
+        assert_eq!(
+            state.resolve_peer_ref_checked("coordinator"),
+            Ok(Some("peer-lower".to_string()))
+        );
+        assert_eq!(
+            state.resolve_peer_ref_checked("Coordinator"),
+            Ok(Some("peer-upper".to_string()))
+        );
+        assert_eq!(state.resolve_peer_ref_checked("coordinator "), Ok(None));
+    }
+
+    /// Critic 1372. Catches: two identities of one live terminal (persisted tab
+    /// UUID + PTY key, 1246-46e3) sharing a register name being reported as an
+    /// ambiguous address although both files lead to the same mailbox owner.
+    #[cfg(unix)]
+    #[test]
+    fn critic_1372_two_identities_of_one_terminal_with_one_name_are_not_ambiguous() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "pty-shared");
+        state.bind_live_pty("tab-uuid", "pty-shared");
+        insert_named_peer(&state, "tab-uuid", "coordinator", 1);
+        insert_named_peer(&state, "pty-shared", "coordinator", 2);
+
+        let resolved = state.resolve_peer_ref_checked("coordinator");
+
+        assert!(
+            resolved.is_ok(),
+            "same terminal, same name: not ambiguous, got {resolved:?}"
+        );
+    }
+
+    /// Critic 1372. Catches: a dead peer (its terminal and MCP session gone, entry
+    /// not yet reaped) making the live peer's name ambiguous after a restart that
+    /// reuses the name.
+    #[cfg(unix)]
+    #[test]
+    fn critic_1372_stale_peer_with_the_same_name_does_not_make_the_live_one_ambiguous() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "pty-live");
+        state.bind_live_pty("live-uuid", "pty-live");
+        insert_named_peer(&state, "live-uuid", "coordinator", 2);
+        // Dead: no live PTY, MCP session unknown to the state.
+        insert_named_peer(&state, "dead-uuid", "coordinator", 1);
+
+        assert_eq!(
+            state.resolve_peer_ref_checked("coordinator"),
+            Ok(Some("live-uuid".to_string()))
+        );
+    }
+
+    /// Critic 1372. Catches: the ambiguity error leaking when a name matches a
+    /// single peer but the same string is also a unique session display name of a
+    /// different terminal (name silently wins, display name unreachable).
+    #[cfg(unix)]
+    #[test]
+    fn critic_1372_name_equal_to_another_terminals_display_name_is_not_silently_preferred() {
+        let state = tests_support::make_test_app_state();
+        tests_support::insert_dummy_session(&state, "pty-display");
+        state.bind_live_pty("display-uuid", "pty-display");
+        state
+            .session_maps
+            .sessions
+            .get("pty-display")
+            .unwrap()
+            .lock()
+            .set_display_name(Some("build".to_string()), true);
+        insert_named_peer(&state, "display-uuid", "worker", 1);
+        insert_named_peer(&state, "squatter-uuid", "build", 2);
+
+        assert_ne!(
+            state.resolve_peer_ref_checked("build"),
+            Ok(Some("squatter-uuid".to_string())),
+            "display name of another terminal captured by a registered name"
+        );
+    }
+
     #[test]
     fn test_utf8_buffer_ascii() {
         let mut buf = Utf8ReadBuffer::new();
         assert_eq!(buf.push(b"hello world"), "hello world");
-        assert!(buf.remainder.is_empty());
+        assert_eq!(buf.remainder, [] as [u8; 0]);
     }
 
     #[test]
     fn test_utf8_buffer_complete_multibyte() {
         let mut buf = Utf8ReadBuffer::new();
         assert_eq!(buf.push("€100".as_bytes()), "€100");
-        assert!(buf.remainder.is_empty());
+        assert_eq!(buf.remainder, [] as [u8; 0]);
     }
 
     #[test]
@@ -5568,7 +8242,7 @@ mod tests {
 
         let result2 = buf.push(&[0x82, 0xAC]);
         assert_eq!(result2, "€");
-        assert!(buf.remainder.is_empty());
+        assert_eq!(buf.remainder, [] as [u8; 0]);
     }
 
     #[test]
@@ -5584,7 +8258,7 @@ mod tests {
 
         let result2 = buf.push(&bytes[2..]);
         assert_eq!(result2, "🦀");
-        assert!(buf.remainder.is_empty());
+        assert_eq!(buf.remainder, [] as [u8; 0]);
     }
 
     #[test]
@@ -5600,7 +8274,7 @@ mod tests {
         chunk2.extend_from_slice(b" world");
         let result2 = buf.push(&chunk2);
         assert_eq!(result2, "€ world");
-        assert!(buf.remainder.is_empty());
+        assert_eq!(buf.remainder, [] as [u8; 0]);
     }
 
     #[test]
@@ -5652,7 +8326,30 @@ mod tests {
         let out = buf.push(&binary);
         assert_eq!(out.chars().count(), 64 * 1024);
         assert!(out.chars().all(|c| c == '\u{FFFD}'));
-        assert!(buf.remainder.is_empty());
+        assert_eq!(buf.remainder, [] as [u8; 0]);
+    }
+
+    /// `len()` must track what `read_last` would actually return, which stops
+    /// short of `total_written` the moment the ring wraps. A naive accessor
+    /// returning the monotonic counter passes the pre-wrap half of this and
+    /// fails the rest.
+    #[test]
+    fn ring_buffer_len_matches_readable_bytes_across_the_wrap() {
+        let mut rb = OutputRingBuffer::new(8);
+        assert_eq!(rb.len(), 0);
+
+        rb.write(b"abc");
+        assert_eq!(rb.len(), 3, "below capacity, len is everything written");
+        assert_eq!(rb.len(), rb.read_last(usize::MAX).0.len());
+
+        rb.write(b"defgh");
+        assert_eq!(rb.len(), 8, "exactly full");
+        assert_eq!(rb.len(), rb.read_last(usize::MAX).0.len());
+
+        rb.write(b"ijklm");
+        assert_eq!(rb.len(), 8, "past the wrap, len saturates at capacity");
+        assert_eq!(rb.total_written, 13, "the monotonic counter keeps climbing");
+        assert_eq!(rb.len(), rb.read_last(usize::MAX).0.len());
     }
 
     #[test]
@@ -5686,7 +8383,7 @@ mod tests {
     fn test_ring_buffer_empty() {
         let rb = OutputRingBuffer::new(16);
         let (data, total) = rb.read_last(16);
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
         assert_eq!(total, 0);
     }
 
@@ -5796,7 +8493,7 @@ mod tests {
         let mut rb = OutputRingBuffer::new(16);
         rb.write(b"abc");
         let (data, _) = rb.read_since(3);
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
     }
 
     #[test]
@@ -5804,7 +8501,7 @@ mod tests {
         let mut rb = OutputRingBuffer::new(16);
         rb.write(b"abc");
         let (data, total) = rb.read_since(999);
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
         assert_eq!(total, 3);
     }
 
@@ -5943,149 +8640,12 @@ mod tests {
 
     // --- Cached config in AppState tests ---
 
-    fn make_test_app_state() -> AppState {
-        AppState {
-            sessions: dashmap::DashMap::new(),
-            data_dir: std::env::temp_dir().join("test-tuic-data"),
-            worktrees_dir: std::env::temp_dir().join("test-worktrees"),
-            metrics: SessionMetrics::new(),
-            output_buffers: dashmap::DashMap::new(),
-            mcp_sessions: dashmap::DashMap::new(),
-            ws_clients: dashmap::DashMap::new(),
-            config: parking_lot::RwLock::new(crate::config::AppConfig::default()),
-            git_cache: GitCacheState::new(),
-            repo_watchers: dashmap::DashMap::new(),
-            repo_git_fingerprints: dashmap::DashMap::new(),
-            repo_head_targets: dashmap::DashMap::new(),
-            repo_head_emits_suppressed: AtomicU64::new(0),
-            dir_watchers: dashmap::DashMap::new(),
-            theme_watcher: parking_lot::Mutex::new(None),
-            mdkb_daemon: crate::mdkb_daemon::create_shared_daemon(),
-            http_client: reqwest::Client::new(),
-            github_token: parking_lot::RwLock::new(None),
-            github_token_source: parking_lot::RwLock::new(Default::default()),
-            github_circuit_breaker: crate::github::GitHubCircuitBreaker::new(),
-            github_poller: parking_lot::Mutex::new(None),
-            github_viewer_login: parking_lot::RwLock::new(None),
-            github_rate_limit_remaining: std::sync::atomic::AtomicU32::new(u32::MAX),
-            ghe_state: dashmap::DashMap::new(),
-            server_shutdown: parking_lot::Mutex::new(None),
-            ipc_started: std::sync::atomic::AtomicBool::new(false),
-            session_token: parking_lot::RwLock::new(String::from("test-token")),
-            auth_rate_limits: dashmap::DashMap::new(),
-            #[cfg(feature = "desktop")]
-            app_handle: parking_lot::RwLock::new(None),
-            plugin_watchers: dashmap::DashMap::new(),
-            ansi_colors: parking_lot::RwLock::new(None),
-            vt_log_buffers: dashmap::DashMap::new(),
-            pty_raw_rings: dashmap::DashMap::new(),
-            #[cfg(feature = "desktop")]
-            grid_channels: dashmap::DashMap::new(),
-            grid_watch: dashmap::DashMap::new(),
-            grid_gates: dashmap::DashMap::new(),
-            grid_frame_dirty: dashmap::DashMap::new(),
-            sync_update_active: dashmap::DashMap::new(),
-            pending_scroll: dashmap::DashMap::new(),
-            kitty_states: dashmap::DashMap::new(),
-            input_buffers: dashmap::DashMap::new(),
-            last_prompts: dashmap::DashMap::new(),
-            pty_descriptions: dashmap::DashMap::new(),
-            silence_states: dashmap::DashMap::new(),
-            claude_usage_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            log_buffer: Arc::new(parking_lot::Mutex::new(
-                crate::app_logger::LogRingBuffer::new(crate::app_logger::LOG_RING_CAPACITY),
-            )),
-            event_bus: tokio::sync::broadcast::channel(256).0,
-            event_counter: Arc::new(AtomicU64::new(0)),
-            sse_filters: Default::default(),
-            session_states: DashMap::new(),
-            session_state_events: SessionStateEventQueue::new(),
-            mcp_upstream_registry: {
-                Arc::new(crate::mcp_proxy::registry::UpstreamRegistry::new())
-            },
-            oauth_flow_manager: Arc::new(crate::mcp_oauth::flow::OAuthFlowManager::new(Arc::new(
-                tokio::sync::Semaphore::new(1),
-            ))),
-            mcp_tools_changed: tokio::sync::broadcast::channel(16).0,
-            tool_search_index: Arc::new(parking_lot::RwLock::new(
-                crate::tool_search::ToolSearchIndex::build(&[]),
-            )),
-            content_indices: DashMap::new(),
-            indexer_throttle: Arc::new(crate::content_index::IndexerThrottle::default()),
-            index_in_flight: Arc::new(DashSet::new()),
-            worktree_recreate_in_flight: Arc::new(DashSet::new()),
-            index_build_sem: Arc::new(tokio::sync::Semaphore::new(1)),
-            monitoring_git_sem: Arc::new(tokio::sync::Semaphore::new(MONITORING_GIT_CONCURRENCY)),
-            slash_mode: DashMap::new(),
-            last_output_ms: DashMap::new(),
-            last_input_ms: DashMap::new(),
-            shell_states: DashMap::new(),
-            terminal_rows: DashMap::new(),
-            resize_locks: DashMap::new(),
-            exit_codes: DashMap::new(),
-            shell_state_since_ms: DashMap::new(),
-            loaded_plugins: DashMap::new(),
-            plugin_output_watchers: parking_lot::RwLock::new(Default::default()),
-            relay: RelayState::new(),
-            peer_agents: DashMap::new(),
-            agent_inbox: DashMap::new(),
-            agent_inbox_evictions: DashMap::new(),
-            agent_read_cursor: DashMap::new(),
-            marker_stats: DashMap::new(),
-            pending_injections: DashMap::new(),
-            pending_initial_prompts: DashMap::new(),
-            active_agent_waiters: DashMap::new(),
-            orchestrator_peers: DashSet::new(),
-            session_html_tabs: DashMap::new(),
-            mcp_to_session: DashMap::new(),
-            session_to_mcp: DashMap::new(),
-            live_pty_by_tuic_session: DashMap::new(),
-            session_parent: DashMap::new(),
-            messaging_channels: DashMap::new(),
-            pty_event_channels: DashMap::new(),
-            session_knowledge: DashMap::new(),
-            knowledge_dirty: DashMap::new(),
-            has_osc133_integration: DashMap::new(),
-            file_sandboxes: DashMap::new(),
-            unrestricted_sessions: DashMap::new(),
-            #[cfg(unix)]
-            bound_socket_path: parking_lot::RwLock::new(std::path::PathBuf::new()),
-            tailscale_state: parking_lot::RwLock::new(
-                crate::tailscale::TailscaleState::NotInstalled,
-            ),
-            push_store: crate::push::PushStore::load(&std::env::temp_dir()),
-            desktop_window_focused: std::sync::atomic::AtomicBool::new(true),
-            server_start_time: std::time::Instant::now(),
-            term_aliases: DashMap::new(),
-            term_alias_counters: DashMap::new(),
-            session_visibility: DashMap::new(),
-            watcher_engine: std::sync::OnceLock::new(),
-            trigger_classifier: crate::ai_agent::triggers::TriggerClassifier::new(),
-            ai_suggestions_enabled: DashMap::new(),
-            tunnel_manager: {
-                let audit = Arc::new(parking_lot::Mutex::new(
-                    crate::tunnels::audit::AuditLog::open(
-                        &std::env::temp_dir().join("test-tunnel-audit.db"),
-                    )
-                    .unwrap(),
-                ));
-                Arc::new(crate::tunnels::manager::TunnelManager::new(audit))
-            },
-            tunnel_audit: Arc::new(parking_lot::Mutex::new(
-                crate::tunnels::audit::AuditLog::open(
-                    &std::env::temp_dir().join("test-tunnel-audit2.db"),
-                )
-                .unwrap(),
-            )),
-            tasks: Arc::new(crate::tasks::TaskRegistry::new()),
-            connections_lock: tokio::sync::Mutex::new(()),
-            screenshot_responses: DashMap::new(),
-            confirm_responses: DashMap::new(),
-            standby_sessions: DashMap::new(),
-            process_snapshot_cache: crate::pty::ProcessSnapshotCache::default(),
-            hot_repo_paths: parking_lot::RwLock::new(std::collections::HashSet::new()),
-        }
-    }
+    // The 116-field literal that used to sit here was a strictly worse copy of
+    // `tests_support::make_test_app_state`: same values everywhere it mattered,
+    // but a SHARED `test-tuic-data` dir, which is the SQLITE_BUSY collision the
+    // shared helper documents and avoids. Deleted rather than kept in sync
+    // (#678-9a75).
+    use super::tests_support::make_test_app_state;
 
     /// The registry is reached through `AppState` by every MCP task handler, so a
     /// state built without a live one would fail at request time, not at boot.
@@ -6333,7 +8893,7 @@ mod tests {
     fn test_strip_kitty_plain_text_passthrough() {
         let (out, actions) = strip_kitty_sequences("hello world");
         assert_eq!(out, "hello world");
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6387,7 +8947,7 @@ mod tests {
         let input = "\x1b[<0;35;16M";
         let (out, actions) = strip_kitty_sequences(input);
         assert_eq!(out, input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6396,7 +8956,7 @@ mod tests {
         let input = "\x1b[?1049h";
         let (out, actions) = strip_kitty_sequences(input);
         assert_eq!(out, input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6405,7 +8965,7 @@ mod tests {
         let input = "\x1b[31mRed\x1b[0m";
         let (out, actions) = strip_kitty_sequences(input);
         assert_eq!(out, input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6414,7 +8974,7 @@ mod tests {
         let input = "\x1b[31m\x1b[0mhello";
         let (out, actions) = strip_kitty_sequences(input);
         assert_eq!(out, input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6431,7 +8991,7 @@ mod tests {
         let (out, actions) = strip_kitty_sequences(input);
         // The ESC is emitted, then [>u follows as normal text
         assert_eq!(out, input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6440,7 +9000,7 @@ mod tests {
         let input = "╭──────╮\n│ hello │\n╰──────╯";
         let (out, actions) = strip_kitty_sequences(input);
         assert_eq!(out, input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
     }
 
     #[test]
@@ -6473,7 +9033,7 @@ mod tests {
         use std::borrow::Cow;
         let input = "hello world";
         let (out, actions) = strip_kitty_sequences(input);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::state::KittyAction; 0]);
         assert!(
             matches!(out, Cow::Borrowed(_)),
             "fast path should return Cow::Borrowed"
@@ -6486,12 +9046,48 @@ mod tests {
         use std::borrow::Cow;
         let input = "before\x1b[>1uafter";
         let (out, actions) = strip_kitty_sequences(input);
-        assert!(!actions.is_empty());
+        assert_ne!(actions, [] as [crate::state::KittyAction; 0]);
         assert!(
             matches!(out, Cow::Owned(_)),
             "slow path should return Cow::Owned"
         );
         assert_eq!(&*out, "beforeafter");
+    }
+
+    /// Catches: recovery entry/exit being invisible to the parent, or duplicate snapshots flooding it.
+    #[test]
+    fn provider_recovery_accumulates_and_notifies_parent_on_edges() {
+        let state = fresh_state();
+        state
+            .session_maps
+            .session_parent
+            .insert("s1".into(), "recovery-parent".into());
+        state
+            .agent_inbox
+            .entry("recovery-parent".into())
+            .or_default();
+        let event = make_parsed(
+            "provider-recovery",
+            serde_json::json!({"recovery": {
+                "phase": "waiting", "next_attempt_ms": 1792100000000_u64, "attempt": 3
+            }}),
+        );
+        let snapshot = apply(&state, &event);
+        assert_eq!(snapshot.provider_recovery.as_ref().unwrap().attempt, 3);
+        assert!(!snapshot.awaiting_input);
+        apply(&state, &event);
+        let notices = parent_state_changes(&state, "recovery-parent");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0]["state"], "recovering");
+        assert_eq!(notices[0]["provider_recovery"]["attempt"], 3);
+        let cleared = apply(
+            &state,
+            &make_parsed("provider-recovery", serde_json::json!({"recovery": null})),
+        );
+        assert!(cleared.provider_recovery.is_none());
+        assert_ne!(snapshot, cleared);
+        let notices = parent_state_changes(&state, "recovery-parent");
+        assert_eq!(notices.last().unwrap()["state"], "recovery-ended");
     }
 
     // Helpers for session-state accumulator tests
@@ -6511,6 +9107,7 @@ mod tests {
     fn apply(state: &Arc<AppState>, event: &AppEvent) -> SessionState {
         AppState::apply_event_to_session_state(state, event);
         state
+            .session_maps
             .session_states
             .get("s1")
             .map(|s| s.clone())
@@ -6519,15 +9116,715 @@ mod tests {
 
     fn fresh_state() -> Arc<AppState> {
         let s = Arc::new(make_test_app_state());
-        s.session_states
+        s.session_maps
+            .session_states
             .insert("s1".to_string(), SessionState::default());
         // Initialize last_output_ms for shell_state derivation
-        s.last_output_ms.insert("s1".to_string(), AtomicU64::new(0));
+        s.session_maps
+            .last_output_ms
+            .insert("s1".to_string(), AtomicU64::new(0));
         let mut silence = crate::pty::SilenceState::new();
         silence.confirm_idle();
-        s.silence_states
+        s.session_maps
+            .silence_states
             .insert("s1".to_string(), Arc::new(parking_lot::Mutex::new(silence)));
         s
+    }
+
+    fn session_created(session_id: &str, agent_type: &str) -> AppEvent {
+        AppEvent::SessionCreated {
+            session_id: session_id.to_string(),
+            tuic_session: None,
+            cwd: None,
+            agent_type: Some(agent_type.to_string()),
+            display_name: None,
+            parent_session: None,
+        }
+    }
+
+    /// Catches: a delayed creation event re-arms a preset after the agent was
+    /// observed and exited, reopening unattended input into the returned shell.
+    #[test]
+    fn delayed_session_created_cannot_rearm_an_observed_agent_after_exit() {
+        let state = Arc::new(make_test_app_state());
+        let mut session = SessionState::default();
+        session.seed_configured_agent(Some("claude".into()));
+        session.agent_foreground_observed = true;
+        session.agent_type = None;
+        session.agent_type_from_run_config = false;
+        state
+            .session_maps
+            .session_states
+            .insert("late-created".into(), session);
+        AppState::apply_event_to_session_state(&state, &session_created("late-created", "claude"));
+        let row = state
+            .session_maps
+            .session_states
+            .get("late-created")
+            .unwrap();
+        assert_eq!(row.agent_type, None);
+        assert!(!row.agent_type_from_run_config);
+        assert!(row.agent_foreground_observed);
+    }
+
+    /// Catches: SessionCreated building the row without `last_activity_ms` or
+    /// `agent_type` (new-entry path), or not refreshing them on a row that a
+    /// PtyParsed event created first (existing-entry path).
+    #[test]
+    fn session_created_stamps_activity_time_and_agent_type_on_new_and_existing_rows() {
+        let state = Arc::new(make_test_app_state());
+
+        AppState::apply_event_to_session_state(&state, &session_created("fresh", "claude"));
+        let row = state
+            .session_maps
+            .session_states
+            .get("fresh")
+            .unwrap()
+            .clone();
+        assert!(row.last_activity_ms > 0, "new row lost its activity time");
+        assert_eq!(row.agent_type.as_deref(), Some("claude"));
+
+        state
+            .session_maps
+            .session_states
+            .insert("existing".to_string(), SessionState::default());
+        AppState::apply_event_to_session_state(&state, &session_created("existing", "codex"));
+        let row = state
+            .session_maps
+            .session_states
+            .get("existing")
+            .unwrap()
+            .clone();
+        assert!(
+            row.last_activity_ms > 0,
+            "existing row kept a zero activity time"
+        );
+        assert_eq!(row.agent_type.as_deref(), Some("codex"));
+    }
+
+    /// Catches: `event_type == "question" && epoch_matches` turned into `||`, so a
+    /// question from a previous turn still records awaiting evidence on the
+    /// session's SilenceState even though its own state update is rejected.
+    #[test]
+    fn stale_epoch_question_records_no_awaiting_evidence() {
+        let state = fresh_state();
+        let stale = make_parsed(
+            "question",
+            serde_json::json!({ "prompt_text": "old?", "_turn_epoch": 99 }),
+        );
+        let row = apply(&state, &stale);
+        assert!(!row.awaiting_input, "a stale question parked the session");
+        assert_eq!(
+            state
+                .session_maps
+                .silence_states
+                .get("s1")
+                .unwrap()
+                .lock()
+                .awaiting_rank(),
+            None,
+            "a stale question recorded awaiting evidence"
+        );
+
+        let current = make_parsed("question", serde_json::json!({ "prompt_text": "now?" }));
+        assert!(apply(&state, &current).awaiting_input);
+        assert!(
+            state
+                .session_maps
+                .silence_states
+                .get("s1")
+                .unwrap()
+                .lock()
+                .awaiting_rank()
+                .is_some(),
+            "a current question must record awaiting evidence"
+        );
+    }
+
+    // Catches: admitting a current non-question as awaiting evidence when && becomes ||.
+    #[test]
+    fn current_non_question_does_not_record_awaiting_evidence() {
+        let state = fresh_state();
+        apply(
+            &state,
+            &make_parsed(
+                "intent",
+                serde_json::json!({"text": "Working", "_turn_epoch": 0}),
+            ),
+        );
+        assert!(!state.session_state_with_shell("s1").unwrap().awaiting_input);
+        assert_eq!(
+            state
+                .session_maps
+                .silence_states
+                .get("s1")
+                .unwrap()
+                .lock()
+                .awaiting_rank(),
+            None
+        );
+    }
+
+    // Catches: a same-epoch clear for another question retracts the current approval.
+    #[test]
+    fn protocol_clear_for_another_question_preserves_the_current_approval() {
+        let state = fresh_state();
+        apply(
+            &state,
+            &make_parsed(
+                "question",
+                serde_json::json!({"prompt_text": "Approve deploy?", "confident": true, "_turn_epoch": 0}),
+            ),
+        );
+        let row = apply(
+            &state,
+            &make_parsed(
+                "protocol-question-cleared",
+                serde_json::json!({"expected_question_text": "Approve delete?", "_turn_epoch": 0}),
+            ),
+        );
+        assert!(row.awaiting_input);
+        assert_eq!(row.question_text.as_deref(), Some("Approve deploy?"));
+        let row = apply(
+            &state,
+            &make_parsed(
+                "protocol-question-cleared",
+                serde_json::json!({"expected_question_text": "Approve deploy?", "_turn_epoch": 0}),
+            ),
+        );
+        assert!(!row.awaiting_input);
+        assert_eq!(row.question_text, None);
+    }
+
+    /// Catches: deleting a parsed-state arm silently drops usage, errors, menu
+    /// entries or subtask counts from the snapshot consumed by clients.
+    #[test]
+    fn parsed_agent_details_reach_the_client_snapshot_and_can_be_replaced() {
+        let state = fresh_state();
+        for (kind, payload) in [
+            ("usage-limit", serde_json::json!({ "percentage": 81 })),
+            (
+                "api-error",
+                serde_json::json!({ "matched_text": "authentication failed" }),
+            ),
+            (
+                "slash-menu",
+                serde_json::json!({ "items": [{
+                "command": "/help", "description": "Show commands", "highlighted": true
+            }] }),
+            ),
+            ("active-subtasks", serde_json::json!({ "count": 3 })),
+        ] {
+            apply(&state, &make_parsed(kind, payload));
+        }
+        let snapshot = state.session_state_with_shell("s1").unwrap();
+        assert_eq!(snapshot.usage_limit_pct, Some(81));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("authentication failed")
+        );
+        assert_eq!(
+            snapshot.slash_menu_items,
+            Some(vec![crate::output_parser::SlashMenuItem {
+                command: "/help".into(),
+                description: "Show commands".into(),
+                highlighted: true,
+            }])
+        );
+        assert_eq!(snapshot.active_sub_tasks, 3);
+
+        apply(
+            &state,
+            &make_parsed("usage-limit", serde_json::json!({ "percentage": 0 })),
+        );
+        apply(
+            &state,
+            &make_parsed("slash-menu", serde_json::json!({ "items": [] })),
+        );
+        apply(
+            &state,
+            &make_parsed("active-subtasks", serde_json::json!({ "count": 0 })),
+        );
+        apply(
+            &state,
+            &make_parsed("status-line", serde_json::json!({ "task_name": "Working" })),
+        );
+        let snapshot = state.session_state_with_shell("s1").unwrap();
+        assert_eq!(snapshot.usage_limit_pct, Some(0));
+        assert_eq!(snapshot.last_error, None);
+        assert_eq!(snapshot.slash_menu_items, Some(vec![]));
+        assert_eq!(snapshot.active_sub_tasks, 0);
+    }
+
+    /// Catches: an inverted or removed epoch guard retracts the current prompt
+    /// on a stale clear, or an always-false guard prevents its real answer.
+    #[test]
+    fn question_clear_preserves_current_prompt_until_matching_epoch_arrives() {
+        for (clear_kind, confident) in [
+            ("question-cleared", false),
+            ("protocol-question-cleared", true),
+        ] {
+            let state = fresh_state();
+            state
+                .session_maps
+                .session_states
+                .get_mut("s1")
+                .unwrap()
+                .turn_epoch = 2;
+            apply(
+                &state,
+                &make_parsed(
+                    "question",
+                    serde_json::json!({
+                        "prompt_text": "Proceed with the current operation?",
+                        "confident": confident,
+                        "_turn_epoch": 2,
+                    }),
+                ),
+            );
+            let before = state.session_state_with_shell("s1").unwrap();
+            assert!(before.awaiting_input);
+            let rank = state
+                .session_maps
+                .silence_states
+                .get("s1")
+                .unwrap()
+                .lock()
+                .awaiting_rank();
+            assert!(rank.is_some());
+            apply(
+                &state,
+                &make_parsed(
+                    clear_kind,
+                    serde_json::json!({
+                        "expected_question_text": "Proceed with the current operation?",
+                        "_turn_epoch": 1,
+                    }),
+                ),
+            );
+            let stale = state.session_state_with_shell("s1").unwrap();
+            assert!(
+                stale.awaiting_input,
+                "{clear_kind} cleared a newer question"
+            );
+            assert_eq!(
+                stale.question_text.as_deref(),
+                Some("Proceed with the current operation?")
+            );
+            assert_eq!(
+                state
+                    .session_maps
+                    .silence_states
+                    .get("s1")
+                    .unwrap()
+                    .lock()
+                    .awaiting_rank(),
+                rank
+            );
+
+            apply(
+                &state,
+                &make_parsed(
+                    clear_kind,
+                    serde_json::json!({
+                        "expected_question_text": "Proceed with the current operation?",
+                        "_turn_epoch": 2,
+                    }),
+                ),
+            );
+            let answered = state.session_state_with_shell("s1").unwrap();
+            assert!(
+                !answered.awaiting_input,
+                "{clear_kind} ignored the current answer"
+            );
+            assert_eq!(answered.question_text, None);
+            assert_eq!(
+                state
+                    .session_maps
+                    .silence_states
+                    .get("s1")
+                    .unwrap()
+                    .lock()
+                    .awaiting_rank(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn pending_acp_question_alerts_the_chat_once_while_desktop_is_away() {
+        let state = fresh_state();
+        let (private, _) = crate::push::generate_vapid_keys().unwrap();
+        {
+            let mut config = state.config.write();
+            config.services.push.enabled = true;
+            config.services.push.vapid_private_key = private;
+        }
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint: "https://fcm.googleapis.com/fcm/send/example".to_string(),
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: "unused".to_string(),
+                auth: "unused".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        state
+            .desktop_window_focused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let request_id = crate::acp::AcpHostRequestId::new();
+        let notice = crate::acp::AcpNotice {
+            connection_id: crate::acp::AcpConnectionId::new(),
+            generation: 1,
+            session_id: Some(agent_client_protocol::schema::v1::SessionId::new(
+                "conversation-1",
+            )),
+            request_id: Some(request_id),
+            sequence: 7,
+            kind: crate::acp::AcpNoticeKind::InteractionPending,
+        };
+
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo"))),
+            Some((
+                "/mobile?repo=%2Frepo&session=conversation-1".to_string(),
+                "AI Chat: response needed".to_string()
+            ))
+        );
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo"))),
+            None,
+            "a repeated notice must not alert within 30 seconds"
+        );
+        let mut other_conversation = notice.clone();
+        other_conversation.session_id = Some(agent_client_protocol::schema::v1::SessionId::new(
+            "conversation-2",
+        ));
+        assert!(
+            AppState::mobile_push_for_acp_notice(
+                &state,
+                &other_conversation,
+                Some((request_id, "/repo"))
+            )
+            .is_some(),
+            "one conversation must not spend another's push budget"
+        );
+        let mut special_conversation = notice.clone();
+        special_conversation.session_id = Some(agent_client_protocol::schema::v1::SessionId::new(
+            "conversation-special",
+        ));
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(
+                &state,
+                &special_conversation,
+                Some((request_id, "/repo/a & b")),
+            ),
+            Some((
+                "/mobile?repo=%2Frepo%2Fa+%26+b&session=conversation-special".to_string(),
+                "AI Chat: response needed".to_string(),
+            )),
+            "repository paths must stay inside the deep-link query value"
+        );
+        let mut card = notice.clone();
+        card.kind = crate::acp::AcpNoticeKind::Card;
+        card.request_id = None;
+        assert_eq!(
+            AppState::mobile_push_for_acp_session(&state, &card, "/repo"),
+            None,
+            "a card must not bypass the question's 30-second conversation budget"
+        );
+        card.session_id = Some(agent_client_protocol::schema::v1::SessionId::new(
+            "card-only",
+        ));
+        assert_eq!(
+            AppState::mobile_push_for_acp_session(&state, &card, "/repo"),
+            Some((
+                "/mobile?repo=%2Frepo&session=card-only".to_string(),
+                "AI Chat: new notice".to_string()
+            ))
+        );
+        assert_eq!(
+            AppState::mobile_push_for_acp_session(&state, &card, "/repo"),
+            None,
+            "repeated cards must not flood the phone"
+        );
+        let first_card = state
+            .acp_push_last_ms
+            .get("card-only")
+            .unwrap()
+            .value()
+            .unwrap();
+        *state.acp_push_last_ms.get_mut("card-only").unwrap() =
+            Some(first_card.saturating_sub(31_000));
+        assert!(AppState::mobile_push_for_acp_session(&state, &card, "/repo").is_some());
+        let key = "conversation-1";
+        let first = state.acp_push_last_ms.get(key).unwrap().value().unwrap();
+        *state.acp_push_last_ms.get_mut(key).unwrap() = Some(first.saturating_sub(31_000));
+        assert!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo")))
+                .is_some()
+        );
+        state.acp_push_last_ms.remove(key);
+        let winners = std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        AppState::mobile_push_for_acp_notice(
+                            &state,
+                            &notice,
+                            Some((request_id, "/repo")),
+                        )
+                    })
+                })
+                .collect();
+            calls
+                .into_iter()
+                .map(|call| call.join().unwrap().is_some())
+                .filter(|sent| *sent)
+                .count()
+        });
+        assert_eq!(
+            winners, 1,
+            "concurrent notices may spend one slot only once"
+        );
+    }
+
+    #[test]
+    fn answered_or_unrelated_acp_notice_cannot_alert_the_phone() {
+        let state = fresh_state();
+        let (private, _) = crate::push::generate_vapid_keys().unwrap();
+        {
+            let mut config = state.config.write();
+            config.services.push.enabled = true;
+            config.services.push.vapid_private_key = private;
+        }
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint: "https://fcm.googleapis.com/fcm/send/example".to_string(),
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: "unused".to_string(),
+                auth: "unused".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        state
+            .desktop_window_focused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let request_id = crate::acp::AcpHostRequestId::new();
+        let mut notice = crate::acp::AcpNotice {
+            connection_id: crate::acp::AcpConnectionId::new(),
+            generation: 1,
+            session_id: Some(agent_client_protocol::schema::v1::SessionId::new(
+                "conversation-1",
+            )),
+            request_id: Some(request_id),
+            sequence: 7,
+            kind: crate::acp::AcpNoticeKind::InteractionPending,
+        };
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, None),
+            None
+        );
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(
+                &state,
+                &notice,
+                Some((crate::acp::AcpHostRequestId::new(), "/repo"))
+            ),
+            None
+        );
+        notice.kind = crate::acp::AcpNoticeKind::Ready;
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo"))),
+            None
+        );
+        notice.kind = crate::acp::AcpNoticeKind::InteractionSettled;
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo"))),
+            None
+        );
+        state
+            .push_store
+            .remove("https://fcm.googleapis.com/fcm/send/example");
+        notice.kind = crate::acp::AcpNoticeKind::InteractionPending;
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo"))),
+            None,
+            "no subscribed phone must leave the budget free"
+        );
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint: "https://fcm.googleapis.com/fcm/send/example".to_string(),
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: "unused".to_string(),
+                auth: "unused".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        state.config.write().services.push.enabled = false;
+        assert_eq!(
+            AppState::mobile_push_for_acp_notice(&state, &notice, Some((request_id, "/repo"))),
+            None,
+            "disabled push must not alert or spend a slot"
+        );
+        assert!(state.acp_push_last_ms.get("conversation-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn live_acp_permission_reaches_one_subscribed_push_service() {
+        use base64ct::Encoding;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/push", listener.local_addr().unwrap());
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/push",
+                    axum::routing::post(move || {
+                        let accepted_tx = accepted_tx.clone();
+                        async move {
+                            accepted_tx.send(()).unwrap();
+                            axum::http::StatusCode::CREATED
+                        }
+                    }),
+                ),
+            )
+            .await
+        });
+
+        let state = fresh_state();
+        let (private, public) = crate::push::generate_vapid_keys().unwrap();
+        {
+            let mut config = state.config.write();
+            config.services.push.enabled = true;
+            config.services.push.vapid_private_key = private;
+            config.services.push.vapid_public_key = public;
+        }
+        let client_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint,
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: base64ct::Base64UrlUnpadded::encode_string(
+                    client_key
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes(),
+                ),
+                auth: base64ct::Base64UrlUnpadded::encode_string(&[7u8; 16]),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        state
+            .desktop_window_focused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let pump = AppState::spawn_acp_notice_pump(state.clone());
+
+        let root = tempfile::Builder::new()
+            .prefix("acp-push-")
+            .tempdir_in(crate::test_support::test_temp_root())
+            .unwrap();
+        for (source, target) in [
+            ("permission-turn.jsonl", "scenario.jsonl"),
+            ("ego-initialize.json", "ego-initialize.json"),
+        ] {
+            std::fs::copy(
+                format!("tests/fixtures/acp/{source}"),
+                root.path().join(target),
+            )
+            .unwrap();
+        }
+        // The nextest `fixture-bins-unix`/`-windows` setup scripts
+        // (`.config/nextest.toml`) build this [[bin]] once before the run
+        // starts; `cargo nextest run --lib` never builds it on its own.
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "tuic-acp-fixture-agent{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+        assert!(
+            executable.is_file(),
+            "fixture agent missing: {}",
+            executable.display()
+        );
+        let connection = state
+            .acp
+            .connect(
+                &crate::acp::EgoAcpConfig {
+                    executable,
+                    profile: String::new(),
+                    master_prompt: String::new(),
+                },
+                crate::acp::AcpConnectRequest {
+                    root: root.path().to_path_buf(),
+                    env: None,
+                },
+            )
+            .await
+            .unwrap();
+        let session = state
+            .acp
+            .new_session(
+                connection.connection_id,
+                crate::acp::AcpSessionAuthority {
+                    cwd: root.path().to_path_buf(),
+                    additional_directories: Vec::new(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .acp
+            .prompt(
+                connection.connection_id,
+                session.session_id.clone(),
+                vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new("hello"),
+                )],
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(60), accepted_rx.recv())
+            .await
+            .expect("pending ACP permission did not reach push service")
+            .expect("push service stopped");
+        let pending = state
+            .acp
+            .pending_interactions(connection.connection_id)
+            .await
+            .unwrap();
+        let request_id = pending[0].request_id();
+        state
+            .acp
+            .respond_permission(
+                connection.connection_id,
+                request_id,
+                agent_client_protocol::schema::v1::RequestPermissionOutcome::Selected(
+                    agent_client_protocol::schema::v1::SelectedPermissionOutcome::new(
+                        agent_client_protocol::schema::v1::PermissionOptionId::new("allow"),
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), accepted_rx.recv())
+                .await
+                .is_err(),
+            "settling a permission must not send another push"
+        );
+        state
+            .acp
+            .disconnect(connection.connection_id)
+            .await
+            .unwrap();
+        pump.abort();
+        service.abort();
     }
 
     #[test]
@@ -6551,6 +9848,7 @@ mod tests {
     fn test_session_state_pty_activity_does_not_restamp_last_activity() {
         let state = fresh_state();
         state
+            .session_maps
             .session_states
             .get_mut("s1")
             .expect("fresh_state seeds s1")
@@ -6614,6 +9912,7 @@ mod tests {
         let state = make_test_app_state();
         let session_id = "session-1";
         state
+            .session_maps
             .last_prompts
             .insert(session_id.to_string(), "the last user prompt".to_string());
         let mut events = state.event_bus.subscribe();
@@ -6621,13 +9920,19 @@ mod tests {
         state.set_pty_description(session_id, Some("Run validation".to_string()));
         assert_eq!(
             state
+                .session_maps
                 .pty_descriptions
                 .get(session_id)
                 .map(|value| value.value().clone()),
             Some("Run validation".to_string())
         );
         assert_eq!(
-            state.last_prompts.get(session_id).unwrap().value(),
+            state
+                .session_maps
+                .last_prompts
+                .get(session_id)
+                .unwrap()
+                .value(),
             "the last user prompt"
         );
         assert!(matches!(
@@ -6640,12 +9945,67 @@ mod tests {
         assert!(events.try_recv().is_err());
 
         state.set_pty_description(session_id, None);
-        assert!(!state.pty_descriptions.contains_key(session_id));
+        assert!(!state.session_maps.pty_descriptions.contains_key(session_id));
         assert!(matches!(
             events.try_recv().unwrap(),
             AppEvent::PtyDescriptionChanged { session_id: id, description: None }
                 if id == session_id
         ));
+    }
+
+    /// The desktop learns a session's lifecycle from this push, not from a 1 Hz
+    /// `list_active_sessions` poll (#687-be9d). Two properties make that safe:
+    /// a real transition produces exactly one push, and a repaint that leaves
+    /// the derived state identical produces none. The second is not a nicety —
+    /// an agent redrawing its spinner restamps `last_activity_ms` on every
+    /// chunk, so pushing on every applied event would be the poll again, at a
+    /// higher rate, with the whole `SessionState` attached.
+    #[tokio::test]
+    async fn session_state_changed_fires_on_a_transition_and_not_on_an_unchanged_repaint() {
+        let state = fresh_state();
+        let mut bus = state.event_bus.subscribe();
+        AppState::spawn_session_state_accumulator(Arc::clone(&state));
+
+        let question = make_parsed(
+            "question",
+            serde_json::json!({ "prompt_text": "Proceed?", "confident": true }),
+        );
+        state.emit_pty_event(question.clone());
+        // The same screen parsed twice: nothing a client renders has moved.
+        state.emit_pty_event(question);
+        state.emit_pty_event(make_parsed(
+            "user-input",
+            serde_json::json!({ "content": "yes" }),
+        ));
+
+        // Read until the answer's push arrives and assert on the whole sequence.
+        // A silence window would only prove the repaint was slow; the ordered
+        // lossless lane lets a leaked repaint show up as an extra `true`.
+        let mut awaiting_pushes: Vec<bool> = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(AppEvent::SessionStateChanged {
+                    session_id,
+                    state: pushed,
+                }) = bus.recv().await
+                {
+                    assert_eq!(session_id, "s1");
+                    let awaiting = pushed.awaiting_input;
+                    awaiting_pushes.push(awaiting);
+                    if !awaiting {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the accumulator never pushed the answered state back");
+
+        assert_eq!(
+            awaiting_pushes,
+            vec![true, false],
+            "one push per real transition; the identical repaint must add none"
+        );
     }
 
     #[test]
@@ -6685,8 +10045,13 @@ mod tests {
     #[tokio::test]
     async fn queued_prior_turn_suggest_cannot_restore_completion_after_submission() {
         let state = fresh_state();
-        state.session_states.get_mut("s1").unwrap().agent_type = Some("codex".to_string());
-        state.shell_states.insert(
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .agent_type = Some("codex".to_string());
+        state.session_maps.shell_states.insert(
             "s1".to_string(),
             std::sync::atomic::AtomicU8::new(crate::pty::SHELL_IDLE),
         );
@@ -6706,6 +10071,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if state
+                    .session_maps
                     .session_states
                     .get("s1")
                     .is_some_and(|session| session.last_activity_ms > 0)
@@ -6718,6 +10084,7 @@ mod tests {
         .await
         .expect("queued Suggest must drain through the accumulator");
         state
+            .session_maps
             .shell_states
             .get("s1")
             .unwrap()
@@ -6754,10 +10121,15 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if state.session_states.get("s1").is_some_and(|session| {
-                    session.awaiting_input
-                        && session.question_text.as_deref() == Some("final prompt")
-                }) {
+                if state
+                    .session_maps
+                    .session_states
+                    .get("s1")
+                    .is_some_and(|session| {
+                        session.awaiting_input
+                            && session.question_text.as_deref() == Some("final prompt")
+                    })
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -6810,6 +10182,397 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_question_without_a_phone_subscription_does_not_consume_the_away_push_budget() {
+        let state = fresh_state();
+        let (private, public) = crate::push::generate_vapid_keys().unwrap();
+        {
+            let mut config = state.config.write();
+            config.services.push.enabled = true;
+            config.services.push.vapid_private_key = private;
+            config.services.push.vapid_public_key = public;
+        }
+        let question = make_parsed(
+            "question",
+            serde_json::json!({ "prompt_text": "Should I deploy now?", "confident": true }),
+        );
+        let at_desk = apply(&state, &question);
+        assert!(
+            at_desk.last_push_ms.is_none(),
+            "a question without a subscribed phone must not spend the 30-second limit"
+        );
+
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint: "https://fcm.googleapis.com/fcm/send/example".to_string(),
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: "unused".to_string(),
+                auth: "unused".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        state
+            .desktop_window_focused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let away = apply(&state, &question);
+        assert!(
+            away.last_push_ms.is_some(),
+            "the same question can alert once Boss leaves"
+        );
+
+        let first = away.last_push_ms.unwrap();
+        let recent = first.saturating_sub(1_000);
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .last_push_ms = Some(recent);
+        let rate_limited = apply(&state, &question);
+        assert_eq!(
+            rate_limited.last_push_ms,
+            Some(recent),
+            "a repeated question within 30 seconds must not alert twice"
+        );
+
+        let old = first.saturating_sub(31_000);
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .last_push_ms = Some(old);
+        let eligible = apply(&state, &question);
+        assert!(
+            eligible.last_push_ms.unwrap() > old,
+            "an older question alert must not block a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_push_does_not_lose_parentage_during_exit_teardown() {
+        use base64ct::Encoding;
+
+        for (parent, silence, question, muted) in [
+            (Some("parent"), true, false, true),
+            (Some("parent"), true, true, true),
+            (Some("parent"), false, false, false),
+            (Some("parent"), false, true, false),
+            (None, true, false, false),
+            (None, true, true, false),
+            (Some("pending-mcp:unbound"), true, false, false),
+            (Some("pending-mcp:unbound"), true, true, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/push", listener.local_addr().unwrap());
+            let (sent, mut accepted) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    axum::Router::new().route(
+                        "/push",
+                        axum::routing::post(move || {
+                            let sent = sent.clone();
+                            async move {
+                                let _ = sent.send(());
+                                axum::http::StatusCode::CREATED
+                            }
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let state = fresh_state();
+            let (private, public) = crate::push::generate_vapid_keys().unwrap();
+            {
+                let mut config = state.config.write();
+                config.services.push.enabled = true;
+                config.services.push.vapid_private_key = private;
+                config.services.push.vapid_public_key = public;
+            }
+            std::fs::write(
+                state.data_dir.join("notifications.json"),
+                serde_json::to_vec(&serde_json::json!({"silence_remote_completions": silence}))
+                    .unwrap(),
+            )
+            .unwrap();
+            state
+                .desktop_window_focused
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+            state.push_store.upsert(crate::push::PushSubscription {
+                endpoint,
+                keys: crate::push::PushSubscriptionKeys {
+                    p256dh: base64ct::Base64UrlUnpadded::encode_string(
+                        key.verifying_key().to_encoded_point(false).as_bytes(),
+                    ),
+                    auth: base64ct::Base64UrlUnpadded::encode_string(&[7u8; 16]),
+                },
+                created_at: chrono::Utc::now(),
+            });
+            if let Some(parent) = parent {
+                state
+                    .session_maps
+                    .session_parent
+                    .insert("s1".into(), parent.into());
+            }
+            // Queue first, then perform the real teardown before starting the consumer.
+            // A live-map lookup in the consumer would now misclassify the child.
+            state.emit_pty_event(if question {
+                make_parsed(
+                    "question",
+                    serde_json::json!({"prompt_text": "Continue?", "confident": true}),
+                )
+            } else {
+                AppEvent::PtyExit {
+                    session_id: "s1".into(),
+                }
+            });
+            crate::pty::mark_session_exited("s1", &state);
+            assert!(!state.session_maps.session_parent.contains_key("s1"));
+            let mut events = state.event_bus.subscribe();
+            AppState::spawn_session_state_accumulator(state.clone());
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    if matches!(events.recv().await.unwrap(), AppEvent::SessionStateChanged { session_id, .. } if session_id == "s1") {
+                        break;
+                    }
+                }
+            }).await.expect("queued event was not applied");
+            if muted {
+                assert!(
+                    state
+                        .session_maps
+                        .session_states
+                        .get("s1")
+                        .unwrap()
+                        .last_push_ms
+                        .is_none(),
+                    "silenced child spent push budget after teardown (question={question})"
+                );
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), accepted.recv())
+                        .await
+                        .is_err(),
+                    "silenced child sent a push after teardown (question={question})"
+                );
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(60), accepted.recv())
+                    .await
+                    .expect("eligible session lost its push")
+                    .expect("push sink closed");
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_push_shares_per_session_window_with_question() {
+        use base64ct::Encoding;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/push", listener.local_addr().unwrap());
+        let (sent, mut accepted) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/push",
+                    axum::routing::post(move || {
+                        let sent = sent.clone();
+                        async move {
+                            sent.send(()).unwrap();
+                            axum::http::StatusCode::CREATED
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let state = fresh_state();
+        let (private, public) = crate::push::generate_vapid_keys().unwrap();
+        {
+            let mut config = state.config.write();
+            config.services.push.enabled = true;
+            config.services.push.vapid_private_key = private;
+            config.services.push.vapid_public_key = public;
+        }
+        state
+            .desktop_window_focused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let exit = AppEvent::PtyExit {
+            session_id: "s1".to_string(),
+        };
+        let without_phone = apply(&state, &exit);
+        assert!(
+            without_phone.last_push_ms.is_none(),
+            "completion without a subscriber must leave the push budget available"
+        );
+        let client_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint,
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: base64ct::Base64UrlUnpadded::encode_string(
+                    client_key
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes(),
+                ),
+                auth: base64ct::Base64UrlUnpadded::encode_string(&[7u8; 16]),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        let question = make_parsed(
+            "question",
+            serde_json::json!({ "prompt_text": "Done?", "confident": true }),
+        );
+        let asked = apply(&state, &question);
+        let first = asked.last_push_ms.expect("question spent the push budget");
+        tokio::time::timeout(std::time::Duration::from_secs(60), accepted.recv())
+            .await
+            .expect("question push never reached the local service")
+            .expect("local service closed");
+
+        apply(&state, &exit);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), accepted.recv())
+                .await
+                .is_err(),
+            "completion bypassed the question's 30-second push limit"
+        );
+
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .last_push_ms = Some(first.saturating_sub(31_000));
+        apply(&state, &exit);
+        tokio::time::timeout(std::time::Duration::from_secs(60), accepted.recv())
+            .await
+            .expect("completion stayed blocked after the window")
+            .expect("local service closed");
+        let completed_at = state
+            .session_maps
+            .session_states
+            .get("s1")
+            .unwrap()
+            .last_push_ms;
+        apply(&state, &exit);
+        assert_eq!(
+            state
+                .session_maps
+                .session_states
+                .get("s1")
+                .unwrap()
+                .last_push_ms,
+            completed_at,
+            "a repeated completion must not reserve a second push"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), accepted.recv())
+                .await
+                .is_err(),
+            "a repeated completion reached the push service"
+        );
+
+        state
+            .session_maps
+            .session_states
+            .insert("s2".to_string(), SessionState::default());
+        AppState::apply_event_to_session_state(
+            &state,
+            &AppEvent::PtyExit {
+                session_id: "s2".to_string(),
+            },
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(60), accepted.recv())
+            .await
+            .expect("another session inherited the first session's limit")
+            .expect("local service closed");
+        AppState::apply_event_to_session_state(
+            &state,
+            &AppEvent::PtyExit {
+                session_id: "s3".to_string(),
+            },
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), accepted.recv())
+            .await
+            .expect("completion without an existing state row lost its push")
+            .expect("local service closed");
+        server.abort();
+    }
+
+    #[test]
+    fn a_focused_but_idle_desktop_can_alert_the_phone() {
+        assert!(super::mobile_push_away(true, Some(120.0)));
+        assert!(!super::mobile_push_away(true, Some(119.9)));
+        assert!(!super::mobile_push_away(true, Some(0.0)));
+        assert!(!super::mobile_push_away(true, Some(f64::NAN)));
+        assert!(!super::mobile_push_away(true, None));
+        assert!(super::mobile_push_away(false, None));
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_waits_for_its_title_before_spending_the_push_limit() {
+        let state = fresh_state();
+        state.push_store.upsert(crate::push::PushSubscription {
+            endpoint: "https://fcm.googleapis.com/fcm/send/example".to_string(),
+            keys: crate::push::PushSubscriptionKeys {
+                p256dh: "unused".to_string(),
+                auth: "unused".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+        });
+        let (private, public) = crate::push::generate_vapid_keys().unwrap();
+        {
+            let mut config = state.config.write();
+            config.services.push.enabled = true;
+            config.services.push.vapid_private_key = private;
+            config.services.push.vapid_public_key = public;
+        }
+        state
+            .desktop_window_focused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let hook = apply(
+            &state,
+            &make_parsed(
+                "question",
+                serde_json::json!({ "prompt_text": "", "confident": true }),
+            ),
+        );
+        assert!(hook.awaiting_input);
+        assert!(
+            hook.last_push_ms.is_none(),
+            "an empty hook signal must leave room for the real question"
+        );
+
+        let titled = apply(
+            &state,
+            &make_parsed(
+                "choice-prompt",
+                serde_json::json!({
+                    "title": "Should I deploy now?",
+                    "options": [
+                        { "key": "1", "label": "Yes", "highlighted": true, "destructive": false },
+                        { "key": "2", "label": "No", "highlighted": false, "destructive": true }
+                    ]
+                }),
+            ),
+        );
+        assert_eq!(
+            titled.question_text.as_deref(),
+            Some("Should I deploy now?")
+        );
+        assert!(
+            titled.last_push_ms.is_some(),
+            "the titled question must be eligible for one push"
+        );
+    }
+
     #[test]
     fn test_session_state_confident_question_sets_flag() {
         let state = fresh_state();
@@ -6850,6 +10613,7 @@ mod tests {
     fn confident_question_routes_awaiting_input_to_the_spawning_parent() {
         let state = fresh_state();
         state
+            .session_maps
             .session_parent
             .insert("s1".to_string(), "parent-1".to_string());
         state.agent_inbox.entry("parent-1".to_string()).or_default();
@@ -6881,6 +10645,7 @@ mod tests {
     fn low_confidence_question_notifies_parent_with_confidence_metadata() {
         let state = fresh_state();
         state
+            .session_maps
             .session_parent
             .insert("s1".to_string(), "parent-1".to_string());
         state.agent_inbox.entry("parent-1".to_string()).or_default();
@@ -6906,6 +10671,7 @@ mod tests {
     fn repeated_confident_question_notifies_the_parent_only_once() {
         let state = fresh_state();
         state
+            .session_maps
             .session_parent
             .insert("s1".to_string(), "parent-1".to_string());
         state.agent_inbox.entry("parent-1".to_string()).or_default();
@@ -6970,8 +10736,14 @@ mod tests {
         use std::collections::VecDeque;
         use std::sync::atomic::AtomicU8;
         let state = fresh_state();
-        state.session_states.get_mut("s1").unwrap().agent_type = Some("claude".to_string());
         state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .agent_type = Some("claude".to_string());
+        state
+            .session_maps
             .shell_states
             .insert("s1".to_string(), AtomicU8::new(crate::pty::SHELL_IDLE));
         let q = make_parsed(
@@ -6980,9 +10752,7 @@ mod tests {
         );
         apply(&state, &q);
         let mut pending = VecDeque::new();
-        pending.push_back(PendingInjection::peer_message(
-            "[TUIC message from peer] wake",
-        ));
+        pending.push_back(PendingInjection::notice(crate::pty::PEER_MAIL_WAKE));
         state.pending_injections.insert("s1".to_string(), pending);
 
         let ui = make_parsed("user-input", serde_json::json!({ "content": "yes" }));
@@ -7059,7 +10829,12 @@ mod tests {
     #[test]
     fn stale_turn_question_cannot_rearm_awaiting_after_input() {
         let state = fresh_state();
-        state.session_states.get_mut("s1").unwrap().turn_epoch = 2;
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .turn_epoch = 2;
         let stale = make_parsed(
             "question",
             serde_json::json!({
@@ -7115,7 +10890,7 @@ mod tests {
                 }),
             ),
         );
-        let waiting = state.session_states.get("s1").unwrap().clone();
+        let waiting = state.session_maps.session_states.get("s1").unwrap().clone();
         assert!(waiting.awaiting_input);
         assert!(waiting.choice_prompt.is_some());
 
@@ -7176,7 +10951,12 @@ mod tests {
             session.choice_prompt.is_some(),
             "an animated status row must not erase a visible choice prompt"
         );
-        state.session_states.get_mut("s1").unwrap().agent_type = Some("claude".into());
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .agent_type = Some("claude".into());
         let snapshot = state.session_state_with_shell("s1").unwrap();
         assert_eq!(snapshot.agent_state.as_deref(), Some("awaiting_input"));
     }
@@ -7202,6 +10982,7 @@ mod tests {
         assert!(!resolve_choice_prompt_input(&state, "s1", "\x1b[B"));
         assert!(
             state
+                .session_maps
                 .session_states
                 .get("s1")
                 .unwrap()
@@ -7210,9 +10991,90 @@ mod tests {
         );
 
         assert!(resolve_choice_prompt_input(&state, "s1", "1"));
-        let session = state.session_states.get("s1").unwrap();
+        let session = state.session_maps.session_states.get("s1").unwrap();
         assert!(session.choice_prompt.is_none());
         assert!(!session.awaiting_input);
+    }
+
+    #[test]
+    fn test_codex_choice_prompt_uses_its_own_exit_keys() {
+        for exit_key in ["\x1d", "\x1b[1;2C"] {
+            let state = fresh_state();
+            apply(
+                &state,
+                &make_parsed(
+                    "choice-prompt",
+                    serde_json::json!({
+                        "title": "Pick a color.",
+                        "options": [{"key": "2", "label": "Blue", "highlighted": false, "destructive": false}],
+                        "dismiss_key": "ctrl+]",
+                        "amend_key": "shift+right"
+                    }),
+                ),
+            );
+            assert!(!resolve_choice_prompt_input(&state, "s1", "\x1b"));
+            assert!(!resolve_choice_prompt_input(&state, "s1", "\t"));
+            assert!(
+                state
+                    .session_maps
+                    .session_states
+                    .get("s1")
+                    .unwrap()
+                    .choice_prompt
+                    .is_some()
+            );
+            assert!(resolve_choice_prompt_input(&state, "s1", exit_key));
+            assert!(
+                state
+                    .session_maps
+                    .session_states
+                    .get("s1")
+                    .unwrap()
+                    .choice_prompt
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn claude_navigation_choice_stays_open_until_enter() {
+        let state = fresh_state();
+        apply(
+            &state,
+            &make_parsed(
+                "choice-prompt",
+                serde_json::json!({
+                    "title": "Which color do you prefer?",
+                    "options": [
+                        {"key": "1", "label": "Red", "highlighted": true, "destructive": false},
+                        {"key": "2", "label": "Green", "highlighted": false, "destructive": false}
+                    ],
+                    "selection_mode": "navigate-enter",
+                    "dismiss_key": "cancel"
+                }),
+            ),
+        );
+        assert!(!resolve_choice_prompt_input(&state, "s1", "\x1b[B"));
+        assert!(!resolve_choice_prompt_input(&state, "s1", "2"));
+        assert!(
+            state
+                .session_maps
+                .session_states
+                .get("s1")
+                .unwrap()
+                .choice_prompt
+                .is_some()
+        );
+        assert!(resolve_choice_prompt_input(&state, "s1", "\r"));
+        assert!(
+            state
+                .session_maps
+                .session_states
+                .get("s1")
+                .unwrap()
+                .choice_prompt
+                .is_none()
+        );
     }
 
     #[test]
@@ -7253,6 +11115,7 @@ mod tests {
         let state = fresh_state();
         // Set shell_states to BUSY (1) — this is the source of truth from PTY reader
         state
+            .session_maps
             .shell_states
             .insert("s1".to_string(), std::sync::atomic::AtomicU8::new(1));
         // Intentionally leave last_output_ms at 0 (stale) — should NOT matter
@@ -7265,6 +11128,7 @@ mod tests {
 
         // Set shell_states to IDLE (2)
         state
+            .session_maps
             .shell_states
             .get("s1")
             .unwrap()
@@ -7273,7 +11137,7 @@ mod tests {
         assert_eq!(ss.shell_state.as_deref(), Some("idle"));
 
         // No shell_states entry → None
-        state.shell_states.remove("s1");
+        state.session_maps.shell_states.remove("s1");
         let ss = state.session_state_with_shell("s1").unwrap();
         assert!(
             ss.shell_state.is_none(),
@@ -7281,11 +11145,16 @@ mod tests {
         );
 
         // The explicit null sentinel also means unobserved, not idle.
-        state.shell_states.insert(
+        state.session_maps.shell_states.insert(
             "s1".to_string(),
             std::sync::atomic::AtomicU8::new(crate::pty::SHELL_NULL),
         );
-        state.session_states.get_mut("s1").unwrap().agent_type = Some("codex".to_string());
+        state
+            .session_maps
+            .session_states
+            .get_mut("s1")
+            .unwrap()
+            .agent_type = Some("codex".to_string());
         let ss = state.session_state_with_shell("s1").unwrap();
         assert!(ss.shell_state.is_none());
         assert_eq!(ss.agent_state.as_deref(), Some("starting"));
@@ -7295,11 +11164,11 @@ mod tests {
     fn test_current_turn_completion_normalizes_stale_busy_shell() {
         let state = fresh_state();
         {
-            let mut session = state.session_states.get_mut("s1").unwrap();
+            let mut session = state.session_maps.session_states.get_mut("s1").unwrap();
             session.agent_type = Some("codex".into());
             session.suggested_actions = Some(vec!["Review diff".into()]);
         }
-        state.shell_states.insert(
+        state.session_maps.shell_states.insert(
             "s1".into(),
             std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
         );
@@ -7310,11 +11179,68 @@ mod tests {
     }
 
     #[test]
+    fn ego_idle_turn_is_not_latched_working_by_background_processes_2018() {
+        // Live fb2bdba2: ego-idle-background-2018.raw records state=idle and
+        // the ready composer; its shared snapshot still had background_work=true.
+        for pending_probe in [false, true] {
+            let state = fresh_state();
+            {
+                let mut session = state.session_maps.session_states.get_mut("s1").unwrap();
+                session.agent_type = Some("ego".into());
+                session.background_work = !pending_probe;
+                if pending_probe {
+                    session.background_probe_turn_epoch = Some(session.turn_epoch);
+                }
+            }
+            state.session_maps.shell_states.insert(
+                "s1".into(),
+                std::sync::atomic::AtomicU8::new(crate::pty::SHELL_IDLE),
+            );
+
+            let snapshot = state.session_state_with_shell("s1").unwrap();
+            assert_eq!(snapshot.agent_state.as_deref(), Some("idle"));
+            assert_eq!(snapshot.shell_state.as_deref(), Some("idle"));
+            // Background ownership still protects suspend/standby safety.
+            assert_eq!(snapshot.background_work, !pending_probe);
+            assert_eq!(snapshot.has_pending_background_probe(), pending_probe);
+        }
+    }
+
+    #[test]
+    fn ego_background_does_not_hide_active_turn_or_question_2018() {
+        for awaiting in [false, true] {
+            let state = fresh_state();
+            {
+                let mut session = state.session_maps.session_states.get_mut("s1").unwrap();
+                session.agent_type = Some("ego".into());
+                session.background_work = true;
+                session.awaiting_input = awaiting;
+            }
+            state.session_maps.shell_states.insert(
+                "s1".into(),
+                std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
+            );
+            assert_eq!(
+                state
+                    .session_state_with_shell("s1")
+                    .unwrap()
+                    .agent_state
+                    .as_deref(),
+                Some(if awaiting {
+                    "awaiting_input"
+                } else {
+                    "working"
+                }),
+            );
+        }
+    }
+
+    #[test]
     fn test_completion_does_not_override_confirmed_or_pending_background_work() {
         for pending_probe in [false, true] {
             let state = fresh_state();
             {
-                let mut session = state.session_states.get_mut("s1").unwrap();
+                let mut session = state.session_maps.session_states.get_mut("s1").unwrap();
                 session.agent_type = Some("claude".into());
                 session.suggested_actions = Some(vec!["Review result".into()]);
                 session.background_work = !pending_probe;
@@ -7322,7 +11248,7 @@ mod tests {
                     session.background_probe_turn_epoch = Some(session.turn_epoch);
                 }
             }
-            state.shell_states.insert(
+            state.session_maps.shell_states.insert(
                 "s1".into(),
                 std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
             );
@@ -7368,591 +11294,18 @@ mod tests {
         assert_eq!(s2.current_task.as_deref(), Some("Reading files"));
     }
 
-    // --- VtLogBuffer tests ---
-
-    fn make_vt_log() -> VtLogBuffer {
-        VtLogBuffer::new(24, 80, 1000)
-    }
+    // Real PTY tests keep the private drain_pty harness here.
 
     /// Helper: extract plain text from log lines for easy assertion.
     fn log_texts(buf: &VtLogBuffer) -> Vec<String> {
         buf.lines().iter().map(|ll| ll.text()).collect()
     }
 
-    /// Emit lines one at a time and verify they appear in the log after scrolling off.
-    /// NOTE: process() is called per-line to match production behavior (PTY reader calls
-    /// process() on each small chunk; a single bulk process() call cannot detect scroll).
-    #[test]
-    fn test_vt_log_line_oriented_output() {
-        let mut buf = make_vt_log();
-        // Feed lines one at a time so the diff algorithm can detect scroll
-        for i in 0..30 {
-            buf.process(format!("line {i}\r\n").as_bytes());
-        }
-        let texts = log_texts(&buf);
-        // Lines 0..6 scrolled off (30 total - 24 visible = 6)
-        assert!(!texts.is_empty(), "should have finalized some lines");
-        assert!(
-            texts[0].starts_with("line "),
-            "line content preserved: {:?}",
-            texts[0]
-        );
-    }
-
-    /// The reader publishes sync state and the frame ticker flushes a stalled
-    /// update through `VtLogBuffer` — both go through these delegations, so a
-    /// missing one silently reinstates the wedged-terminal bug.
-    #[test]
-    fn test_vt_log_sync_update_flush_delegation() {
-        let mut buf = make_vt_log();
-        buf.process(b"\x1b[?2026h");
-        assert!(
-            buf.is_sync_update_active(),
-            "reader observes the open update"
-        );
-        buf.process(b"STALLED\r\n");
-        assert!(
-            !buf.flush_sync_timeout_if_needed(),
-            "ticker does not flush before the deadline"
-        );
-
-        std::thread::sleep(std::time::Duration::from_millis(170));
-
-        assert!(
-            buf.flush_sync_timeout_if_needed(),
-            "ticker flushes the expired update with no further PTY bytes"
-        );
-        assert!(!buf.is_sync_update_active(), "hint clears after the flush");
-        assert!(
-            buf.screen_rows_ref()
-                .is_some_and(|rows| rows.iter().any(|r| r.contains("STALLED"))),
-            "flushed content reaches the cached screen rows"
-        );
-    }
-
-    /// Teardown must drain a buffered update rather than drop it.
-    #[test]
-    fn test_vt_log_force_stop_sync_on_shutdown() {
-        let mut buf = make_vt_log();
-        buf.process(b"\x1b[?2026h");
-        buf.process(b"ATEXIT\r\n");
-        assert!(
-            buf.force_stop_sync_if_buffered(),
-            "shutdown drains the buffer"
-        );
-        assert!(
-            buf.screen_rows_ref()
-                .is_some_and(|rows| rows.iter().any(|r| r.contains("ATEXIT"))),
-            "content survives teardown"
-        );
-    }
-
-    /// In-place rewrite via \r should resolve to the final content on screen.
-    #[test]
-    fn test_vt_log_in_place_rewrite() {
-        let mut buf = make_vt_log();
-        // Write "aaaa\r" followed by "bbbb" — vt100 resolves this to "bbbb" on the line
-        buf.process(b"aaaa\rbbbb\r\n");
-        // The current screen should show "bbbb" not "aaaa"
-        let rows = buf.screen_rows();
-        let first_nonempty = rows
-            .iter()
-            .find(|r| !r.is_empty())
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        assert_eq!(
-            first_nonempty, "bbbb",
-            "in-place rewrite resolved to final content"
-        );
-    }
-
-    /// Rows scrolled off the top go into the log.
-    /// NOTE: per-line process() calls to match production behavior.
-    #[test]
-    fn test_vt_log_scroll_emits_scrolled_off_rows() {
-        let mut buf = make_vt_log();
-        // Feed exactly 25 lines one at a time — the first one scrolls off
-        for i in 0..25 {
-            buf.process(format!("row{i}\r\n").as_bytes());
-        }
-        let texts = log_texts(&buf);
-        assert!(
-            !texts.is_empty(),
-            "at least one line should have scrolled off"
-        );
-        assert_eq!(
-            texts[0], "row0",
-            "first scrolled-off row is row0, got: {:?}",
-            texts[0]
-        );
-    }
-
-    /// Alternate screen suppresses log extraction.
-    #[test]
-    fn test_vt_log_alternate_screen_suppresses_extraction() {
-        let mut buf = make_vt_log();
-        // Enter alternate screen (smcup), write some content, exit (rmcup)
-        // smcup: ESC[?1049h
-        buf.process(b"\x1b[?1049h");
-        // Write 30 lines in alternate screen
-        let mut content = String::new();
-        for i in 0..30 {
-            content.push_str(&format!("alt-line {i}\r\n"));
-        }
-        buf.process(content.as_bytes());
-        // No lines should be in the log while alternate screen is active
-        assert!(
-            buf.lines().is_empty(),
-            "alternate screen content should not be logged"
-        );
-    }
-
-    /// After alternate screen exits, extraction resumes.
-    #[test]
-    fn test_vt_log_alternate_screen_exit_resumes_extraction() {
-        let mut buf = make_vt_log();
-        // Enter alternate screen
-        buf.process(b"\x1b[?1049h");
-        // Write in alternate screen (per-line)
-        for i in 0..30 {
-            buf.process(format!("alt {i}\r\n").as_bytes());
-        }
-        // Exit alternate screen (rmcup)
-        buf.process(b"\x1b[?1049l");
-        // Now write regular output that will scroll (per-line)
-        for i in 0..30 {
-            buf.process(format!("main {i}\r\n").as_bytes());
-        }
-        // Main screen output should appear in the log
-        let texts = log_texts(&buf);
-        assert!(
-            !texts.is_empty(),
-            "main screen lines should appear in log after alt exit"
-        );
-        assert!(
-            texts.iter().any(|l| l.starts_with("main")),
-            "main lines present in log"
-        );
-    }
-
-    /// `grok --no-alt-screen` (and any inline TUI) enables mouse reporting on the
-    /// primary buffer and then scrolls its own viewport (`CSI S` / line dump).
-    /// Those rows must not enter the durable log — same contract as alt-screen.
-    #[test]
-    fn test_vt_log_primary_mouse_mode_suppresses_extraction() {
-        let mut buf = make_vt_log();
-        // Combined DECSET the way grok actually emits it (not `?1000h` alone).
-        buf.process(b"\x1b[?1000;1002;1003;1006h");
-        for i in 0..30 {
-            buf.process(format!("grok-frame {i}\r\n").as_bytes());
-        }
-        assert!(
-            buf.lines().is_empty(),
-            "mouse-mode primary TUI must not be logged, got: {:?}",
-            log_texts(&buf)
-        );
-        assert!(
-            buf.grid_history_size() > 0,
-            "grid scrollback must still accumulate so the scrollbar works"
-        );
-    }
-
-    /// Turning mouse reporting off resumes durable-log capture. Leftover TUI
-    /// rows still on the primary viewport may scroll into the log afterwards
-    /// (that is the point of `--no-alt-screen`); what must not happen is a
-    /// one-shot flush of the history that accumulated *while* mouse mode was on.
-    #[test]
-    fn test_vt_log_primary_mouse_mode_exit_resumes_capture() {
-        let mut buf = make_vt_log();
-        buf.process(b"\x1b[?1000h");
-        for i in 0..30 {
-            buf.process(format!("tui {i}\r\n").as_bytes());
-        }
-        let history_while_tui = buf.grid_history_size();
-        assert!(history_while_tui > 0, "TUI must have created grid history");
-        buf.process(b"\x1b[?1000l");
-        assert!(
-            buf.lines().is_empty(),
-            "disabling mouse mode must not flush TUI history, got: {:?}",
-            log_texts(&buf)
-        );
-        for i in 0..30 {
-            buf.process(format!("shell {i}\r\n").as_bytes());
-        }
-        let texts = log_texts(&buf);
-        assert!(
-            texts.iter().any(|l| l.starts_with("shell")),
-            "shell lines must appear after mouse mode ends, got: {texts:?}"
-        );
-    }
-
-    /// A resize while an alternate-screen app owns a large history must not move
-    /// the primary screen's log cursor into that unrelated coordinate space.
-    ///
-    /// This models `gh run watch`: every refresh homes, erases, and prints a frame
-    /// taller than the viewport. After leaving the app, ordinary shell output must
-    /// be captured immediately instead of being suppressed until primary history
-    /// catches up with the much larger alternate history.
-    #[test]
-    fn test_vt_log_alt_resize_keeps_primary_capture_cursor() {
-        let mut buf = VtLogBuffer::new(4, 80, 1000);
-
-        for i in 0..8 {
-            buf.process(format!("before-watch-{i}\r\n").as_bytes());
-        }
-        let before_watch_total = buf.total_lines();
-        assert!(
-            before_watch_total > 0,
-            "sanity: primary output reached the log"
-        );
-
-        buf.process(b"\x1b[?1049h");
-        for refresh in 0..4 {
-            buf.process(b"\x1b[0;0H\x1b[J");
-            buf.process(
-                format!("Refreshing run status every 3 seconds [{refresh}]\r\n").as_bytes(),
-            );
-            for job in 0..12 {
-                buf.process(format!("  job-{job:02}: running\r\n").as_bytes());
-            }
-        }
-        assert!(
-            buf.grid_history_size() > 20,
-            "sanity: the synthetic watch built substantial alternate history"
-        );
-
-        // Real panel/layout changes resize the PTY while the watch is still active.
-        buf.resize(5, 72);
-        buf.process(b"\x1b[?1049l");
-
-        for i in 0..10 {
-            buf.process(format!("after-watch-{i}\r\n").as_bytes());
-        }
-
-        let texts = log_texts(&buf);
-        assert!(
-            texts.iter().any(|line| line == "after-watch-0"),
-            "primary capture must resume immediately after alt exit; log tail: {:?}",
-            texts.iter().rev().take(12).collect::<Vec<_>>()
-        );
-        assert!(
-            !texts
-                .iter()
-                .any(|line| line.contains("Refreshing run status") || line.contains("job-")),
-            "alternate-screen rows must remain excluded from the durable log"
-        );
-    }
-
-    /// resize() updates parser dimensions.
-    #[test]
-    fn test_vt_log_resize() {
-        let mut buf = make_vt_log();
-        // Resize to a smaller terminal
-        buf.resize(10, 40);
-        // Should not panic and screen size should be updated
-        let rows = buf.screen_rows();
-        // After resize, screen_rows returns 10 rows (all empty after resize)
-        assert_eq!(rows.len(), 10, "resize to 10 rows");
-    }
-
-    /// Empty/whitespace-only rows are not added to the log.
-    #[test]
-    fn test_vt_log_trims_whitespace_only_rows() {
-        let mut buf = make_vt_log();
-        // Fill with content including empty lines
-        let mut input = String::new();
-        for i in 0..25 {
-            if i == 5 {
-                input.push_str("\r\n"); // empty line
-            } else {
-                input.push_str(&format!("content {i}\r\n"));
-            }
-        }
-        buf.process(input.as_bytes());
-        let texts = log_texts(&buf);
-        // None of the logged lines should be empty
-        for line in &texts {
-            assert!(
-                !line.is_empty(),
-                "logged line should not be empty: {line:?}"
-            );
-        }
-    }
-
-    /// Log capacity is bounded: old lines are dropped when capacity is exceeded.
-    #[test]
-    fn test_vt_log_bounded_capacity() {
-        let mut buf = VtLogBuffer::new(24, 80, 10); // tiny capacity
-        // Produce many more than 10 lines
-        let mut input = String::new();
-        for i in 0..200 {
-            input.push_str(&format!("line {i:04}\r\n"));
-        }
-        buf.process(input.as_bytes());
-        assert!(
-            buf.lines().len() <= 10,
-            "log should be capped at capacity=10, got {}",
-            buf.lines().len()
-        );
-    }
-
-    /// lines_since_owned returns lines after offset and correct new offset.
-    #[test]
-    fn test_vt_log_lines_since_owned() {
-        let mut buf = VtLogBuffer::new(24, 80, 1000);
-        // Feed lines one at a time to trigger scroll detection
-        for i in 0..30 {
-            buf.process(format!("line {i}\r\n").as_bytes());
-        }
-        let total = buf.total_lines();
-        assert!(total > 0, "should have some finalized lines");
-        // First fetch: all lines
-        let (batch1, off1) = buf.lines_since_owned(0, usize::MAX);
-        assert_eq!(batch1.len(), total);
-        assert_eq!(off1, total);
-        // Second fetch: nothing new
-        let (batch2, off2) = buf.lines_since_owned(off1, usize::MAX);
-        assert!(batch2.is_empty());
-        assert_eq!(off2, total);
-    }
-
-    /// grid_get_lines uses ABSOLUTE row coords (0 = oldest scrollback line), not
-    /// viewport-relative. Regression: it previously called get_row_text, which
-    /// returned visible screen rows whenever scrollback was non-empty — so reading
-    /// abs 0 gave the top of the screen instead of the oldest history line.
-    #[test]
-    fn test_grid_get_lines_absolute_coords_with_scrollback() {
-        let mut buf = VtLogBuffer::new(3, 80, 1000); // 3 visible rows → forces scrollback
-        for i in 0..9 {
-            buf.process(format!("line {i}\r\n").as_bytes());
-        }
-        buf.process(b"line 9"); // no trailing newline → bottom visible row is "line 9"
-
-        // NOTE: pass a large `end` so grid_get_lines clamps to the GRID's total
-        // (history + visible screen). Do NOT use buf.total_lines() here — that is
-        // VtLogBuffer::total_pushed (finalized log lines only, excludes the live
-        // visible screen) and is a different quantity than grid.total_lines().
-        let lines = buf.grid_get_lines(0, usize::MAX);
-        // Absolute row 0 is the OLDEST line; the bottom of the visible screen is the
-        // NEWEST. The old viewport-relative get_row_text path returned the top VISIBLE
-        // row (≈ "line 7") for index 0 and dropped the real history entirely.
-        assert_eq!(lines.first().map(String::as_str), Some("line 0"));
-        assert_eq!(lines.last().map(String::as_str), Some("line 9"));
-        assert_eq!(buf.grid_get_lines(0, 1), vec!["line 0".to_string()]);
-        // Rows come back contiguous oldest→newest — history AND visible screen,
-        // no gaps and no out-of-range empties.
-        for w in lines.windows(2) {
-            let a: usize = w[0].trim_start_matches("line ").parse().expect("line N");
-            let b: usize = w[1].trim_start_matches("line ").parse().expect("line N");
-            assert_eq!(b, a + 1, "rows must be contiguous ascending: {a} -> {b}");
-        }
-    }
-
-    /// lines_since_owned returns correct results after buffer rotation
-    /// (oldest lines evicted by pop_front).
-    #[test]
-    fn test_vt_log_lines_since_owned_after_rotation() {
-        let mut buf = VtLogBuffer::new(24, 80, 10); // capacity = 10
-        // Feed 40 lines one-at-a-time so scroll detection works
-        for i in 0..40 {
-            buf.process(format!("rot-{i}\r\n").as_bytes());
-        }
-        // Buffer should be at capacity
-        assert!(buf.lines().len() <= 10, "should be capped at 10");
-        let total = buf.total_lines();
-        // Fetch all — should return only the retained lines
-        let (batch, off) = buf.lines_since_owned(0, usize::MAX);
-        assert_eq!(batch.len(), buf.lines().len());
-        assert_eq!(off, total);
-        // The retained lines should be the newest ones
-        for line in &batch {
-            assert!(
-                line.text().starts_with("rot-"),
-                "unexpected line: {:?}",
-                line.text()
-            );
-        }
-        // Fetch with an offset past the end — empty
-        let (empty, off2) = buf.lines_since_owned(off, usize::MAX);
-        assert!(empty.is_empty());
-        assert_eq!(off2, off);
-    }
-
-    #[test]
-    fn test_vt_log_lines_since_owned_evicted_offset_clamped() {
-        let mut buf = VtLogBuffer::new(24, 80, 10);
-        for i in 0..40 {
-            buf.process(format!("rot-{i}\r\n").as_bytes());
-        }
-        let oldest = buf.oldest_offset();
-        assert!(oldest > 0, "some lines must have been evicted");
-        // Request from an offset in the evicted range — should clamp to oldest
-        let evicted_offset = oldest.saturating_sub(5);
-        let (batch, off) = buf.lines_since_owned(evicted_offset, usize::MAX);
-        assert_eq!(batch.len(), buf.lines().len());
-        assert_eq!(off, buf.total_lines());
-        for line in &batch {
-            assert!(
-                line.text().starts_with("rot-"),
-                "unexpected line: {:?}",
-                line.text()
-            );
-        }
-    }
-
-    /// Feed data in small incremental chunks (simulating real PTY reads that
-    /// may split mid-line) and verify lines are still extracted.
-    ///
-    /// Misaligned chunks (7-byte boundaries) may produce partial rows that
-    /// break overlap detection between consecutive process() calls. The
-    /// conservative approach captures fewer lines than a "dump everything"
-    /// fallback but avoids false duplicate log entries.
-    #[test]
-    fn test_vt_log_incremental_chunked_feed() {
-        let mut buf = VtLogBuffer::new(24, 80, 1000);
-        // Build 30 lines of output
-        use std::fmt::Write as _;
-        let full_output: String = (0..30).fold(String::new(), |mut acc, i| {
-            let _ = write!(acc, "chunk-{i}\r\n");
-            acc
-        });
-        let bytes = full_output.as_bytes();
-        // Feed in small chunks of 7 bytes (deliberately misaligned with lines)
-        for chunk in bytes.chunks(7) {
-            buf.process(chunk);
-        }
-        let lines = log_texts(&buf);
-        let matching: Vec<&String> = lines.iter().filter(|l| l.starts_with("chunk-")).collect();
-        // Misaligned chunking limits overlap detection — we capture some lines
-        // but not all. The key property: no duplicate entries.
-        assert!(
-            !matching.is_empty(),
-            "chunked feed should capture at least some lines: {:?}",
-            lines,
-        );
-    }
-
-    /// Scroll regions (DECSTBM): scrolling within a restricted region does
-    /// NOT produce overlap with the full-screen prev/curr comparison, so the
-    /// conservative detector does not extract these lines. This is acceptable:
-    /// scroll regions are rare in mobile-targeted sessions, and screen rows
-    /// always show the current content accurately.
-    #[test]
-    fn test_vt_log_scroll_region_decstbm() {
-        let mut buf = VtLogBuffer::new(10, 80, 1000); // small 10-row screen
-        // Fill the screen first so we have a baseline for diff detection
-        for i in 0..10 {
-            buf.process(format!("init-{i}\r\n").as_bytes());
-        }
-        let before = buf.total_lines();
-        // Set scroll region to rows 3-8 (1-indexed): ESC[3;8r
-        // Then move cursor into the region and write lines to force scrolling
-        // within the region only.
-        buf.process(b"\x1b[3;8r"); // DECSTBM: set scroll region rows 3-8
-        buf.process(b"\x1b[3;1H"); // CUP: move cursor to row 3, col 1
-        for i in 0..20 {
-            buf.process(format!("region-{i}\r\n").as_bytes());
-        }
-        buf.process(b"\x1b[r"); // Reset scroll region to full screen
-        let after = buf.total_lines();
-        // Scroll-region scrolling changes rows within the region but doesn't
-        // produce a full-screen overlap pattern, so no new log lines are
-        // expected with the conservative detector.
-        assert_eq!(
-            after, before,
-            "scroll region scroll does not produce overlap-based log lines"
-        );
-    }
-
-    /// Cursor movement (CUU) that overwrites existing rows should NOT
-    /// produce the overwritten content as new log output.
-    #[test]
-    fn test_vt_log_cursor_movement_no_overwrite_in_log() {
-        let mut buf = VtLogBuffer::new(10, 80, 1000);
-        // Write 5 lines
-        for i in 0..5 {
-            buf.process(format!("orig-{i}\r\n").as_bytes());
-        }
-        // Move cursor up 3 rows (CUU) and overwrite with "REPLACED"
-        buf.process(b"\x1b[3A"); // CUU 3: move up 3
-        buf.process(b"REPLACED\r\n"); // overwrite current line
-        let lines = log_texts(&buf);
-        // "REPLACED" should NOT appear in the log — it was written via cursor
-        // movement within the viewport, not as new scrolled-off output.
-        // (The diff detector may emit the displaced orig-N lines, but the
-        // replacement text itself should stay on-screen, not in the log.)
-        let replaced_in_log = lines.iter().any(|l| l.contains("REPLACED"));
-        assert!(
-            !replaced_in_log,
-            "cursor-overwritten text should not appear in log: {lines:?}"
-        );
-    }
-
-    /// SGR attributes (colors, bold, etc.) should not leak into extracted text.
-    #[test]
-    fn test_vt_log_sgr_produces_clean_text() {
-        let mut buf = VtLogBuffer::new(24, 80, 1000);
-        // Write 30 lines with SGR color codes (enough to cause scrolling)
-        for i in 0..30 {
-            // ESC[31m = red, ESC[1m = bold, ESC[0m = reset
-            buf.process(format!("\x1b[1;31mcolor-{i}\x1b[0m\r\n").as_bytes());
-        }
-        let lines = log_texts(&buf);
-        let color_lines: Vec<&String> = lines.iter().filter(|l| l.contains("color-")).collect();
-        assert!(
-            color_lines.len() >= 5,
-            "should capture color-N lines, got {}: {:?}",
-            color_lines.len(),
-            lines,
-        );
-        // No line should contain raw ESC characters — vt100 parser strips them
-        for line in &lines {
-            assert!(
-                !line.contains('\x1b'),
-                "log line should not contain ESC sequences: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_vt_log_screen_with_chrome_trim() {
-        let mut buf = VtLogBuffer::new(24, 80, 1000);
-        // Write content lines + agent chrome (separator + prompt + status bar)
-        for i in 0..5 {
-            buf.process(format!("content line {i}\r\n").as_bytes());
-        }
-        // Simulate Claude Code chrome at bottom
-        buf.process(b"\x1b[20;1H");
-        buf.process("────────────────────────────────────────\r\n".as_bytes());
-        buf.process("❯ \r\n".as_bytes());
-        buf.process("────────────────────────────────────────\r\n".as_bytes());
-        buf.process("  [Opus 4.6 | Max] tuicommander git:(main)\r\n".as_bytes());
-
-        let raw_rows = buf.screen_rows();
-        let refs: Vec<&str> = raw_rows.iter().map(|s| s.as_str()).collect();
-        let cutoff = crate::chrome::find_chrome_cutoff(&refs).unwrap_or(raw_rows.len());
-        let screen: Vec<LogLine> = buf.screen_log_lines().into_iter().take(cutoff).collect();
-
-        let screen_text: Vec<String> = screen.iter().map(|l| l.text()).collect();
-        assert!(
-            !screen_text
-                .iter()
-                .any(|t| t.contains("❯") || t.contains("Opus 4.6")),
-            "chrome should be trimmed, got: {screen_text:?}"
-        );
-        // Content lines should still be present
-        assert!(
-            screen_text.iter().any(|t| t.contains("content line")),
-            "content should be preserved, got: {screen_text:?}"
-        );
-    }
-
     /// Integration test: spawn a real PTY process, feed its output through
     /// VtLogBuffer, and verify that clean log lines are extracted.
     #[test]
     fn test_vt_log_real_pty_echo() {
-        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-        use std::io::Read;
+        use portable_pty::{PtySize, native_pty_system};
 
         let pty_system = native_pty_system();
         let pair = match pty_system.openpty(PtySize {
@@ -7969,30 +11322,34 @@ mod tests {
             Err(e) => panic!("open pty: {e}"),
         };
 
-        // Spawn a shell that echos numbered lines and exits
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg("for i in $(seq 1 30); do echo \"test-line-$i\"; done; exit 0");
+        // Replay 30 numbered lines through the PTY. CRLF because the file is
+        // written as bytes rather than produced by the tty's own `\n`
+        // translation, and a bare LF would leave the cursor off column 0.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stream = dir.path().join("lines.txt");
+        let sent: Vec<String> = (1..=30).map(|i| format!("test-line-{i}")).collect();
+        std::fs::write(&stream, format!("{}\r\n", sent.join("\r\n"))).expect("write stream");
+        let cmd = crate::test_support::replay_file_command(&stream);
         let mut child = pair.slave.spawn_command(cmd).expect("spawn");
-        drop(pair.slave); // close slave so reads see EOF
+        // Unix only: closing the slave is what makes the master report EOF
+        // there. A ConPTY has no such handshake, and dropping the slave while
+        // the console host is still starting loses the child's output.
+        #[cfg(unix)]
+        drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let terminal = pair.master.take_writer().expect("writer");
         let mut buf = VtLogBuffer::new(24, 80, 1000);
-        // Use a small read buffer (64 bytes) to force multiple reads,
-        // simulating the incremental reads the production reader thread does.
-        let mut raw = [0u8; 64];
-
-        // Read all output from the PTY and feed into VtLogBuffer
-        loop {
-            match reader.read(&mut raw) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.process(&raw[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(_) => break,
-            }
-        }
+        // Kept so a failure can name what the tty actually sent. A ConPTY is a
+        // VT interpreter rather than a pass-through, so "no lines" there could
+        // be a shell that never ran or a re-render that never scrolls, and the
+        // two need different fixes.
+        let mut seen = Vec::new();
+        crate::test_support::drain_pty(reader, terminal, |chunk| {
+            seen.extend_from_slice(chunk);
+            buf.process(chunk);
+        });
+        let _ = child.kill();
         let _ = child.wait();
 
         let lines = log_texts(&buf);
@@ -8003,9 +11360,13 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "expected some 'test-line-N' lines in log, got 0 out of {} total lines: {:?}",
+            "expected some 'test-line-N' lines in log, got 0 out of {} total lines: {:?}\n\
+             screen: {:?}\nthe tty sent {} bytes: {}",
             lines.len(),
             lines,
+            buf.screen_rows(),
+            seen.len(),
+            String::from_utf8_lossy(&seen).escape_debug(),
         );
         // Verify the captured lines cover a reasonable range.
         let nums: Vec<u32> = matching
@@ -8023,8 +11384,7 @@ mod tests {
     /// captured by VtLogBuffer when using a real PTY.
     #[test]
     fn test_vt_log_real_pty_alternate_screen_suppressed() {
-        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-        use std::io::Read;
+        use portable_pty::{PtySize, native_pty_system};
 
         let pty_system = native_pty_system();
         let pair = match pty_system.openpty(PtySize {
@@ -8041,36 +11401,32 @@ mod tests {
             Err(e) => panic!("open pty: {e}"),
         };
 
-        // Script: echo normal lines, enter alternate screen, write TUI garbage,
-        // exit alternate screen, echo more lines.
-        let script = concat!(
-            "echo 'before-alt-1'; echo 'before-alt-2'; ",
-            "printf '\\033[?1049h'; ", // enter alternate screen
-            "echo 'TUI-GARBAGE-LINE'; ",
-            "printf '\\033[?1049l'; ", // exit alternate screen
-            "echo 'after-alt-1'; echo 'after-alt-2'; ",
-            "exit 0"
+        // Normal lines, enter alternate screen, TUI garbage, exit alternate
+        // screen, more normal lines — written as the bytes themselves rather
+        // than as a shell script, since `cmd` has no `printf` to emit an ESC.
+        let stream = concat!(
+            "before-alt-1\r\nbefore-alt-2\r\n",
+            "\x1b[?1049h", // enter alternate screen
+            "TUI-GARBAGE-LINE\r\n",
+            "\x1b[?1049l", // exit alternate screen
+            "after-alt-1\r\nafter-alt-2\r\n",
         );
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg(script);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("alt.raw");
+        std::fs::write(&path, stream).expect("write stream");
+        let cmd = crate::test_support::replay_file_command(&path);
         let mut child = pair.slave.spawn_command(cmd).expect("spawn");
+        // See `test_vt_log_real_pty_echo`: unix only.
+        #[cfg(unix)]
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let terminal = pair.master.take_writer().expect("writer");
         let mut buf = VtLogBuffer::new(24, 80, 1000);
-        let mut raw = [0u8; 64]; // small buffer for incremental reads
-
-        loop {
-            match reader.read(&mut raw) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.process(&raw[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(_) => break,
-            }
-        }
+        crate::test_support::drain_pty(reader, terminal, |chunk| {
+            buf.process(chunk);
+        });
+        let _ = child.kill();
         let _ = child.wait();
 
         let lines = log_texts(&buf);
@@ -8081,6 +11437,18 @@ mod tests {
             "alternate-screen content should be suppressed, but found TUI-GARBAGE in: {:?}",
             lines,
         );
+        // An absence proves nothing on its own: this assertion passed on
+        // Windows while the PTY had delivered zero bytes. What the test is
+        // really about is that the alt screen is suppressed *and* the stream
+        // around it survives. The survivors are on the screen, not in `lines`
+        // — four rows of a 24-row grid never scroll into the log.
+        let screen = buf.screen_rows();
+        for expected in ["before-alt-1", "before-alt-2", "after-alt-1", "after-alt-2"] {
+            assert!(
+                screen.iter().any(|l| l.contains(expected)),
+                "{expected} must survive the alternate screen, got {screen:?}",
+            );
+        }
     }
 
     /// End-to-end through a real PTY: replaying the recorded `gh run watch`
@@ -8089,8 +11457,7 @@ mod tests {
     /// *together* — scrollback the user can scroll, no alt noise in the logs.
     #[test]
     fn test_vt_log_real_pty_gh_run_watch_builds_alt_scrollback() {
-        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-        use std::io::Read;
+        use portable_pty::{PtySize, native_pty_system};
 
         let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/fixtures/alt_screen/gh-run-watch.raw");
@@ -8110,27 +11477,30 @@ mod tests {
             Err(e) => panic!("open pty: {e}"),
         };
 
-        let mut cmd = CommandBuilder::new("/bin/cat");
-        cmd.arg(&fixture);
+        let cmd = crate::test_support::replay_file_command(&fixture);
         let mut child = pair.slave.spawn_command(cmd).expect("spawn");
+        // See `test_vt_log_real_pty_echo`: unix only.
+        #[cfg(unix)]
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let terminal = pair.master.take_writer().expect("writer");
         let mut buf = VtLogBuffer::new(24, 120, 1000);
-        let mut raw = [0u8; 4096];
-        loop {
-            match reader.read(&mut raw) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.process(&raw[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(_) => break,
-            }
-        }
+        // See `test_vt_log_real_pty_echo`: kept for the failure message.
+        let mut seen = Vec::new();
+        crate::test_support::drain_pty(reader, terminal, |chunk| {
+            seen.extend_from_slice(chunk);
+            buf.process(chunk);
+        });
+        let _ = child.kill();
         let _ = child.wait();
 
-        assert!(buf.is_alternate_screen(), "stream leaves us in alt screen");
+        assert!(
+            buf.is_alternate_screen(),
+            "stream leaves us in alt screen; the tty sent {} bytes: {}",
+            seen.len(),
+            String::from_utf8_lossy(&seen[..seen.len().min(4000)]).escape_debug(),
+        );
         assert!(
             buf.grid_history_size() > 0,
             "alt-screen scrollback must exist — 0 is the bug (no scrollbar, no scrollback)"
@@ -8142,721 +11512,6 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("Refreshing run status")),
             "alt-screen content must stay out of the log buffer, got: {lines:?}",
-        );
-    }
-
-    // --- ChangedRow / process() return value tests ---
-
-    /// process() returns the rows that changed on the normal screen.
-    #[test]
-    fn test_vt_log_changed_rows_basic() {
-        let mut buf = make_vt_log();
-        let changed = buf.process(b"hello world");
-        assert!(
-            changed.iter().any(|r| r.text == "hello world"),
-            "expected 'hello world' in changed rows, got: {:?}",
-            changed,
-        );
-    }
-
-    /// CR-based overwrite: process() returns the final overwritten row text.
-    #[test]
-    fn test_vt_log_changed_rows_overwrite() {
-        let mut buf = make_vt_log();
-        // "aaaa\r" moves cursor to column 0; "bbbb" overwrites — vt100 renders "bbbb"
-        let changed = buf.process(b"aaaa\rbbbb");
-        assert!(
-            changed.iter().any(|r| r.text.contains("bbbb")),
-            "expected 'bbbb' after CR overwrite, got: {:?}",
-            changed,
-        );
-        assert!(
-            !changed.iter().any(|r| r.text == "aaaa"),
-            "should not see raw 'aaaa' (overwritten), got: {:?}",
-            changed,
-        );
-    }
-
-    /// Alternate screen: changed rows are reported even when alternate screen is active.
-    #[test]
-    fn test_vt_log_changed_rows_alternate_screen() {
-        let mut buf = make_vt_log();
-        buf.process(b"\x1b[?1049h");
-        let changed = buf.process(b"status: running");
-        assert!(
-            changed.iter().any(|r| r.text.contains("status: running")),
-            "changed rows must be reported during alternate screen, got: {:?}",
-            changed,
-        );
-        assert_eq!(
-            buf.total_lines(),
-            0,
-            "log must remain empty during alternate screen"
-        );
-    }
-
-    /// Cursor movement: changed rows reflect the final rendered state.
-    #[test]
-    fn test_vt_log_changed_rows_cursor_movement() {
-        let mut buf = make_vt_log();
-        buf.process(b"line0\r\nline1\r\nline2");
-        // Move cursor up 1 row (CUU 1) and overwrite line1
-        let changed = buf.process(b"\x1b[1Aupdated");
-        assert!(
-            changed.iter().any(|r| r.text.contains("updated")),
-            "expected 'updated' in changed rows after CUU overwrite, got: {:?}",
-            changed,
-        );
-    }
-
-    /// No change: a second process() with no new data returns empty Vec.
-    #[test]
-    fn test_vt_log_changed_rows_empty_on_no_change() {
-        let mut buf = make_vt_log();
-        buf.process(b"hello");
-        let changed = buf.process(b"");
-        assert!(
-            changed.is_empty(),
-            "expected no changed rows when no data written, got: {:?}",
-            changed,
-        );
-    }
-
-    /// resize() clears prev_rows so the next process() reports all non-empty rows.
-    #[test]
-    fn test_vt_log_changed_rows_resize_clears_prev() {
-        let mut buf = make_vt_log();
-        buf.process(b"hello");
-        buf.process(b""); // stabilise prev_rows
-        buf.resize(24, 80);
-        let changed = buf.process(b"");
-        assert!(
-            changed.iter().any(|r| r.text.contains("hello")),
-            "expected 'hello' after resize clears prev, got: {:?}",
-            changed,
-        );
-    }
-
-    /// Screen switch resets prev_rows so first frame reports all non-empty rows.
-    #[test]
-    fn test_vt_log_changed_rows_screen_switch_resets_prev() {
-        let mut buf = make_vt_log();
-        buf.process(b"normal line");
-        buf.process(b""); // stabilise
-        buf.process(b"\x1b[?1049h"); // enter alternate
-        buf.process(b"alt content");
-        // Exit alternate — should reset prev for normal screen
-        let changed = buf.process(b"\x1b[?1049l");
-        assert!(
-            changed.iter().any(|r| r.text.contains("normal line")),
-            "expected 'normal line' after screen switch resets prev, got: {:?}",
-            changed,
-        );
-    }
-
-    // --- mark_agent_chrome tests ---
-
-    /// Helper: create plain LogLine vec from string slices for testing.
-    fn make_log_lines(items: &[&str]) -> Vec<LogLine> {
-        items
-            .iter()
-            .map(|s| LogLine {
-                spans: if s.is_empty() {
-                    vec![]
-                } else {
-                    vec![LogSpan {
-                        text: s.to_string(),
-                        fg: None,
-                        bg: None,
-                        bold: false,
-                        italic: false,
-                        underline: false,
-                    }]
-                },
-                cols: 0,
-                chrome: false,
-            })
-            .collect()
-    }
-
-    /// Helper: mark a batch and return the texts readers would see.
-    fn visible_texts(items: &[&str]) -> Vec<String> {
-        let mut lines = make_log_lines(items);
-        mark_agent_chrome(&mut lines);
-        lines
-            .iter()
-            .filter(|l| !l.chrome)
-            .map(|l| l.text())
-            .collect()
-    }
-
-    // find_scrollback_chrome_cutoff tests live in chrome.rs (canonical location)
-
-    /// Large batch with an Ink prompt → prompt and everything below marked chrome.
-    #[test]
-    fn test_mark_agent_chrome_large_batch_ink_prompt() {
-        let mut items: Vec<&str> = vec!["real content"; 18];
-        items.push("❯"); // index 18
-        items.push(""); // index 19
-        items.push("Model: x"); // index 20
-        let visible = visible_texts(&items);
-        assert_eq!(visible.len(), 18, "lines before prompt stay visible");
-        assert!(visible.iter().all(|t| t == "real content"));
-    }
-
-    /// Regression: agents echo the submitted user message on a prompt row. That
-    /// row is the conversation, and marking it chrome deleted both the message
-    /// and the reply that followed it in the same batch.
-    #[test]
-    fn test_mark_agent_chrome_keeps_echoed_user_message() {
-        let visible = visible_texts(&[
-            "❯ rename non funziona nel filebrowser",
-            "  intent: investigating FileBrowser rename bug",
-            "• Ho trovato il punto: la closure leggeva previousFocus azzerato.",
-        ]);
-        assert_eq!(visible.len(), 3, "user message and reply must survive");
-    }
-
-    /// A bare `> ` row is still a prompt (Gemini/generic).
-    #[test]
-    fn test_mark_agent_chrome_bare_gt_prompt() {
-        let mut items: Vec<&str> = vec!["output"; 17];
-        items.push("> "); // index 17 — bare prompt, no input typed
-        items.push("chrome"); // index 18
-        assert_eq!(visible_texts(&items).len(), 17);
-    }
-
-    /// Small batch with a prompt in the scan window → still marked.
-    #[test]
-    fn test_mark_agent_chrome_small_batch_with_prompt() {
-        let visible = visible_texts(&["line 1", "❯", "chrome"]);
-        assert_eq!(visible, vec!["line 1"]);
-    }
-
-    /// Separator lines immediately above a prompt are part of the prompt box.
-    #[test]
-    fn test_mark_agent_chrome_separator_above_prompt() {
-        let visible = visible_texts(&[
-            "real output",
-            "more output",
-            "────────────────────", // separator above prompt
-            "❯ ",                   // bare prompt
-            "────────────────────", // separator below
-            "[Opus 4.6 | Max]",
-            "Context ███░░░",
-        ]);
-        assert_eq!(visible, vec!["real output", "more output"]);
-    }
-
-    /// Empty lines above a prompt are part of the prompt box.
-    #[test]
-    fn test_mark_agent_chrome_empty_lines_above_prompt() {
-        let visible = visible_texts(&["real output", "", "", "❯", "Model: x"]);
-        assert_eq!(visible, vec!["real output"]);
-    }
-
-    // is_separator_line tests live in chrome.rs (canonical location)
-
-    /// Batch with no prompt → nothing marked, regardless of size.
-    #[test]
-    fn test_mark_agent_chrome_no_prompt_any_size_passthrough() {
-        let mut lines = make_log_lines(&["a", "b", "c"]);
-        let before = lines.clone();
-        mark_agent_chrome(&mut lines);
-        assert_eq!(lines, before);
-    }
-
-    /// Large batch without any prompt → nothing marked.
-    #[test]
-    fn test_mark_agent_chrome_large_batch_no_prompt_passthrough() {
-        let items: Vec<&str> = vec!["output line"; 20];
-        let mut lines = make_log_lines(&items);
-        let before = lines.clone();
-        mark_agent_chrome(&mut lines);
-        assert_eq!(lines, before);
-    }
-
-    /// Empty batch → no panic.
-    #[test]
-    fn test_mark_agent_chrome_empty_batch() {
-        let mut lines: Vec<LogLine> = Vec::new();
-        mark_agent_chrome(&mut lines);
-        assert!(lines.is_empty());
-    }
-
-    /// Regression: a markdown blockquote is prose, not a prompt. Everything after
-    /// it used to be deleted from history, so paragraphs arrived mid-sentence.
-    #[test]
-    fn test_mark_agent_chrome_markdown_quote_is_not_a_prompt() {
-        let visible = visible_texts(&[
-            "Here is what the docs say:",
-            "> quoted guidance from the manual",
-            "verificabile; non è un force-push e non sovrascrive alcun branch",
-            "esistente.",
-        ]);
-        assert_eq!(visible.len(), 4, "quoted prose must not truncate the batch");
-    }
-
-    /// Regression: a separator alone is not chrome. Tables, progress bars and
-    /// Codex's `└ ────` dividers all carry box-drawing runs mid-output.
-    #[test]
-    fn test_mark_agent_chrome_standalone_separator_is_not_a_prompt() {
-        let visible = visible_texts(&[
-            "• Ran cargo nextest run",
-            "  └ ──────────────────────",
-            "    Summary [ 12.4s ] 91 tests run",
-            "    all passed",
-        ]);
-        assert_eq!(visible.len(), 4, "a divider must not truncate the batch");
-    }
-
-    /// Regression: markdown table rules are box-drawing runs. They anchored the
-    /// cut and swallowed the rest of the table plus whatever followed it.
-    #[test]
-    fn test_mark_agent_chrome_markdown_table_survives() {
-        let visible = visible_texts(&[
-            "  │ Livello                                   │ Esito                 │",
-            "  ├───────────────────────────────────────────┼───────────────────────┤",
-            "  │ fs.rs:1239 rename_path + route /fs/rename │ ✅ rinomina realmente │",
-            "  └───────────────────────────────────────────┴───────────────────────┘",
-            "Conclusione: il rename funziona lato backend.",
-        ]);
-        assert_eq!(visible.len(), 5, "table and trailing prose must survive");
-    }
-
-    /// Chrome is hidden from readers but never dropped from the buffer, so a
-    /// misclassification costs visibility, not history.
-    #[test]
-    fn test_mark_agent_chrome_keeps_lines_in_the_batch() {
-        let mut lines = make_log_lines(&["real output", "❯ ", "Context ███░░░"]);
-        mark_agent_chrome(&mut lines);
-        assert_eq!(lines.len(), 3, "no line is discarded");
-        assert!(!lines[0].chrome);
-        assert!(lines[1].chrome && lines[2].chrome);
-    }
-
-    /// End-to-end through the buffer: chrome occupies offset slots but is not
-    /// returned, and real content after a false-positive anchor survives.
-    #[test]
-    fn test_lines_since_owned_filters_chrome_without_losing_content() {
-        let mut buf = VtLogBuffer::new(3, 80, 1000);
-        // 3-row screen: everything but the last 3 rows scrolls into history, so the
-        // trailing padding lines push the content under test off the screen.
-        buf.process(b"alpha\r\n> quoted prose\r\nbravo\r\ncharlie\r\npad1\r\npad2\r\npad3\r\n");
-        let (lines, total) = buf.lines_since_owned(0, usize::MAX);
-        let texts: Vec<String> = lines.iter().map(|l| l.text()).collect();
-        for expected in ["alpha", "> quoted prose", "bravo", "charlie"] {
-            assert!(
-                texts.iter().any(|t| t.trim() == expected),
-                "{expected:?} missing from {texts:?}"
-            );
-        }
-        assert!(total >= texts.len(), "offset space includes chrome slots");
-    }
-
-    /// Replays the live reproduction that exposed the bug: numbered content with
-    /// chrome-shaped anchors (`> `, `────`, `›`, `❯`) landing near batch ends.
-    /// Against the old truncating capture this lost 6 of 100 lines.
-    #[test]
-    fn test_scrollback_survives_chrome_shaped_anchors_in_content() {
-        let anchors = [
-            "> markdown quote anchor",
-            "──────────────────────",
-            "› codex prompt anchor",
-            "❯ ink prompt anchor",
-        ];
-        let mut stream = Vec::new();
-        let mut n = 1;
-        for anchor in anchors {
-            for _ in 0..20 {
-                stream.extend_from_slice(format!("LINE-{n:03} normal content row\r\n").as_bytes());
-                n += 1;
-            }
-            stream.extend_from_slice(anchor.as_bytes());
-            stream.extend_from_slice(b"\r\n");
-            for _ in 0..5 {
-                stream.extend_from_slice(format!("LINE-{n:03} normal content row\r\n").as_bytes());
-                n += 1;
-            }
-        }
-        // Push the tail off the screen so every numbered row reaches history.
-        for _ in 0..30 {
-            stream.extend_from_slice(b"pad\r\n");
-        }
-
-        let mut buf = VtLogBuffer::new(24, 80, 10_000);
-        // Feed in 512-byte chunks: batch boundaries are what put an anchor inside
-        // the scan window, which is exactly how the live session tripped this.
-        for chunk in stream.chunks(512) {
-            buf.process(chunk);
-        }
-
-        let (lines, _) = buf.lines_since_owned(0, usize::MAX);
-        let seen: Vec<String> = lines.iter().map(|l| l.text().trim().to_string()).collect();
-        let missing: Vec<usize> = (1..=100)
-            .filter(|i| {
-                let needle = format!("LINE-{i:03}");
-                !seen.iter().any(|t| t.starts_with(&needle))
-            })
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "content lines lost from history: {missing:?}"
-        );
-    }
-
-    // --- LogLine / extract_log_line tests ---
-
-    /// Helper: create a TerminalGrid, feed data, and extract LogLine for row 0.
-    fn extract_line_from(data: &[u8]) -> LogLine {
-        use alacritty_terminal::index::Line;
-        let mut grid = crate::terminal_grid::TerminalGrid::new(4, 80, 0);
-        let _ = grid.process(data);
-        grid.extract_log_line(Line(0))
-    }
-
-    /// Plain text produces a single span with no color attributes.
-    #[test]
-    fn test_extract_log_line_plain_text_single_span() {
-        let line = extract_line_from(b"Hello world");
-        assert_eq!(line.spans.len(), 1, "plain text = single span");
-        assert_eq!(line.spans[0].text, "Hello world");
-        assert_eq!(line.spans[0].fg, None);
-        assert_eq!(line.spans[0].bg, None);
-        assert!(!line.spans[0].bold);
-        assert!(!line.spans[0].italic);
-        assert!(!line.spans[0].underline);
-    }
-
-    /// Colored text (ANSI escape for red) produces a span with fg color.
-    #[test]
-    fn test_extract_log_line_colored_text() {
-        // ESC[31m = red foreground, ESC[0m = reset
-        let line = extract_line_from(b"\x1b[31mERROR\x1b[0m ok");
-        assert!(
-            line.spans.len() >= 2,
-            "should have at least 2 spans: {:?}",
-            line.spans
-        );
-        // First span: "ERROR" with red fg
-        assert_eq!(line.spans[0].text, "ERROR");
-        assert_eq!(line.spans[0].fg, Some(LogColor::Idx(1))); // ANSI red = idx 1
-        // Second span: " ok" with default color
-        assert_eq!(line.spans[1].text, " ok");
-        assert_eq!(line.spans[1].fg, None);
-    }
-
-    #[test]
-    fn log_color_maps_named_ansi_palette_exhaustively() {
-        use alacritty_terminal::vte::ansi::{Color, NamedColor};
-
-        let defaults = [
-            NamedColor::Foreground,
-            NamedColor::Background,
-            NamedColor::Cursor,
-            NamedColor::BrightForeground,
-            NamedColor::DimForeground,
-        ];
-        for named in defaults {
-            assert_eq!(LogColor::from_ansi_color(Color::Named(named)), None);
-        }
-
-        let palette = [
-            (NamedColor::Black, 0),
-            (NamedColor::Red, 1),
-            (NamedColor::Green, 2),
-            (NamedColor::Yellow, 3),
-            (NamedColor::Blue, 4),
-            (NamedColor::Magenta, 5),
-            (NamedColor::Cyan, 6),
-            (NamedColor::White, 7),
-            (NamedColor::BrightBlack, 8),
-            (NamedColor::BrightRed, 9),
-            (NamedColor::BrightGreen, 10),
-            (NamedColor::BrightYellow, 11),
-            (NamedColor::BrightBlue, 12),
-            (NamedColor::BrightMagenta, 13),
-            (NamedColor::BrightCyan, 14),
-            (NamedColor::BrightWhite, 15),
-            (NamedColor::DimBlack, 0),
-            (NamedColor::DimRed, 1),
-            (NamedColor::DimGreen, 2),
-            (NamedColor::DimYellow, 3),
-            (NamedColor::DimBlue, 4),
-            (NamedColor::DimMagenta, 5),
-            (NamedColor::DimCyan, 6),
-            (NamedColor::DimWhite, 7),
-        ];
-        for (named, index) in palette {
-            assert_eq!(
-                LogColor::from_ansi_color(Color::Named(named)),
-                Some(LogColor::Idx(index)),
-                "unexpected mapping for {named:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn log_color_preserves_indexed_and_rgb_values() {
-        use alacritty_terminal::vte::ansi::{Color, Rgb};
-
-        assert_eq!(
-            LogColor::from_ansi_color(Color::Indexed(231)),
-            Some(LogColor::Idx(231))
-        );
-        assert_eq!(
-            LogColor::from_ansi_color(Color::Spec(Rgb {
-                r: 12,
-                g: 34,
-                b: 56,
-            })),
-            Some(LogColor::Rgb(12, 34, 56))
-        );
-    }
-
-    /// Multi-span line with bold + color changes.
-    #[test]
-    fn test_extract_log_line_multi_span_bold_color() {
-        // Bold green then normal
-        let line = extract_line_from(b"\x1b[1;32m+added\x1b[0m context");
-        assert!(line.spans.len() >= 2, "multi-span: {:?}", line.spans);
-        assert_eq!(line.spans[0].text, "+added");
-        assert!(line.spans[0].bold);
-        assert_eq!(line.spans[0].fg, Some(LogColor::Idx(2))); // green = idx 2
-        // Rest is plain
-        let last = line.spans.last().unwrap();
-        assert_eq!(last.text, " context");
-        assert!(!last.bold);
-        assert_eq!(last.fg, None);
-    }
-
-    /// Trailing whitespace spans are trimmed.
-    #[test]
-    fn test_extract_log_line_trims_trailing_whitespace() {
-        let line = extract_line_from(b"text");
-        // Should not have trailing spaces filling to column 80
-        let total_len: usize = line.spans.iter().map(|s| s.text.len()).sum();
-        assert_eq!(total_len, 4, "no trailing whitespace: {:?}", line.spans);
-    }
-
-    /// Empty row produces an empty spans vec.
-    #[test]
-    fn test_extract_log_line_empty_row() {
-        let line = extract_line_from(b"");
-        assert!(
-            line.spans.is_empty(),
-            "empty row = empty spans: {:?}",
-            line.spans
-        );
-    }
-
-    /// LogLine.text() concatenates all span texts.
-    #[test]
-    fn test_log_line_text_method() {
-        let line = LogLine {
-            spans: vec![
-                LogSpan {
-                    text: "hello".into(),
-                    fg: Some(LogColor::Idx(1)),
-                    bg: None,
-                    bold: true,
-                    italic: false,
-                    underline: false,
-                },
-                LogSpan {
-                    text: " world".into(),
-                    fg: None,
-                    bg: None,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                },
-            ],
-            cols: 0,
-            chrome: false,
-        };
-        assert_eq!(line.text(), "hello world");
-    }
-
-    /// Colored lines scrolled off are preserved as LogLine with attributes.
-    #[test]
-    fn test_vt_log_colored_lines_preserved_in_log() {
-        let mut buf = VtLogBuffer::new(4, 80, 100); // small 4-row screen
-        // Feed colored lines that will scroll off
-        for i in 0..6 {
-            buf.process(format!("\x1b[31mred-{i}\x1b[0m\r\n").as_bytes());
-        }
-        let log = buf.lines();
-        assert!(!log.is_empty(), "should have scrolled-off lines");
-        // At least one line should have a colored span
-        let has_color = log.iter().any(|ll| ll.spans.iter().any(|s| s.fg.is_some()));
-        assert!(
-            has_color,
-            "scrolled-off lines should preserve color: {:?}",
-            log
-        );
-    }
-
-    /// Serialize LogLine to JSON matches expected format.
-    #[test]
-    fn test_log_line_serialization() {
-        let line = LogLine {
-            spans: vec![
-                LogSpan {
-                    text: "hello".into(),
-                    fg: Some(LogColor::Idx(1)),
-                    bg: None,
-                    bold: true,
-                    italic: false,
-                    underline: false,
-                },
-                LogSpan {
-                    text: " world".into(),
-                    fg: None,
-                    bg: None,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                },
-            ],
-            cols: 0,
-            chrome: false,
-        };
-        let json = serde_json::to_value(&line).unwrap();
-        let spans = json["spans"].as_array().unwrap();
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0]["text"], "hello");
-        assert_eq!(spans[0]["fg"], serde_json::json!({"idx": 1}));
-        assert!(spans[0]["bold"].as_bool().unwrap());
-        // Second span has no color fields (skipped by serde)
-        assert_eq!(spans[1]["text"], " world");
-        assert!(spans[1].get("fg").is_none() || spans[1]["fg"].is_null());
-        assert!(spans[1].get("bold").is_none() || !spans[1]["bold"].as_bool().unwrap_or(true));
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_no_match() {
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "normal output".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert_eq!(line.spans[0].text, "normal output");
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_plain_intent() {
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "intent: reading the config file".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert!(
-            line.spans.is_empty(),
-            "plain-prefix intent should be stripped entirely"
-        );
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_plain_suggest() {
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "suggest: Run tests | Check logs | Push".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert!(
-            line.spans.is_empty(),
-            "plain-prefix suggest should be stripped entirely"
-        );
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_mid_line_not_stripped() {
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "The intent: of this code is clear".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert_eq!(line.spans[0].text, "The intent: of this code is clear");
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_indented_suggest() {
-        // Ink indents continuation lines — suggest: with leading whitespace must be stripped
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "  suggest: Run tests | Check logs | Push".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert!(line.spans.is_empty(), "indented suggest should be stripped");
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_indented_intent() {
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "  intent: reading the config file".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert!(line.spans.is_empty(), "indented intent should be stripped");
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_bullet_suggest() {
-        // Ink bullet prefix: ● suggest: ...
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "● suggest: A | B | C".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert!(
-            line.spans.is_empty(),
-            "bullet-prefixed suggest should be stripped"
-        );
-    }
-
-    #[test]
-    fn test_strip_structural_tokens_bullet_intent() {
-        let mut line = LogLine {
-            spans: vec![LogSpan {
-                text: "⏺ intent: doing something (Task)".into(),
-                ..Default::default()
-            }],
-            cols: 0,
-            chrome: false,
-        };
-        line.strip_structural_tokens();
-        assert!(
-            line.spans.is_empty(),
-            "bullet-prefixed intent should be stripped"
         );
     }
 
@@ -8903,7 +11558,7 @@ mod tests {
         assert!(s.rate_limit_set_ms > 0);
 
         // Manually backdate the timestamp to simulate expiry
-        if let Some(mut entry) = state.session_states.get_mut("s1") {
+        if let Some(mut entry) = state.session_maps.session_states.get_mut("s1") {
             entry.rate_limit_set_ms = entry.rate_limit_set_ms.saturating_sub(6000);
         }
 
@@ -8947,7 +11602,7 @@ mod tests {
         assert!(s.retry_after_ms.is_none());
 
         // Backdate past the default expiry (120s)
-        if let Some(mut entry) = state.session_states.get_mut("s1") {
+        if let Some(mut entry) = state.session_maps.session_states.get_mut("s1") {
             entry.rate_limit_set_ms = entry.rate_limit_set_ms.saturating_sub(121_000);
         }
 
@@ -8957,30 +11612,53 @@ mod tests {
             "rate limit should expire with default timeout"
         );
     }
+}
 
-    // ── VtLogBuffer alt-screen ──────────────────────────────────
+#[cfg(test)]
+mod http_client_tests {
+    use super::*;
 
-    #[test]
-    fn vt_log_buffer_is_alternate_screen_tracks_state() {
-        let mut vt = VtLogBuffer::new(24, 80, 1000);
-        assert!(!vt.is_alternate_screen());
-        vt.process(b"\x1b[?1049h");
-        assert!(vt.is_alternate_screen());
-        vt.process(b"\x1b[?1049l");
-        assert!(!vt.is_alternate_screen());
+    /// A `reqwest::Client` with no timeout waits forever on a peer that accepts
+    /// the connection and then goes silent — the half-open socket a VPN drop
+    /// leaves behind. The GitHub poller awaits that request inline in its
+    /// `select!`, so the hang takes the poller's Stop handling down with it.
+    #[tokio::test]
+    async fn request_timeout_fires_when_the_peer_accepts_and_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalling listener");
+        let addr = listener.local_addr().expect("local addr");
+        // Accept and hold the socket open without ever writing a response.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let client = http_client_with_timeouts(Duration::from_secs(2), Duration::from_millis(150));
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("a stalled peer must not resolve");
+
+        assert!(err.is_timeout(), "expected a timeout error, got: {err}");
     }
 
+    /// The shared client must bound *both* phases: a route that black-holes SYN
+    /// packets never reaches the request phase, so a request-only timeout still
+    /// leaves the connect hanging for the OS default (~75s on macOS).
     #[test]
-    fn vt_log_buffer_exit_alt_screen_only_when_active() {
-        let mut vt = VtLogBuffer::new(24, 80, 1000);
-
-        // Not in alt screen — should be no-op
-        assert!(!vt.is_alternate_screen());
-
-        // Enter alt screen, then exit via the recovery sequences
-        vt.process(b"\x1b[?1049h");
-        assert!(vt.is_alternate_screen());
-        vt.process(b"\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?25h\x1b[0m");
-        assert!(!vt.is_alternate_screen());
+    fn shared_client_timeouts_are_bounded_and_connect_is_the_tighter_one() {
+        assert!(
+            HTTP_CONNECT_TIMEOUT < HTTP_REQUEST_TIMEOUT,
+            "connect ({HTTP_CONNECT_TIMEOUT:?}) must be tighter than the whole \
+             request ({HTTP_REQUEST_TIMEOUT:?})"
+        );
+        assert!(
+            HTTP_REQUEST_TIMEOUT <= Duration::from_secs(30),
+            "a GitHub API call slower than 30s is a wedge, not a slow response"
+        );
     }
 }

@@ -6,18 +6,20 @@ import { rateLimitStore } from "../../stores/ratelimit";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
 import {
-	displayTask,
 	effectiveActivityState,
 	isActivityWorking,
-	projectName,
 	reconcileActivityOrder,
+	terminalProjectName,
 	terminalStatusLabel,
 } from "../../utils/activitySnapshot";
+import { displayTask } from "../../utils/displayTask";
 import { navigateToTerminal } from "../../utils/navigateToTerminal";
 import { getRepoColor } from "../../utils/repoColor";
 import { formatRelativeTime } from "../../utils/time";
 import { GlobeIcon } from "../GlobeIcon";
+import { Button } from "../ui/Button";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
+import { SubAgentIcon } from "../ui/SubAgentIcon";
 import s from "./ActivityDashboard.module.css";
 
 export const statusClasses = {
@@ -30,7 +32,7 @@ export const statusClasses = {
 
 /** Truncate a string to a single line for display */
 function truncate(text: string, maxLen = 80): string {
-	const oneLine = text.replace(/\n/g, " ").trim();
+	const oneLine = text.replaceAll("\n", " ").trim();
 	if (oneLine.length <= maxLen) return oneLine;
 	return oneLine.slice(0, maxLen - 1) + "\u2026";
 }
@@ -79,6 +81,8 @@ export type TerminalRow = {
 	activeSubTasks: number;
 	isActive: boolean;
 	isPromoted: boolean;
+	/** Spawning agent's tab name when this PTY is a sub-agent; null otherwise. */
+	subAgentTag: string | null;
 };
 
 /** Field-equality for a row. `status` is derived fresh on every build, so it is
@@ -173,7 +177,7 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 		return {
 			id,
 			name: term.name,
-			project: projectName(term.cwd),
+			project: terminalProjectName(id, term.cwd),
 			projectColor: repoPath ? getRepoColor(repoPath) : undefined,
 			agent: term.agentType || "shell",
 			status,
@@ -186,6 +190,7 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 			activeSubTasks: term.activeSubTasks,
 			isActive: terminalsStore.state.activeId === id,
 			isPromoted: globalWorkspaceStore.isPromoted(id),
+			subAgentTag: terminalsStore.getSubAgentTag(id),
 		};
 	};
 
@@ -243,8 +248,15 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 							<div class={s.rowMain}>
 								<div class={s.nameCell}>
 									<span class={s.termName}>{term.name}</span>
+									<Show when={term.subAgentTag}>
+										{(parent) => <SubAgentIcon parent={parent()} class={s.subAgentTag} />}
+									</Show>
 									<Show when={term.project}>
-										<span class={s.project} style={term.projectColor ? { color: term.projectColor } : undefined}>
+										<span
+											class={s.project}
+											title={term.project ?? undefined}
+											style={term.projectColor ? { color: term.projectColor } : undefined}
+										>
 											{term.project}
 										</span>
 									</Show>
@@ -252,7 +264,10 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 								<span class={s.agent}>{term.agent}</span>
 								<span class={`${s.status} ${term.status.className}`}>{term.status.label}</span>
 								<span class={s.lastActivity}>{term.isWorking ? "" : formatRelativeTime(term.idleSince)}</span>
-								<button
+								<Button
+									variant="ghost"
+									shape="icon"
+									aria-label={term.isPromoted ? "Remove from Global Workspace" : "Promote to Global Workspace"}
 									class={`${s.promoteBtn} ${term.isPromoted ? s.promoted : ""}`}
 									title={term.isPromoted ? "Remove from Global Workspace" : "Promote to Global Workspace"}
 									onClick={(e) => {
@@ -265,7 +280,7 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 									}}
 								>
 									<GlobeIcon />
-								</button>
+								</Button>
 							</div>
 							<Show when={term.currentTask}>
 								{(task) => (
@@ -306,9 +321,6 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 
 			<div class={s.footer}>
 				<span>{terminals().length} terminal(s)</span>
-				<Show when={!props.embedded}>
-					<span style={{ "margin-left": "auto" }}>Click to switch • Esc to close</span>
-				</Show>
 			</div>
 		</>
 	);

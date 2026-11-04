@@ -3,6 +3,7 @@ import { useSmartPrompts } from "../../hooks/useSmartPrompts";
 import { appLogger } from "../../stores/appLogger";
 import { promptLibraryStore, type SavedPrompt, type SmartPlacement } from "../../stores/promptLibrary";
 import { cx } from "../../utils";
+import { promptError } from "../../utils/promptError";
 import { IconCheck, IconChevronDown, IconSparkle } from "../icons";
 import { Spinner } from "../shared/Spinner";
 import s from "./SmartButtonStrip.module.css";
@@ -111,7 +112,7 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 			const result = await executeSmartPrompt(prompt, extraVars);
 			if (!result.ok) props.onError?.(friendlyError(result, prompt.name));
 		} catch (err) {
-			props.onError?.(String(err));
+			props.onError?.(promptError(err));
 			appLogger.error("prompts", `SmartButtonStrip "${prompt.name}" failed`, err);
 		} finally {
 			setBusy(false);
@@ -151,6 +152,14 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 							{(item) => {
 								const check = () => canExecute(item);
 								const isActive = () => item.id === activePrompt()?.id;
+								// DEFERRED (2026-09-06) — this hint stays a `title=` tooltip, so its
+								// "Settings → …" text is not clickable here. Making it clickable
+								// needs an onOpenSettings prop threaded through all six mount points
+								// (GitHubPanel, PrSection, PrDetailPopover, ChangesTab, BranchesTab, and
+								// each of their parents), because `openSettings` is local App.tsx state
+								// with no store. The real fix is to promote it to a store; until then the
+								// threading costs more than it buys. Clickable version lives in
+								// SmartPromptsDropdown (#706-8d98).
 								return (
 									<button
 										class={cx(s.menuItem, isActive() && s.menuItemActive, !check().ok && s.menuItemDisabled)}

@@ -1,0 +1,50 @@
+.roadmap { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--fg-primary); background: var(--bg-primary); font: var(--font-md) var(--font-ui); }
+/* Roadmap: a flat toolbar, a sticky axis on the well, tinted bars (no
+   outlines), the undated list behind one hairline. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }
+.roadmap :focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+.toolbar label, .navigation { display: flex; align-items: center; gap: 8px; }
+.navigation { flex: 1; }
+.navigation h2 { font-size: var(--font-md); font-weight: 600; margin: 0; text-align: center; }
+.status { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px; color: var(--fg-muted); font-size: var(--font-sm); }
+.mapping { margin: 0; padding: 4px 12px 8px; color: var(--fg-muted); font-size: var(--font-sm); }
+.warning { color: var(--warning); }
+.error { color: var(--error); overflow-wrap: anywhere; }
+.content { flex: 1; min-height: 0; display: flex; border-top: var(--hairline-w) solid var(--hairline); }
+.dated { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.timeline { flex: 1; min-height: 0; overflow: auto; }
+.sheet { --label-width: 240px; width: calc(var(--label-width) + var(--track-width)); min-width: 100%; }
+.axis { display: flex; height: 32px; position: sticky; top: 0; z-index: 3; background: var(--bg-primary); border-bottom: var(--hairline-w) solid var(--hairline); color: var(--fg-muted); font-size: var(--font-sm); }
+.axisTitle { flex: 0 0 var(--label-width); position: sticky; left: 0; z-index: 1; padding: 8px 12px; box-sizing: border-box; background: var(--bg-primary); }
+.ticks { display: flex; flex: 1; min-width: 0; }
+.ticks > span { flex: 1; min-width: 0; border-left: var(--hairline-w) solid var(--hairline); padding-top: 8px; text-align: center; white-space: nowrap; box-sizing: border-box; }
+.canvas { position: relative; }
+.row { position: absolute; left: 0; width: 100%; }
+button[data-control-layout="row"].task { min-height: 36px; color: var(--fg-primary); font: inherit; cursor: pointer; display: flex; width: 100%; height: 100%; padding: 0; border: 0; border-bottom: var(--hairline-w) solid var(--hairline); border-radius: 0; text-align: left; background: transparent; }
+.identity { position: sticky; left: 0; z-index: 1; flex: 0 0 var(--label-width); min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 6px 12px; box-sizing: border-box; background: var(--bg-primary); border-right: var(--hairline-w) solid var(--hairline); }
+.task:hover .identity { background: color-mix(in srgb, var(--fg-primary) 4%, var(--bg-primary)); }
+.title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dates { font: var(--font-xs) var(--font-mono); color: var(--fg-muted); }
+.track { position: relative; flex: 1; min-width: 0; }
+.bar { position: absolute; top: 10px; bottom: 10px; min-width: 4px; border-radius: var(--radius-md); background: color-mix(in srgb, var(--accent) 22%, var(--bg-primary)); color: var(--fg-primary); box-sizing: border-box; overflow: hidden; }
+.bar > span { display: block; overflow: hidden; text-overflow: ellipsis; padding: 0 8px; line-height: 30px; white-space: nowrap; font-size: var(--font-xs); }
+.bar[data-tone="success"] { background: color-mix(in srgb, var(--success) 22%, var(--bg-primary)); }
+.bar[data-tone="warning"] { background: color-mix(in srgb, var(--warning) 22%, var(--bg-primary)); }
+.bar[data-tone="danger"] { background: color-mix(in srgb, var(--error) 22%, var(--bg-primary)); }
+.outside { display: block; padding: 20px 12px; color: var(--fg-muted); font-size: var(--font-sm); }
+.roadmap .undated { height: auto; display: flex; flex-direction: column; flex: 0 0 300px; min-height: 0; min-width: 0; border-left: var(--hairline-w) solid var(--hairline); }
+.undated h3 { margin: 0; padding: 10px 12px; color: var(--fg-secondary); font-size: var(--font-sm); font-weight: 600; }
+.empty { padding: 16px; color: var(--fg-muted); }
+.more { align-self: center; margin: 8px; }
+@container (max-width: 700px) {
+	.toolbar { padding: 8px; }
+	.navigation { flex-basis: 100%; }
+	.navigation h2 { flex: 1; font-size: var(--font-md); }
+
+	.content { flex-direction: column; }
+	.dated { min-height: 140px; }
+	.roadmap .undated { flex: 0 0 35%; border-left: 0; border-top: var(--hairline-w) solid var(--hairline); }
+	.undated h3 { padding: 8px 12px; }
+	.sheet { --label-width: 180px; }
+	.dates { font-size: var(--font-2xs); }
+}

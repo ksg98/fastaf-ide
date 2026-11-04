@@ -79,10 +79,10 @@ export const RunCommandDialog: Component<RunCommandDialogProps> = (props) => {
 						/>
 					</div>
 					<div class={d.actions}>
-						<button class={d.cancelBtn} onClick={props.onClose}>
+						<button type="button" class={d.cancelBtn} onClick={props.onClose}>
 							{t("runCommand.cancel", "Cancel")}
 						</button>
-						<button class={d.primaryBtn} onClick={handleSaveAndRun} disabled={!command().trim()}>
+						<button type="button" class={d.primaryBtn} onClick={handleSaveAndRun} disabled={!command().trim()}>
 							{t("runCommand.saveAndRun", "Save & Run")}
 						</button>
 					</div>

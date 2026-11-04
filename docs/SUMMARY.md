@@ -19,14 +19,19 @@
 - [Command Palette](./user-guide/command-palette.md)
 - [Keyboard Shortcuts](./user-guide/keyboard-shortcuts.md)
 - [Settings](./user-guide/settings.md)
+- [Design Mode](./user-guide/design-mode.md)
 
 ## AI Agents
 
 - [Agent Support](./user-guide/ai-agents.md)
 - [Agent Teams](./user-guide/agent-teams.md)
+- [Automations](./user-guide/automations.md)
+- [Project Progress](./user-guide/project-progress.md)
+- [Progress Reporting Evaluation](./evaluations/progress-reporting.md)
 - [AI Chat](./user-guide/ai-chat.md)
 - [Smart Prompts](./user-guide/smart-prompts.md)
 - [Prompt Library](./user-guide/prompt-library.md)
+- [Guided Event Configuration](./user-guide/event-driven-templates.md)
 - [Voice Dictation](./user-guide/dictation.md)
 
 ## Git & GitHub
@@ -55,6 +60,7 @@
 ## Architecture Decisions
 
 - [Atomic MCP Agent Submission](./decisions/2026-08-27-atomic-mcp-agent-submission.md)
+- [Ego Triage Read-only Boundary (Design)](./internals/ego-triage-readonly-boundary.md)
 
 ## Agent Detection
 
@@ -62,7 +68,6 @@
 - [Detection Matrix](./architecture/agents/detection-matrix.md)
 - [Claude Code](./architecture/agents/claude-code.md)
 - [Codex](./architecture/agents/codex.md)
-- [Aider](./architecture/agents/aider.md)
 - [Gemini CLI](./architecture/agents/gemini-cli.md)
 - [OpenCode](./architecture/agents/opencode.md)
 - [pi](./architecture/agents/pi.md)
@@ -72,13 +77,15 @@
 # Backend
 
 - [Configuration](./backend/config.md)
+- [Workflow Contract Baseline](./backend/workflow-baseline/contract.md)
 - [PTY Management](./backend/pty.md)
 - [Output Parser](./backend/output-parser.md)
 - [Error Classification](./backend/error-classification.md)
-- [AI Watchers](./backend/ai-watchers.md)
 - [Git Operations](./backend/git.md)
+  - [Native Worktree Recycling Measurement](./evidence/worktree-recycling-1705-native.md)
 - [GitHub Integration](./backend/github.md)
 - [MCP & HTTP Server](./backend/mcp-http.md)
+- [ACP Client for ego](./backend/acp.md)
 - [MCP Proxy Hub](./backend/mcp-proxy.md)
 - [Voice Dictation](./backend/dictation.md)
 - [Alacritty Integration](./backend/alacritty-integration.md)
@@ -120,6 +127,7 @@
 
 ## Audits & Plans
 
+- [Relay Remote Daemon Design (Proposal)](./design/2085-relay-remote-daemon.md)
 - [CanvasTerminal Feature Audit](./frontend/canvas-terminal-audit.md)
 - [Font Size Audit](./frontend/font-size-audit.md)
 - [Keyboard Shortcuts Comparison](./frontend/KEYBOARD_SHORTCUTS_COMPARISON.md)

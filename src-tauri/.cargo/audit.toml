@@ -1,0 +1,28 @@
+# cargo-audit reads its config from `<cwd>/.cargo/audit.toml` and nowhere else.
+# `make check` and .github/workflows/audit.yml both run `cargo audit` with
+# src-tauri as the working directory, so this file is the single ignore list
+# for local and CI runs. Never pass `--ignore` on the command line: a flag is
+# invisible to the other caller and carries no reason.
+#
+# Every entry needs the advisory id, why it is accepted, and a review date.
+# Re-audit each suppression every quarter. If the review date is older than the
+# quarter, recheck whether an upstream fix or an alternative crate exists.
+#
+# The four exceptions retired on 2026-09-05 remain retired: patched rand and
+# quick-xml, and removed rsa. Do not restore those unrelated suppressions.
+[advisories]
+ignore = [
+    # DEFERRED (2026-10-20) — tauri-plugin-updater 2.x requires ZIP ^4, including
+    # latest stable 2.14.0. Remove these exceptions when the updater uses ZIP >=9.
+    # Reviewed 2026-10-20; coordinator accepted only the residual updater ZIP 4.
+    # TUIC uses createUpdaterArtifacts=true (tauri.conf.json:70), not v1Compatible;
+    # its Windows update feed uses .exe, not ZIP (stable-manifest.json:32,36).
+    # The plugin also verifies minisign BEFORE installation/extraction:
+    # updater 2.11.0 updater.rs:740,766-767,1524-1532; TUIC uses downloadAndInstall.
+    # A malicious ZIP update would need a valid signature from the release key.
+    # Our plugin/speech ZIP readers use ZIP 9; retain all existing archive codecs.
+    # Evidence: reports/tuicommander/2026-10-19-2037-compatible-rust-refresh.md.
+    "RUSTSEC-2026-0367", # ZIP extraction preserves SUID/SGID bits.
+    "RUSTSEC-2026-0368", # ZIP extraction creates escaping symlinks.
+    "RUSTSEC-2026-0369", # ZIP extraction applies permissions through symlinks.
+]

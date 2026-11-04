@@ -1,3 +1,5 @@
+import { parseTuicFilePath } from "../../utils/tuicFilePath";
+
 /** Version of the TUIC SDK injected into plugin iframes */
 export const TUIC_SDK_VERSION = "1.0";
 
@@ -8,6 +10,7 @@ export const TUIC_SDK_VERSION = "1.0";
  */
 export const TUIC_SDK_SCRIPT = `<script id="tuic-sdk">
 (function(){
+  var parseFilePath=${parseTuicFilePath.toString()};
   var _activeRepo=null;
   var _repoListeners=[];
   var _filePending={};
@@ -19,6 +22,9 @@ export const TUIC_SDK_SCRIPT = `<script id="tuic-sdk">
     version:"${TUIC_SDK_VERSION}",
     open:function(path,opts){
       parent.postMessage({type:"tuic:open",path:path,pinned:!!(opts&&opts.pinned)},"*");
+    },
+    openUrl:function(url){
+      parent.postMessage({type:"tuic:open-url",url:url},"*");
     },
     edit:function(path,opts){
       parent.postMessage({type:"tuic:edit",path:path,line:(opts&&opts.line)||0},"*");
@@ -75,10 +81,11 @@ export const TUIC_SDK_SCRIPT = `<script id="tuic-sdk">
     var href=a.getAttribute("href");
     if(!href)return;
     if(href.indexOf("tuic://")!==0){
-      // Block all non-tuic navigation — relative links in srcdoc resolve
-      // to the app origin and would load TUIC inside its own iframe.
+      // Only explicit external URLs can leave this iframe. Relative links in
+      // srcdoc resolve to the app origin and must not reload TUIC in the frame.
       if(href.charAt(0)==="#")return;
       e.preventDefault();
+      if(/^(https?:|mailto:)/i.test(href))tuic.openUrl(href);
       return;
     }
     e.preventDefault();
@@ -86,13 +93,11 @@ export const TUIC_SDK_SCRIPT = `<script id="tuic-sdk">
       var url=new URL(href);
       var cmd=url.hostname;
       if(cmd==="open"){
-        var rawPath=decodeURIComponent(url.pathname);
-        var path=rawPath.length>1&&rawPath.charAt(0)==="/"?rawPath.slice(1):rawPath;
+        var path=parseFilePath(url.pathname);
         var pinned=a.hasAttribute("data-pinned");
         tuic.open(path,{pinned:pinned});
       }else if(cmd==="edit"){
-        var rawEpath=decodeURIComponent(url.pathname);
-        var epath=rawEpath.length>1&&rawEpath.charAt(0)==="/"?rawEpath.slice(1):rawEpath;
+        var epath=parseFilePath(url.pathname);
         var line=parseInt(url.searchParams.get("line")||"0",10);
         tuic.edit(epath,{line:line});
       }else if(cmd==="terminal"){

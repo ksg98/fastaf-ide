@@ -23,6 +23,13 @@ pub(super) struct FsReadQuery {
     pub path: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct FsReadBase64Query {
+    pub path: String,
+    #[serde(rename = "maxBytes")]
+    pub max_bytes: Option<u64>,
+}
+
 pub(super) async fn plugin_fs_read(
     State(state): State<Arc<AppState>>,
     AxumPath(plugin_id): AxumPath<String>,
@@ -49,9 +56,12 @@ pub(super) async fn plugin_fs_read_batch(
 pub(super) async fn plugin_fs_read_base64(
     State(state): State<Arc<AppState>>,
     AxumPath(plugin_id): AxumPath<String>,
-    Query(q): Query<FsReadQuery>,
+    Query(q): Query<FsReadBase64Query>,
 ) -> Response {
-    json_result(crate::plugin_fs::plugin_read_file_base64_impl(&state, q.path, plugin_id).await)
+    json_result(
+        crate::plugin_fs::plugin_read_file_base64_impl(&state, q.path, q.max_bytes, plugin_id)
+            .await,
+    )
 }
 
 #[derive(Deserialize)]
@@ -98,6 +108,14 @@ pub(super) struct FsWriteBody {
     pub content: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct FsWriteBase64Body {
+    pub path: String,
+    pub content: String,
+    #[serde(default, rename = "maxBytes")]
+    pub max_bytes: Option<u64>,
+}
+
 pub(super) async fn plugin_fs_write(
     State(state): State<Arc<AppState>>,
     AxumPath(plugin_id): AxumPath<String>,
@@ -105,6 +123,23 @@ pub(super) async fn plugin_fs_write(
 ) -> Response {
     json_result(
         crate::plugin_fs::plugin_write_file_impl(&state, body.path, body.content, plugin_id).await,
+    )
+}
+
+pub(super) async fn plugin_fs_write_base64(
+    State(state): State<Arc<AppState>>,
+    AxumPath(plugin_id): AxumPath<String>,
+    Json(body): Json<FsWriteBase64Body>,
+) -> Response {
+    json_result(
+        crate::plugin_fs::plugin_write_file_base64_impl(
+            &state,
+            body.path,
+            body.content,
+            body.max_bytes,
+            plugin_id,
+        )
+        .await,
     )
 }
 
@@ -212,10 +247,13 @@ pub(super) async fn plugin_exec(
 
 #[derive(Deserialize)]
 pub(super) struct HttpFetchBody {
+    #[serde(rename = "requestId")]
+    pub request_id: Option<String>,
     pub url: String,
     pub method: Option<String>,
     pub headers: Option<HashMap<String, String>>,
     pub body: Option<String>,
+    pub account: Option<String>,
 }
 
 pub(super) async fn plugin_http_fetch(
@@ -224,16 +262,36 @@ pub(super) async fn plugin_http_fetch(
     Json(body): Json<HttpFetchBody>,
 ) -> Response {
     json_result(
-        crate::plugin_http::plugin_http_fetch_impl(
+        crate::plugin_http::plugin_http_fetch_cancellable_impl(
             &state,
             body.url,
             body.method,
             body.headers,
             body.body,
+            body.account,
             plugin_id,
+            body.request_id,
         )
         .await,
     )
+}
+
+#[derive(Deserialize)]
+pub(super) struct HttpCancelBody {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+}
+
+pub(super) async fn plugin_http_cancel(
+    State(state): State<Arc<AppState>>,
+    AxumPath(plugin_id): AxumPath<String>,
+    Json(body): Json<HttpCancelBody>,
+) -> Response {
+    json_result(crate::plugin_http::plugin_http_cancel_impl(
+        &state,
+        plugin_id,
+        body.request_id,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +351,27 @@ pub(super) async fn plugin_unregister(
     json_result(Ok::<_, String>(()))
 }
 
+pub(super) async fn plugin_settings(
+    State(state): State<Arc<AppState>>,
+    AxumPath(plugin_id): AxumPath<String>,
+    Json(action): Json<crate::settings::plugins::PluginAction>,
+) -> Response {
+    use axum::{http::StatusCode, response::IntoResponse};
+    match crate::plugin_settings::plugin_settings_action_impl(&state, plugin_id, action).await {
+        Ok(reply) => Json(reply).into_response(),
+        Err(error) => {
+            let status = if error.code == "not_found" {
+                StatusCode::NOT_FOUND
+            } else if error.code == "conflict" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (status, Json(error)).into_response()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct OutputWatchersBody {
     /// Identifies the frontend that owns this set — a desktop window and a
@@ -325,4 +404,29 @@ pub(super) async fn plugin_readme(AxumPath(plugin_id): AxumPath<String>) -> Resp
     // Returns Option<String>: None → JSON null. json_result expects Result so wrap it.
     let path = crate::plugins::get_plugin_readme_path(plugin_id);
     json_result(Ok::<Option<String>, String>(path))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct GithubActionBody {
+    account: String,
+    reference: crate::work_items::model::WorkItemRef,
+    request: crate::plugin_github::Request,
+}
+
+pub(super) async fn plugin_github_action(
+    State(state): State<Arc<AppState>>,
+    AxumPath(plugin_id): AxumPath<String>,
+    Json(body): Json<GithubActionBody>,
+) -> Response {
+    json_result(
+        crate::plugin_github::execute(
+            &state,
+            plugin_id,
+            body.account,
+            body.reference,
+            body.request,
+        )
+        .await,
+    )
 }

@@ -1,0 +1,63 @@
+{
+  "agent": "claude",
+  "args": [
+    "--model",
+    "haiku",
+    "--safe-mode",
+    "--strict-mcp-config",
+    "--tools",
+    ""
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "text": "Allow external CLAUDE.md file imports?",
+      "timeout_secs": 30
+    },
+    {
+      "action": "approval",
+      "key": "enter"
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "idle",
+        "awaiting": false
+      },
+      "replay_expect": {
+        "awaiting": false
+      },
+      "timeout_secs": 60
+    },
+    {
+      "action": "prompt",
+      "text": "Reply with the single uppercase English word meaning prepared. Do not use any tools."
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "working"
+      },
+      "timeout_secs": 30
+    },
+    {
+      "action": "wait",
+      "expect": {
+        "agent": "idle",
+        "awaiting": false
+      },
+      "replay_expect": {
+        "awaiting": false
+      },
+      "timeout_secs": 60
+    },
+    {
+      "action": "wait",
+      "text": "READY",
+      "timeout_secs": 30
+    },
+    {
+      "action": "interrupt"
+    }
+  ]
+}

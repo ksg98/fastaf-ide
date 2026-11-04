@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../mocks/tauri";
 import { browserCreatedSessions } from "../../hooks/useAppInit";
 import { usePty } from "../../hooks/usePty";
+import { setRemoteBaseUrlLookup, setRepoConnectionLookup } from "../../transportRuntime";
 import { mockInvoke } from "../mocks/tauri";
 
 describe("usePty", () => {
@@ -101,6 +102,58 @@ describe("usePty", () => {
 		});
 	});
 
+	// A desktop create for a repo registered against a remote machine travels over
+	// HTTP to that machine's daemon, so it has the same `session-created` echo race
+	// browser mode has. Without pre-registration the echo is adopted as a second
+	// tab — the user sees one shell open as "shell 1" plus "PTY: Session N", both
+	// bound to the one PTY that actually exists on the remote host.
+	describe("createSession() on the desktop, routed to a remote machine", () => {
+		const REMOTE_CWD = "/home/stefano/omi-local-stack";
+		let fetchMock: ReturnType<typeof vi.fn>;
+		const realFetch = globalThis.fetch;
+
+		beforeEach(() => {
+			setRepoConnectionLookup((path) => (path.startsWith(REMOTE_CWD) ? "conn-mac-mint" : undefined));
+			setRemoteBaseUrlLookup((id) => (id === "conn-mac-mint" ? "http://mac-mint:9877" : undefined));
+			fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+				const body = JSON.parse((init?.body as string) ?? "{}");
+				// `create_pty`'s mapper flattens the config into the request body.
+				return new Response(JSON.stringify({ session_id: body.session_id ?? "backend-id" }), {
+					status: 201,
+					headers: { "content-type": "application/json" },
+				});
+			});
+			globalThis.fetch = fetchMock as unknown as typeof fetch;
+		});
+
+		afterEach(() => {
+			setRepoConnectionLookup(() => undefined);
+			setRemoteBaseUrlLookup(() => undefined);
+			globalThis.fetch = realFetch;
+		});
+
+		it("pre-registers the session id even though isTauri() is true", async () => {
+			const sessionId = await pty.createSession({ cwd: REMOTE_CWD, rows: 24, cols: 80, shell: null });
+
+			// The request really left for mac-mint, carrying a client-minted id...
+			expect(String(fetchMock.mock.calls[0][0])).toContain("mac-mint");
+			const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+			expect(sentBody.session_id).toBeTruthy();
+			// ...and that id is known locally before the daemon can echo it back.
+			expect(browserCreatedSessions.has(sentBody.session_id)).toBe(true);
+			expect(sessionId).toBe(sentBody.session_id);
+		});
+
+		it("still lets the backend mint the id for a local repo", async () => {
+			mockInvoke.mockResolvedValueOnce("sess-local");
+			await pty.createSession({ cwd: "/Users/stefano/local-repo", rows: 24, cols: 80, shell: null });
+
+			expect(fetchMock).not.toHaveBeenCalled();
+			const [, sentArgs] = mockInvoke.mock.calls[0];
+			expect(sentArgs.config.session_id).toBeUndefined();
+		});
+	});
+
 	describe("createSessionWithWorktree()", () => {
 		it("calls invoke with both configs and returns worktree result", async () => {
 			const ptyConfig = { cwd: "/tmp", rows: 24, cols: 80, shell: null };
@@ -138,6 +191,51 @@ describe("usePty", () => {
 	});
 
 	describe("sendCommand()", () => {
+		it("keeps a Codex-safe Enter gap when an unrecognized foreground process owns the shell", async () => {
+			const writes: Array<{ data: string; at: number }> = [];
+			mockInvoke.mockImplementation(async (command: string, args?: { data?: string }) => {
+				if (command === "get_session_shell_family") return "posix";
+				if (command === "has_foreground_process") return "C2";
+				if (command === "write_pty") writes.push({ data: args?.data ?? "", at: performance.now() });
+				return undefined;
+			});
+
+			await pty.sendCommand("wrapped-codex", "review this", null);
+
+			expect(writes.map(({ data }) => data)).toEqual(["\x15", "review this", "\r"]);
+			expect(writes[1].at - writes[0].at).toBeGreaterThanOrEqual(45);
+			expect(writes[2].at - writes[1].at).toBeGreaterThanOrEqual(195);
+		});
+
+		it("keeps a free shell on its ordinary text and Enter path", async () => {
+			const writes: string[] = [];
+			mockInvoke.mockImplementation(async (command: string, args?: { data?: string }) => {
+				if (command === "get_session_shell_family") return "posix";
+				if (command === "has_foreground_process") return null;
+				if (command === "write_pty") writes.push(args?.data ?? "");
+				return undefined;
+			});
+
+			await pty.sendCommand("free-shell", "echo ready", null);
+
+			expect(writes).toEqual(["\x15echo ready", "\r"]);
+		});
+
+		it("delays Enter after a failed foreground probe without changing shell input bytes", async () => {
+			const writes: Array<{ data: string; at: number }> = [];
+			mockInvoke.mockImplementation(async (command: string, args?: { data?: string }) => {
+				if (command === "get_session_shell_family") return "posix";
+				if (command === "has_foreground_process") throw new Error("process exited during probe");
+				if (command === "write_pty") writes.push({ data: args?.data ?? "", at: performance.now() });
+				return undefined;
+			});
+
+			await pty.sendCommand("uncertain-shell", "echo ready", null);
+
+			expect(writes.map(({ data }) => data)).toEqual(["\x15echo ready", "\r"]);
+			expect(writes[1].at - writes[0].at).toBeGreaterThanOrEqual(195);
+		});
+
 		it("uses the central command helper to insert reviewable text without Enter", async () => {
 			mockInvoke.mockImplementation(async (command: string) => {
 				if (command === "get_session_shell_family") return "posix";
@@ -149,7 +247,11 @@ describe("usePty", () => {
 			expect(mockInvoke).toHaveBeenCalledWith("get_session_shell_family", { sessionId: "sess-review" });
 			expect(mockInvoke).toHaveBeenCalledWith("write_pty", {
 				sessionId: "sess-review",
-				data: "\x15review this prompt",
+				data: "\x15",
+			});
+			expect(mockInvoke).toHaveBeenCalledWith("write_pty", {
+				sessionId: "sess-review",
+				data: "review this prompt",
 			});
 			expect(mockInvoke).not.toHaveBeenCalledWith("write_pty", {
 				sessionId: "sess-review",
@@ -163,10 +265,13 @@ describe("usePty", () => {
 			mockInvoke.mockResolvedValueOnce({ typed: false, queued: 2 });
 			const outcome = await pty.enqueueCommand("sess-1", "run the tests");
 			expect(outcome).toEqual({ typed: false, queued: 2 });
-			expect(mockInvoke).toHaveBeenCalledWith("enqueue_agent_command", {
-				sessionId: "sess-1",
-				text: "run the tests",
-			});
+			expect(mockInvoke).toHaveBeenCalledWith(
+				"enqueue_agent_command",
+				expect.objectContaining({
+					sessionId: "sess-1",
+					text: "run the tests",
+				}),
+			);
 		});
 
 		it("propagates a rejection so the caller can surface it", async () => {

@@ -1,20 +1,30 @@
-import { batch } from "solid-js";
+import { batch, untrack } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { AGENT_TYPES } from "../agents";
+import type { DetachedWorktree, WorktreeDiagnostic } from "../hooks/useRepository";
 import { invoke, listen } from "../invoke";
+import { updateGitHubPollingPaths } from "../services/githubPollingPaths";
+import { settingsRefresh } from "../services/settingsRefresh";
+import { setRepoConnectionLookup } from "../transportRuntime";
 import type { SavedTerminal } from "../types";
-import { pathStartsWith, pathStripPrefix } from "../utils/pathUtils";
+import { pathBasename, pathStartsWith, pathStripPrefix } from "../utils/pathUtils";
 import { markPerf } from "../utils/perfTrace";
-import { type RepoOwner, resolveRepoOwnerIn } from "../utils/repoOwnership";
+import { type RepoOwner, resolveRepoOwnerIn, sameDir } from "../utils/repoOwnership";
 import { appLogger } from "./appLogger";
 import { makeBranchKey } from "./tabManager";
+import {
+	migrateActiveWorkspaceId,
+	migrateRepoWorkspaces,
+	type WorkspaceId,
+	type WorkspaceState,
+} from "./workspaceIdentity";
 
 const LEGACY_STORAGE_KEY = "tui-commander-repos";
 
 /** Returns paths of repos that have at least one active terminal. */
 function getHotRepoPaths(repositories: Record<string, RepositoryState>): string[] {
 	return Object.entries(repositories)
-		.filter(([, repo]) => Object.values(repo.branches).some((b) => b.terminals.length > 0))
+		.filter(([, repo]) => Object.values(repo.workspaces).some((b) => b.terminals.length > 0))
 		.map(([path]) => path);
 }
 
@@ -24,45 +34,56 @@ function syncHotRepos(repositories: Record<string, RepositoryState>): void {
 	);
 }
 
-/** Branch with its terminals */
-export interface BranchState {
-	name: string;
-	isMain: boolean; // true for main/master/develop
-	isShell?: boolean; // true for non-git directory shell entries
-	isPreparing?: boolean; // true while stale worktree is being cleaned up and recreated in background
-	isRemoving?: boolean; // true while worktree removal is in progress
-	worktreePath: string | null; // Path to worktree directory (null for main branch)
-	terminals: string[]; // terminal IDs belonging to this branch
-	hadTerminals: boolean; // true once a terminal has been created — suppresses auto-spawn after close-all
-	lastActiveTerminal: string | null; // last active terminal ID when leaving this branch
-	additions: number;
-	deletions: number;
-	isMerged: boolean; // true when branch is fully merged into the repo's main branch
-	lastCommitTs: number | null; // Unix timestamp of last commit on this branch
-	runCommand?: string; // Saved run command for this branch
-	savedTerminals?: SavedTerminal[]; // Persisted terminal metadata for session restore
-	/** CI auto-heal: when enabled, CI failures trigger automatic agent fix cycles */
-	ciAutoHeal?: { enabled: boolean; attempts: number; lastRunId?: number; healing?: boolean };
-	/** Whether the terminal tab list is expanded under this branch row */
-	tabsExpanded?: boolean;
-}
+export type { WorkspaceId, WorkspaceKind, WorkspaceState } from "./workspaceIdentity";
 
-/** Repository with branches */
+/** Repository with workspaces */
 export interface RepositoryState {
 	path: string;
 	displayName: string;
 	initials: string;
 	isGitRepo?: boolean; // false for plain directories (defaults to true for backward compat)
-	expanded: boolean; // Whether branches are expanded/collapsed
+	expanded: boolean; // Whether workspaces are expanded/collapsed
 	collapsed: boolean; // Whether entire repo is collapsed to icon only
 	parked: boolean; // Whether repo is hidden from sidebar (recallable via popover)
-	branches: Record<string, BranchState>;
-	activeBranch: string | null;
+	workspaces: Record<WorkspaceId, WorkspaceState>;
+	/** Transient backend inventory; never used as workspace identity or persisted. */
+	detachedWorktrees?: DetachedWorktree[];
+	worktreeDiagnostics?: WorktreeDiagnostic[];
+	/** Which workspace is on screen. Indexes `workspaces`, so it is an id — read
+	 *  `workspaces[activeWorkspaceId].branchName` when you want the branch. */
+	activeWorkspaceId: WorkspaceId | null;
+	/** Backend-authored stable agent placement; retained by repository persistence. */
+	declaredWorktrees?: Record<string, { workspaceId: string; branch: string; worktreePath: string }>;
 	/** Which remote connection this repo belongs to (undefined = local) */
 	connectionId?: string;
 	/** Unix ms timestamp of the last time this repo was made active — drives the
 	 *  "Recently active" sidebar sort. Missing on pre-feature configs. */
 	lastActivatedAt?: number;
+}
+
+/**
+ * A repository row the backend classifier found stale: a non-existent local
+ * path under a recognized temp root, holding nothing but an empty shell
+ * workspace (#763-d219). Quarantined from the normal sidebar listing —
+ * `getGroupedLayout`/`getOrderedRepos` both exclude it — until an explicit
+ * `repairStaleTemp` call removes it; never deleted implicitly.
+ */
+export interface StaleTempCandidate {
+	path: string;
+	displayName: string;
+}
+
+/** Paths currently quarantined by the stale-temp classifier (#763-d219) —
+ *  shared by `getGroupedLayout` and `getOrderedRepos`, the two listings that
+ *  must exclude them. */
+function quarantinedPaths(candidates: StaleTempCandidate[]): Set<string> {
+	return new Set(candidates.map((c) => c.path));
+}
+
+/** What `repairStaleTemp` actually did, from the backend's own transactional write. */
+export interface StaleTempRepairSummary {
+	removed: string[];
+	backupPath: string;
 }
 
 /** A named, colored group of repositories */
@@ -77,10 +98,12 @@ export interface RepoGroup {
 /** Sidebar repo sort mode */
 export type RepoSortMode = "manual" | "name" | "recent";
 
-/** A named workspace — a membership-only set of repo paths shown together in
- *  the sidebar. Groups and manual ordering stay global; a workspace merely
- *  filters what is visible. */
-export interface Workspace {
+/** A named workspace (FastAF) — a membership-only set of repo paths shown
+ *  together in the sidebar. Groups and manual ordering stay global; a named
+ *  workspace merely filters what is visible. Not to be confused with a repo's
+ *  `workspaces` (its branch/worktree rows): this one lives at store level, and
+ *  is persisted under the top-level `workspaces` key of repositories.json. */
+export interface NamedWorkspace {
 	id: string;
 	name: string;
 	repoPaths: string[];
@@ -105,10 +128,16 @@ interface RepositoriesStoreState {
 	groupOrder: string[]; // display order of group IDs
 	/** True while a branch switch is in progress — TabBar holds previous tabs */
 	branchSwitching: boolean;
+	/** Backend-classified stale-temp ghost rows, quarantined from the sidebar
+	 *  pending an explicit repair (#763-d219). Populated by
+	 *  `refreshStaleTempCandidates`, never computed on the frontend — see
+	 *  AGENTS.md "Architecture". */
+	staleTempCandidates: StaleTempCandidate[];
+	// FastAF sidebar: sort mode and named workspaces (store-level, not per repo)
 	sortMode: RepoSortMode;
-	workspaces: Record<string, Workspace>;
-	workspaceOrder: string[]; // display order of workspace IDs
-	activeWorkspaceId: string | null; // null = "All projects"
+	namedWorkspaces: Record<string, NamedWorkspace>;
+	namedWorkspaceOrder: string[]; // display order of named workspace IDs
+	activeNamedWorkspaceId: string | null; // null = "All projects"
 }
 
 /** Grouped layout returned by getGroupedLayout() */
@@ -141,8 +170,8 @@ function compareRepoNames(a: RepositoryState, b: RepositoryState): number {
 function repoRecency(repo: RepositoryState): number {
 	if (repo.lastActivatedAt !== undefined) return repo.lastActivatedAt;
 	let latest = 0;
-	for (const branch of Object.values(repo.branches)) {
-		if (branch.lastCommitTs && branch.lastCommitTs > latest) latest = branch.lastCommitTs;
+	for (const workspace of Object.values(repo.workspaces)) {
+		if (workspace.lastCommitTs && workspace.lastCommitTs > latest) latest = workspace.lastCommitTs;
 	}
 	return latest;
 }
@@ -151,8 +180,8 @@ function repoRecency(repo: RepositoryState): number {
  *  preserves the stored order untouched). Used by the sidebar layout selectors;
  *  never mutates the persisted repoOrder. */
 export function sortRepos(repos: RepositoryState[], mode: RepoSortMode): RepositoryState[] {
-	if (mode === "name") return [...repos].sort(compareRepoNames);
-	if (mode === "recent") return [...repos].sort((a, b) => repoRecency(b) - repoRecency(a) || compareRepoNames(a, b));
+	if (mode === "name") return repos.toSorted(compareRepoNames);
+	if (mode === "recent") return repos.toSorted((a, b) => repoRecency(b) - repoRecency(a) || compareRepoNames(a, b));
 	return repos;
 }
 
@@ -164,17 +193,20 @@ interface RepositorySnapshot {
 	activeRepoPath: string | null;
 	groups: Record<string, RepoGroup>;
 	groupOrder: string[];
-	// FastAF: sort mode and workspaces persist in the same document.
+	// FastAF: sort mode and named workspaces persist in the same document, under
+	// the top-level keys `workspaces`/`workspaceOrder`/`activeWorkspaceId` (the
+	// on-disk names predate upstream's per-repo `workspaces`; they never collide
+	// because those live inside `repos[path]`).
 	sortMode: RepoSortMode;
-	workspaces: Record<string, Workspace>;
+	workspaces: Record<string, NamedWorkspace>;
 	workspaceOrder: string[];
 	activeWorkspaceId: string | null;
 }
 
 interface KeyedRepositoryMutation {
 	id: string;
-	before: RepositoryState | RepoGroup | Workspace | null;
-	after: RepositoryState | RepoGroup | Workspace | null;
+	before: RepositoryState | RepoGroup | NamedWorkspace | null;
+	after: RepositoryState | RepoGroup | NamedWorkspace | null;
 }
 
 interface RepositoryFieldMutation<T> {
@@ -197,6 +229,23 @@ interface RepositoryMutationBatch {
 
 function cloneJson<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * The fields a partial update actually names. `undefined` means "leave it
+ * alone", never "blank it".
+ *
+ * A caller that reads a field off a payload which changed shape writes
+ * `undefined` without noticing, and a spread puts that over a required field.
+ * This is how `branchName` disappeared from 31 of 38 repos on disk: `make dev`
+ * never restarts the Rust side, so a running backend still answered
+ * `worktree_paths` as branch → path while the reloaded frontend read
+ * `wt.branch` off a string. Every refresh then blanked the field, and every
+ * save persisted it. The skew is the caller's bug; letting it reach disk was
+ * this store's.
+ */
+function definedFields<T extends object>(data: T): Partial<T> {
+	return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)) as Partial<T>;
 }
 
 function emptyRepositorySnapshot(): RepositorySnapshot {
@@ -237,17 +286,18 @@ function isRepoSortMode(value: unknown): value is RepoSortMode {
 /** One repository as it goes to disk: the fields that live only in this window's
  *  memory are stripped, so two clients holding the same document agree on it. */
 function serializableRepo(repo: RepositoryState): RepositoryState {
-	const branches: Record<string, BranchState> = {};
-	for (const [name, branch] of Object.entries(repo.branches)) {
-		const persisted: BranchState = { ...branch, terminals: [] };
+	const workspaces: Record<string, WorkspaceState> = {};
+	for (const [name, branch] of Object.entries(repo.workspaces)) {
+		const persisted: WorkspaceState = { ...branch, terminals: [] };
 		// `healing` is a transient runtime flag; never persist it (a crash mid-heal
 		// would otherwise leave the toggle showing "Healing" forever after reload).
 		if (persisted.ciAutoHeal?.healing) {
 			persisted.ciAutoHeal = { ...persisted.ciAutoHeal, healing: false };
 		}
-		branches[name] = persisted;
+		workspaces[name] = persisted;
 	}
-	return { ...repo, branches };
+	const { detachedWorktrees: _inventory, worktreeDiagnostics: _diagnostics, ...persistedRepo } = repo;
+	return { ...persistedRepo, workspaces };
 }
 
 /**
@@ -258,14 +308,39 @@ function serializableRepo(repo: RepositoryState): RepositoryState {
  * wrote, and the fields defaulted here are read as always-present. The `agentType`
  * scrub is the sharp one — an unknown name throws inside a render no ErrorBoundary
  * covers.
+ *
+ * This is also the single seam the `branches` → `workspaces` migration runs on.
+ * Both the hydrate path and every adopted record pass through here, and
+ * `repositoryIntentView` normalises the on-disk baseline the same way — so a
+ * document still holding the old key compares equal to its migrated self and the
+ * compare-and-swap does not read the migration as a competing edit.
  */
 function normalizeLoadedRepo(repo: RepositoryState): void {
+	// A record persisted (or adopted from another client) can carry a missing,
+	// non-string, or blank `displayName` — every consumer (sidebar, Command Palette
+	// sort/labels) reads it as always-present text, and `CommandPalette`'s
+	// `baseSort` crashes the whole app on `undefined.localeCompare` (#763-d219).
+	// The path-derived fallback is deterministic across restarts/clients, unlike a
+	// random or counter-based placeholder, and cross-platform via `pathBasename`.
+	if (typeof repo.displayName !== "string" || repo.displayName.trim() === "") {
+		const fallback = pathBasename(repo.path) || repo.path || "Unnamed Repository";
+		appLogger.warn("store", "Repository record had an invalid displayName; using path-derived fallback", {
+			path: repo.path,
+			displayName: repo.displayName,
+			fallback,
+		});
+		repo.displayName = fallback;
+	}
 	if (repo.collapsed === undefined) repo.collapsed = false;
 	if (repo.expanded === undefined) repo.expanded = true;
 	if (repo.parked === undefined) repo.parked = false;
 	// Migration: remove legacy showAllBranches field
 	delete (repo as unknown as Record<string, unknown>).showAllBranches;
-	for (const branch of Object.values(repo.branches)) {
+	repo.activeWorkspaceId = migrateActiveWorkspaceId(repo);
+	repo.workspaces = migrateRepoWorkspaces(repo);
+	delete (repo as unknown as Record<string, unknown>).branches;
+	delete (repo as unknown as Record<string, unknown>).activeBranch;
+	for (const branch of Object.values(repo.workspaces)) {
 		branch.terminals = [];
 		// Reset hadTerminals on startup: the flag only suppresses auto-spawn
 		// within a session (after user closes all terminals). Across restarts,
@@ -298,9 +373,9 @@ function serializableSnapshot(
 	groups: Record<string, RepoGroup>,
 	groupOrder: string[],
 	sortMode: RepoSortMode,
-	workspaces: Record<string, Workspace>,
-	workspaceOrder: string[],
-	activeWorkspaceId: string | null,
+	namedWorkspaces: Record<string, NamedWorkspace>,
+	namedWorkspaceOrder: string[],
+	activeNamedWorkspaceId: string | null,
 ): RepositorySnapshot {
 	const serializable: Record<string, RepositoryState> = {};
 	for (const [path, repo] of Object.entries(repositories)) {
@@ -316,10 +391,10 @@ function serializableSnapshot(
 		groupOrder: [...groupOrder],
 		sortMode,
 		workspaces: Object.fromEntries(
-			Object.entries(workspaces).map(([id, ws]) => [id, { ...ws, repoPaths: [...ws.repoPaths] }]),
+			Object.entries(namedWorkspaces).map(([id, ws]) => [id, { ...ws, repoPaths: [...ws.repoPaths] }]),
 		),
-		workspaceOrder: [...workspaceOrder],
-		activeWorkspaceId,
+		workspaceOrder: [...namedWorkspaceOrder],
+		activeWorkspaceId: activeNamedWorkspaceId,
 	});
 }
 
@@ -327,10 +402,10 @@ function jsonEqual(left: unknown, right: unknown): boolean {
 	return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/** The branches of `repo` this window still has an open terminal in. */
+/** The workspaces of `repo` this window still has an open terminal in. */
 function liveBranchNames(repo: RepositoryState | undefined): string[] {
 	if (!repo) return [];
-	return Object.entries(repo.branches)
+	return Object.entries(repo.workspaces)
 		.filter(([, branch]) => branch.terminals.length > 0)
 		.map(([name]) => name);
 }
@@ -351,6 +426,7 @@ const DERIVED_BRANCH_FIELDS = [
 	"additions",
 	"deletions",
 	"isMerged",
+	"lifecycleStatus",
 	"lastActiveTerminal",
 	"lastCommitTs",
 	// Persisted, but session state all the same: it suppresses auto-spawn after the
@@ -362,7 +438,7 @@ const DERIVED_BRANCH_FIELDS = [
 /**
  * What this window *meant* a record to say, for comparison only.
  *
- * Two differences must not read as an edit. `updateBranchStats` moves a diffstat
+ * Two differences must not read as an edit. `updateWorkspaceStats` moves a diffstat
  * without saving, so a repo under active work drifts from its own baseline every few
  * seconds — comparing whole records would refuse every remote change for exactly the
  * repos the user is working in. And the baseline is the document as it came off disk,
@@ -373,8 +449,8 @@ function repositoryIntentView(record: RepositoryState | null): unknown {
 	if (!record) return null;
 	const view = cloneJson(record);
 	normalizeLoadedRepo(view);
-	const branches = (view as unknown as { branches: Record<string, Record<string, unknown>> }).branches;
-	for (const branch of Object.values(branches)) {
+	const workspaces = (view as unknown as { workspaces: Record<string, Record<string, unknown>> }).workspaces;
+	for (const branch of Object.values(workspaces)) {
 		for (const field of DERIVED_BRANCH_FIELDS) delete branch[field];
 	}
 	return view;
@@ -387,20 +463,21 @@ function repositoryIntentView(record: RepositoryState | null): unknown {
 function withLiveBranchFields(fresh: RepositoryState, live: RepositoryState | undefined): RepositoryState {
 	const incoming = cloneJson(fresh);
 	if (!live) return incoming;
-	const branches: Record<string, BranchState> = {};
-	for (const [name, branch] of Object.entries(incoming.branches)) {
-		const liveBranch = live.branches[name];
+	const workspaces: Record<string, WorkspaceState> = {};
+	for (const [name, branch] of Object.entries(incoming.workspaces)) {
+		const liveBranch = live.workspaces[name];
 		if (!liveBranch) {
-			branches[name] = branch;
+			workspaces[name] = branch;
 			continue;
 		}
-		branches[name] = {
+		workspaces[name] = {
 			...branch,
 			terminals: [...liveBranch.terminals],
 			hadTerminals: liveBranch.hadTerminals,
 			additions: liveBranch.additions,
 			deletions: liveBranch.deletions,
 			isMerged: liveBranch.isMerged,
+			lifecycleStatus: liveBranch.lifecycleStatus,
 			lastActiveTerminal: liveBranch.lastActiveTerminal,
 			lastCommitTs: liveBranch.lastCommitTs,
 			ciAutoHeal:
@@ -411,15 +488,15 @@ function withLiveBranchFields(fresh: RepositoryState, live: RepositoryState | un
 	}
 	// The repo-level live-terminal rule, at branch granularity: a branch another
 	// client deleted while this window still has a pane open in it stays. Dropping it
-	// leaves the pane running with nothing in `branches` owning it — invisible to the
+	// leaves the pane running with nothing in `workspaces` owning it — invisible to the
 	// tab strip, and unreachable through `findOwnerForTerminal`.
 	for (const name of liveBranchNames(live)) {
-		if (!branches[name]) branches[name] = cloneJson(live.branches[name]);
+		if (!workspaces[name]) workspaces[name] = cloneJson(live.workspaces[name]);
 	}
-	return { ...incoming, branches };
+	return { ...incoming, workspaces };
 }
 
-function keyedMutations<T extends RepositoryState | RepoGroup | Workspace>(
+function keyedMutations<T extends RepositoryState | RepoGroup | NamedWorkspace>(
 	before: Record<string, T>,
 	after: Record<string, T>,
 ): KeyedRepositoryMutation[] {
@@ -508,7 +585,7 @@ type LoadedRepositoryDocument = {
 	groups?: Record<string, RepoGroup>;
 	groupOrder?: string[];
 	sortMode?: string;
-	workspaces?: Record<string, Workspace>;
+	workspaces?: Record<string, NamedWorkspace>;
 	workspaceOrder?: string[];
 	activeWorkspaceId?: string | null;
 };
@@ -524,7 +601,7 @@ async function loadPersistedSnapshot(): Promise<RepositorySnapshot | null> {
 	return snapshotFromLoaded(loaded);
 }
 
-function rebaseKeyed<T extends RepositoryState | RepoGroup | Workspace>(
+function rebaseKeyed<T extends RepositoryState | RepoGroup | NamedWorkspace>(
 	mutations: KeyedRepositoryMutation[],
 	records: Record<string, T>,
 ): KeyedRepositoryMutation[] {
@@ -577,9 +654,9 @@ interface PersistedRepoState {
 	groups: Record<string, RepoGroup>;
 	groupOrder: string[];
 	sortMode: RepoSortMode;
-	workspaces: Record<string, Workspace>;
-	workspaceOrder: string[];
-	activeWorkspaceId: string | null;
+	namedWorkspaces: Record<string, NamedWorkspace>;
+	namedWorkspaceOrder: string[];
+	activeNamedWorkspaceId: string | null;
 }
 
 /** Last snapshot this client knows it persisted. Saves are serialized so a
@@ -587,6 +664,8 @@ interface PersistedRepoState {
 let persistedSnapshot: RepositorySnapshot | null = null;
 let queuedSnapshot: RepositorySnapshot | null = null;
 let saveInFlight = false;
+let saveCompletion: Promise<void> = Promise.resolve();
+let saveError: unknown;
 
 /** Set by the store so an adoption that arrived mid-save can run once the baseline
  *  is settled. A save writes `persistedSnapshot` when its request resolves, which
@@ -606,8 +685,10 @@ function drainRepositorySaveQueue(): void {
 	}
 
 	saveInFlight = true;
-	persistRepositoryMutation(mutation, next)
+	saveError = undefined;
+	saveCompletion = persistRepositoryMutation(mutation, next)
 		.catch((err: unknown) => {
+			saveError = err;
 			// An error-level entry increments the visible Errors badge. In particular,
 			// same-record conflicts must never remain a debug-only lost mutation.
 			appLogger.error("store", "Repository changes were not saved", err);
@@ -667,9 +748,9 @@ function saveReposImmediate(snapshot: PersistedRepoState): void {
 		snapshot.groups,
 		snapshot.groupOrder,
 		snapshot.sortMode,
-		snapshot.workspaces,
-		snapshot.workspaceOrder,
-		snapshot.activeWorkspaceId,
+		snapshot.namedWorkspaces,
+		snapshot.namedWorkspaceOrder,
+		snapshot.activeNamedWorkspaceId,
 	);
 	drainRepositorySaveQueue();
 }
@@ -690,8 +771,8 @@ function generateGroupId(): string {
 	return `grp-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 }
 
-/** Generate a unique workspace ID */
-function generateWorkspaceId(): string {
+/** Generate a unique named-workspace ID */
+function generateNamedWorkspaceId(): string {
 	return `ws-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 }
 
@@ -711,14 +792,15 @@ function createRepositoriesStore() {
 		groups: {},
 		groupOrder: [],
 		branchSwitching: false,
+		staleTempCandidates: [],
 		sortMode: "manual",
-		workspaces: {},
-		workspaceOrder: [],
-		activeWorkspaceId: null,
+		namedWorkspaces: {},
+		namedWorkspaceOrder: [],
+		activeNamedWorkspaceId: null,
 	});
 
-	// Inverse index: terminal ID → repo path (O(1) lookup instead of O(repos*branches*terminals)).
-	// Maps termId→repoPath only (NOT branchName). renameBranch and mergeBranchState don't update
+	// Inverse index: terminal ID → repo path (O(1) lookup instead of O(repos*workspaces*terminals)).
+	// Maps termId→repoPath only (NOT branchName). renameBranch and mergeWorkspaceState don't update
 	// this map because they never change the repoPath — terminals stay in the same repo.
 	const terminalToRepo = new Map<string, string>();
 
@@ -730,9 +812,9 @@ function createRepositoriesStore() {
 		groups: state.groups,
 		groupOrder: state.groupOrder,
 		sortMode: state.sortMode,
-		workspaces: state.workspaces,
-		workspaceOrder: state.workspaceOrder,
-		activeWorkspaceId: state.activeWorkspaceId,
+		namedWorkspaces: state.namedWorkspaces,
+		namedWorkspaceOrder: state.namedWorkspaceOrder,
+		activeNamedWorkspaceId: state.activeNamedWorkspaceId,
 	});
 
 	/** Debounced save shorthand using current state */
@@ -747,7 +829,7 @@ function createRepositoriesStore() {
 		// Clear inverse index entries for all terminals in this repo
 		const repo = state.repositories[path];
 		if (repo) {
-			for (const branch of Object.values(repo.branches)) {
+			for (const branch of Object.values(repo.workspaces)) {
 				for (const termId of branch.terminals) {
 					terminalToRepo.delete(termId);
 				}
@@ -763,8 +845,8 @@ function createRepositoriesStore() {
 				for (const group of Object.values(s.groups)) {
 					group.repoOrder = group.repoOrder.filter((p) => p !== path);
 				}
-				// Clean up workspace membership
-				for (const workspace of Object.values(s.workspaces)) {
+				// Clean up named-workspace membership
+				for (const workspace of Object.values(s.namedWorkspaces)) {
 					workspace.repoPaths = workspace.repoPaths.filter((p) => p !== path);
 				}
 				if (s.activeRepoPath === path) {
@@ -801,10 +883,11 @@ function createRepositoriesStore() {
 			state.groups,
 			state.groupOrder,
 			state.sortMode,
-			state.workspaces,
-			state.workspaceOrder,
-			state.activeWorkspaceId,
+			state.namedWorkspaces,
+			state.namedWorkspaceOrder,
+			state.activeNamedWorkspaceId,
 		);
+		const previousOwners = Object.values(state.repositories).map((repo) => repo.connectionId);
 		const next = cloneJson(baseline);
 		let adopted = false;
 
@@ -886,15 +969,15 @@ function createRepositoriesStore() {
 			if (!jsonEqual(mine, current.workspaces[id] ?? null)) continue;
 			if (incoming) {
 				next.workspaces[id] = cloneJson(incoming);
-				setState("workspaces", id, cloneJson(incoming));
+				setState("namedWorkspaces", id, cloneJson(incoming));
 			} else {
 				delete next.workspaces[id];
 				next.workspaceOrder = next.workspaceOrder.filter((wid) => wid !== id);
 				setState(
 					produce((s) => {
-						delete s.workspaces[id];
-						s.workspaceOrder = s.workspaceOrder.filter((wid) => wid !== id);
-						if (s.activeWorkspaceId === id) s.activeWorkspaceId = null;
+						delete s.namedWorkspaces[id];
+						s.namedWorkspaceOrder = s.namedWorkspaceOrder.filter((wid) => wid !== id);
+						if (s.activeNamedWorkspaceId === id) s.activeNamedWorkspaceId = null;
 					}),
 				);
 			}
@@ -905,7 +988,7 @@ function createRepositoriesStore() {
 			jsonEqual(baseline.workspaceOrder, current.workspaceOrder)
 		) {
 			next.workspaceOrder = [...fresh.workspaceOrder];
-			setState("workspaceOrder", [...fresh.workspaceOrder]);
+			setState("namedWorkspaceOrder", [...fresh.workspaceOrder]);
 			adopted = true;
 		}
 		if (baseline.sortMode !== fresh.sortMode && baseline.sortMode === current.sortMode) {
@@ -932,7 +1015,7 @@ function createRepositoriesStore() {
 		if (!adopted) return;
 		persistedSnapshot = next;
 		syncHotRepos(state.repositories);
-		invoke("github_update_paths", { paths: actions.getActivePaths() }).catch(() => {});
+		updateGitHubPollingPaths(actions.getActivePaths(), previousOwners);
 	};
 
 	let remoteSyncStarted = false;
@@ -975,6 +1058,19 @@ function createRepositoriesStore() {
 	const startRemoteSync = (): void => {
 		if (remoteSyncStarted) return;
 		remoteSyncStarted = true;
+		const stopSettings = settingsRefresh.register({
+			section: "repositories_registration",
+			read: loadPersistedSnapshot,
+			apply: (fresh) => {
+				if (!fresh) return;
+				if (saveInFlight) {
+					remoteSyncPending = true;
+					return;
+				}
+				adoptRemoteRepositories(fresh);
+			},
+		});
+		window.addEventListener("beforeunload", stopSettings, { once: true });
 		onSaveSettled = () => {
 			if (remoteSyncPending) syncFromDisk();
 		};
@@ -1028,7 +1124,7 @@ function createRepositoriesStore() {
 					groups?: Record<string, RepoGroup>;
 					groupOrder?: string[];
 					sortMode?: string;
-					workspaces?: Record<string, Workspace>;
+					workspaces?: Record<string, NamedWorkspace>;
 					workspaceOrder?: string[];
 					activeWorkspaceId?: string | null;
 				}>("load_repositories");
@@ -1065,16 +1161,16 @@ function createRepositoriesStore() {
 						setState("sortMode", loaded.sortMode);
 					}
 
-					// Hydrate workspaces — migration: missing field initializes empty.
+					// Hydrate named workspaces — migration: missing field initializes empty.
 					// Membership may reference repos that were since removed on another
 					// machine; keep those paths (filtered at render) rather than pruning.
-					const workspaces = loaded.workspaces ?? {};
-					setState("workspaces", workspaces);
-					const savedWsOrder = (loaded.workspaceOrder ?? []).filter((id) => id in workspaces);
-					const missingWs = Object.keys(workspaces).filter((id) => !savedWsOrder.includes(id));
-					setState("workspaceOrder", [...savedWsOrder, ...missingWs]);
-					if (loaded.activeWorkspaceId && loaded.activeWorkspaceId in workspaces) {
-						setState("activeWorkspaceId", loaded.activeWorkspaceId);
+					const namedWorkspaces = loaded.workspaces ?? {};
+					setState("namedWorkspaces", namedWorkspaces);
+					const savedWsOrder = (loaded.workspaceOrder ?? []).filter((id) => id in namedWorkspaces);
+					const missingWs = Object.keys(namedWorkspaces).filter((id) => !savedWsOrder.includes(id));
+					setState("namedWorkspaceOrder", [...savedWsOrder, ...missingWs]);
+					if (loaded.activeWorkspaceId && loaded.activeWorkspaceId in namedWorkspaces) {
+						setState("activeNamedWorkspaceId", loaded.activeWorkspaceId);
 					}
 
 					// Restore active repo
@@ -1085,10 +1181,60 @@ function createRepositoriesStore() {
 				hydrated = true;
 				syncHotRepos(state.repositories);
 				startRemoteSync();
+				// Awaited, not fire-and-forget: `hydrate()` is itself awaited before
+				// the sidebar renders (`useAppInit.ts`), so a fire-and-forget call
+				// here would let a stale-temp ghost row paint for one IPC round trip
+				// before quarantine caught up to it — exactly the permanent-ghost-row
+				// flash this story exists to remove, just delayed by a frame instead
+				// of avoided.
+				await this.refreshStaleTempCandidates();
 			} catch (err) {
 				appLogger.error("store", "Failed to hydrate repositories", err);
 				// hydrated stays false — saves are blocked to prevent data loss
 			}
+		},
+
+		/**
+		 * Re-read the backend's stale-temp classification (#763-d219). The
+		 * classifier itself lives entirely in Rust (`config.rs`) — this only
+		 * fetches its verdict and quarantines the named paths from
+		 * `getGroupedLayout`/`getOrderedRepos`, never computes it here.
+		 */
+		async refreshStaleTempCandidates(): Promise<void> {
+			try {
+				const candidates = await invoke<StaleTempCandidate[]>("list_stale_temp_repository_candidates");
+				// A malformed/unmocked response (undefined, not an array) must never
+				// corrupt this field to a non-array — every read of it downstream
+				// (`getGroupedLayout`, `getOrderedRepos`) assumes an array.
+				setState("staleTempCandidates", Array.isArray(candidates) ? candidates : []);
+			} catch (err) {
+				appLogger.error("store", "Failed to list stale-temp repository candidates", err);
+			}
+		},
+
+		/** Current stale-temp candidates, quarantined from the sidebar pending repair. */
+		getStaleTempCandidates(): StaleTempCandidate[] {
+			return state.staleTempCandidates;
+		},
+
+		/**
+		 * User-explicit repair (#763-d219): remove exactly `paths` from
+		 * `repositories.json`. The backend re-validates every path against the
+		 * live on-disk document and refuses the whole request if any no longer
+		 * matches — this call does not, and must not, decide that on its own.
+		 *
+		 * Does not touch `state.repositories` directly: a successful repair
+		 * fires the same `repositories-changed` broadcast a remote client's
+		 * edit would, and the existing `adoptRemoteRepositories` path removes
+		 * the rows from every window (including this one) exactly as it
+		 * would for any other client's write — one removal path, not two.
+		 * Only the quarantine list updates immediately, for instant feedback
+		 * in the confirming window without waiting on that round trip.
+		 */
+		async repairStaleTemp(paths: string[]): Promise<StaleTempRepairSummary> {
+			const summary = await invoke<StaleTempRepairSummary>("repair_stale_temp_repositories", { paths });
+			setState("staleTempCandidates", (list) => list.filter((c) => !summary.removed.includes(c.path)));
+			return summary;
 		},
 
 		/** Add a repository */
@@ -1107,28 +1253,29 @@ function createRepositoriesStore() {
 				expanded: true,
 				collapsed: false,
 				parked: false,
-				branches: {},
-				activeBranch: null,
+				workspaces: {},
+				activeWorkspaceId: null,
 				connectionId: repo.connectionId,
 			});
 			if (!state.repoOrder.includes(repo.path)) {
 				setState("repoOrder", [...state.repoOrder, repo.path]);
 			}
-			// A repo added while a workspace is active joins it — otherwise the
+			// A repo added while a named workspace is active joins it — otherwise the
 			// just-added repo would be invisible in the sidebar.
-			const wsId = state.activeWorkspaceId;
-			if (wsId && state.workspaces[wsId] && !state.workspaces[wsId].repoPaths.includes(repo.path)) {
-				setState("workspaces", wsId, "repoPaths", (paths) => [...paths, repo.path]);
+			const wsId = state.activeNamedWorkspaceId;
+			if (wsId && state.namedWorkspaces[wsId] && !state.namedWorkspaces[wsId].repoPaths.includes(repo.path)) {
+				setState("namedWorkspaces", wsId, "repoPaths", (paths) => [...paths, repo.path]);
 			}
 			save();
-			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
+			updateGitHubPollingPaths(this.getActivePaths());
 		},
 
 		/** Remove a repository */
 		remove(path: string): void {
+			const previousOwner = state.repositories[path]?.connectionId;
 			dropRepositoryFromState(path);
 			save();
-			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
+			updateGitHubPollingPaths(this.getActivePaths(), [previousOwner]);
 		},
 
 		/** Set active repository */
@@ -1141,10 +1288,10 @@ function createRepositoriesStore() {
 				if (path && state.repositories[path]) {
 					setState("repositories", path, "lastActivatedAt", Date.now());
 					// Activating a non-member escapes to "All projects" — the active
-					// repo must never be hidden by the workspace filter.
-					const ws = state.activeWorkspaceId ? state.workspaces[state.activeWorkspaceId] : undefined;
+					// repo must never be hidden by the named-workspace filter.
+					const ws = state.activeNamedWorkspaceId ? state.namedWorkspaces[state.activeNamedWorkspaceId] : undefined;
 					if (ws && !ws.repoPaths.includes(path)) {
-						setState("activeWorkspaceId", null);
+						setState("activeNamedWorkspaceId", null);
 					}
 				}
 			});
@@ -1152,6 +1299,14 @@ function createRepositoriesStore() {
 			if (path && !getHotRepoPaths(state.repositories).includes(path)) {
 				setState("revisions", path, (n) => (n ?? 0) + 1);
 				invoke("github_poll_repo", { path }).catch(() => {});
+			}
+			// The "and switch" half of the `active_and_switch` index strategy — the
+			// boot half lives in Rust (lib.rs pre-warm). Fire-and-forget, and NOT
+			// conditional on the hot-repo check above: whether the warm runs is a
+			// config policy owned by `content_index::warm_index`, which no-ops for
+			// `disabled`/`active_only` and dedupes an already-built repo.
+			if (path) {
+				invoke("warm_content_index", { repoPath: path }).catch(() => {});
 			}
 		},
 
@@ -1174,18 +1329,19 @@ function createRepositoriesStore() {
 			save();
 		},
 
-		/** Toggle branch terminal tab list expanded state */
-		toggleBranchTabsExpanded(repoPath: string, branchName: string): void {
-			if (!state.repositories[repoPath]?.branches[branchName]) return;
-			setState("repositories", repoPath, "branches", branchName, "tabsExpanded", (e) => !e);
+		/** Collapse or re-expand the agents under a workspace row (expanded by default) */
+		toggleWorkspaceTabsCollapsed(repoPath: string, workspaceId: string): void {
+			if (!state.repositories[repoPath]?.workspaces[workspaceId]) return;
+			setState("repositories", repoPath, "workspaces", workspaceId, "tabsCollapsed", (c) => !c);
 			save();
 		},
 
-		/** Set branch terminal tab list expanded state explicitly */
-		setBranchTabsExpanded(repoPath: string, branchName: string, expanded: boolean): void {
-			if (!state.repositories[repoPath]?.branches[branchName]) return;
-			setState("repositories", repoPath, "branches", branchName, "tabsExpanded", expanded);
-			save();
+		setWorktreeDiagnostics(repoPath: string, entries: WorktreeDiagnostic[]): void {
+			if (state.repositories[repoPath]) setState("repositories", repoPath, "worktreeDiagnostics", entries);
+		},
+
+		setDetachedWorktrees(repoPath: string, entries: DetachedWorktree[]): void {
+			if (state.repositories[repoPath]) setState("repositories", repoPath, "detachedWorktrees", entries);
 		},
 
 		/** Update git repo status (used when a directory gains or loses .git) */
@@ -1194,50 +1350,103 @@ function createRepositoriesStore() {
 			save();
 		},
 
-		/** Add or update a branch */
-		setBranch(repoPath: string, branchName: string, data?: Partial<BranchState>): void {
-			const existing = state.repositories[repoPath]?.branches[branchName];
+		/**
+		 * Add or update one workspace, addressed by its id.
+		 *
+		 * The second argument is the map KEY, never a branch to look up. For
+		 * everything that exists today the two are the same string — the identity
+		 * migration minted `workspaceId = branchName` so nothing persisted moved —
+		 * and that is exactly why the parameter is named for the key: callers
+		 * should not couple workspace identity to a display branch name.
+		 *
+		 * `branchName` in `data` is what is checked out. Absent, it defaults to the
+		 * id, which is right for every row created from a branch.
+		 */
+		setWorkspace(repoPath: string, workspaceId: string, data?: Partial<WorkspaceState>): void {
+			const existing = state.repositories[repoPath]?.workspaces[workspaceId];
+			const patch = data ? definedFields(data) : {};
 			if (existing) {
-				setState("repositories", repoPath, "branches", branchName, (prev) => ({
+				setState("repositories", repoPath, "workspaces", workspaceId, (prev) => ({
 					...prev,
-					...data,
+					...patch,
 				}));
 			} else {
-				setState("repositories", repoPath, "branches", branchName, {
-					name: branchName,
+				const branchName = patch.branchName ?? workspaceId;
+				setState("repositories", repoPath, "workspaces", workspaceId, {
+					workspaceId,
+					branchName,
+					kind: isMainBranch(branchName) ? "main" : "worktree",
+					parentRepoPath: null,
 					isMain: isMainBranch(branchName),
 					worktreePath: null,
 					terminals: [],
 					hadTerminals: false,
-					tabsExpanded: false,
 					lastActiveTerminal: null,
 					additions: 0,
 					deletions: 0,
 					isMerged: false,
 					lastCommitTs: null,
-					...data,
+					...patch,
 				});
 			}
 			save();
 		},
 
-		/** Set active branch for a repo */
-		setActiveBranch(repoPath: string, branchName: string | null): void {
-			setState("repositories", repoPath, "activeBranch", branchName);
+		/**
+		 * Point a repo at the workspace on screen.
+		 *
+		 * The id must name a row that exists. A dangling pointer does not fail where
+		 * it is written — it fails twice, later, in places that name neither this
+		 * call nor the repo: the sidebar renders no tab row for the active workspace
+		 * (terminals stay alive with nothing to click), and `handleAddTerminalToWorkspace`
+		 * reads `workspaces[id]?.worktreePath` off `undefined` and spawns the next
+		 * terminal in the user's HOME directory.
+		 *
+		 * 22 call sites set this, and several pass a branch or a workspace id straight
+		 * off a backend payload — the shape those payloads are keyed on changed under
+		 * them once already. So the check belongs here, once, and keeps the previous
+		 * pointer: it names a row that does exist, which is strictly better than a
+		 * pointer to nothing. `migrateActiveWorkspaceId` drops the same dangling id at
+		 * load time for exactly this reason; this is the live half of that rule.
+		 */
+		setActiveWorkspace(repoPath: string, workspaceId: string | null): void {
+			const repo = state.repositories[repoPath];
+			if (workspaceId !== null && repo && !repo.workspaces[workspaceId]) {
+				appLogger.error("store", `setActiveWorkspace: "${workspaceId}" names no workspace — pointer left alone`, {
+					repoPath,
+					requested: workspaceId,
+					current: repo.activeWorkspaceId,
+					known: Object.keys(repo.workspaces),
+				});
+				return;
+			}
+			setState("repositories", repoPath, "activeWorkspaceId", workspaceId);
+		},
+
+		/** Adopt a caller-bound backend declaration before its repository refresh arrives. */
+		setDeclaredWorktree(
+			repoPath: string,
+			peer: string,
+			placement: { workspaceId: string; branch: string; worktreePath: string },
+		): void {
+			const repo = state.repositories[repoPath];
+			if (!repo) return;
+			setState("repositories", repoPath, "declaredWorktrees", { ...repo.declaredWorktrees, [peer]: placement });
+			save();
 		},
 
 		/** Add terminal to branch */
-		addTerminalToBranch(repoPath: string, branchName: string, terminalId: string): void {
-			const branch = state.repositories[repoPath]?.branches[branchName];
+		addTerminalToWorkspace(repoPath: string, workspaceId: string, terminalId: string): void {
+			const branch = state.repositories[repoPath]?.workspaces[workspaceId];
 			if (branch && !branch.terminals.includes(terminalId)) {
-				appLogger.info("terminal", `addTerminalToBranch ${branchName} += ${terminalId}`, {
+				appLogger.info("terminal", `addTerminalToWorkspace ${workspaceId} += ${terminalId}`, {
 					before: [...branch.terminals],
 				});
 				terminalToRepo.set(terminalId, repoPath);
 				batch(() => {
-					setState("repositories", repoPath, "branches", branchName, "terminals", (t) => [...t, terminalId]);
+					setState("repositories", repoPath, "workspaces", workspaceId, "terminals", (t) => [...t, terminalId]);
 					if (!branch.hadTerminals) {
-						setState("repositories", repoPath, "branches", branchName, "hadTerminals", true);
+						setState("repositories", repoPath, "workspaces", workspaceId, "hadTerminals", true);
 					}
 				});
 				save();
@@ -1246,21 +1455,21 @@ function createRepositoriesStore() {
 		},
 
 		/** Remove terminal from branch */
-		removeTerminalFromBranch(repoPath: string, branchName: string, terminalId: string): void {
-			const branch = state.repositories[repoPath]?.branches[branchName];
-			appLogger.info("terminal", `removeTerminalFromBranch ${branchName} -= ${terminalId}`, {
+		removeTerminalFromWorkspace(repoPath: string, workspaceId: string, terminalId: string): void {
+			const branch = state.repositories[repoPath]?.workspaces[workspaceId];
+			appLogger.info("terminal", `removeTerminalFromWorkspace ${workspaceId} -= ${terminalId}`, {
 				before: branch?.terminals ? [...branch.terminals] : [],
 			});
 			terminalToRepo.delete(terminalId);
 			batch(() => {
-				setState("repositories", repoPath, "branches", branchName, "terminals", (t) =>
+				setState("repositories", repoPath, "workspaces", workspaceId, "terminals", (t) =>
 					t.filter((id) => id !== terminalId),
 				);
 				// When last terminal is removed, clear stale savedTerminals so the periodic
 				// snapshot doesn't resurrect closed tabs on next branch click.
-				const updated = state.repositories[repoPath]?.branches[branchName];
+				const updated = state.repositories[repoPath]?.workspaces[workspaceId];
 				if (updated && updated.terminals.length === 0 && updated.savedTerminals && updated.savedTerminals.length > 0) {
-					setState("repositories", repoPath, "branches", branchName, "savedTerminals", []);
+					setState("repositories", repoPath, "workspaces", workspaceId, "savedTerminals", []);
 				}
 			});
 			save();
@@ -1268,35 +1477,35 @@ function createRepositoriesStore() {
 		},
 
 		/** Set run command for a branch */
-		setRunCommand(repoPath: string, branchName: string, command: string | undefined): void {
-			const branch = state.repositories[repoPath]?.branches[branchName];
+		setRunCommand(repoPath: string, workspaceId: string, command: string | undefined): void {
+			const branch = state.repositories[repoPath]?.workspaces[workspaceId];
 			if (branch) {
-				setState("repositories", repoPath, "branches", branchName, "runCommand", command);
+				setState("repositories", repoPath, "workspaces", workspaceId, "runCommand", command);
 				save();
 			}
 		},
 
 		/** Update CI auto-heal state for a branch */
-		setCiAutoHeal(repoPath: string, branchName: string, value: BranchState["ciAutoHeal"]): void {
-			if (!state.repositories[repoPath]?.branches[branchName]) return;
-			setState("repositories", repoPath, "branches", branchName, "ciAutoHeal", value);
+		setCiAutoHeal(repoPath: string, workspaceId: string, value: WorkspaceState["ciAutoHeal"]): void {
+			if (!state.repositories[repoPath]?.workspaces[workspaceId]) return;
+			setState("repositories", repoPath, "workspaces", workspaceId, "ciAutoHeal", value);
 			save();
 		},
 
 		/** Update branch stats (additions/deletions) — only if branch already exists */
-		updateBranchStats(repoPath: string, branchName: string, additions: number, deletions: number): void {
-			if (!state.repositories[repoPath]?.branches[branchName]) return;
-			setState("repositories", repoPath, "branches", branchName, { additions, deletions });
+		updateWorkspaceStats(repoPath: string, workspaceId: string, additions: number, deletions: number): void {
+			if (!state.repositories[repoPath]?.workspaces[workspaceId]) return;
+			setState("repositories", repoPath, "workspaces", workspaceId, { additions, deletions });
 		},
 
-		/** Remove a branch from a repository */
-		removeBranch(repoPath: string, branchName: string): void {
+		/** Remove one workspace, addressed by its id. */
+		removeWorkspace(repoPath: string, workspaceId: string): void {
 			const repo = state.repositories[repoPath];
 			if (!repo) return;
 
-			const branch = repo.branches[branchName];
+			const branch = repo.workspaces[workspaceId];
 			if (branch) {
-				appLogger.debug("terminal", `removeBranch "${branchName}" from ${repoPath}`, {
+				appLogger.debug("terminal", `removeWorkspace "${workspaceId}" from ${repoPath}`, {
 					terminals: branch.terminals,
 					hadTerminals: branch.hadTerminals,
 					savedTerminals: branch.savedTerminals?.length ?? 0,
@@ -1315,23 +1524,39 @@ function createRepositoriesStore() {
 					const r = s.repositories[repoPath];
 					if (!r) return;
 
+					// A removed checkout must not remain a saved peer placement.
+					for (const [peer, placement] of Object.entries(r.declaredWorktrees ?? {})) {
+						if (placement.workspaceId === workspaceId) delete r.declaredWorktrees![peer];
+					}
 					// Delete the branch
-					delete r.branches[branchName];
+					delete r.workspaces[workspaceId];
 
 					// Clear active branch if it was removed
-					if (r.activeBranch === branchName) {
-						const remainingBranches = Object.keys(r.branches);
-						r.activeBranch = remainingBranches[0] || null;
+					if (r.activeWorkspaceId === workspaceId) {
+						const remainingBranches = Object.keys(r.workspaces);
+						r.activeWorkspaceId = remainingBranches[0] || null;
 					}
 				}),
 			);
 			save();
 		},
 
-		/** Rename a branch in a repository */
+		/**
+		 * A branch was renamed: follow it.
+		 *
+		 * Both arguments are branch names, and for a branch-derived id they are
+		 * also the old and new map key — which is why this moves the record. The
+		 * `workspaceId` field has to move WITH the key: the record used to be
+		 * spread through unchanged, so after a rename the map key was the new name
+		 * while `workspaceId` still held the old one, and every consumer that
+		 * reads `ws.workspaceId` then addressed a key that no longer existed.
+		 *
+		 * Linked worktrees cannot share a branch, so the branch-derived id and map
+		 * key move together.
+		 */
 		renameBranch(repoPath: string, oldName: string, newName: string): void {
 			const repo = state.repositories[repoPath];
-			if (!repo?.branches[oldName]) return;
+			if (!repo?.workspaces[oldName]) return;
 
 			setState(
 				produce((s) => {
@@ -1339,41 +1564,43 @@ function createRepositoriesStore() {
 					if (!r) return;
 
 					// Get the old branch data
-					const oldBranch = r.branches[oldName];
+					const oldBranch = r.workspaces[oldName];
 					if (!oldBranch) return;
 
 					// Create new branch entry with updated name
-					r.branches[newName] = {
+					r.workspaces[newName] = {
 						...oldBranch,
-						name: newName,
+						workspaceId: newName,
+						branchName: newName,
 						isMain: isMainBranch(newName),
 					};
 
 					// Delete the old branch entry
-					delete r.branches[oldName];
+					delete r.workspaces[oldName];
 
 					// Update active branch if it was renamed
-					if (r.activeBranch === oldName) {
-						r.activeBranch = newName;
+					if (r.activeWorkspaceId === oldName) {
+						r.activeWorkspaceId = newName;
 					}
 				}),
 			);
 			save();
 		},
 
-		/** Merge terminal state from one branch into another (for main checkout rename race).
+		/** Merge terminal state from one workspace into another, both addressed by id
+		 *  (for the main-checkout rename race).
 		 *  Moves terminals, savedTerminals, hadTerminals, lastActiveTerminal from source
 		 *  to target, keeping the target's worktreePath and other git-derived fields. */
-		mergeBranchState(repoPath: string, sourceName: string, targetName: string): void {
+		mergeWorkspaceState(repoPath: string, sourceId: string, targetId: string): void {
 			const repo = state.repositories[repoPath];
-			if (!repo?.branches[sourceName] || !repo.branches[targetName]) return;
+			if (!repo?.workspaces[sourceId] || !repo.workspaces[targetId]) return;
 
 			setState(
 				produce((s) => {
 					const r = s.repositories[repoPath];
 					if (!r) return;
-					const src = r.branches[sourceName];
-					const tgt = r.branches[targetName];
+					const src = r.workspaces[sourceId];
+					const tgt = r.workspaces[targetId];
 					if (!src || !tgt) return;
 
 					// Transfer terminals
@@ -1412,6 +1639,47 @@ function createRepositoriesStore() {
 		/** Get repository by path */
 		get(path: string): RepositoryState | undefined {
 			return state.repositories[path];
+		},
+
+		/** One workspace by its id. The only supported way to reach a record: a
+		 *  branch cannot name a row once two workspaces share one. */
+		getWorkspace(repoPath: string, workspaceId: string): WorkspaceState | undefined {
+			return state.repositories[repoPath]?.workspaces[workspaceId];
+		},
+
+		/**
+		 * The branch a workspace has checked out.
+		 *
+		 * The legitimate direction: id -> branch is a lookup, branch -> id is a
+		 * guess. Callers that hold an id and need a git ref (a merge subject, a PR
+		 * lookup, a label) come through here rather than reusing the id as a name.
+		 * Falls back to the id, which is what it equals for everything a linked
+		 * worktree ever created.
+		 */
+		branchNameFor(repoPath: string, workspaceId: string): string {
+			return state.repositories[repoPath]?.workspaces[workspaceId]?.branchName ?? workspaceId;
+		},
+
+		/**
+		 * The workspace on `branchName` — the ONE place allowed to go from a branch
+		 * to an id, and only for callers whose input genuinely is a branch and
+		 * nothing else: a GitHub PR names its head branch, never a directory.
+		 *
+		 * DEFERRED (2026-09-11) — with two workspaces on one branch this returns the
+		 * first and there is no better answer available at these call sites: a PR
+		 * merge knows which ref landed, not which of two checkouts the user meant.
+		 * Resolving it needs the PR-cleanup flows to carry a workspace from the row
+		 * the user clicked, which is a UI change, not a lookup change. Until then
+		 * this is a documented single seam instead of the same guess inlined at four
+		 * call sites.
+		 */
+		workspaceIdOnBranch(repoPath: string, branchName: string): string | null {
+			const workspaces = state.repositories[repoPath]?.workspaces;
+			if (!workspaces) return null;
+			for (const [workspaceId, workspace] of Object.entries(workspaces)) {
+				if (workspace.branchName === branchName) return workspaceId;
+			}
+			return null;
 		},
 
 		/** True unless the repo is a registered plain directory. Unknown paths
@@ -1460,7 +1728,7 @@ function createRepositoriesStore() {
 			if (!state.repositories[path]) return;
 			setState("repositories", path, "parked", parked);
 			save();
-			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
+			updateGitHubPollingPaths(this.getActivePaths(), [state.repositories[path].connectionId]);
 			const cmd = parked ? "stop_repo_watcher" : "start_repo_watcher";
 			invoke(cmd, { repoPath: path }).catch((err) => {
 				appLogger.warn("store", `${cmd} failed for ${path}`, err);
@@ -1488,14 +1756,17 @@ function createRepositoriesStore() {
 			return Object.values(state.repositories).filter((r) => r.parked);
 		},
 
-		/** Get ordered repo paths (excludes parked repos) */
+		/** Get ordered repo paths (excludes parked repos and quarantined stale-temp ghosts) */
 		getOrderedRepos(): RepositoryState[] {
-			return state.repoOrder.map((path) => state.repositories[path]).filter((r) => r && !r.parked);
+			const quarantined = quarantinedPaths(state.staleTempCandidates);
+			return state.repoOrder
+				.map((path) => state.repositories[path])
+				.filter((r) => r && !r.parked && !quarantined.has(r.path));
 		},
 
 		/** Reorder terminals within the active branch */
-		reorderTerminals(repoPath: string, branchName: string, fromIndex: number, toIndex: number): void {
-			setState("repositories", repoPath, "branches", branchName, "terminals", (terminals) => {
+		reorderTerminals(repoPath: string, workspaceId: string, fromIndex: number, toIndex: number): void {
+			setState("repositories", repoPath, "workspaces", workspaceId, "terminals", (terminals) => {
 				const result = [...terminals];
 				const [moved] = result.splice(fromIndex, 1);
 				result.splice(toIndex, 0, moved);
@@ -1509,15 +1780,19 @@ function createRepositoriesStore() {
 			return terminalToRepo.get(termId) ?? null;
 		},
 
-		/** Reverse-lookup: find repo path + branch name owning a terminal.
-		 *  Uses O(1) repo lookup via inverse index, then scans branches (typically 1-5). */
-		findOwnerForTerminal(termId: string): { repoPath: string; branchName: string } | null {
+		/** Reverse-lookup: which repo and WORKSPACE own a terminal.
+		 *  O(1) repo lookup via the inverse index, then a scan of that repo's
+		 *  workspaces (typically 1-5). Returns the map key, so a caller can feed it
+		 *  straight back into any id-taking method — the previous name for this
+		 *  field said `branchName` while already holding the key, which is how a
+		 *  branch reached call sites that needed an id. */
+		findOwnerForTerminal(termId: string): { repoPath: string; workspaceId: string } | null {
 			const repoPath = terminalToRepo.get(termId);
 			if (!repoPath) return null;
 			const repo = state.repositories[repoPath];
 			if (!repo) return null;
-			for (const [name, branch] of Object.entries(repo.branches)) {
-				if (branch.terminals.includes(termId)) return { repoPath, branchName: name };
+			for (const [workspaceId, workspace] of Object.entries(repo.workspaces)) {
+				if (workspace.terminals.includes(termId)) return { repoPath, workspaceId };
 			}
 			return null;
 		},
@@ -1532,19 +1807,19 @@ function createRepositoriesStore() {
 		/** Get terminals for current active branch */
 		getActiveTerminals(): string[] {
 			const repo = actions.getActive();
-			if (!repo?.activeBranch) return [];
-			return repo.branches[repo.activeBranch]?.terminals || [];
+			if (!repo?.activeWorkspaceId) return [];
+			return repo.workspaces[repo.activeWorkspaceId]?.terminals || [];
 		},
 
 		/** Snapshot terminal metadata into each branch for persistence (called at quit time) */
 		snapshotTerminals(snapshots: Map<string, Map<string, SavedTerminal[]>>): void {
 			setState(
 				produce((s) => {
-					for (const [repoPath, branches] of snapshots) {
+					for (const [repoPath, workspaces] of snapshots) {
 						const repo = s.repositories[repoPath];
 						if (!repo) continue;
-						for (const [branchName, terminals] of branches) {
-							const branch = repo.branches[branchName];
+						for (const [branchName, terminals] of workspaces) {
+							const branch = repo.workspaces[branchName];
 							if (!branch) continue;
 							branch.savedTerminals = terminals;
 						}
@@ -1555,12 +1830,21 @@ function createRepositoriesStore() {
 			saveNow();
 		},
 
-		/** Clear savedTerminals from all branches (consume-once after restore) */
+		/** Wait until the latest queued snapshot reaches the backend. */
+		async flushSave(): Promise<void> {
+			while (saveInFlight || queuedSnapshot) {
+				drainRepositorySaveQueue();
+				await saveCompletion;
+			}
+			if (saveError !== undefined) throw saveError;
+		},
+
+		/** Clear savedTerminals from all workspaces (consume-once after restore) */
 		clearSavedTerminals(): void {
 			setState(
 				produce((s) => {
 					for (const repo of Object.values(s.repositories)) {
-						for (const branch of Object.values(repo.branches)) {
+						for (const branch of Object.values(repo.workspaces)) {
 							branch.savedTerminals = [];
 						}
 					}
@@ -1660,7 +1944,7 @@ function createRepositoriesStore() {
 			save();
 		},
 
-		// ── Sort mode & workspaces ──
+		// ── Sort mode & named workspaces (FastAF) ──
 
 		/** Set the sidebar repo sort mode */
 		setSortMode(mode: RepoSortMode): void {
@@ -1668,58 +1952,60 @@ function createRepositoriesStore() {
 			save();
 		},
 
-		/** Create a workspace from a set of repo paths. Returns ID or null if
+		/** Create a named workspace from a set of repo paths. Returns ID or null if
 		 *  name is duplicate (case-insensitive). */
-		createWorkspace(name: string, repoPaths: string[]): string | null {
+		createNamedWorkspace(name: string, repoPaths: string[]): string | null {
 			const nameLower = name.toLowerCase();
-			const exists = Object.values(state.workspaces).some((w) => w.name.toLowerCase() === nameLower);
+			const exists = Object.values(state.namedWorkspaces).some((w) => w.name.toLowerCase() === nameLower);
 			if (exists) return null;
 
-			const id = generateWorkspaceId();
+			const id = generateNamedWorkspaceId();
 			batch(() => {
-				setState("workspaces", id, { id, name, repoPaths: [...repoPaths] });
-				setState("workspaceOrder", [...state.workspaceOrder, id]);
+				setState("namedWorkspaces", id, { id, name, repoPaths: [...repoPaths] });
+				setState("namedWorkspaceOrder", [...state.namedWorkspaceOrder, id]);
 			});
 			save();
 			return id;
 		},
 
-		/** Rename a workspace. Returns false if name is duplicate (case-insensitive). */
-		renameWorkspace(id: string, newName: string): boolean {
-			if (!state.workspaces[id]) return false;
+		/** Rename a named workspace. Returns false if name is duplicate (case-insensitive). */
+		renameNamedWorkspace(id: string, newName: string): boolean {
+			if (!state.namedWorkspaces[id]) return false;
 			const nameLower = newName.toLowerCase();
-			const exists = Object.values(state.workspaces).some((w) => w.id !== id && w.name.toLowerCase() === nameLower);
+			const exists = Object.values(state.namedWorkspaces).some(
+				(w) => w.id !== id && w.name.toLowerCase() === nameLower,
+			);
 			if (exists) return false;
-			setState("workspaces", id, "name", newName);
+			setState("namedWorkspaces", id, "name", newName);
 			save();
 			return true;
 		},
 
-		/** Delete a workspace — falls back to "All projects" if it was active */
-		deleteWorkspace(id: string): void {
-			if (!state.workspaces[id]) return;
+		/** Delete a named workspace — falls back to "All projects" if it was active */
+		deleteNamedWorkspace(id: string): void {
+			if (!state.namedWorkspaces[id]) return;
 			setState(
 				produce((s) => {
-					delete s.workspaces[id];
-					s.workspaceOrder = s.workspaceOrder.filter((wid) => wid !== id);
-					if (s.activeWorkspaceId === id) {
-						s.activeWorkspaceId = null;
+					delete s.namedWorkspaces[id];
+					s.namedWorkspaceOrder = s.namedWorkspaceOrder.filter((wid) => wid !== id);
+					if (s.activeNamedWorkspaceId === id) {
+						s.activeNamedWorkspaceId = null;
 					}
 				}),
 			);
 			save();
 		},
 
-		/** Set the active workspace (null = "All projects") */
-		setActiveWorkspace(id: string | null): void {
-			if (id !== null && !state.workspaces[id]) return;
-			setState("activeWorkspaceId", id);
+		/** Set the active named workspace (null = "All projects") */
+		setActiveNamedWorkspace(id: string | null): void {
+			if (id !== null && !state.namedWorkspaces[id]) return;
+			setState("activeNamedWorkspaceId", id);
 			save();
 		},
 
-		/** Get the active workspace (undefined when "All projects") */
-		getActiveWorkspace(): Workspace | undefined {
-			return state.activeWorkspaceId ? state.workspaces[state.activeWorkspaceId] : undefined;
+		/** Get the active named workspace (undefined when "All projects") */
+		getActiveNamedWorkspace(): NamedWorkspace | undefined {
+			return state.activeNamedWorkspaceId ? state.namedWorkspaces[state.activeNamedWorkspaceId] : undefined;
 		},
 
 		// ── Group assignment ──
@@ -1816,11 +2102,14 @@ function createRepositoriesStore() {
 		 *  wrapper whenever it still describes the same group and the same repo
 		 *  proxies, so an untouched group survives a change to its neighbour. */
 		getGroupedLayout(): GroupedLayout {
+			const quarantined = quarantinedPaths(state.staleTempCandidates);
 			const groups = state.groupOrder
 				.map((gid) => state.groups[gid])
 				.filter(Boolean)
 				.map((group) => {
-					const repos = group.repoOrder.map((path) => state.repositories[path]).filter((r) => r && !r.parked);
+					const repos = group.repoOrder
+						.map((path) => state.repositories[path])
+						.filter((r) => r && !r.parked && !quarantined.has(r.path));
 					const cached = groupLayoutCache.get(group.id);
 					if (cached && cached.group === group && sameRefs(cached.repos, repos)) return cached;
 					const entry = { group, repos };
@@ -1839,7 +2128,7 @@ function createRepositoriesStore() {
 			const ungrouped = state.repoOrder
 				.filter((path) => !groupedPaths.has(path))
 				.map((path) => state.repositories[path])
-				.filter((r) => r && !r.parked);
+				.filter((r) => r && !r.parked && !quarantined.has(r.path));
 
 			if (!lastLayout || !sameRefs(lastLayout.groups, groups) || !sameRefs(lastLayout.ungrouped, ungrouped)) {
 				lastLayout = {
@@ -1892,9 +2181,9 @@ function createRepositoriesStore() {
 					state.groups,
 					state.groupOrder,
 					state.sortMode,
-					state.workspaces,
-					state.workspaceOrder,
-					state.activeWorkspaceId,
+					state.namedWorkspaces,
+					state.namedWorkspaceOrder,
+					state.activeNamedWorkspaceId,
 				);
 			}
 		},
@@ -1924,13 +2213,13 @@ registerDebugSnapshot("repositories", () => {
 				path,
 				{
 					displayName: r.displayName,
-					activeBranch: r.activeBranch,
+					activeWorkspaceId: r.activeWorkspaceId,
 					expanded: r.expanded,
 					collapsed: r.collapsed,
 					parked: r.parked,
 					isGitRepo: r.isGitRepo,
-					branches: Object.fromEntries(
-						Object.entries(r.branches).map(([name, b]) => [
+					workspaces: Object.fromEntries(
+						Object.entries(r.workspaces).map(([name, b]) => [
 							name,
 							{
 								isMain: b.isMain,
@@ -1962,8 +2251,8 @@ export function currentBranchKey(): string | undefined {
 export function branchKeyFor(repoPath: string | null | undefined): string | undefined {
 	if (!repoPath) return undefined;
 	const repo = repositoriesStore.state.repositories[repoPath];
-	if (!repo?.activeBranch) return undefined;
-	return makeBranchKey(repoPath, repo.activeBranch);
+	if (!repo?.activeWorkspaceId) return undefined;
+	return makeBranchKey(repoPath, repo.activeWorkspaceId);
 }
 
 /** Resolve which registered repo owns `path`. Returns null when none does — callers
@@ -2000,8 +2289,8 @@ export function locateFile(absolutePath: string): FileLocation {
 	if (!owner) return { repoPath: "", fsRoot: "", filePath: absolutePath };
 
 	// A linked worktree is the filesystem root for I/O; the repo root is not.
-	const worktreePath = owner.branchName
-		? repositoriesStore.state.repositories[owner.repoPath]?.branches[owner.branchName]?.worktreePath
+	const worktreePath = owner.workspaceId
+		? repositoriesStore.state.repositories[owner.repoPath]?.workspaces[owner.workspaceId]?.worktreePath
 		: null;
 	const fsRoot = worktreePath || owner.repoPath;
 	const filePath = pathStartsWith(absolutePath, fsRoot)
@@ -2011,24 +2300,53 @@ export function locateFile(absolutePath: string): FileLocation {
 }
 
 /**
- * The branch a terminal owned by `owner` should be filed under.
+ * The workspace a terminal owned by `owner` should be filed under.
  *
- * A linked worktree names its own branch and is used as-is. A match at the repo
- * ROOT names none — what is checked out there moves under the user's feet — so it
- * resolves late, here:
+ * A linked worktree directory names its own workspace and is used as-is. A match
+ * at the repo ROOT names none — what is checked out there moves under the user's
+ * feet — so it resolves late, here:
  *
- *  1. `activeBranch`, the branch the repo is on right now;
- *  2. failing that, whichever branch records the repo root as its worktree.
+ *  1. whichever workspace records the repo root as its worktree;
+ *  2. failing that, no workspace until the root checkout is discovered.
  *
- * Step 2 is not redundant. A repo discovered before its branches were scanned has
- * `activeBranch: null` while already knowing its root checkout, and stopping at
- * step 1 left every session in it unplaced — invisible tabs, not misfiled ones.
+ * The root workspace is an exact path match. Falling back to `activeWorkspaceId`
+ * files every root session under whichever linked worktree happened to be selected
+ * when the frontend rehydrated.
+ * It returns that workspace's KEY, not its `branchName`: the caller feeds the
+ * answer straight into `addTerminalToWorkspace`.
  */
-export function placementBranchFor(owner: RepoOwner): string | null {
-	if (owner.branchName) return owner.branchName;
+export function placementWorkspaceFor(owner: RepoOwner): string | null {
+	if (owner.workspaceId) return owner.workspaceId;
 	const repo = repositoriesStore.state.repositories[owner.repoPath];
 	if (!repo) return null;
-	if (repo.activeBranch) return repo.activeBranch;
-	const atRoot = Object.values(repo.branches).find((branch) => branch.worktreePath === owner.repoPath);
-	return atRoot?.name ?? null;
+	const atRoot = Object.entries(repo.workspaces).find(
+		([, ws]) => !!ws.worktreePath && sameDir(ws.worktreePath, owner.repoPath),
+	);
+	return atRoot?.[0] ?? null;
 }
+
+/** True while at least one registered repository lives on another machine. */
+function anyRepoIsRemote(): boolean {
+	const repos = repositoriesStore.state.repositories;
+	for (const path in repos) {
+		if (repos[path]?.connectionId) return true;
+	}
+	return false;
+}
+
+// Route repo-scoped calls to the machine that holds the repo. The transport asks
+// this on every call, so a call reaches the right backend without its call site
+// knowing a remote machine exists. Registered here rather than imported there:
+// `transportRuntime` must import no store, because the stores import it.
+//
+// `untrack` because this runs inside whichever effect happened to make the call:
+// a transport detail must not subscribe that effect to the whole registry. And
+// the early exit matters — on a machine with no remote repo, which is every
+// machine until one is added, the prefix walk below is pure cost on every call.
+setRepoConnectionLookup((path) =>
+	untrack(() => {
+		if (!anyRepoIsRemote()) return undefined;
+		const repoPath = resolveRepoPathFor(path);
+		return repoPath ? repositoriesStore.getConnectionId(repoPath) : undefined;
+	}),
+);

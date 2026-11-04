@@ -1,0 +1,3 @@
+Recorded on macOS, 2026-10-10, using lsof -nP -iTCP -sTCP:LISTEN -Fpcn, lsof -a -p <pids> -d cwd -Fn, and ps -p <pids> -o pid=,command=. mac-listeners/mac-cwds contain two disposable Python servers launched in this worktree. mac-worktrees files are read-only observations of Vite listeners in the main checkout and two linked worktrees. No fixture process was stopped except our disposable servers. PIDs are historical fixture identities, never cleanup targets.
+
+`edge-extension-settings.json` wraps the extension entry recorded in `~/Gits/.tmp/dm-broken/ext.txt` on 2026-10-13 (Edge 155.0.4283.45, Default/Secure Preferences). The entry is unchanged; only the containing extensions/settings object was added. The historical path is fixture data, never a launch or cleanup target.

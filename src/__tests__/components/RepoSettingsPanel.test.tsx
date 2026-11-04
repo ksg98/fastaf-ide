@@ -4,10 +4,11 @@ import { fireEvent, render } from "@solidjs/testing-library";
 
 vi.mock("../../stores/settings", () => ({
 	settingsStore: {
-		state: { ide: "vscode", font: "JetBrains Mono", defaultFontSize: 12 },
+		state: { ide: "vscode", font: "JetBrains Mono", defaultFontSize: 12, customLaunchers: [] },
 		setIde: vi.fn(),
 		setFont: vi.fn(),
 		isAiChatEnabled: vi.fn().mockReturnValue(false),
+		isAcpConfigured: vi.fn().mockReturnValue(false),
 	},
 	IDE_NAMES: { vscode: "VS Code" },
 	FONT_FAMILIES: { "JetBrains Mono": "JetBrains Mono" },
@@ -93,6 +94,7 @@ describe("SettingsPanel — repo context", () => {
 			path: "/repo",
 			displayName: "my-repo",
 			autoConsolidateWorktrees: false,
+			devServerUrl: null,
 			baseBranch: "automatic",
 			copyIgnoredFiles: false,
 			copyUntrackedFiles: false,
@@ -105,6 +107,7 @@ describe("SettingsPanel — repo context", () => {
 			promptOnCreate: null,
 			deleteBranchOnRemove: null,
 			autoArchiveMerged: null,
+			archiveRetentionDays: null,
 			orphanCleanup: null,
 			prMergeStrategy: null,
 			afterMerge: null,
@@ -132,9 +135,28 @@ describe("SettingsPanel — repo context", () => {
 		expect(activeItem!.textContent).toBe("my-repo");
 	});
 
+	it("keeps sidebar swatches in the shared control column and preserves color updates", () => {
+		// Catches: the custom color label makes the legacy grid place swatches before the row label.
+		const { container } = render(() => <SettingsPanel {...defaultProps} />);
+		const label = Array.from(container.querySelectorAll("label")).find((item) => item.textContent === "Sidebar Color")!;
+		const row = label.closest(".settingRow");
+		expect(row).not.toBeNull();
+		expect(row!.querySelector(".settingRowText")?.textContent).toContain("Color-code this repo in the sidebar");
+		const swatch = row!.querySelector<HTMLButtonElement>(".settingRowControl button[title='Red']")!;
+		fireEvent.click(swatch);
+		expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { color: "#FF6B6B" });
+	});
+
+	it("shows a repo-specific Design Mode URL field", () => {
+		const { container } = render(() => <SettingsPanel {...defaultProps} />);
+		const field = container.querySelector<HTMLInputElement>("#repo-dev-server-url");
+		expect(field).not.toBeNull();
+		expect(field?.type).toBe("url");
+	});
+
 	it("shows repo settings content when repo nav item is active", () => {
 		const { container } = render(() => <SettingsPanel {...defaultProps} />);
-		// RepoWorktreeTab renders h3 "Repository"
+		// Section cards retain the repository headings.
 		const headings = Array.from(container.querySelectorAll(".section h3")).map((h) => h.textContent);
 		expect(headings).toContain("Repository");
 		// RepoScriptsTab renders h3 "Automation Scripts"
@@ -157,12 +179,60 @@ describe("SettingsPanel — repo context", () => {
 		expect(repoSettingsStore.reset).toHaveBeenCalledWith("/repo");
 	});
 
+	// Catches: replacing the consolidation checkbox drops its label, checked value or repository owner callback.
+	it("keeps consolidation as a labelled repository switch", () => {
+		const { getByRole } = render(() => <SettingsPanel {...defaultProps} />);
+		const control = getByRole("switch", {
+			name: "Show all worktrees of this repo in one consolidated screen",
+		}) as HTMLInputElement;
+		expect(control.checked).toBe(false);
+		fireEvent.click(control);
+		expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { autoConsolidateWorktrees: true });
+	});
+
+	it("keeps explicit disabled fetch distinct from inherited defaults", () => {
+		// Catches coercing the nullable sentinel or explicit zero into the same override.
+		const { container } = render(() => <SettingsPanel {...defaultProps} />);
+		const label = [...container.querySelectorAll("label")].find((e) => e.textContent === "Auto-Fetch Interval")!;
+		const select = container.querySelector(`#${label.htmlFor}`)!;
+		fireEvent.change(select, { target: { value: "0" } });
+		expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { autoFetchIntervalMinutes: 0 });
+		fireEvent.change(select, { target: { value: "__inherit__" } });
+		expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { autoFetchIntervalMinutes: null });
+	});
+	it("clears a script override to inheritance without exporting it", () => {
+		// Catches replacing the textarea without preserving its empty-to-null update boundary.
+		const { container } = render(() => <SettingsPanel {...defaultProps} />);
+		const input = container.querySelector("#repo-run-script")!;
+		fireEvent.input(input, { target: { value: "pnpm dev" } });
+		expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { runScript: "pnpm dev" });
+		fireEvent.input(input, { target: { value: "" } });
+		expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { runScript: null });
+		expect(container.textContent).toContain("Scripts are never exported.");
+	});
+
+	it("keeps inherited boolean overrides distinct from explicit on and off", () => {
+		// Catches flattening nullable overrides into a two-state checkbox.
+		const { container } = render(() => <SettingsPanel {...defaultProps} />);
+		const label = [...container.querySelectorAll("label")].find((e) => e.textContent === "Copy ignored files")!;
+		const control = container.querySelector<HTMLSelectElement>(`#${label.htmlFor}`)!;
+		for (const [value, expected] of [
+			["true", true],
+			["false", false],
+			["__inherit__", null],
+		] as const) {
+			fireEvent.change(control, { target: { value } });
+			expect(repoSettingsStore.update).toHaveBeenLastCalledWith("/repo", { copyIgnoredFiles: expected });
+		}
+	});
+
 	it("clicking a global nav item switches to global content", () => {
 		const { container } = render(() => <SettingsPanel {...defaultProps} />);
 		const generalItem = Array.from(container.querySelectorAll(".navItem")).find((n) => n.textContent === "General")!;
 		fireEvent.click(generalItem);
-		const h3 = container.querySelector(".section h3");
-		expect(h3!.textContent).toBe("General");
+		const headings = Array.from(container.querySelectorAll(".section h3")).map((heading) => heading.textContent);
+		expect(headings).toContain("Local tools");
+		expect(headings).toContain("General");
 		// Reset button gone when on global section
 		expect(container.querySelector(".footerReset")).toBeNull();
 	});

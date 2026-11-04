@@ -2,11 +2,6 @@ import { describe, expect, it } from "vitest";
 import { TUIC_SDK_SCRIPT, TUIC_SDK_VERSION } from "../tuicSdk";
 
 describe("TUIC SDK Script", () => {
-	it("exports a non-empty script string", () => {
-		expect(TUIC_SDK_SCRIPT).toBeTruthy();
-		expect(typeof TUIC_SDK_SCRIPT).toBe("string");
-	});
-
 	it("wraps content in a script tag", () => {
 		expect(TUIC_SDK_SCRIPT).toMatch(/^<script id="tuic-sdk">/);
 		expect(TUIC_SDK_SCRIPT).toMatch(/<\/script>$/);

@@ -10,14 +10,21 @@ State is split between the Rust backend (source of truth for persistence) and So
 
 The central backend state, shared across all Tauri commands via `State<'_, Arc<AppState>>`:
 
+`AppState` has **113 fields** (`state.rs:1328`). The excerpt below is the PTY core
+only — it is NOT the whole struct. Read `state.rs` for the rest; the remainder covers
+the config cache, git/GitHub TTL caches, repo watchers, session states, MCP/agent
+registries, worktree bookkeeping and the event bus.
+
 ```rust
 pub struct AppState {
     pub sessions: DashMap<String, Mutex<PtySession>>,       // Active PTY sessions
-    pub worktrees_dir: PathBuf,                              // Worktree storage path
-    pub metrics: SessionMetrics,                             // Atomic counters
+    pub(crate) data_dir: PathBuf,                            // Config/data directory
+    pub(crate) worktrees_dir: PathBuf,                       // Worktree storage path
+    pub(crate) metrics: SessionMetrics,                      // Atomic counters
     pub output_buffers: DashMap<String, Mutex<OutputRingBuffer>>, // MCP output access
-    pub mcp_sse_sessions: DashMap<String, UnboundedSender<String>>, // SSE clients
-    pub ws_clients: DashMap<String, Vec<UnboundedSender<String>>>,  // WebSocket clients
+    pub mcp_sessions: DashMap<String, McpSessionMeta>,       // MCP Streamable HTTP sessions
+    pub ws_clients: DashMap<String, Vec<WsClientTx>>,        // WebSocket clients per session
+    // ... 106 more fields
 }
 ```
 
@@ -30,15 +37,25 @@ pub struct AppState {
 ### PtySession
 
 ```rust
+pub type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
 pub struct PtySession {
-    pub writer: Box<dyn Write + Send>,          // Write to PTY
-    pub master: Box<dyn MasterPty + Send>,      // PTY master handle
-    pub(crate) _child: Box<dyn Child + Send>,   // Child process
-    pub(crate) paused: Arc<AtomicBool>,         // Pause flag
-    pub worktree: Option<WorktreeInfo>,         // Associated worktree
-    pub cwd: Option<String>,                    // Working directory
+    pub writer: SharedPtyWriter,                        // Write to PTY (outside the session mutex)
+    pub master: Box<dyn MasterPty + Send>,              // PTY master handle
+    pub(crate) _child: Box<dyn Child + Send + Sync>,    // Child process
+    pub(crate) paused: Arc<AtomicBool>,                 // Pause flag
+    pub worktree: Option<WorktreeInfo>,                 // Associated worktree
+    pub cwd: Option<String>,                            // Working directory
+    pub display_name: Option<String>,                   // UI/agent/intent title
+    pub display_name_is_custom: bool,                   // Explicit user rename wins over OSC/intent
+    pub display_name_from_spawn: bool,                  // Named by agent spawn; OSC title must not replace it
+    pub is_remote: bool,                                // Created through HTTP/MCP, not the desktop UI
+    pub shell: String,                                  // Resolved spawn command, kept for shell-family classification
 }
 ```
+
+`writer` is deliberately outside the session `Mutex` so a terminal-generated reply can
+wait on an in-flight user write without blocking the reader thread.
 
 ### SessionMetrics
 
@@ -60,13 +77,13 @@ pub(crate) struct SessionMetrics {
 |--------|---------|----------|
 | `Utf8ReadBuffer` | Accumulates bytes until valid UTF-8 boundary | Variable |
 | `EscapeAwareBuffer` | Holds incomplete ANSI escape sequences | Variable |
-| `OutputRingBuffer` | Circular buffer for MCP output access | 64 KB |
+| `OutputRingBuffer` | Circular buffer for MCP output access | 2 MB |
 
 ### Constants
 
 ```rust
 pub(crate) const MAX_CONCURRENT_SESSIONS: usize = 50;
-pub(crate) const OUTPUT_RING_BUFFER_CAPACITY: usize = 64 * 1024;
+pub(crate) const OUTPUT_RING_BUFFER_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB
 ```
 
 ## Frontend Stores
@@ -89,6 +106,9 @@ export const myStore = {
 
 ### Store Registry
 
+A subset — `src/stores/` holds 60 store modules. The table covers the ones a
+contributor meets first; it is not the full inventory.
+
 | Store | File | Purpose | Persisted |
 |-------|------|---------|-----------|
 | `terminalsStore` | `terminals.ts` | Terminal instances, active tab, split layout | Partial (IDs in repos) |
@@ -101,13 +121,13 @@ export const myStore = {
 | `promptLibraryStore` | `promptLibrary.ts` | Prompt templates | `prompt-library.json` |
 | `notificationsStore` | `notifications.ts` | Notification preferences | `notification-config.json` |
 | `dictationStore` | `dictation.ts` | Dictation config and state | `dictation-config.json` |
-| `errorHandlingStore` | `errorHandling.ts` | Error retry config | `ui-prefs.json` |
+| `errorLogStore` | `errorLog.ts` | Error-log overlay open/closed | Not persisted |
 | `rateLimitStore` | `ratelimit.ts` | Active rate limits | Not persisted |
 | `tasksStore` | `tasks.ts` | Agent task queue | Not persisted |
 | `promptStore` | `prompt.ts` | Active prompt overlay state | Not persisted |
 | `diffTabsStore` | `diffTabs.ts` | Open diff tabs | Not persisted |
 | `mdTabsStore` | `mdTabs.ts` | Open markdown tabs and plugin panels | Not persisted |
-| `notesStore` | `notes.ts` | Ideas/notes with repo tagging and used-at tracking | `notes.json` |
+| `ideasStore` | `ideas.ts` | Ideas with repo tagging and used-at tracking | `notes.json` |
 | `statusBarTicker` | `statusBarTicker.ts` | Priority-based rotating status bar messages | Not persisted |
 | `userActivityStore` | `userActivity.ts` | Tracks last user click/keydown for activity-based timeouts | Not persisted |
 | `updaterStore` | `updater.ts` | App update state (check, download, install) | Not persisted |
@@ -143,7 +163,7 @@ statusBarTicker
     ├── Claude Usage messages            ──from──> features/claudeUsage.ts (native)
     └── Plugin messages                  ──from──> pluginRegistry (ui:ticker capability)
 
-notesStore
+ideasStore
     │
     ├── Note.repoPath                    ──filters by──> active repo
     ├── Note.usedAt                      ──marks when──> sent to terminal

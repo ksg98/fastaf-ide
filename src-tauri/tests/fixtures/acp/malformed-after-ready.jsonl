@@ -1,0 +1,20 @@
+// Bytes that are not a frame, from an agent that is initialized and stays up.
+//
+// The case `malformed` cannot make: there the process dies straight after, so
+// the connection would end on the EOF whatever the client thought of the bytes.
+// Here the agent keeps talking, and the question is what the client does with a
+// line it could not read.
+//
+// The garbage goes out while the client is blocked on `session/new`, which is
+// the whole reason this scenario is shaped this way: the only thing in flight
+// is that one request, so what comes back next is the client's answer to the
+// garbage and not whatever the scheduler happened to run first.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"raw","bytes":"not-json\n"}
+{"step":"expect_response","id":null,"errorCode":-32700}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","configOptions":[]}}
+{"step":"expect","method":"session/list","capture":"list"}
+{"step":"respond","to":"list","result":{"sessions":[{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","cwd":"/tmp/one"}]}}
+{"step":"await_stdin_eof"}

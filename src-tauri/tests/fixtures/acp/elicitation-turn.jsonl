@@ -1,0 +1,20 @@
+// A form the agent puts in front of a person, filled in and sent back.
+//
+// The counterpart to `permission-turn` on the other seat. The agent asks for a
+// branch name, waits, and only goes on once it has one — so a client that
+// answered from inside the dispatch callback would deadlock here rather than
+// somewhere subtler.
+//
+// The response step is what pins the answer: `accept` with the content the
+// person typed, and nothing else. An answer the agent cannot read is a turn
+// that ends in an error, which is why what reaches the wire is asserted rather
+// than inferred from the client's own state.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect","method":"session/prompt","capture":"prompt"}
+{"step":"request","id":8,"method":"elicitation/create","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","mode":"form","message":"Which branch?","requestedSchema":{"type":"object","properties":{"branch":{"type":"string","title":"Branch"}},"required":["branch"]}}}
+{"step":"expect_response","id":8,"result":{"action":"accept","content":{"branch":"main"}}}
+{"step":"respond","to":"prompt","result":{"stopReason":"end_turn"}}
+{"step":"await_stdin_eof"}

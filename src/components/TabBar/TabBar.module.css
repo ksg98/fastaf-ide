@@ -8,6 +8,7 @@
    (--row-selected), text 13px. State is the leading 6px dot, kind its colour;
    the close button appears on hover and on the active tab. */
 .tabBarWrapper {
+  composes: toolbar from "../ui/FormControls.module.css";
   display: flex;
   flex: 1;
   align-items: center;
@@ -57,7 +58,6 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -66,7 +66,6 @@
   color: var(--fg-muted);
   cursor: pointer;
   z-index: 5;
-  padding: 0;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--duration-fast) var(--ease-out),
@@ -172,6 +171,20 @@
   opacity: 0.5;
 }
 
+.designModeBadge {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.designModeArmed {
+  color: var(--success);
+  border: 1px solid var(--success);
+}
+
 .tabName {
   font-size: var(--font-md);
   font-weight: 400;
@@ -201,8 +214,6 @@
   color: var(--fg-primary);
   font-size: var(--font-md);
   font-family: inherit;
-  padding: 0 4px;
-  min-width: 40px;
   max-width: 200px;
   outline: none;
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
@@ -239,6 +250,13 @@
   opacity: 0.7;
 }
 
+/* Touch: no hover to reveal it, so the close button stays visible. */
+@media (hover: none) {
+  .tabClose {
+    opacity: 1;
+  }
+}
+
 @media (hover: hover) {
   .tabClose:hover {
     background: var(--wash-2);
@@ -264,6 +282,11 @@
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
   align-self: center;
+  /* Long press opens the agent list: no text selection, iOS callout or pan. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .newBtn:hover {
@@ -338,12 +361,10 @@
 /* Globe icon for promoted terminal tabs */
 .globeIcon {
   background: none;
-  border: none;
   color: var(--accent);
   display: inline-flex;
   align-items: center;
   cursor: pointer;
-  padding: 0 2px;
   flex-shrink: 0;
   opacity: 0.8;
   transition: opacity var(--duration-fast) var(--ease-out);
@@ -408,6 +429,16 @@
   vertical-align: middle;
 }
 
+.tab.suspended {
+  opacity: 0.6;
+}
+
+.suspendedBadge {
+  opacity: 0.8;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
 /* Awaiting input — override tabIcon to show state via left dot */
 .tab.awaitingInput .tabIcon {
   opacity: 1;
@@ -458,7 +489,7 @@
   opacity: 0.9;
 }
 
-.tab.remoteTab:not(.shellBusy):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
+.tab.remoteTab:not(.awaitingInput):not(.shellBusy):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
   color: rgb(var(--tab-remote-rgb));
   opacity: 0.9;
 }

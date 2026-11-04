@@ -10,15 +10,18 @@ import {
 	Switch,
 } from "solid-js";
 import { AGENT_DISPLAY } from "../../agents";
+import { AGENT_USAGE_BLINK_THRESHOLD } from "../../features/usageThresholds";
 import { useGitHub } from "../../hooks/useGitHub";
+import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { shortenHomePath } from "../../platform";
 import { formatWaitTime } from "../../rate-limit";
 import { appLogger } from "../../stores/appLogger";
 import { dictationStore } from "../../stores/dictation";
-import { notesStore } from "../../stores/notes";
+import { ideasStore } from "../../stores/ideas";
 import { rateLimitStore } from "../../stores/ratelimit";
+import { remoteConnectionsStore } from "../../stores/remoteConnections";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { statusBarTicker } from "../../stores/statusBarTicker";
@@ -29,12 +32,14 @@ import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
 import { activePrStatus } from "../../utils/mergedPrGrace";
+import { prReadinessOf } from "../../utils/prReadiness";
 import { IconAlert, IconChat, IconDocument, IconFiles, IconGit, IconLightbulb } from "../icons";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
 import { AgentIcon } from "../ui/AgentIcon";
 import { CiBadge, PrBadge } from "../ui/StatusBadge";
 import { VoiceOrb } from "../ui/VoiceOrb";
 import { ZoomIndicator } from "../ui/ZoomIndicator";
+import { ProviderRecoveryStatus } from "./ProviderRecoveryStatus";
 import s from "./StatusBar.module.css";
 import { TickerArea } from "./TickerArea";
 
@@ -142,9 +147,17 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 	// Pendulum ticker: detect overflow on notification text
 	let infoContainerRef: HTMLSpanElement | undefined;
 	let infoTextRef: HTMLSpanElement | undefined;
+	let infoBalloonRef: HTMLDivElement | undefined;
 	const [tickerActive, setTickerActive] = createSignal(false);
 	const [infoBalloonOpen, setInfoBalloonOpen] = createSignal(false);
 	const [infoPulse, setInfoPulse] = createSignal(false);
+
+	// The info text toggles the balloon, so it counts as inside.
+	useOutsideDismiss({
+		inside: () => [infoBalloonRef, infoContainerRef],
+		onClose: () => setInfoBalloonOpen(false),
+		enabled: infoBalloonOpen,
+	});
 
 	// Close balloon on Escape
 	onMount(() => {
@@ -187,7 +200,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 	const getRepoPath = () => props.currentRepoPath;
 	const github = useGitHub(getRepoPath);
 
-	const notesBadgeCount = () => notesStore.pendingCount(props.currentRepoPath ?? null);
+	const notesBadgeCount = () => ideasStore.pendingCount(props.currentRepoPath ?? null);
 
 	const [changesCount, setChangesCount] = createSignal(0);
 	createEffect(() => {
@@ -234,6 +247,24 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 		setShowPrDetailPopover(true);
 	};
 
+	/**
+	 * Remote machines that hold at least one registered repository and are not
+	 * currently connected. A machine with no repos is not reported: not being
+	 * connected to it is the normal resting state and says nothing is wrong.
+	 */
+	const unreachableMachines = createMemo(() => {
+		const states = remoteConnectionsStore.getConnections();
+		const withRepos = new Set(
+			repositoriesStore
+				.getAllReposOrdered()
+				.map((r) => r.connectionId)
+				.filter((id): id is string => !!id),
+		);
+		return Object.values(states)
+			.filter((c) => withRepos.has(c.connection.id) && c.status !== "connected")
+			.map((c) => c.connection.name);
+	});
+
 	return (
 		<div id="status-bar" class={inline() ? s.inline : s.bar}>
 			{/* Left section */}
@@ -256,8 +287,9 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						</span>
 					</span>
 					<Show when={infoBalloonOpen()}>
-						<div class={s.infoBalloonOverlay} onClick={() => setInfoBalloonOpen(false)} />
-						<div class={s.infoBalloon}>{props.statusInfo}</div>
+						<div ref={infoBalloonRef} class={s.infoBalloon}>
+							{props.statusInfo}
+						</div>
 					</Show>
 				</Show>
 				<Show when={!inline() && cwdParts()}>
@@ -277,23 +309,40 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					</span>
 				</Show>
 				<TickerArea />
-				<Show when={terminalsStore.getActive()?.agentType}>
+				<Show when={terminalsStore.getActive()?.providerRecovery}>
+					{(recovery) => (
+						<ProviderRecoveryStatus recovery={recovery()} sessionId={terminalsStore.getActive()?.sessionId ?? ""} />
+					)}
+				</Show>
+				<Show when={!terminalsStore.getActive()?.providerRecovery && terminalsStore.getActive()?.agentType}>
 					{(agentType) => {
 						const display = () => AGENT_DISPLAY[agentType()];
 						const ul = () => terminalsStore.getActive()?.usageLimit ?? null;
 						const rl = rateLimitWarning;
-						// When agent is claude, absorb the claude-usage ticker into the badge
-						const claudeTicker = () =>
-							agentType() === "claude" ? statusBarTicker.getAll().find((m) => m.pluginId === "claude-usage") : null;
+						// The shared usage slot follows Claude, Codex or ego. Absorb it only when
+						// its provider label matches this tab; an async provider switch may
+						// briefly leave the previous provider's result in the store.
+						const usageTicker = () => {
+							const provider = agentType();
+							if (provider !== "claude" && provider !== "codex" && provider !== "ego") return null;
+							return statusBarTicker
+								.getAll()
+								.find(
+									(message) =>
+										message.pluginId === "claude-usage" &&
+										message.label?.toLowerCase() === provider &&
+										(provider !== "ego" || message.sessionId === terminalsStore.getActive()?.sessionId),
+								);
+						};
 						return (
 							<span
-								class={cx(s.agentBadge, claudeTicker()?.onClick && s.tickerClickable)}
-								onClick={() => claudeTicker()?.onClick?.()}
+								class={cx(s.agentBadge, usageTicker()?.onClick && s.tickerClickable)}
+								onClick={() => usageTicker()?.onClick?.()}
 								title={
 									rl()
 										? `${agentType()} — ${rl()!.count} session(s) rate limited (${rl()!.remaining})`
-										: claudeTicker()
-											? claudeTicker()!.text
+										: usageTicker()
+											? (usageTicker()!.tooltip ?? usageTicker()!.text)
 											: ul()
 												? `${agentType()} — ${ul()!.percentage}% of ${ul()!.limitType} limit used`
 												: `${t("statusBar.agent", "Agent:")} ${agentType()}`
@@ -304,17 +353,19 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 								</span>
 								<Switch fallback={<span style={{ color: display().color }}> {agentType()}</span>}>
 									<Match when={rl()}>{(rl) => <span class={s.agentRateLimited}> ⚠ {rl().remaining}</span>}</Match>
-									<Match when={claudeTicker()}>
+									<Match when={usageTicker()}>
 										{(ticker) => (
 											<span
 												class={cx(
 													s.agentUsage,
-													ticker().priority >= 90 && s.agentUsageCritical,
-													ticker().priority >= 50 && ticker().priority < 90 && s.agentUsageWarning,
+													ticker().priority >= AGENT_USAGE_BLINK_THRESHOLD && s.agentUsageCritical,
+													ticker().priority >= 50 &&
+														ticker().priority < AGENT_USAGE_BLINK_THRESHOLD &&
+														s.agentUsageWarning,
 												)}
 											>
 												{" "}
-												{ticker().text.replace(/^Claude:\s*/, "")}
+												{ticker().text.replace(/^(?:Claude|Codex):\s*/, "")}
 											</span>
 										)}
 									</Match>
@@ -323,8 +374,8 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 											<span
 												class={cx(
 													s.agentUsage,
-													ul().percentage >= 90 && s.agentUsageCritical,
-													ul().percentage >= 70 && ul().percentage < 90 && s.agentUsageWarning,
+													ul().percentage >= AGENT_USAGE_BLINK_THRESHOLD && s.agentUsageCritical,
+													ul().percentage >= 70 && ul().percentage < AGENT_USAGE_BLINK_THRESHOLD && s.agentUsageWarning,
 												)}
 											>
 												{" "}
@@ -339,15 +390,28 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				</Show>
 			</div>
 
+			{/* Remote machines holding registered repos that are not answering.
+			    Without this the only symptom is every operation on those repos
+			    failing one by one, with the real cause buried in Settings. */}
+			<Show when={unreachableMachines().length > 0}>
+				<div
+					class={s.remoteOffline}
+					title={t(
+						"statusBar.remoteOfflineHint",
+						"Open Settings → Remote Machines to reconnect. Repositories on these machines cannot be read.",
+					)}
+				>
+					{t("statusBar.remoteOffline", "Offline:")} {unreachableMachines().join(", ")}
+				</div>
+			</Show>
+
 			{/* GitHub PR + CI badges */}
 			<Show when={activePrData()}>
 				<div class={s.githubStatus}>
 					<PrBadge
 						number={activePrData()!.number}
 						title={activePrData()!.title}
-						state={activePrData()!.state}
-						mergeable={activePrData()!.mergeable}
-						mergeStateStatus={activePrData()!.merge_state_status}
+						readiness={prReadinessOf(activePrData()!)}
 						onClick={() => setShowPrDetailPopover(true)}
 					/>
 					<Show when={activePrData()!.checks && activePrData()!.checks!.total > 0}>
@@ -392,7 +456,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				</Show>
 				<button
 					class={s.toggleBtn}
-					classList={{ [s.toggleActive]: uiStore.state.notesPanelVisible }}
+					classList={{ [s.toggleActive]: uiStore.state.ideasPanelVisible }}
 					onClick={() => props.onToggleNotes?.()}
 					title={`${t("statusBar.toggleNotes", "Toggle Ideas Panel")} (${keyFor("toggle-notes")})`}
 					style={{ position: "relative" }}

@@ -3,11 +3,18 @@
 //! Coordinates the full OAuth 2.1 Authorization Code + PKCE flow for upstream
 //! MCP servers:
 //!
-//! 1. [`OAuthFlowManager::start_flow`]: acquires the auth semaphore (serializing
-//!    concurrent flows), resolves authorization/token endpoints (discovery or
-//!    config override), generates a PKCE S256 challenge and a cryptographically
-//!    random `state` nonce, inserts a [`PendingFlow`], and returns the
-//!    authorization URL for the caller to open in the browser.
+//! 1. [`OAuthFlowManager::start_flow`]: resolves authorization/token endpoints
+//!    (discovery or config override), generates a PKCE S256 challenge and a
+//!    cryptographically random `state` nonce, inserts a [`PendingFlow`], and
+//!    returns the authorization URL for the caller to open in the browser.
+//!
+//!    Flows are **not** serialized. Everything a flow owns — PKCE verifier,
+//!    `state` nonce, callback server port, `pending` entry — is per-flow, so
+//!    concurrent flows share nothing. An earlier design held a single-permit
+//!    semaphore across the whole browser round-trip; a second Authorize click
+//!    then blocked inside `start_flow` for up to five minutes with no browser,
+//!    no dialog and no error, and `cancel_flows_for` could not reach it because
+//!    the queued flow was not yet in `pending`.
 //! 2. [`OAuthFlowManager::complete_flow`]: called from the localhost callback
 //!    server (see [`super::callback_server`]). Looks up the pending flow by
 //!    keyed `state`, calls [`TokenManager::exchange_code`], and returns the
@@ -22,7 +29,6 @@ use anyhow::{Result, anyhow, bail};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
 
 use crate::mcp_oauth::discovery::{
     discover_auth_server, discover_protected_resource, registrable_domain,
@@ -46,6 +52,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 struct PendingFlow {
     /// Upstream name this flow is for.
     upstream_name: String,
+    upstream_url: String,
     /// Full `state` nonce (also the DashMap key for this entry).
     state: String,
     /// PKCE verifier used when exchanging the code.
@@ -87,39 +94,36 @@ pub(crate) struct StartFlowOutcome {
 
 /// Manages the lifecycle of in-flight OAuth flows.
 ///
-/// Clone-safe via internal `Arc`s (`DashMap`, `Arc<Semaphore>`); callers
-/// should wrap `OAuthFlowManager` itself in `Arc` for storage in `AppState`.
+/// Clone-safe via internal `Arc`s (`DashMap`); callers should wrap
+/// `OAuthFlowManager` itself in `Arc` for storage in `AppState`.
 pub(crate) struct OAuthFlowManager {
-    /// Concurrent flow serialization (shared with `UpstreamRegistry`).
-    semaphore: Arc<Semaphore>,
     /// state nonce → pending flow.
     pending: Arc<DashMap<String, PendingFlow>>,
     /// HTTP client used for discovery and token exchange.
     http_client: reqwest::Client,
     /// Timeout after which a flow is considered abandoned.
     timeout: Duration,
-    /// Active permit guards: state → permit. Dropping a permit releases the
-    /// semaphore for the next queued flow.
-    ///
-    /// Stored separately from `pending` so that a completed flow can be
-    /// removed from `pending` while the permit is released only after the
-    /// caller explicitly finishes (avoids double-drop semantics).
-    permits: Arc<DashMap<String, tokio::sync::OwnedSemaphorePermit>>,
+    pub(crate) settings_publisher: parking_lot::RwLock<crate::settings::changes::Publisher>,
 }
 
 impl OAuthFlowManager {
-    pub(crate) fn new(semaphore: Arc<Semaphore>) -> Self {
-        Self::with_timeout(semaphore, DEFAULT_FLOW_TIMEOUT)
+    pub(crate) fn new() -> Self {
+        Self::with_timeout(DEFAULT_FLOW_TIMEOUT)
     }
 
-    pub(crate) fn with_timeout(semaphore: Arc<Semaphore>, timeout: Duration) -> Self {
+    pub(crate) fn with_timeout(timeout: Duration) -> Self {
         Self {
-            semaphore,
             pending: Arc::new(DashMap::new()),
             http_client: reqwest::Client::new(),
             timeout,
-            permits: Arc::new(DashMap::new()),
+            settings_publisher: Default::default(),
         }
+    }
+
+    /// How long a pending flow stays valid — the callback server must outlive
+    /// this, otherwise a late redirect hits a closed port.
+    pub(crate) fn flow_timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// Number of flows currently pending (test/diagnostics helper).
@@ -135,9 +139,9 @@ impl OAuthFlowManager {
 
     /// Start a new OAuth flow.
     ///
-    /// Acquires the shared auth semaphore (blocks if another flow is active),
-    /// resolves endpoints via RFC 9728/8414 discovery when not pre-configured,
-    /// generates PKCE + state nonce, and returns the authorization URL.
+    /// Resolves endpoints via RFC 9728/8414 discovery when not pre-configured,
+    /// generates PKCE + state nonce, and returns the authorization URL. Never
+    /// waits on another flow — see the module docs.
     ///
     /// The caller is responsible for opening the URL in the user's browser
     /// (typically via `tauri-plugin-opener`).
@@ -167,14 +171,6 @@ impl OAuthFlowManager {
                 bail!("OAuth flow requires OAuth2 auth config, got Bearer")
             }
         };
-
-        // Acquire the flow semaphore (serialize concurrent flows).
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| anyhow!("OAuth semaphore closed: {e}"))?;
 
         // Resolve endpoints (and scopes when not pre-configured).
         let (authorization_endpoint, token_endpoint, discovered_scopes, cross_domain_as) =
@@ -212,9 +208,10 @@ impl OAuthFlowManager {
             Some(server_url),
         );
 
-        // Store pending flow + permit.
+        // Store pending flow.
         let flow = PendingFlow {
             upstream_name: upstream_name.to_string(),
+            upstream_url: server_url.to_string(),
             state: state.clone(),
             pkce_verifier: pkce.verifier.clone(),
             redirect_uri: redirect_uri.to_string(),
@@ -225,7 +222,6 @@ impl OAuthFlowManager {
             created_at: Instant::now(),
         };
         self.pending.insert(state.clone(), flow);
-        self.permits.insert(state.clone(), permit);
 
         Ok(StartFlowOutcome {
             authorization_url,
@@ -251,9 +247,6 @@ impl OAuthFlowManager {
             .pending
             .remove(state)
             .ok_or_else(|| anyhow!("OAuth state mismatch or flow expired"))?;
-        // Drop the permit regardless of exchange outcome — the browser round-
-        // trip is over. `let _` here to make the intent explicit.
-        let _permit = self.permits.remove(state);
 
         // Check timeout.
         if flow.created_at.elapsed() > self.timeout {
@@ -263,23 +256,23 @@ impl OAuthFlowManager {
         // Exchange code for tokens.
         let token_mgr = TokenManager::new(
             flow.upstream_name.clone(),
+            flow.upstream_url.clone(),
             flow.client_id.clone(),
             flow.client_secret.clone(),
             flow.token_endpoint.clone(),
             flow.resource.clone(),
-        );
+        )
+        .with_settings_publisher(self.settings_publisher.read().clone());
         let tokens = token_mgr
             .exchange_code(code, &flow.pkce_verifier, &flow.redirect_uri)
             .await?;
         Ok((flow.upstream_name, tokens))
     }
 
-    /// Cancel a pending flow, dropping its permit. Returns true if a flow
-    /// with the given state was found and removed.
+    /// Cancel a pending flow. Returns true if a flow with the given state was
+    /// found and removed.
     pub(crate) fn cancel_flow(&self, state: &str) -> bool {
-        let removed_pending = self.pending.remove(state).is_some();
-        let _ = self.permits.remove(state);
-        removed_pending
+        self.pending.remove(state).is_some()
     }
 
     /// Cancel all flows for a given upstream name (e.g. on disconnect).
@@ -297,26 +290,37 @@ impl OAuthFlowManager {
         n
     }
 
-    /// Remove expired pending flows. Returns the number cleaned up.
-    pub(crate) fn cleanup_expired(&self) -> usize {
+    /// Remove expired pending flows. Returns the upstream name of each one, so
+    /// the caller can transition it out of `Authenticating` — without that the
+    /// upstream sits on "Awaiting authorization…" forever, with no path back to
+    /// a retryable state.
+    pub(crate) fn cleanup_expired(&self) -> Vec<String> {
         let timeout = self.timeout;
-        let expired: Vec<String> = self
+        let expired: Vec<(String, String)> = self
             .pending
             .iter()
             .filter(|e| e.value().created_at.elapsed() > timeout)
-            .map(|e| e.key().clone())
+            .map(|e| (e.key().clone(), e.value().upstream_name.clone()))
             .collect();
-        let n = expired.len();
-        for state in expired {
-            self.cancel_flow(&state);
-        }
-        n
+        expired
+            .into_iter()
+            .filter(|(state, _)| self.cancel_flow(state))
+            .map(|(_, name)| name)
+            .collect()
     }
 
-    /// Spawn a background task that periodically removes expired pending
-    /// flows. The task runs for the lifetime of the returned `Arc`; drop all
-    /// outer references to stop it. Wired in by `spawn_background_tasks`.
-    pub(crate) fn spawn_cleanup_task(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    /// Spawn a background task that periodically removes expired pending flows
+    /// and returns each one's upstream to `NeedsAuth`. The task runs for the
+    /// lifetime of the returned `Arc`; drop all outer references to stop it.
+    /// Wired in by `spawn_background_tasks`.
+    ///
+    /// `registry` is taken as a parameter rather than stored on the manager:
+    /// the registry already holds a `Weak` back to this manager, and a strong
+    /// field here would close the cycle.
+    pub(crate) fn spawn_cleanup_task(
+        self: &Arc<Self>,
+        registry: Arc<crate::mcp_proxy::registry::UpstreamRegistry>,
+    ) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
@@ -324,13 +328,17 @@ impl OAuthFlowManager {
             loop {
                 ticker.tick().await;
                 let Some(strong) = weak.upgrade() else { break };
-                let n = strong.cleanup_expired();
-                if n > 0 {
+                let expired = strong.cleanup_expired();
+                if !expired.is_empty() {
                     tracing::info!(
                         target: "mcp_oauth",
-                        cleaned = n,
+                        cleaned = expired.len(),
+                        upstreams = %expired.join(", "),
                         "Cleaned up expired OAuth flows"
                     );
+                    for name in expired {
+                        registry.rollback_authenticating(&name);
+                    }
                 }
             }
         })
@@ -524,7 +532,7 @@ mod tests {
     }
 
     fn mgr() -> OAuthFlowManager {
-        OAuthFlowManager::new(Arc::new(Semaphore::new(1)))
+        OAuthFlowManager::new()
     }
 
     // -- helpers --
@@ -690,7 +698,7 @@ mod tests {
         let pr = pr_meta_no_scopes();
         let as_ = as_meta_no_scopes();
         let scopes = resolve_scopes(&pr, &as_);
-        assert!(scopes.is_empty());
+        assert_eq!(scopes, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -745,10 +753,15 @@ mod tests {
         assert!(err.to_string().contains("OAuth2"));
     }
 
+    /// Replaces `concurrent_flows_are_serialized`, which asserted the very
+    /// behaviour that broke authorization: a single-permit semaphore held across
+    /// the whole browser round-trip. A second Authorize click blocked inside
+    /// `start_flow` for the full 5-minute flow timeout — no browser, no dialog,
+    /// no error — and because the queued flow never reached `pending`, Cancel
+    /// could not release it either. Flows share no state, so they must not wait
+    /// on each other.
     #[tokio::test]
-    async fn concurrent_flows_are_serialized() {
-        // semaphore permits = 1 → second start_flow must block until first
-        // releases (cancel or complete).
+    async fn concurrent_flows_do_not_block_each_other() {
         let m = Arc::new(mgr());
         let _out1 = m
             .start_flow(
@@ -759,33 +772,44 @@ mod tests {
             )
             .await
             .unwrap();
-        // Second call must not resolve while first holds the permit.
-        let m2 = m.clone();
-        let pending = tokio::spawn(async move {
-            m2.start_flow(
+
+        // A second flow for a different upstream must resolve immediately while
+        // the first is still pending — not after it completes or expires.
+        let out2 = tokio::time::timeout(
+            Duration::from_millis(500),
+            m.start_flow(
                 "b",
+                "https://api.example.com",
+                &oauth2_config(),
+                "http://127.0.0.1:9999/oauth/callback",
+            ),
+        )
+        .await
+        .expect("second flow blocked behind the first")
+        .unwrap();
+
+        assert!(out2.authorization_url.contains("state="));
+        assert_eq!(m.pending_count(), 2, "both flows must be pending");
+    }
+
+    /// The queued-flow bug's second half: a flow that has started is always in
+    /// `pending`, so `cancel_flows_for` can actually reach it. Under the old
+    /// semaphore a blocked flow was invisible to cancel, which is why "Cancel
+    /// then Authorize again" did nothing but lengthen the queue.
+    #[tokio::test]
+    async fn a_started_flow_is_immediately_cancellable() {
+        let m = mgr();
+        let _out = m
+            .start_flow(
+                "outlook-mail",
                 "https://api.example.com",
                 &oauth2_config(),
                 "http://127.0.0.1:9999/oauth/callback",
             )
             .await
-        });
-        // Give the pending task a chance to run.
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(
-            !pending.is_finished(),
-            "second flow should block until first releases"
-        );
-        // Release by cancelling the first flow — permit drops.
-        let first_state = m.pending.iter().next().unwrap().key().clone();
-        assert!(m.cancel_flow(&first_state));
-        // Now the second flow should complete.
-        let out2 = tokio::time::timeout(Duration::from_secs(2), pending)
-            .await
-            .expect("second flow did not unblock")
-            .unwrap()
             .unwrap();
-        assert!(out2.authorization_url.contains("state="));
+        assert_eq!(m.cancel_flows_for("outlook-mail"), 1);
+        assert_eq!(m.pending_count(), 0);
     }
 
     // -- complete_flow --
@@ -802,8 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_flow_rejects_expired_flow() {
-        let m =
-            OAuthFlowManager::with_timeout(Arc::new(Semaphore::new(1)), Duration::from_millis(1));
+        let m = OAuthFlowManager::with_timeout(Duration::from_millis(1));
         let out = m
             .start_flow(
                 "test",
@@ -821,7 +844,7 @@ mod tests {
     // -- cancel_flow --
 
     #[tokio::test]
-    async fn cancel_flow_removes_pending_and_releases_permit() {
+    async fn cancel_flow_removes_pending() {
         let m = mgr();
         let out = m
             .start_flow(
@@ -835,18 +858,6 @@ mod tests {
         assert_eq!(m.pending_count(), 1);
         assert!(m.cancel_flow(&out.state));
         assert_eq!(m.pending_count(), 0);
-        // Semaphore is now free — a new flow should start immediately.
-        let _out2 = tokio::time::timeout(
-            Duration::from_millis(200),
-            m.start_flow(
-                "test2",
-                "https://api.example.com",
-                &oauth2_config(),
-                "http://127.0.0.1:9999/oauth/callback",
-            ),
-        )
-        .await
-        .expect("second flow timed out");
     }
 
     #[tokio::test]
@@ -857,10 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_flows_for_upstream() {
-        let m = Arc::new(OAuthFlowManager::with_timeout(
-            Arc::new(Semaphore::new(10)), // allow multiple concurrent for test
-            DEFAULT_FLOW_TIMEOUT,
-        ));
+        let m = Arc::new(OAuthFlowManager::with_timeout(DEFAULT_FLOW_TIMEOUT));
         let _a = m
             .start_flow(
                 "srv-a",
@@ -895,23 +903,29 @@ mod tests {
 
     // -- cleanup_expired --
 
+    /// `cleanup_expired` must name the upstreams it dropped: the sweep is the
+    /// only thing that can take an abandoned flow's upstream out of
+    /// `Authenticating`, and it can only do that if it knows which one it was.
+    /// Returning a bare count left the UI on "Awaiting authorization…" forever.
     #[tokio::test]
-    async fn cleanup_expired_removes_stale_flows() {
-        let m =
-            OAuthFlowManager::with_timeout(Arc::new(Semaphore::new(10)), Duration::from_millis(1));
-        let _a = m
-            .start_flow(
-                "test",
+    async fn cleanup_expired_returns_the_upstreams_it_dropped() {
+        let m = OAuthFlowManager::with_timeout(Duration::from_millis(1));
+        for name in ["outlook-mail", "spinach"] {
+            m.start_flow(
+                name,
                 "https://api.example.com",
                 &oauth2_config(),
                 "http://127.0.0.1:9999/oauth/callback",
             )
             .await
             .unwrap();
-        assert_eq!(m.pending_count(), 1);
+        }
+        assert_eq!(m.pending_count(), 2);
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let n = m.cleanup_expired();
-        assert_eq!(n, 1);
+
+        let mut expired = m.cleanup_expired();
+        expired.sort();
+        assert_eq!(expired, vec!["outlook-mail", "spinach"]);
         assert_eq!(m.pending_count(), 0);
     }
 
@@ -927,8 +941,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let n = m.cleanup_expired();
-        assert_eq!(n, 0);
+        assert_eq!(m.cleanup_expired(), [] as [std::string::String; 0]);
         assert_eq!(m.pending_count(), 1);
     }
 }

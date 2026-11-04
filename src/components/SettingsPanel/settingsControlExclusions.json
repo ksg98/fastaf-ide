@@ -1,0 +1,7 @@
+{
+  "transient.repositories.terminal_meta_hotkeys": "Transient repository hotkey override; the existing DEFERRED repoSettings.ts:62 records the absent Rust field. No durable configuration is claimed.",
+  "fastaf.ai_chat": "FastAF's built-in AI Chat settings and scheduled jobs: stored by the engine through load/save_ai_chat_config and load/save_scheduler_config, outside the Rust settings catalogue.",
+  "fastaf.providers": "FastAF's provider registry (load/save_provider_registry) and the provider API keys it keeps in the OS keychain; owned by the built-in engine, outside the Rust settings catalogue.",
+  "fastaf.chatgpt": "Sign in with ChatGPT: an account session whose tokens live in the OS keychain, not a configuration field.",
+  "fastaf.voice_agent": "FastAF's voice agent: its config (voice_get_config/voice_set_config) and downloaded models and voices, outside the Rust settings catalogue."
+}

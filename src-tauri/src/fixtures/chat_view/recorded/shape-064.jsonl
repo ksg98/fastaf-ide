@@ -1,0 +1,1 @@
+{"type": "cost-state", "sessionId": "81d37958-2839-4247-8a32-9ef0b7d37628", "totalCostUSD": 0, "totalAPIDuration": 0, "totalAPIDurationWithoutRetries": 0, "totalToolDuration": 0, "totalLinesAdded": 0, "totalLinesRemoved": 0, "totalDuration": 795, "startTime": 1790100939410, "modelUsage": {}, "hasUnknownModelCost": false}

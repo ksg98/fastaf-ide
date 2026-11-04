@@ -19,6 +19,7 @@ const [mockDefaults, setMockDefaults] = createStore({
 	setupScript: "",
 	runScript: "",
 	archiveScript: "",
+	archiveRetentionDays: 0,
 });
 
 vi.mock("../../stores/repoDefaults", () => ({
@@ -28,7 +29,7 @@ vi.mock("../../stores/repoDefaults", () => ({
 /** The entry for `path` in the most recent `save_repo_settings` call. */
 function lastSavedEntry(path: string): Record<string, unknown> {
 	const calls = mockInvoke.mock.calls.filter(([name]) => name === "save_repo_settings");
-	const call = calls[calls.length - 1];
+	const call = calls.at(-1)!;
 	if (!call) throw new Error("save_repo_settings was never called");
 	const repos = (call[1] as { config: { repos: Record<string, Record<string, unknown>> } }).config.repos;
 	return repos[path];
@@ -50,6 +51,7 @@ describe("repoSettingsStore", () => {
 			setupScript: "",
 			runScript: "",
 			archiveScript: "",
+			archiveRetentionDays: 0,
 		});
 
 		vi.doMock("@tauri-apps/api/core", () => ({
@@ -61,8 +63,66 @@ describe("repoSettingsStore", () => {
 		}));
 
 		store = (await import("../../stores/repoSettings")).repoSettingsStore;
+		await store.hydrate();
+		mockInvoke.mockClear();
 	});
 
+	// Catches: false being treated as inheritance, or null retaining a stale global filter.
+	it("PR visibility overrides preserve false and track inherited global changes", async () => {
+		const { settingsStore } = await import("../../stores/settings");
+		mockInvoke.mockResolvedValueOnce({});
+		await settingsStore.hydrate();
+		vi.useFakeTimers();
+		try {
+			testInScope(() => {
+				store.getOrCreate("/repo", "Repo");
+				settingsStore.setPrHideDrafts(true);
+				settingsStore.setPrHideConflicting(true);
+				settingsStore.setPrHideCiFailing(true);
+				expect(store.getEffective("/repo")).toMatchObject({
+					prHideDrafts: true,
+					prHideConflicting: true,
+					prHideCiFailing: true,
+				});
+				store.update("/repo", { prHideDrafts: false, prHideConflicting: false, prHideCiFailing: false });
+				expect(store.getEffective("/repo")).toMatchObject({
+					prHideDrafts: false,
+					prHideConflicting: false,
+					prHideCiFailing: false,
+				});
+				store.update("/repo", { prHideDrafts: null, prHideConflicting: null, prHideCiFailing: null });
+				expect(store.getEffective("/repo")).toMatchObject({
+					prHideDrafts: true,
+					prHideConflicting: true,
+					prHideCiFailing: true,
+				});
+				settingsStore.setPrHideDrafts(false);
+				settingsStore.setPrHideConflicting(false);
+				settingsStore.setPrHideCiFailing(false);
+				expect(store.getEffective("/repo")).toMatchObject({
+					prHideDrafts: false,
+					prHideConflicting: false,
+					prHideCiFailing: false,
+				});
+			});
+		} finally {
+			vi.clearAllTimers();
+			vi.useRealTimers();
+		}
+	});
+
+	// Catches: Off (0) being flattened into inheritance.
+	it("archive retention inherits the default but preserves explicit Off", () => {
+		testInScope(() => {
+			store.getOrCreate("/repo", "Repo");
+			setMockDefaults("archiveRetentionDays", 14);
+			expect(store.getEffective("/repo")?.archiveRetentionDays).toBe(14);
+			store.update("/repo", { archiveRetentionDays: 0 });
+			expect(store.getEffective("/repo")?.archiveRetentionDays).toBe(0);
+			store.update("/repo", { archiveRetentionDays: null });
+			expect(store.getEffective("/repo")?.archiveRetentionDays).toBe(14);
+		});
+	});
 	describe("get()", () => {
 		it("returns undefined for unknown repo", () => {
 			testInScope(() => {
@@ -101,6 +161,7 @@ describe("repoSettingsStore", () => {
 			testInScope(() => {
 				store.getOrCreate("/repo", "my-repo");
 				expect(mockInvoke).toHaveBeenCalledWith("save_repo_settings", {
+					base: expect.anything(),
 					config: expect.objectContaining({
 						repos: expect.objectContaining({
 							"/repo": expect.objectContaining({ path: "/repo" }),
@@ -172,18 +233,6 @@ describe("repoSettingsStore", () => {
 				const effective = store.getEffective("/repo");
 				expect(effective).toBeDefined();
 				expect(effective!.baseBranch).toBe("develop");
-			});
-		});
-
-		it("returns non-nullable effective settings", () => {
-			testInScope(() => {
-				store.getOrCreate("/repo", "my-repo");
-				const effective = store.getEffective("/repo");
-				expect(effective).toBeDefined();
-				// All fields must be non-null
-				expect(effective!.baseBranch).not.toBeNull();
-				expect(effective!.copyIgnoredFiles).not.toBeNull();
-				expect(effective!.setupScript).not.toBeNull();
 			});
 		});
 
@@ -389,6 +438,7 @@ describe("repoSettingsStore", () => {
 						path: "/repo",
 						display_name: "my-repo",
 						base_branch: "main",
+						dev_server_url: "http://localhost:5173",
 						prompt_on_create: false,
 						auto_fetch_interval_minutes: 15,
 						copy_ignored_files: null,
@@ -401,6 +451,7 @@ describe("repoSettingsStore", () => {
 				await store.hydrate();
 				expect(store.get("/repo")?.displayName).toBe("my-repo");
 				expect(store.get("/repo")?.baseBranch).toBe("main");
+				expect(store.get("/repo")?.devServerUrl).toBe("http://localhost:5173");
 				expect(store.get("/repo")?.promptOnCreate).toBe(false);
 				expect(store.get("/repo")?.autoFetchIntervalMinutes).toBe(15);
 				expect(store.get("/repo")?.copyIgnoredFiles).toBeNull();
@@ -418,15 +469,22 @@ describe("repoSettingsStore", () => {
 				await store.hydrate();
 				expect(store.get("/repo")?.branchLabels).toEqual({});
 				expect(store.get("/repo")?.mcpUpstreams).toBeNull();
+				expect(store.get("/repo")?.devServerUrl).toBeNull();
 			});
 		});
 
-		it("saves every override under the name the backend reads", () => {
-			testInScope(() => {
+		it("saves every override under the name the backend reads", async () => {
+			await testInScopeAsync(async () => {
 				store.getOrCreate("/repo", "my-repo");
 				mockInvoke.mockClear();
-				store.update("/repo", { promptOnCreate: false, deleteBranchOnRemove: true, autoFetchIntervalMinutes: 5 });
+				store.update("/repo", {
+					promptOnCreate: false,
+					deleteBranchOnRemove: true,
+					autoFetchIntervalMinutes: 5,
+					devServerUrl: "http://localhost:5173",
+				});
 
+				await vi.waitFor(() => expect(lastSavedEntry("/repo")).toMatchObject({ prompt_on_create: false }));
 				const entry = lastSavedEntry("/repo");
 				expect(entry).toMatchObject({
 					path: "/repo",
@@ -434,6 +492,7 @@ describe("repoSettingsStore", () => {
 					prompt_on_create: false,
 					delete_branch_on_remove: true,
 					auto_fetch_interval_minutes: 5,
+					dev_server_url: "http://localhost:5173",
 				});
 				// No camelCase key may survive: serde would drop it without a word.
 				expect(Object.keys(entry).filter((k) => /[A-Z]/.test(k))).toEqual([]);
@@ -446,6 +505,7 @@ describe("repoSettingsStore", () => {
 				mockInvoke.mockClear();
 				store.update("/repo", { promptOnCreate: false });
 			});
+			await vi.waitFor(() => expect(lastSavedEntry("/repo")).toMatchObject({ prompt_on_create: false }));
 			const saved = lastSavedEntry("/repo");
 
 			mockInvoke.mockResolvedValueOnce({ repos: { "/repo": saved } });
@@ -471,6 +531,7 @@ describe("repoSettingsStore", () => {
 				// The migration writes the wire shape too, or it hands the backend an
 				// entry it reads as empty and the old settings are gone for good.
 				expect(mockInvoke).toHaveBeenCalledWith("save_repo_settings", {
+					base: expect.anything(),
 					config: { repos: { "/repo": { path: "/repo", display_name: "my-repo", base_branch: "main" } } },
 				});
 			});

@@ -1,0 +1,1210 @@
+{
+  "since_utc": "2026-09-07T00:00:00+00:00",
+  "timestamp_policy": "Row timestamp; file mtime for undated rows",
+  "files_found": 2659,
+  "recent_files": 2561,
+  "records": {
+    "agent-name": 46205,
+    "ai-title": 3268,
+    "assistant": 295592,
+    "atis-latch": 49050,
+    "attachment": 419016,
+    "continued-in": 3,
+    "cost-state": 350,
+    "custom-title": 46154,
+    "file-history-delta": 3170,
+    "file-history-snapshot": 6788,
+    "fork-context-ref": 5,
+    "last-prompt": 49198,
+    "launched": 1,
+    "mode": 47842,
+    "permission-mode": 41938,
+    "pr-link": 1828,
+    "queue-operation": 22973,
+    "started": 3,
+    "system": 23841,
+    "user": 185251
+  },
+  "content_blocks": {
+    "assistant/fallback": 1,
+    "assistant/text": 32396,
+    "assistant/thinking": 94925,
+    "assistant/tool_use": 168294,
+    "user/image": 168,
+    "user/text": 2012,
+    "user/tool_result": 168224
+  },
+  "shapes": {
+    "agent-name|": 46205,
+    "ai-title|": 3268,
+    "assistant|list|absent|fallback": 1,
+    "assistant|list|absent|isSidechain|text": 4349,
+    "assistant|list|absent|isSidechain|text|tool_use": 1,
+    "assistant|list|absent|isSidechain|thinking|empty": 22499,
+    "assistant|list|absent|isSidechain|thinking|empty|text|tool_use": 1,
+    "assistant|list|absent|isSidechain|thinking|empty|text|tool_use|tool_use": 1,
+    "assistant|list|absent|isSidechain|thinking|empty|tool_use": 2,
+    "assistant|list|absent|isSidechain|thinking|empty|tool_use|tool_use": 2,
+    "assistant|list|absent|isSidechain|thinking|nonempty": 92,
+    "assistant|list|absent|isSidechain|tool_use": 37818,
+    "assistant|list|absent|text": 28042,
+    "assistant|list|absent|text|tool_use": 1,
+    "assistant|list|absent|thinking|empty": 70134,
+    "assistant|list|absent|thinking|empty|text|tool_use": 1,
+    "assistant|list|absent|thinking|empty|thinking|nonempty|tool_use": 1,
+    "assistant|list|absent|thinking|empty|tool_use": 7,
+    "assistant|list|absent|thinking|nonempty": 2184,
+    "assistant|list|absent|tool_use": 130456,
+    "atis-latch|": 49050,
+    "attachment|agent_listing_delta": 2301,
+    "attachment|auto_mode": 843,
+    "attachment|bash_output_audience_note": 2549,
+    "attachment|batching_reminder_sent": 2863,
+    "attachment|budget_usd": 3,
+    "attachment|command_permissions": 575,
+    "attachment|compact_file_reference": 844,
+    "attachment|credential_org": 1304,
+    "attachment|date": 2688,
+    "attachment|date_change": 31,
+    "attachment|deferred_tools_delta": 5581,
+    "attachment|deferred_tools_record": 3081,
+    "attachment|diagnostics": 75,
+    "attachment|dynamic_skill": 1,
+    "attachment|edited_text_file": 1365,
+    "attachment|environment": 6976,
+    "attachment|file": 1133,
+    "attachment|goal_status": 640,
+    "attachment|hook_additional_context": 59737,
+    "attachment|hook_blocking_error": 1074,
+    "attachment|hook_cancelled": 5425,
+    "attachment|hook_error_during_execution": 2,
+    "attachment|hook_non_blocking_error": 467,
+    "attachment|hook_success": 134037,
+    "attachment|instructions": 2264,
+    "attachment|invoked_skills": 111,
+    "attachment|mcp_instructions_delta": 3828,
+    "attachment|model": 2794,
+    "attachment|nested_memory": 73,
+    "attachment|prompt_snapshot": 5170,
+    "attachment|queued_command": 5367,
+    "attachment|read_truncation_notice": 210,
+    "attachment|remote_session_change": 3,
+    "attachment|session_context": 2590,
+    "attachment|silent_turn_reminder": 6594,
+    "attachment|skill_listing": 2130,
+    "attachment|task_reminder": 25,
+    "attachment|task_status": 227,
+    "attachment|team_context": 2,
+    "attachment|thinking_drop": 163,
+    "attachment|total_tokens_reminder": 153853,
+    "attachment|ultrathink_effort": 17,
+    "continued-in|": 3,
+    "cost-state|": 350,
+    "custom-title|": 46154,
+    "file-history-delta|": 3170,
+    "file-history-snapshot|": 6788,
+    "fork-context-ref|": 5,
+    "last-prompt|": 49198,
+    "launched|": 1,
+    "mode|": 47842,
+    "permission-mode|": 41938,
+    "pr-link|": 1828,
+    "queue-operation|": 22973,
+    "started|": 3,
+    "system||agents_killed": 12,
+    "system||api_error": 42,
+    "system||away_summary": 1002,
+    "system||compact_boundary": 420,
+    "system||informational": 66,
+    "system||local_command": 153,
+    "system||model_refusal_fallback": 1,
+    "system||scheduled_task_fire": 471,
+    "system||stop_hook_summary": 12000,
+    "system||turn_duration": 9674,
+    "user|list|absent|isMeta|isSidechain|text": 9,
+    "user|list|absent|isMeta|isSidechain|text|text": 420,
+    "user|list|absent|isMeta|text": 704,
+    "user|list|absent|isMeta|text|text": 12,
+    "user|list|absent|isMeta|text|text|text": 1,
+    "user|list|absent|isMeta|text|text|text|text|text": 1,
+    "user|list|absent|isSidechain|text": 11,
+    "user|list|absent|isSidechain|tool_result|list|False|image": 112,
+    "user|list|absent|isSidechain|tool_result|list|False|text": 575,
+    "user|list|absent|isSidechain|tool_result|list|False|text|text": 87,
+    "user|list|absent|isSidechain|tool_result|list|False|tool_reference": 151,
+    "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference": 43,
+    "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference|tool_reference": 13,
+    "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference": 1,
+    "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference": 1,
+    "user|list|absent|isSidechain|tool_result|str|False": 35611,
+    "user|list|absent|isSidechain|tool_result|str|True": 1222,
+    "user|list|absent|text": 239,
+    "user|list|absent|tool_result|list|False|image": 808,
+    "user|list|absent|tool_result|list|False|text": 9078,
+    "user|list|absent|tool_result|list|False|text|document": 1,
+    "user|list|absent|tool_result|list|False|text|image": 78,
+    "user|list|absent|tool_result|list|False|text|image|image|image|image|image": 1,
+    "user|list|absent|tool_result|list|False|text|image|image|image|image|image|image|image": 1,
+    "user|list|absent|tool_result|list|False|text|image|text": 10,
+    "user|list|absent|tool_result|list|False|text|text": 45,
+    "user|list|absent|tool_result|list|False|text|text|image": 2,
+    "user|list|absent|tool_result|list|False|text|text|image|text": 2,
+    "user|list|absent|tool_result|list|False|text|text|text": 4,
+    "user|list|absent|tool_result|list|False|text|text|text|image": 14,
+    "user|list|absent|tool_result|list|False|text|text|text|image|text": 12,
+    "user|list|absent|tool_result|list|False|text|text|text|image|text|text|text|image": 1,
+    "user|list|absent|tool_result|list|False|text|text|text|image|text|text|text|image|text": 1,
+    "user|list|absent|tool_result|list|False|text|text|text|text": 9,
+    "user|list|absent|tool_result|list|False|text|text|text|text|image": 5,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text": 8,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|image": 6,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|image|text": 7,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|text": 7,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|text|image|text": 1,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text": 2,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text|image": 2,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text|image|text": 2,
+    "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text|text": 1,
+    "user|list|absent|tool_result|list|False|tool_reference": 1197,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference": 229,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference": 55,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference": 22,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference": 18,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference": 4,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference": 2,
+    "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference": 2,
+    "user|list|absent|tool_result|str|False": 115061,
+    "user|list|absent|tool_result|str|True": 3710,
+    "user|list|human|text|image": 136,
+    "user|list|human|text|image|image": 12,
+    "user|list|human|text|image|image|image": 1,
+    "user|list|human|text|image|image|image|image|image": 1,
+    "user|str|absent|": 429,
+    "user|str|absent|<bash-input>": 14,
+    "user|str|absent|<bash-stdout>": 14,
+    "user|str|absent|<command-message>": 7,
+    "user|str|absent|<command-name>": 136,
+    "user|str|absent|<local-command-stdout>": 47,
+    "user|str|absent|isCompactSummary|": 381,
+    "user|str|absent|isMeta|": 2362,
+    "user|str|absent|isMeta|<local-command-caveat>": 121,
+    "user|str|absent|isMeta|isSidechain|": 18,
+    "user|str|absent|isMeta|isSidechain|<system-reminder>": 491,
+    "user|str|absent|isSidechain|": 1341,
+    "user|str|absent|isSidechain|isCompactSummary|": 39,
+    "user|str|auto-continuation|isMeta|": 8,
+    "user|str|coordinator|isMeta|isSidechain|": 25,
+    "user|str|human|": 5346,
+    "user|str|human|<command-message>": 46,
+    "user|str|peer|isMeta|": 208,
+    "user|str|peer|isMeta|isSidechain|": 5,
+    "user|str|task-notification|": 5,
+    "user|str|task-notification|<task-notification>": 4416,
+    "user|str|task-notification|isMeta|isSidechain|": 21
+  },
+  "malformed_rows": 101,
+  "largest_bytes": 348179373,
+  "privacy_audit": {
+    "method": "token-set intersection",
+    "patterns": 339896,
+    "matches": 0
+  },
+  "fixtures": [
+    {
+      "file": "shape-000.jsonl",
+      "shape": "agent-name|",
+      "rows": 1,
+      "source_json_bytes": 96
+    },
+    {
+      "file": "shape-001.jsonl",
+      "shape": "ai-title|",
+      "rows": 1,
+      "source_json_bytes": 96
+    },
+    {
+      "file": "shape-002.jsonl",
+      "shape": "assistant|list|absent|fallback",
+      "rows": 1,
+      "source_json_bytes": 2853
+    },
+    {
+      "file": "shape-003.jsonl",
+      "shape": "assistant|list|absent|isSidechain|text",
+      "rows": 1,
+      "source_json_bytes": 1065
+    },
+    {
+      "file": "shape-004.jsonl",
+      "shape": "assistant|list|absent|isSidechain|text|tool_use",
+      "rows": 1,
+      "source_json_bytes": 3036
+    },
+    {
+      "file": "shape-005.jsonl",
+      "shape": "assistant|list|absent|isSidechain|thinking|empty",
+      "rows": 1,
+      "source_json_bytes": 1447
+    },
+    {
+      "file": "shape-006.jsonl",
+      "shape": "assistant|list|absent|isSidechain|thinking|empty|text|tool_use",
+      "rows": 1,
+      "source_json_bytes": 5739
+    },
+    {
+      "file": "shape-007.jsonl",
+      "shape": "assistant|list|absent|isSidechain|thinking|empty|text|tool_use|tool_use",
+      "rows": 1,
+      "source_json_bytes": 7746
+    },
+    {
+      "file": "shape-008.jsonl",
+      "shape": "assistant|list|absent|isSidechain|thinking|empty|tool_use",
+      "rows": 1,
+      "source_json_bytes": 2529
+    },
+    {
+      "file": "shape-009.jsonl",
+      "shape": "assistant|list|absent|isSidechain|thinking|empty|tool_use|tool_use",
+      "rows": 1,
+      "source_json_bytes": 2641
+    },
+    {
+      "file": "shape-010.jsonl",
+      "shape": "assistant|list|absent|isSidechain|thinking|nonempty",
+      "rows": 1,
+      "source_json_bytes": 2461
+    },
+    {
+      "file": "shape-011.jsonl",
+      "shape": "assistant|list|absent|isSidechain|tool_use",
+      "rows": 1,
+      "source_json_bytes": 1176
+    },
+    {
+      "file": "shape-012.jsonl",
+      "shape": "assistant|list|absent|text",
+      "rows": 1,
+      "source_json_bytes": 1097
+    },
+    {
+      "file": "shape-013.jsonl",
+      "shape": "assistant|list|absent|text|tool_use",
+      "rows": 1,
+      "source_json_bytes": 1727
+    },
+    {
+      "file": "shape-014.jsonl",
+      "shape": "assistant|list|absent|thinking|empty",
+      "rows": 1,
+      "source_json_bytes": 1637
+    },
+    {
+      "file": "shape-015.jsonl",
+      "shape": "assistant|list|absent|thinking|empty|text|tool_use",
+      "rows": 1,
+      "source_json_bytes": 3351
+    },
+    {
+      "file": "shape-016.jsonl",
+      "shape": "assistant|list|absent|thinking|empty|thinking|nonempty|tool_use",
+      "rows": 1,
+      "source_json_bytes": 6116
+    },
+    {
+      "file": "shape-017.jsonl",
+      "shape": "assistant|list|absent|thinking|empty|tool_use",
+      "rows": 1,
+      "source_json_bytes": 2410
+    },
+    {
+      "file": "shape-018.jsonl",
+      "shape": "assistant|list|absent|thinking|nonempty",
+      "rows": 1,
+      "source_json_bytes": 2528
+    },
+    {
+      "file": "shape-019.jsonl",
+      "shape": "assistant|list|absent|tool_use",
+      "rows": 1,
+      "source_json_bytes": 1300
+    },
+    {
+      "file": "shape-020.jsonl",
+      "shape": "atis-latch|",
+      "rows": 1,
+      "source_json_bytes": 87
+    },
+    {
+      "file": "shape-021.jsonl",
+      "shape": "attachment|agent_listing_delta",
+      "rows": 1,
+      "source_json_bytes": 855
+    },
+    {
+      "file": "shape-022.jsonl",
+      "shape": "attachment|auto_mode",
+      "rows": 1,
+      "source_json_bytes": 509
+    },
+    {
+      "file": "shape-023.jsonl",
+      "shape": "attachment|bash_output_audience_note",
+      "rows": 1,
+      "source_json_bytes": 514
+    },
+    {
+      "file": "shape-024.jsonl",
+      "shape": "attachment|batching_reminder_sent",
+      "rows": 1,
+      "source_json_bytes": 599
+    },
+    {
+      "file": "shape-025.jsonl",
+      "shape": "attachment|budget_usd",
+      "rows": 1,
+      "source_json_bytes": 612
+    },
+    {
+      "file": "shape-026.jsonl",
+      "shape": "attachment|command_permissions",
+      "rows": 1,
+      "source_json_bytes": 442
+    },
+    {
+      "file": "shape-027.jsonl",
+      "shape": "attachment|compact_file_reference",
+      "rows": 1,
+      "source_json_bytes": 610
+    },
+    {
+      "file": "shape-028.jsonl",
+      "shape": "attachment|credential_org",
+      "rows": 1,
+      "source_json_bytes": 476
+    },
+    {
+      "file": "shape-029.jsonl",
+      "shape": "attachment|date",
+      "rows": 1,
+      "source_json_bytes": 506
+    },
+    {
+      "file": "shape-030.jsonl",
+      "shape": "attachment|date_change",
+      "rows": 1,
+      "source_json_bytes": 445
+    },
+    {
+      "file": "shape-031.jsonl",
+      "shape": "attachment|deferred_tools_delta",
+      "rows": 1,
+      "source_json_bytes": 742
+    },
+    {
+      "file": "shape-032.jsonl",
+      "shape": "attachment|deferred_tools_record",
+      "rows": 1,
+      "source_json_bytes": 505
+    },
+    {
+      "file": "shape-033.jsonl",
+      "shape": "attachment|diagnostics",
+      "rows": 1,
+      "source_json_bytes": 796
+    },
+    {
+      "file": "shape-034.jsonl",
+      "shape": "attachment|dynamic_skill",
+      "rows": 1,
+      "source_json_bytes": 734
+    },
+    {
+      "file": "shape-035.jsonl",
+      "shape": "attachment|edited_text_file",
+      "rows": 1,
+      "source_json_bytes": 581
+    },
+    {
+      "file": "shape-036.jsonl",
+      "shape": "attachment|environment",
+      "rows": 1,
+      "source_json_bytes": 821
+    },
+    {
+      "file": "shape-037.jsonl",
+      "shape": "attachment|file",
+      "rows": 1,
+      "source_json_bytes": 1061
+    },
+    {
+      "file": "shape-038.jsonl",
+      "shape": "attachment|goal_status",
+      "rows": 1,
+      "source_json_bytes": 481
+    },
+    {
+      "file": "shape-039.jsonl",
+      "shape": "attachment|hook_additional_context",
+      "rows": 1,
+      "source_json_bytes": 606
+    },
+    {
+      "file": "shape-040.jsonl",
+      "shape": "attachment|hook_blocking_error",
+      "rows": 1,
+      "source_json_bytes": 739
+    },
+    {
+      "file": "shape-041.jsonl",
+      "shape": "attachment|hook_cancelled",
+      "rows": 1,
+      "source_json_bytes": 528
+    },
+    {
+      "file": "shape-042.jsonl",
+      "shape": "attachment|hook_error_during_execution",
+      "rows": 1,
+      "source_json_bytes": 801
+    },
+    {
+      "file": "shape-043.jsonl",
+      "shape": "attachment|hook_non_blocking_error",
+      "rows": 1,
+      "source_json_bytes": 798
+    },
+    {
+      "file": "shape-044.jsonl",
+      "shape": "attachment|hook_success",
+      "rows": 1,
+      "source_json_bytes": 661
+    },
+    {
+      "file": "shape-045.jsonl",
+      "shape": "attachment|instructions",
+      "rows": 1,
+      "source_json_bytes": 1284
+    },
+    {
+      "file": "shape-046.jsonl",
+      "shape": "attachment|invoked_skills",
+      "rows": 1,
+      "source_json_bytes": 2677
+    },
+    {
+      "file": "shape-047.jsonl",
+      "shape": "attachment|mcp_instructions_delta",
+      "rows": 1,
+      "source_json_bytes": 500
+    },
+    {
+      "file": "shape-048.jsonl",
+      "shape": "attachment|model",
+      "rows": 1,
+      "source_json_bytes": 677
+    },
+    {
+      "file": "shape-049.jsonl",
+      "shape": "attachment|nested_memory",
+      "rows": 1,
+      "source_json_bytes": 1741
+    },
+    {
+      "file": "shape-050.jsonl",
+      "shape": "attachment|prompt_snapshot",
+      "rows": 1,
+      "source_json_bytes": 628
+    },
+    {
+      "file": "shape-051.jsonl",
+      "shape": "attachment|queued_command",
+      "rows": 1,
+      "source_json_bytes": 626
+    },
+    {
+      "file": "shape-052.jsonl",
+      "shape": "attachment|read_truncation_notice",
+      "rows": 1,
+      "source_json_bytes": 858
+    },
+    {
+      "file": "shape-053.jsonl",
+      "shape": "attachment|remote_session_change",
+      "rows": 1,
+      "source_json_bytes": 1353
+    },
+    {
+      "file": "shape-054.jsonl",
+      "shape": "attachment|session_context",
+      "rows": 1,
+      "source_json_bytes": 413
+    },
+    {
+      "file": "shape-055.jsonl",
+      "shape": "attachment|silent_turn_reminder",
+      "rows": 1,
+      "source_json_bytes": 623
+    },
+    {
+      "file": "shape-056.jsonl",
+      "shape": "attachment|skill_listing",
+      "rows": 1,
+      "source_json_bytes": 724
+    },
+    {
+      "file": "shape-057.jsonl",
+      "shape": "attachment|task_reminder",
+      "rows": 1,
+      "source_json_bytes": 532
+    },
+    {
+      "file": "shape-058.jsonl",
+      "shape": "attachment|task_status",
+      "rows": 1,
+      "source_json_bytes": 850
+    },
+    {
+      "file": "shape-059.jsonl",
+      "shape": "attachment|team_context",
+      "rows": 1,
+      "source_json_bytes": 780
+    },
+    {
+      "file": "shape-060.jsonl",
+      "shape": "attachment|thinking_drop",
+      "rows": 1,
+      "source_json_bytes": 1038
+    },
+    {
+      "file": "shape-061.jsonl",
+      "shape": "attachment|total_tokens_reminder",
+      "rows": 1,
+      "source_json_bytes": 470
+    },
+    {
+      "file": "shape-062.jsonl",
+      "shape": "attachment|ultrathink_effort",
+      "rows": 1,
+      "source_json_bytes": 478
+    },
+    {
+      "file": "shape-063.jsonl",
+      "shape": "continued-in|",
+      "rows": 1,
+      "source_json_bytes": 182
+    },
+    {
+      "file": "shape-064.jsonl",
+      "shape": "cost-state|",
+      "rows": 1,
+      "source_json_bytes": 322
+    },
+    {
+      "file": "shape-065.jsonl",
+      "shape": "custom-title|",
+      "rows": 1,
+      "source_json_bytes": 100
+    },
+    {
+      "file": "shape-066.jsonl",
+      "shape": "file-history-delta|",
+      "rows": 1,
+      "source_json_bytes": 344
+    },
+    {
+      "file": "shape-067.jsonl",
+      "shape": "file-history-snapshot|",
+      "rows": 1,
+      "source_json_bytes": 247
+    },
+    {
+      "file": "shape-068.jsonl",
+      "shape": "fork-context-ref|",
+      "rows": 1,
+      "source_json_bytes": 199
+    },
+    {
+      "file": "shape-069.jsonl",
+      "shape": "last-prompt|",
+      "rows": 1,
+      "source_json_bytes": 128
+    },
+    {
+      "file": "shape-070.jsonl",
+      "shape": "launched|",
+      "rows": 1,
+      "source_json_bytes": 20
+    },
+    {
+      "file": "shape-071.jsonl",
+      "shape": "mode|",
+      "rows": 1,
+      "source_json_bytes": 87
+    },
+    {
+      "file": "shape-072.jsonl",
+      "shape": "permission-mode|",
+      "rows": 1,
+      "source_json_bytes": 106
+    },
+    {
+      "file": "shape-073.jsonl",
+      "shape": "pr-link|",
+      "rows": 1,
+      "source_json_bytes": 213
+    },
+    {
+      "file": "shape-074.jsonl",
+      "shape": "queue-operation|",
+      "rows": 1,
+      "source_json_bytes": 145
+    },
+    {
+      "file": "shape-075.jsonl",
+      "shape": "started|",
+      "rows": 1,
+      "source_json_bytes": 176
+    },
+    {
+      "file": "shape-076.jsonl",
+      "shape": "system||agents_killed",
+      "rows": 1,
+      "source_json_bytes": 420
+    },
+    {
+      "file": "shape-077.jsonl",
+      "shape": "system||api_error",
+      "rows": 1,
+      "source_json_bytes": 807
+    },
+    {
+      "file": "shape-078.jsonl",
+      "shape": "system||away_summary",
+      "rows": 1,
+      "source_json_bytes": 601
+    },
+    {
+      "file": "shape-079.jsonl",
+      "shape": "system||compact_boundary",
+      "rows": 1,
+      "source_json_bytes": 717
+    },
+    {
+      "file": "shape-080.jsonl",
+      "shape": "system||informational",
+      "rows": 1,
+      "source_json_bytes": 499
+    },
+    {
+      "file": "shape-081.jsonl",
+      "shape": "system||local_command",
+      "rows": 1,
+      "source_json_bytes": 483
+    },
+    {
+      "file": "shape-082.jsonl",
+      "shape": "system||model_refusal_fallback",
+      "rows": 1,
+      "source_json_bytes": 1244
+    },
+    {
+      "file": "shape-083.jsonl",
+      "shape": "system||scheduled_task_fire",
+      "rows": 1,
+      "source_json_bytes": 593
+    },
+    {
+      "file": "shape-084.jsonl",
+      "shape": "system||stop_hook_summary",
+      "rows": 1,
+      "source_json_bytes": 782
+    },
+    {
+      "file": "shape-085.jsonl",
+      "shape": "system||turn_duration",
+      "rows": 1,
+      "source_json_bytes": 442
+    },
+    {
+      "file": "shape-086.jsonl",
+      "shape": "user|list|absent|isMeta|isSidechain|text",
+      "rows": 1,
+      "source_json_bytes": 1621
+    },
+    {
+      "file": "shape-087.jsonl",
+      "shape": "user|list|absent|isMeta|isSidechain|text|text",
+      "rows": 1,
+      "source_json_bytes": 1300
+    },
+    {
+      "file": "shape-088.jsonl",
+      "shape": "user|list|absent|isMeta|text",
+      "rows": 1,
+      "source_json_bytes": 502
+    },
+    {
+      "file": "shape-089.jsonl",
+      "shape": "user|list|absent|isMeta|text|text",
+      "rows": 1,
+      "source_json_bytes": 770
+    },
+    {
+      "file": "shape-090.jsonl",
+      "shape": "user|list|absent|isMeta|text|text|text",
+      "rows": 1,
+      "source_json_bytes": 1025
+    },
+    {
+      "file": "shape-091.jsonl",
+      "shape": "user|list|absent|isMeta|text|text|text|text|text",
+      "rows": 1,
+      "source_json_bytes": 1449
+    },
+    {
+      "file": "shape-092.jsonl",
+      "shape": "user|list|absent|isSidechain|text",
+      "rows": 1,
+      "source_json_bytes": 565
+    },
+    {
+      "file": "shape-093.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|image",
+      "rows": 2,
+      "source_json_bytes": 10783
+    },
+    {
+      "file": "shape-094.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|text",
+      "rows": 2,
+      "source_json_bytes": 2366
+    },
+    {
+      "file": "shape-095.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|text|text",
+      "rows": 2,
+      "source_json_bytes": 3081
+    },
+    {
+      "file": "shape-096.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2089
+    },
+    {
+      "file": "shape-097.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2149
+    },
+    {
+      "file": "shape-098.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2275
+    },
+    {
+      "file": "shape-099.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2730
+    },
+    {
+      "file": "shape-100.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2798
+    },
+    {
+      "file": "shape-101.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|str|False",
+      "rows": 2,
+      "source_json_bytes": 2058
+    },
+    {
+      "file": "shape-102.jsonl",
+      "shape": "user|list|absent|isSidechain|tool_result|str|True",
+      "rows": 2,
+      "source_json_bytes": 2004
+    },
+    {
+      "file": "shape-103.jsonl",
+      "shape": "user|list|absent|text",
+      "rows": 1,
+      "source_json_bytes": 580
+    },
+    {
+      "file": "shape-104.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|image",
+      "rows": 2,
+      "source_json_bytes": 4767
+    },
+    {
+      "file": "shape-105.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text",
+      "rows": 2,
+      "source_json_bytes": 2193
+    },
+    {
+      "file": "shape-106.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|document",
+      "rows": 2,
+      "source_json_bytes": 517367
+    },
+    {
+      "file": "shape-107.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|image",
+      "rows": 2,
+      "source_json_bytes": 3444
+    },
+    {
+      "file": "shape-108.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|image|image|image|image|image",
+      "rows": 2,
+      "source_json_bytes": 815296
+    },
+    {
+      "file": "shape-109.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|image|image|image|image|image|image|image",
+      "rows": 2,
+      "source_json_bytes": 990957
+    },
+    {
+      "file": "shape-110.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 19707
+    },
+    {
+      "file": "shape-111.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text",
+      "rows": 2,
+      "source_json_bytes": 2790
+    },
+    {
+      "file": "shape-112.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|image",
+      "rows": 2,
+      "source_json_bytes": 12698
+    },
+    {
+      "file": "shape-113.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 46686
+    },
+    {
+      "file": "shape-114.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text",
+      "rows": 2,
+      "source_json_bytes": 2963
+    },
+    {
+      "file": "shape-115.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|image",
+      "rows": 2,
+      "source_json_bytes": 26797
+    },
+    {
+      "file": "shape-116.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 45560
+    },
+    {
+      "file": "shape-117.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|image|text|text|text|image",
+      "rows": 2,
+      "source_json_bytes": 107937
+    },
+    {
+      "file": "shape-118.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|image|text|text|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 99030
+    },
+    {
+      "file": "shape-119.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text",
+      "rows": 2,
+      "source_json_bytes": 3176
+    },
+    {
+      "file": "shape-120.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|image",
+      "rows": 2,
+      "source_json_bytes": 4098
+    },
+    {
+      "file": "shape-121.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text",
+      "rows": 2,
+      "source_json_bytes": 3353
+    },
+    {
+      "file": "shape-122.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|image",
+      "rows": 2,
+      "source_json_bytes": 29961
+    },
+    {
+      "file": "shape-123.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 47932
+    },
+    {
+      "file": "shape-124.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|text",
+      "rows": 2,
+      "source_json_bytes": 3528
+    },
+    {
+      "file": "shape-125.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 51899
+    },
+    {
+      "file": "shape-126.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text",
+      "rows": 2,
+      "source_json_bytes": 3689
+    },
+    {
+      "file": "shape-127.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text|image",
+      "rows": 2,
+      "source_json_bytes": 48547
+    },
+    {
+      "file": "shape-128.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text|image|text",
+      "rows": 2,
+      "source_json_bytes": 47910
+    },
+    {
+      "file": "shape-129.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|text|text|text|text|text|text|text|text",
+      "rows": 2,
+      "source_json_bytes": 4240
+    },
+    {
+      "file": "shape-130.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2152
+    },
+    {
+      "file": "shape-131.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2263
+    },
+    {
+      "file": "shape-132.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2602
+    },
+    {
+      "file": "shape-133.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2837
+    },
+    {
+      "file": "shape-134.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2704
+    },
+    {
+      "file": "shape-135.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 3380
+    },
+    {
+      "file": "shape-136.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 2983
+    },
+    {
+      "file": "shape-137.jsonl",
+      "shape": "user|list|absent|tool_result|list|False|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference|tool_reference",
+      "rows": 2,
+      "source_json_bytes": 3576
+    },
+    {
+      "file": "shape-138.jsonl",
+      "shape": "user|list|absent|tool_result|str|False",
+      "rows": 1,
+      "source_json_bytes": 817
+    },
+    {
+      "file": "shape-139.jsonl",
+      "shape": "user|list|absent|tool_result|str|True",
+      "rows": 1,
+      "source_json_bytes": 876
+    },
+    {
+      "file": "shape-140.jsonl",
+      "shape": "user|list|human|text|image",
+      "rows": 1,
+      "source_json_bytes": 7476
+    },
+    {
+      "file": "shape-141.jsonl",
+      "shape": "user|list|human|text|image|image",
+      "rows": 1,
+      "source_json_bytes": 28630
+    },
+    {
+      "file": "shape-142.jsonl",
+      "shape": "user|list|human|text|image|image|image",
+      "rows": 1,
+      "source_json_bytes": 1674055
+    },
+    {
+      "file": "shape-143.jsonl",
+      "shape": "user|list|human|text|image|image|image|image|image",
+      "rows": 1,
+      "source_json_bytes": 1041572
+    },
+    {
+      "file": "shape-144.jsonl",
+      "shape": "user|str|absent|",
+      "rows": 1,
+      "source_json_bytes": 485
+    },
+    {
+      "file": "shape-145.jsonl",
+      "shape": "user|str|absent|<bash-input>",
+      "rows": 1,
+      "source_json_bytes": 510
+    },
+    {
+      "file": "shape-146.jsonl",
+      "shape": "user|str|absent|<bash-stdout>",
+      "rows": 1,
+      "source_json_bytes": 593
+    },
+    {
+      "file": "shape-147.jsonl",
+      "shape": "user|str|absent|<command-message>",
+      "rows": 1,
+      "source_json_bytes": 652
+    },
+    {
+      "file": "shape-148.jsonl",
+      "shape": "user|str|absent|<command-name>",
+      "rows": 1,
+      "source_json_bytes": 549
+    },
+    {
+      "file": "shape-149.jsonl",
+      "shape": "user|str|absent|<local-command-stdout>",
+      "rows": 1,
+      "source_json_bytes": 513
+    },
+    {
+      "file": "shape-150.jsonl",
+      "shape": "user|str|absent|isCompactSummary|",
+      "rows": 1,
+      "source_json_bytes": 7161
+    },
+    {
+      "file": "shape-151.jsonl",
+      "shape": "user|str|absent|isMeta|",
+      "rows": 1,
+      "source_json_bytes": 562
+    },
+    {
+      "file": "shape-152.jsonl",
+      "shape": "user|str|absent|isMeta|<local-command-caveat>",
+      "rows": 1,
+      "source_json_bytes": 644
+    },
+    {
+      "file": "shape-153.jsonl",
+      "shape": "user|str|absent|isMeta|isSidechain|",
+      "rows": 1,
+      "source_json_bytes": 652
+    },
+    {
+      "file": "shape-154.jsonl",
+      "shape": "user|str|absent|isMeta|isSidechain|<system-reminder>",
+      "rows": 1,
+      "source_json_bytes": 661
+    },
+    {
+      "file": "shape-155.jsonl",
+      "shape": "user|str|absent|isSidechain|",
+      "rows": 1,
+      "source_json_bytes": 470
+    },
+    {
+      "file": "shape-156.jsonl",
+      "shape": "user|str|absent|isSidechain|isCompactSummary|",
+      "rows": 1,
+      "source_json_bytes": 9587
+    },
+    {
+      "file": "shape-157.jsonl",
+      "shape": "user|str|auto-continuation|isMeta|",
+      "rows": 1,
+      "source_json_bytes": 761
+    },
+    {
+      "file": "shape-158.jsonl",
+      "shape": "user|str|coordinator|isMeta|isSidechain|",
+      "rows": 1,
+      "source_json_bytes": 892
+    },
+    {
+      "file": "shape-159.jsonl",
+      "shape": "user|str|human|",
+      "rows": 1,
+      "source_json_bytes": 552
+    },
+    {
+      "file": "shape-160.jsonl",
+      "shape": "user|str|human|<command-message>",
+      "rows": 1,
+      "source_json_bytes": 581
+    },
+    {
+      "file": "shape-161.jsonl",
+      "shape": "user|str|peer|isMeta|",
+      "rows": 1,
+      "source_json_bytes": 1712
+    },
+    {
+      "file": "shape-162.jsonl",
+      "shape": "user|str|peer|isMeta|isSidechain|",
+      "rows": 1,
+      "source_json_bytes": 2518
+    },
+    {
+      "file": "shape-163.jsonl",
+      "shape": "user|str|task-notification|",
+      "rows": 1,
+      "source_json_bytes": 769
+    },
+    {
+      "file": "shape-164.jsonl",
+      "shape": "user|str|task-notification|<task-notification>",
+      "rows": 1,
+      "source_json_bytes": 862
+    },
+    {
+      "file": "shape-165.jsonl",
+      "shape": "user|str|task-notification|isMeta|isSidechain|",
+      "rows": 1,
+      "source_json_bytes": 1540
+    }
+  ]
+}

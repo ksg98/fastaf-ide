@@ -1,31 +1,60 @@
-import { type Component, Show } from "solid-js";
+import { type Component, createEffect, createSignal, lazy, Show, Suspense } from "solid-js";
 import { diffTabsStore } from "../stores/diffTabs";
-import { globalWorkspaceStore } from "../stores/globalWorkspace";
+import { globalWorkspaceStore, MANUAL_SCOPE } from "../stores/globalWorkspace";
+import { progressStore } from "../stores/progress";
 import { settingsStore } from "../stores/settings";
+import { storiesUi } from "../stores/storiesUi";
 import { uiStore } from "../stores/ui";
-import { sendTextToActiveTerminal } from "../utils/sendToActiveTerminal";
-import { AIChatPanel } from "./AIChatPanel";
-import { AiTriagePanel } from "./AiTriagePanel";
+import {
+	canQueueToActiveTerminal,
+	queueTextToActiveTerminal,
+	sendTextToActiveTerminal,
+} from "../utils/sendToActiveTerminal";
+import { AutomationsHost } from "./AutomationsDialog/AutomationsHost";
 import { FileBrowserPanel } from "./FileBrowserPanel";
 import { GitPanel } from "./GitPanel/GitPanel";
+import { IdeasPanel } from "./IdeasPanel";
 import { MarkdownPanel } from "./MarkdownPanel";
-import { NotesPanel } from "./NotesPanel";
 import { OutlinePanel } from "./OutlinePanel";
+import { ProgressDialog } from "./ProgressDialog";
 import { ReferencesPanel } from "./ReferencesPanel";
+
+const StoriesDialog = lazy(() =>
+	import("./StoriesDialog/StoriesDialog").then((module) => ({ default: module.StoriesDialog })),
+);
+const AIChatPanel = lazy(() => import("./AIChatPanel").then((module) => ({ default: module.AIChatPanel })));
 
 export interface PanelOrchestratorProps {
 	repoPath: string | null;
 	/** Effective filesystem root (worktree path when on a linked worktree) */
 	fsRoot?: string | null;
+	onOpenSettings?: (tab: string, section?: string) => void;
 	onFileOpen: (repoPath: string, filePath: string, line?: number) => void;
 }
 
+/**
+ * Whether the hand-promoted, cross-repo global workspace is showing.
+ *
+ * A per-repo auto-consolidated workspace (#e767) has a single, well-defined
+ * repo — `props.repoPath`/`fsRoot` still resolve correctly — so it must not
+ * suppress these panels the way the manual, potentially cross-repo workspace
+ * does.
+ */
+function manualWorkspaceActive(): boolean {
+	return globalWorkspaceStore.isActive() && globalWorkspaceStore.getScope() === MANUAL_SCOPE;
+}
+
 export const PanelOrchestrator: Component<PanelOrchestratorProps> = (props) => {
+	const [aiChatRequested, setAiChatRequested] = createSignal(uiStore.state.aiChatPanelVisible);
+	createEffect(() => {
+		if (uiStore.state.aiChatPanelVisible) setAiChatRequested(true);
+	});
 	return (
 		<>
+			<AutomationsHost />
 			<Show when={!uiStore.isDetached("file-browser")}>
 				<FileBrowserPanel
-					visible={uiStore.state.fileBrowserPanelVisible && !globalWorkspaceStore.isActive()}
+					visible={uiStore.state.fileBrowserPanelVisible && !manualWorkspaceActive()}
 					repoPath={props.repoPath}
 					fsRoot={props.fsRoot}
 					onClose={() => uiStore.toggleFileBrowserPanel()}
@@ -43,11 +72,12 @@ export const PanelOrchestrator: Component<PanelOrchestratorProps> = (props) => {
 			</Show>
 
 			<Show when={!uiStore.isDetached("notes")}>
-				<NotesPanel
-					visible={uiStore.state.notesPanelVisible}
+				<IdeasPanel
+					visible={uiStore.state.ideasPanelVisible}
 					repoPath={props.repoPath}
-					onClose={() => uiStore.toggleNotesPanel()}
+					onClose={() => uiStore.toggleIdeasPanel()}
 					onSendToTerminal={(text) => void sendTextToActiveTerminal(text)}
+					onQueueToTerminal={canQueueToActiveTerminal() ? (text) => void queueTextToActiveTerminal(text) : undefined}
 				/>
 			</Show>
 
@@ -61,7 +91,7 @@ export const PanelOrchestrator: Component<PanelOrchestratorProps> = (props) => {
 
 			<Show when={!uiStore.isDetached("git")}>
 				<GitPanel
-					visible={uiStore.state.gitPanelVisible && !globalWorkspaceStore.isActive()}
+					visible={uiStore.state.gitPanelVisible && !manualWorkspaceActive()}
 					repoPath={props.repoPath}
 					fsRoot={props.fsRoot}
 					onClose={() => uiStore.toggleGitPanel()}
@@ -70,12 +100,29 @@ export const PanelOrchestrator: Component<PanelOrchestratorProps> = (props) => {
 				/>
 			</Show>
 
-			<Show when={settingsStore.isAiChatEnabled() && !uiStore.isDetached("ai-chat")}>
-				<AIChatPanel visible={uiStore.state.aiChatPanelVisible} onClose={() => uiStore.toggleAiChatPanel()} />
+			<Show when={settingsStore.isAiChatEnabled() && !uiStore.isDetached("ai-chat") && aiChatRequested()}>
+				<Suspense>
+					<AIChatPanel
+						visible={uiStore.state.aiChatPanelVisible}
+						repoPath={props.repoPath}
+						fsRoot={props.fsRoot}
+						onClose={() => uiStore.toggleAiChatPanel()}
+						onOpenSettings={props.onOpenSettings}
+					/>
+				</Suspense>
 			</Show>
 
-			<Show when={uiStore.state.aiTriagePanelVisible}>
-				<AiTriagePanel visible={true} repoPath={props.repoPath} onClose={() => uiStore.toggleAiTriagePanel()} />
+			<Show when={progressStore.dialogVisible()}>
+				<ProgressDialog />
+			</Show>
+			<Show when={storiesUi.visible() && !uiStore.isDetached("stories")}>
+				<Show when={storiesUi.project()} keyed>
+					{(project) => (
+						<Suspense>
+							<StoriesDialog project={project} onClose={() => storiesUi.close()} />
+						</Suspense>
+					)}
+				</Show>
 			</Show>
 		</>
 	);

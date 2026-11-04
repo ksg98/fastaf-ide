@@ -1,0 +1,43 @@
+.backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.sheet {
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  width: 100%;
+  max-height: 72%;
+  overflow-y: auto;
+  padding: 16px 20px calc(20px + env(safe-area-inset-bottom));
+  border-radius: 16px 16px 0 0;
+  background: var(--bg-secondary);
+  color: var(--fg-primary);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.close {
+  color: var(--fg-primary);
+  font-size: 24px;
+}
+
+.entry {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.entry small {
+  color: var(--fg-muted);
+  text-transform: capitalize;
+}
+
+.entry p { margin: 4px 0; white-space: pre-wrap; }

@@ -60,7 +60,7 @@ pub enum Event {
     /// Child process exited.
     ChildExit(ExitStatus),
 
-    /// OSC 133 shell integration marker.
+    /// OSC 133 shell integration marker with an eviction-stable all-time row.
     Osc133 {
         command: char,
         params: String,
@@ -70,7 +70,7 @@ pub enum Event {
     /// OSC 7 current working directory (file://hostname/path).
     Osc7(String),
 
-    /// OSC 7770 TUIC protocol event (verb=payload).
+    /// OSC 7770 TUIC protocol event (verb=payload), with an all-time row.
     Tuic {
         verb: String,
         payload: String,

@@ -1,0 +1,296 @@
+{
+  "source": "Live COORDINATOR Claude PTY styled-rows HTTP API, 2026-10-03",
+  "sessionId": "4b4c5243-2464-4264-ac01-76cb551f1eed",
+  "historyBase": 5389,
+  "endAbs": 15429,
+  "promptLines": [
+    10035
+  ],
+  "rows": [
+    {
+      "abs": 9874,
+      "text": "      6720 Sat Oct  3 08:45:21 2026     bash tools/agents/mail-watch.sh                                                                              ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9875,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9876,
+      "text": "⏺ 💬 Green bar in the terminal scrollbar: green is the colour TUIC uses to mark the                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9877,
+      "text": "  line where you sent a prompt, one 2-pixel tick per prompt                                                                                          ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9878,
+      "text": "  (src/components/Terminal/scrollbarMarks.ts). A solid band means hundreds of those                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9879,
+      "text": "  ticks are bunched together at the bottom. Either far too many prompts get recorded                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9880,
+      "text": "  (for example Claude Code redrawing its input box), or their positions are calculated                                                               ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9881,
+      "text": "  against a different line count than the scrollbar uses. I haven't proven which.                                                                    ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9882,
+      "text": "  Story 1388 is open and the tuic-1388 agent is finding the cause with evidence before                                                               ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9883,
+      "text": "  fixing it.                                                                                                                                         ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9884,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9885,
+      "text": "  💬 Project by project: the full status is in the tab \"Stato progetti 03/10\"                                                                        ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9886,
+      "text": "  (~/Gits/.tmp/boss/stato-progetti-20261003.md); here is the short version.                                                                          ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9887,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9888,
+      "text": "  ┌──────────────┬──────────────┬──────┬──────────────────────────────────────────┐                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9889,
+      "text": "  │   Project    │ Closed since │ Open │               In progress                │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9890,
+      "text": "  │              │  last night  │      │                                          │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9891,
+      "text": "  ├──────────────┼──────────────┼──────┼──────────────────────────────────────────┤                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9892,
+      "text": "  │ mdkb         │ 29           │ 6    │ flaky test 254; 220 waits on you         │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9893,
+      "text": "  ├──────────────┼──────────────┼──────┼──────────────────────────────────────────┤                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9894,
+      "text": "  │ ego          │ 11           │ 71   │ 265 (read denial ends the turn);         │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9895,
+      "text": "  │              │              │      │ verifying 227, 258/260, 198/261          │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9896,
+      "text": "  ├──────────────┼──────────────┼──────┼──────────────────────────────────────────┤                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9897,
+      "text": "  │              │              │      │ voice stories 1383–1385; 1386 input box; │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9898,
+      "text": "  │ tuicommander │ 5            │ 63   │  1387 \"Status\"; 1388 green band;         │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9899,
+      "text": "  │              │              │      │ codebase analysis                        │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9900,
+      "text": "  ├──────────────┼──────────────┼──────┼──────────────────────────────────────────┤                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9901,
+      "text": "  │ smartmem     │ 3            │ 12   │ duplicate story files and 023 wait on    │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9902,
+      "text": "  │              │              │      │ you                                      │                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9903,
+      "text": "  └──────────────┴──────────────┴──────┴──────────────────────────────────────────┘                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9904,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9905,
+      "text": "  - mdkb: the full suite passes on main, 2482 of 2482. The mutants for 246–253 were                                                                  ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9906,
+      "text": "    checked by hand, not yet by a run on the box.                                                                                                    ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9907,
+      "text": "  - ego: current master builds and its tests pass (46 of 46).                                                                                        ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9908,
+      "text": "  - tuicommander: the voice mutation gate is complete.                                                                                               ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9909,
+      "text": "  - Not available: rb gate --status doesn't exist in this version of rb (it only                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9910,
+      "text": "    prints usage), so I have no gate status per repo.                                                                                                ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9911,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9912,
+      "text": "  💬 Worktrees: I closed the 5 that were finished:                                                                                                   ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9913,
+      "text": "  - tuicommander: fix/1163, fix/1380, gate/tuic-mutants-20261001b                                                                                    ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9914,
+      "text": "  - smartmem: critic-011-015, critic-021                                                                                                             ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9915,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9916,
+      "text": "  The two smartmem branches are kept. Their tests are already in main, but the commits                                                               ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9917,
+      "text": "  were copied over (cherry-picked), so TUIC sees them as unmerged.                                                                                   ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9918,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9919,
+      "text": "  💬 The ones still open each have a reason:                                                                                                         ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9920,
+      "text": "                                                                                                                                                     ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9921,
+      "text": "  ┌───────────────────────────────────────────────────┬────────────────────────────┐                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9922,
+      "text": "  │                     Worktree                      │        Why it stays        │                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9923,
+      "text": "  ├───────────────────────────────────────────────────┼────────────────────────────┤                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9924,
+      "text": "  │ gate-voice, gate-mdkb, analysis,                  │ a live agent is working in │                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9925,
+      "text": "  │ sweep-voice-survivors, sweep-mdkb-b, 265, 1386,   │  it                        │                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9926,
+      "text": "  │ 1388                                              │                            │                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9927,
+      "text": "  ├───────────────────────────────────────────────────┼────────────────────────────┤                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9928,
+      "text": "  │ ego 227, 258, 198                                 │ ego-land is checking them  │                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9929,
+      "text": "  │                                                   │ before I merge them        │                                                                 ",
+      "isWrapped": false
+    },
+    {
+      "abs": 9930,
+      "text": "  ├───────────────────────────────────────────────────┼────────────────────────────┤                                                                 ",
+      "isWrapped": false
+    }
+  ]
+}

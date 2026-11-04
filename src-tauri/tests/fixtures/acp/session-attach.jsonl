@@ -1,0 +1,8 @@
+// Loading an existing session attaches it, and closing it lets it go.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/load","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"load"}
+{"step":"respond","to":"load","result":{"configOptions":[]}}
+{"step":"expect","method":"session/close","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa"},"capture":"close"}
+{"step":"respond","to":"close","result":{}}
+{"step":"await_stdin_eof"}

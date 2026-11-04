@@ -60,3 +60,9 @@ describe("filterMatchesToBlock", () => {
 		expect(result).toEqual(allMatches);
 	});
 });
+
+// Catches: block-scoped search drifting to later output after scrollback eviction.
+it("rebases search rows against absolute block boundaries after eviction", () => {
+	const matches = [7, 8, 9, 10].map((row) => ({ row, col_start: 0, col_end: 1 }));
+	expect(filterMatchesToBlock(matches, [{ promptLine: 18, endLine: 20 }], 8, 10)).toEqual(matches.slice(1, 3));
+});

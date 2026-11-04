@@ -12,7 +12,7 @@ describe("nextZoomStep", () => {
 		const up = [level];
 		for (let i = 0; i < ZOOM_STEPS.length + 3; i++) {
 			level = nextZoomStep(level, 1);
-			if (up[up.length - 1] !== level) up.push(level);
+			if (up.at(-1) !== level) up.push(level);
 		}
 		expect(up).toEqual([...ZOOM_STEPS]);
 	});

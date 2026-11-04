@@ -1,0 +1,187 @@
+{"fixture":"src-tauri/src/fixtures/agent_prompts/ego-mcp-questions-2088-2089.tcap","agent":"ego","geometry":[41,128]}
+{"record":0,"event":{"type":"shell-state","state":"busy","agent_type":"ego"}}
+{"record":0,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":1,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":2,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":3,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":4,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":5,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":6,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":7,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":8,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":9,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":10,"event":{"type":"intent","text":"Live verification only. First use search_tools to discover session status with l","title":"εgo","_turn_epoch":0}}
+{"record":10,"event":{"type":"user-input","content":"","line":-1,"_turn_epoch":0}}
+{"record":10,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":11,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":12,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":13,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":14,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":15,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":16,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":17,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":18,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":19,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":20,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":21,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":22,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":23,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":24,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":25,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":26,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":27,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":28,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":29,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":30,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":31,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":32,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"record":33,"event":{"type":"question","prompt_text":"","confident":true,"_turn_epoch":0}}
+{"record":33,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":34,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":35,"event":{"type":"choice-prompt","title":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","options":[{"key":"y","label":"yes","highlighted":true,"destructive":false},{"key":"a","label":"yes, remember rule (details: d)","highlighted":false,"destructive":false},{"key":"n","label":"no, say what to do instead","highlighted":false,"destructive":true},{"key":"e","label":"edit","highlighted":false,"destructive":false},{"key":"d","label":"details","highlighted":false,"destructive":false}],"_turn_epoch":0}}
+{"record":35,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":37,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":38,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/search_tools; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":39,"event":{"type":"choice-cleared","_turn_epoch":0}}
+{"record":39,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":40,"event":{"type":"user-input","content":"","line":-1,"_turn_epoch":0}}
+{"record":40,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":41,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":42,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":43,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":44,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":45,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":46,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":47,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":48,"event":{"type":"intent","text":"Verifying session status and colour selection","title":"Live verification","_turn_epoch":0}}
+{"record":48,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":49,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":50,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":51,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":52,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":53,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":54,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":55,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":56,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":57,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":58,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":59,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":60,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":61,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":62,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":63,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":64,"event":{"type":"question","prompt_text":"","confident":true,"_turn_epoch":0}}
+{"record":64,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":65,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":66,"event":{"type":"choice-prompt","title":"Allow call tuic/call_tool; call tuic/session; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","options":[{"key":"y","label":"yes","highlighted":true,"destructive":false},{"key":"a","label":"yes, remember rule (details: d)","highlighted":false,"destructive":false},{"key":"n","label":"no, say what to do instead","highlighted":false,"destructive":true},{"key":"e","label":"edit","highlighted":false,"destructive":false},{"key":"d","label":"details","highlighted":false,"destructive":false}],"_turn_epoch":0}}
+{"record":66,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/call_tool; call tuic/session; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/call_tool; call tuic/session; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":68,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/call_tool; call tuic/session; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/call_tool; call tuic/session; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":69,"event":{"type":"protocol-question-cleared"}}
+{"record":69,"event":{"type":"user-input","content":"","line":-1,"_turn_epoch":0}}
+{"record":69,"event":{"type":"choice-cleared","_turn_epoch":0}}
+{"record":69,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":70,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":71,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":72,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":73,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":74,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":75,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":76,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":77,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":78,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":79,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":80,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":81,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":82,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":83,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":84,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":85,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":86,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":87,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":88,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":89,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":90,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":91,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":92,"event":{"type":"question","prompt_text":"","confident":true,"_turn_epoch":0}}
+{"record":92,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":93,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":94,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":95,"event":{"type":"choice-prompt","title":"Pick a colour?","options":[{"key":"1","label":"Red","highlighted":true,"destructive":false},{"key":"2","label":"Green","highlighted":false,"destructive":false},{"key":"3","label":"Blue","highlighted":false,"destructive":false}],"selection_mode":"navigate-enter","dismiss_key":"cancel","_turn_epoch":0}}
+{"record":95,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Pick a colour?","confident":true,"last_question":"","choice_sig":"Pick a colour?|1,2,3","fullscreen":false}}
+{"record":97,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Pick a colour?","confident":true,"last_question":"","choice_sig":"Pick a colour?|1,2,3","fullscreen":false}}
+{"record":98,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Pick a colour?","confident":true,"last_question":"","choice_sig":"Pick a colour?|1,2,3","fullscreen":false}}
+{"record":99,"event":{"type":"choice-cleared","_turn_epoch":0}}
+{"record":99,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":100,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":101,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":102,"event":{"type":"choice-prompt","title":"Pick a colour?","options":[{"key":"1","label":"Red","highlighted":false,"destructive":false},{"key":"2","label":"Green","highlighted":true,"destructive":false},{"key":"3","label":"Blue","highlighted":false,"destructive":false}],"selection_mode":"navigate-enter","dismiss_key":"cancel","_turn_epoch":0}}
+{"record":102,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Pick a colour?","confident":true,"last_question":"","choice_sig":"Pick a colour?|1,2,3","fullscreen":false}}
+{"record":104,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Pick a colour?","confident":true,"last_question":"","choice_sig":"Pick a colour?|1,2,3","fullscreen":false}}
+{"record":105,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Pick a colour?","confident":true,"last_question":"","choice_sig":"Pick a colour?|1,2,3","fullscreen":false}}
+{"record":106,"event":{"type":"choice-cleared","_turn_epoch":0}}
+{"record":106,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":107,"event":{"type":"user-input","content":"","line":-1,"_turn_epoch":0}}
+{"record":107,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":108,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":109,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":110,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":111,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":112,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":113,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":114,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":115,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":116,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":117,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":118,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":119,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":120,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":121,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":122,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":123,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":124,"event":{"type":"question","prompt_text":"","confident":true,"_turn_epoch":0}}
+{"record":124,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":125,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":126,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"","confident":true,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":127,"event":{"type":"choice-prompt","title":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","options":[{"key":"y","label":"yes","highlighted":true,"destructive":false},{"key":"a","label":"yes, remember rule (details: d)","highlighted":false,"destructive":false},{"key":"n","label":"no, say what to do instead","highlighted":false,"destructive":true},{"key":"e","label":"edit","highlighted":false,"destructive":false},{"key":"d","label":"details","highlighted":false,"destructive":false}],"_turn_epoch":0}}
+{"record":127,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":129,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":130,"state":{"shell":1,"agent":"awaiting_input","awaiting":true,"question":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?","confident":true,"last_question":"","choice_sig":"Allow call tuic/progress; run /Users/stefano.straus/Gits/personal/tuicommander__wt/chore-live-postland2/src-tauri/binaries/tuic-bridge-aarch64-app?|y,a,n,e,d","fullscreen":false}}
+{"record":131,"event":{"type":"choice-cleared","_turn_epoch":0}}
+{"record":131,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":132,"event":{"type":"user-input","content":"","line":-1,"_turn_epoch":0}}
+{"record":132,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":133,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":134,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":135,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":136,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":137,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":138,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":139,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":140,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":141,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":142,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":143,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":144,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":145,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":146,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":147,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":148,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":149,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":150,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":151,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":152,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":153,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":154,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":155,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":156,"event":{"type":"shell-state","state":"idle","agent_type":"ego"}}
+{"record":156,"state":{"shell":2,"agent":"idle","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":157,"state":{"shell":2,"agent":"idle","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":158,"state":{"shell":2,"agent":"idle","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":159,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":160,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":161,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":162,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":163,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":164,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"record":165,"state":{"shell":2,"agent":"completed","awaiting":false,"question":null,"confident":false,"last_question":"","choice_sig":null,"fullscreen":false}}
+{"ring_len":12791}

@@ -1,0 +1,41 @@
+.dialog {
+  width: min(720px, calc(100vw - 32px));
+}
+.section {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+.section summary {
+  cursor: pointer;
+  color: var(--fg-primary);
+}
+.size {
+  float: right;
+  margin-left: 12px;
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.note {
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+}
+.source {
+  overflow-wrap: anywhere;
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+}
+.text {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+}

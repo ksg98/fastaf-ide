@@ -18,7 +18,7 @@ export function handleAgentExitCompletion(terminalId: string, hadAgent = false):
 	appLogger.info("terminal", `[Notify] ${terminalId} completion — session exited (background tab)`);
 	if (
 		shouldPlayCompletionSound({
-			isRemoteSession: terminal?.isRemote ?? false,
+			isRemoteSession: terminal?.isExternallyCreated ?? false,
 			silenceRemoteCompletions: notificationsStore.state.config.silence_remote_completions,
 		})
 	) {

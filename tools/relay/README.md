@@ -1,156 +1,129 @@
-# FastAF Relay Server
+# FastAF Relay Prototype
 
-A lightweight, blind WebSocket relay that enables secure remote access to FastAF from any network — no port forwarding, no VPN required.
+This independent Rust service is a starting point for remote access through a
+WebSocket intermediary. **It is not a complete remote-access product. There is
+no deployed FastAF relay service.** The default hostname in Settings is
+not an available hosted service.
 
-## How It Works
+## Current scope
 
-The relay server acts as a **blind intermediary** between your computer running FastAF and your phone's browser. It forwards encrypted blobs without ever being able to read their contents.
+The server forwards frames between peers in a room. It includes SQLite token,
+session and push-subscription storage, registration limiting, peer-status
+messages, an idle reaper, and optional VAPID Web Push delivery.
 
-```
-Your Computer                    Relay Server                     Your Phone
-FastAF  ──── WSS ────►  tuic-relay  ◄──── WSS ────  Mobile PWA
-              encrypted                          encrypted
-              blobs only                         blobs only
-```
+The desktop client connects, sends push hints and forwards selected application
+events when another peer is present. It decrypts incoming commands but does not
+yet dispatch them. The mobile PWA uses direct HTTP, WebSocket and SSE access;
+relay transport and relay QR pairing are not implemented. The server does not
+serve the PWA assets. Enabling the relay alone cannot provide usable mobile
+remote access.
 
-### End-to-End Encryption
+Direct LAN, Tailscale and VPN access remain separate from this prototype.
 
-**The relay server has zero knowledge of your data.** All communication between FastAF and your phone is encrypted end-to-end with AES-256-GCM:
+## Encryption and trust
 
-- The encryption key is generated on your computer and delivered to your phone via QR code
-- The key is embedded in the URL **fragment** (`#`), which is [never sent to any server](https://www.rfc-editor.org/rfc/rfc3986#section-3.5) by the browser
-- The relay sees only opaque binary blobs — it cannot decrypt terminal output, commands, file contents, or any other data
-- Even if the relay server is compromised, your data remains encrypted and unreadable
-- No encryption keys are ever stored or transmitted through the relay
+**The current desktop protocol is not end-to-end encrypted.** Its AES-256-GCM
+key is derived with HKDF from the bearer token, which the desktop sends to the
+relay for authentication. The relay operator can derive that key and read the
+traffic. Use only a trusted relay operator and TLS for non-loopback connections.
 
-### What the relay CAN see
+The relay stores token hashes in SQLite, but also caches plaintext bearer tokens
+in process memory. It sees room identifiers, connection metadata and plaintext
+push hints, including the reason and session identifier.
 
-Only connection metadata required for routing:
+True E2E requires an encryption secret independent of authentication, delivered
+out-of-band and never sent to the relay. A QR URL fragment can carry that secret,
+but JavaScript served by the page's origin can read it. Protection against an
+actively malicious relay operator also requires an independently trusted client
+distribution origin or signed client. That design is not implemented here.
 
-- Session ID (random UUID, not tied to your identity)
-- Bearer token hash (for authentication)
-- Timestamps and byte counts (for usage stats)
-- Push notification hints: **type** of event ("question", "error") and **session name** — never the actual content
+Do not expose this prototype as a public service: reliable recovery and the
+complete mobile transport still need validation and completion. Room admission
+requires a valid first-frame bearer, binds both peers to the same token and
+enforces room capacity and per-token room limits atomically. Existing test source is not evidence of production readiness.
 
-### What the relay CANNOT see
+## Local development
 
-- Terminal output or commands
-- File contents
-- Agent conversations
-- API keys, credentials, or any other secrets
-- Anything encrypted with your E2E key
+Build this standalone package with the repository's required Rust build tooling
+and scheduler. Run the resulting `tuic-relay` binary with an explicit loopback
+bind and a database in an isolated scratch directory:
 
-## Setup
-
-### Option 1: Use the hosted relay (easiest)
-
-FastAF ships pre-configured to use `relay.tuicommander.com`. Just enable it in **Settings → Services → Remote Relay** and scan the QR code with your phone. No server setup needed.
-
-### Option 2: Self-host with Docker Compose (recommended for self-hosting)
-
-Clone the repo and run:
-
-```bash
-cd tools/relay
-docker compose up -d
+```sh
+./target/debug/tuic-relay --bind 127.0.0.1:8080 --db-path ./relay.db
 ```
 
-This starts the relay server with Caddy as a reverse proxy for automatic HTTPS (Let's Encrypt).
+The binary path depends on the build tooling's target directory. Do not connect
+a production FastAF instance to a development relay.
 
-**Required configuration** — edit `docker-compose.yml` or set environment variables:
+### Implemented configuration
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RELAY_BIND` | No | `0.0.0.0:8080` | Address the relay binds to |
-| `RELAY_DB_PATH` | No | `./relay.db` | Path to SQLite database for stats |
-| `RELAY_ADMIN_KEY` | Yes | — | Secret key for the `/stats/global` admin endpoint |
-| `RELAY_VAPID_PRIVATE_KEY` | Yes | — | VAPID private key for Web Push notifications (base64) |
-| `RELAY_VAPID_SUBJECT` | Yes | — | VAPID subject (e.g., `mailto:admin@example.com`) |
-| `RELAY_MAX_SESSIONS_PER_TOKEN` | No | `5` | Max concurrent relay sessions per user |
-| `RELAY_SESSION_TIMEOUT_SECS` | No | `3600` | Idle session timeout (seconds) |
-| `RELAY_REGISTER_RATE_LIMIT` | No | `10/hour` | Registration rate limit per IP |
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `RELAY_BIND` | `0.0.0.0:8080` | Listen address; override with loopback for local work |
+| `RELAY_DB_PATH` | `./relay.db` | SQLite database |
+| `RELAY_VAPID_PRIVATE_KEY` | unset | Optional base64url, unpadded raw ES256 private scalar (32 bytes) |
+| `RELAY_VAPID_SUBJECT` | `mailto:admin@tuicommander.com` | VAPID contact URI; set your own for push |
+| `RELAY_SESSION_TIMEOUT_SECS` | `3600` | Idle-room timeout |
+| `RELAY_RATE_LIMIT_PER_HOUR` | `10` | Registrations per source IP per hour; zero disables limit |
+| `RELAY_MAX_SESSIONS_PER_TOKEN` | `5` | Concurrent rooms per token; zero disables limit |
 
-**Generate VAPID keys** (one-time):
+Push is disabled without a VAPID key. The key parser expects raw scalar bytes,
+not a PEM file or a DER-encoded EC key. The CLI has no `generate-vapid`
+subcommand, admin-key option or global-stats endpoint. A reproducible key
+provisioning flow and public-key discovery remain part of future onboarding.
 
-```bash
-# Using openssl
-openssl ecparam -genkey -name prime256v1 -out vapid_private.pem
-openssl ec -in vapid_private.pem -pubout -out vapid_public.pem
+### Implemented routes
 
-# Or use the relay's built-in command:
-docker run --rm tuic-relay generate-vapid
-```
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Returns `ok` |
+| POST | `/register` | Rate-limited token registration |
+| GET | `/stats` | Bearer-authenticated token statistics |
+| WS | `/ws/{session_id}` | Peer room; desktop sends `Bearer <token>` as first text frame |
+| POST | `/push/subscribe` | Bearer-authenticated push subscription |
+| DELETE | `/push/subscribe` | Bearer-authenticated subscription removal |
 
-Then point FastAF to your relay: **Settings → Services → Remote Relay → Relay URL** = `wss://your-domain.com`.
+These are the implemented surfaces, not a claim that admission and accounting
+meet the intended service contract. In particular, HTTP token lookup uses an in-memory cache, and forwarding does
+not accumulate byte statistics correctly. Anonymous peers and peers with a
+different room-owner token are rejected with close code 4003. A full room uses
+4001; creation beyond the token room limit uses 4002. Joining an existing room
+does not consume another room allowance. Idle eviction terminates both socket
+directions. Forwarding and cleanup check the admitted channel identity, so an
+expired socket cannot access or remove peers in a recreated room.
 
-### Option 3: Build from source
+## Desktop configuration
 
-```bash
-cd tools/relay
-cargo build --release
-./target/release/tuic-relay --bind 0.0.0.0:8080
-```
+The Cloud Relay section in Remote Access settings supports enable/disable, URL,
+a pasted registration token, room ID regeneration and relay connection status.
+The backend supervisor applies connection-setting changes live; the current UI
+restart warning is stale. A connected indicator means the relay handshake
+completed, not that the mobile transport is available. Registration is not
+performed by the settings UI, and the direct-access QR is not relay pairing.
 
-Place a reverse proxy (Caddy, nginx, Traefik) in front for TLS termination.
+## Packaging and self-hosting status
 
-## Architecture
+`Dockerfile`, `docker-compose.yml` and `Caddyfile` are prototype packaging inputs,
+not a validated production recipe. The Caddy example names the public relay
+domain: do not run it unchanged, request certificates for that domain or deploy
+it without explicit hosting approval. The relay binds plain TCP; a non-local
+service needs separately configured TLS termination and operational policy.
 
-```
-tools/relay/
-├── Cargo.toml
-├── Dockerfile              # Multi-stage: compiles inside Docker
-├── docker-compose.yml      # Self-hosting with Caddy auto-HTTPS
-├── src/
-│   ├── main.rs             # CLI entry point
-│   ├── lib.rs              # Library root
-│   ├── routes.rs           # Axum HTTP/WS routes
-│   ├── relay.rs            # Session pairing + message forwarding
-│   ├── auth.rs             # Bearer token auth (argon2id)
-│   ├── db.rs               # SQLite stats (tokio-rusqlite)
-│   ├── push.rs             # Web Push notifications (VAPID)
-│   └── types.rs            # Shared types
-└── tests/
-    └── relay_core.rs       # Integration tests
-```
+No image-size, startup-time, memory or concurrent-user performance guarantee is
+established. A complete self-host reference must include trusted PWA delivery,
+authentication/admission verification, independent E2E pairing, key provisioning,
+reconnect recovery and push integration before it can promise phone access.
 
-### API Endpoints
+## Source map
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/health` | None | Health check |
-| `POST` | `/register` | Rate-limited | Self-registration, returns bearer token |
-| `WS` | `/ws/{sessionId}` | Bearer (first message) | WebSocket relay — max 2 peers per session |
-| `GET` | `/stats` | Bearer | Per-user session statistics |
-| `GET` | `/stats/global` | Admin key | Global statistics |
-| `POST` | `/push/subscribe` | Bearer | Register push notification subscription |
-| `DELETE` | `/push/subscribe` | Bearer | Unregister push subscription |
-
-### Resource Usage
-
-The relay is extremely lightweight:
-
-| Metric | Value |
-|--------|-------|
-| Docker image | ~10 MB |
-| RAM per 100 concurrent sessions | ~50 MB |
-| CPU | Negligible (pure I/O forwarding) |
-| Disk | SQLite file, a few MB even with thousands of sessions |
-
-A $5/month VPS comfortably handles hundreds of concurrent users.
-
-## Relationship to Direct Access
-
-The relay **does not replace** FastAF's existing direct HTTP access. If you're on the same network (LAN, Tailscale, VPN), the direct connection at `http://{ip}:9876/mobile` continues to work with no encryption overhead. The relay is an additional option for when you need access from any network without VPN setup.
-
-## Security Model
-
-- **E2E encryption**: AES-256-GCM, key never touches the relay
-- **Token hashing**: argon2id (GPU-resistant)
-- **Rate limiting**: Per-IP registration, per-token message rate
-- **Session limits**: Max 2 peers per session, max 5 sessions per token
-- **Timeouts**: Idle sessions cleaned up after 1 hour (configurable)
-- **TLS**: Terminated at reverse proxy (Caddy auto-HTTPS recommended)
-- **Zero persistence of user data**: Only connection metadata stored in SQLite
+- `src/main.rs`: CLI and startup
+- `src/routes.rs`: HTTP and WebSocket routes
+- `src/relay.rs`: admission, rooms, forwarding and idle cleanup
+- `src/auth.rs`: token generation and hashing
+- `src/db.rs`: SQLite storage and statistics
+- `src/push.rs`: VAPID and push delivery
+- `src/types.rs`: wire metadata and subscription types
+- `tests/relay_core.rs`, `tests/auth_db.rs`: existing integration tests
 
 ## License
 

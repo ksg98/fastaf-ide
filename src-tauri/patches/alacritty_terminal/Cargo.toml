@@ -51,6 +51,10 @@ path = "src/lib.rs"
 name = "ref"
 path = "tests/ref.rs"
 
+[dependencies.arrayvec]
+version = "0.7.2"
+features = ["serde"]
+
 [dependencies.base64]
 version = "0.22.0"
 

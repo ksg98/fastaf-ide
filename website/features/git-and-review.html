@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>Review and ship — FastAF</title>
+  <meta name="description" content="Tasks next to your agents, pull request review in place, CI auto-heal, worktrees and a full Git panel." />
+  <meta property="og:title" content="Review and ship — FastAF" />
+  <meta property="og:description" content="Tasks, pull request review in place, CI auto-heal, worktrees and Git." />
+  <meta property="og:url" content="https://tuicommander.com/features/git-and-review.html" />
+  <meta name="twitter:title" content="Review and ship — FastAF" />
+  <meta name="twitter:description" content="Tasks, pull request review in place, CI auto-heal, worktrees and Git." />
+  <link rel="canonical" href="https://tuicommander.com/features/git-and-review.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Review and ship</p>
+      <h1>From idea to <em>PR</em>, in the same window.</h1>
+      <p>The tracker, the branch, the diff, the review and the CI result all sit next to the agent that wrote the code.</p>
+    </div>
+  </header>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Your tracker, <em>next to your agents</em>.</h2>
+        <p><strong>Tasks</strong> shows your work items as a list or a board, with assignees, labels and the moves each provider allows. Open an item to read its description and comments, then start work on it in a branch.</p>
+        <ul class="points">
+          <li>Work items come from a <strong>provider plugin</strong> that you install from a folder or a ZIP file, then configure in Tasks.</li>
+          <li>FastAF ships no provider plugin; Tasks appears once one is installed.</li>
+        </ul>
+        <a class="more" href="/docs/user-guide/github-integration.html">Read the GitHub Integration guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/s-issue.webp" alt="Tasks board with an issue's description and comments" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band flip">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>CI breaks. <em>The agent fixes it.</em></h2>
+        <p>Every branch with a pull request shows its badge and CI ring. The detail popover gives the merge readiness, the review decision and each check. Turn on <strong>Auto-heal</strong> and the failing GitHub Actions or CircleCI logs go to the agent on that branch, with a budget of three delivered attempts.</p>
+        <a class="more" href="/docs/user-guide/github-integration.html">Read about CI Auto-Heal &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/s-pr.webp" alt="Pull request detail popover with checks and the auto-heal switch" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>Review the PR <em>in place</em>.</h2>
+        <p>The PR Files tab draws the review threads on the diff lines. Reply, resolve, add pending comments from the line gutter and submit the review, pinned to the head you read. If the head moves, the submission is refused instead of landing on code you did not see.</p>
+        <a class="more" href="/docs/user-guide/github-integration.html">Read the GitHub Integration guide &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/s-review.webp" alt="Pull request diff with a review thread on a line" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <section class="more-features">
+    <div class="container">
+      <div class="section-head">
+        <h2>Branches without the bookkeeping</h2>
+      </div>
+      <div class="card-grid">
+        <div class="card">
+          <h3>Worktrees, managed</h3>
+          <p>The <code>+</code> button creates a branch in its own worktree, ready for an agent. Ignored build directories arrive copy-on-write, so the first build is incremental.</p>
+        </div>
+        <div class="card">
+          <h3>Merge and archive</h3>
+          <p>Right-click a worktree branch to merge it and archive or remove the worktree. The Worktree Manager shows all of them with PR state and dirty files.</p>
+        </div>
+        <div class="card">
+          <h3>Git panel</h3>
+          <p>Diff, stage and commit, plus a Branches tab to create, merge, rebase, push, pull and compare. Smart Commit asks your agent to write the message.</p>
+        </div>
+      </div>
+      <p class="note center"><a href="/docs/user-guide/worktrees.html">Worktrees guide</a> · <a href="/docs/user-guide/branches.html">Branch Management guide</a></p>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container band-inner">
+      <div class="band-text">
+        <h2>A board for <em>every</em> provider.</h2>
+        <p>Lanes load page by page, cards move through a menu of the transitions the provider allows, and the arrow keys work everywhere. Your last view is remembered.</p>
+        <a class="more" href="/docs/user-guide/plugins.html">Read about Tasks providers &rarr;</a>
+      </div>
+      <figure class="shot"><img src="/shots/s-tasks.webp" alt="Tasks board with lanes and cards" width="2000" height="1181" loading="lazy" /></figure>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

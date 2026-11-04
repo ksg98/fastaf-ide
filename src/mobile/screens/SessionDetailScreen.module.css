@@ -1,61 +1,149 @@
 .screen {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  min-width: 0;
 }
 
 .header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 4px;
+  box-sizing: border-box;
+  height: 56px;
+  padding: 0 8px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
-.backBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: none;
-  background: none;
-  color: var(--accent);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  padding: 0;
-  flex-shrink: 0;
-}
+.backBtn { color: var(--accent); }
 
 .backBtn:active {
   opacity: 0.7;
 }
 
-.headerInfo {
+button[data-control-layout="row"].headerInfo {
   flex: 1;
   min-width: 0;
+  height: 44px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  justify-content: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .agentName {
+  composes: ellipsis from "../mobileText.module.css";
   font-size: 15px;
   font-weight: 600;
   color: var(--fg-primary);
-  text-transform: capitalize;
 }
 
 .project {
-  font-size: 12px;
+  composes: ellipsis from "../mobileText.module.css";
+  font-size: 11px;
   color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
+
+.logo {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.stateDot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--bg-secondary);
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.stateDot[data-state="busy"],
+.stateDot[data-state="sub-tasks"] { background: var(--accent); }
+.stateDot[data-state="idle"] { background: #4dbc80; }
+.stateDot[data-state="question"] { background: #eabf53; }
+.stateDot[data-state="error"],
+.stateDot[data-state="rate-limited"] { background: var(--accent-red, #f44747); }
+
+.headerAction { position: relative; color: var(--fg-primary); }
+
+.voiceActive {
+  color: var(--accent-red, #f44747);
+}
+
+.taskCount {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  min-width: 15px;
+  padding: 1px 2px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.overflow {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  z-index: 15;
+  top: 56px;
+  right: 8px;
+  width: min(240px, calc(100% - 16px));
+  padding: 4px;
+  max-height: calc(100dvh - 80px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+
+/* The session pane already excludes navigation, banners and safe areas. */
+.sessionMenu {
+  max-height: calc(100% - 64px);
+  overscroll-behavior: contain;
+}
+
+.overflow > * { flex-shrink: 0; }
+
+.overflowInfo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  text-align: left;
+}
+
+.overflow button { justify-content: space-between; text-align: left; }
+.overflow button:active { background: var(--bg-highlight); }
+.overflowInfo { color: var(--fg-muted); }
+.overflow .dangerAction { color: var(--accent-red, #f44747); }
 
 .questionBar {
   padding: 8px 12px;
@@ -117,97 +205,10 @@
   color: var(--fg-muted);
 }
 
-.endedBackBtn {
-  padding: 10px 28px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--fg-primary);
-  font-size: 15px;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
+.endedBackBtn { color: var(--fg-primary); }
 
 .endedBackBtn:active {
   opacity: 0.7;
-}
-
-.intentLine,
-.taskLine {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  font-size: 13px;
-  color: var(--fg-muted);
-  background: var(--bg-secondary);
-  overflow: hidden;
-}
-
-.intentLine {
-  font-style: italic;
-}
-
-.intentLine svg,
-.taskLine svg {
-  flex-shrink: 0;
-  opacity: 0.6;
-}
-
-.subText {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.headerProgressBar {
-  height: 2px;
-  background: var(--bg-tertiary);
-  flex-shrink: 0;
-}
-
-.headerProgressFill {
-  height: 100%;
-  width: 100%;
-  background: var(--accent);
-  transform-origin: left;
-  transition: transform 0.3s ease;
-}
-
-.usageLabel {
-  font-size: 11px;
-  color: var(--fg-muted);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.usageLabel.danger {
-  color: var(--accent-red, #f44747);
-}
-
-.searchToggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: none;
-  background: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  padding: 0;
-  flex-shrink: 0;
-  border-radius: var(--radius-md);
-}
-
-.searchToggle:active {
-  opacity: 0.7;
-}
-
-.searchToggleActive {
-  color: var(--accent);
-  background: rgba(255, 255, 255, 0.06);
 }
 
 .searchBar {
@@ -220,33 +221,55 @@
   flex-shrink: 0;
 }
 
-.searchInput {
-  flex: 1;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
-  color: var(--fg-primary);
-  font-size: 14px;
-  font-family: var(--font-mono);
-  outline: none;
+.searchInput { flex: 1; font-family: var(--font-mono); }
+
+
+
+.searchClear { color: var(--fg-muted); }
+
+.markdownSection { display: flex; flex-direction: column; border-block: 1px solid var(--border); }
+.markdownHeading, .markdownStatus { padding: 8px 12px; color: var(--fg-muted); font-size: 12px; }
+.markdownHeading { font-weight: 600; }
+button[data-control-layout="row"].markdownEntry { display: flex; width: 100%; min-height: 44px; padding: 8px 12px; border: 0; background: transparent; color: var(--fg-primary); text-align: left; font: inherit; cursor: pointer; flex-direction: column; align-items: stretch; justify-content: center; gap: 4px; }
+.markdownEntry span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.markdownPath { color: var(--fg-muted); font-size: 11px; }
+
+/* Phones reserve identity space; tablets keep the direct secondary controls. */
+.overflow .phoneAction { display: none; }
+
+@media (max-width: 430px) {
+  .header .secondaryAction { display: none; }
+  .overflow .phoneAction { display: flex; }
 }
 
-.searchInput:focus {
-  border-color: var(--accent);
+/* Anchor composer sheets above both input and keys, regardless of keybar height. */
+.controls {
+  position: relative;
+  flex-shrink: 0;
 }
 
-.searchClear {
+.controls > :last-child {
+  position: static;
+}
+
+.markdownDropdown { position: relative; flex-shrink: 0; }
+
+.markdownTrigger[aria-expanded="true"] { background: var(--bg-highlight); }
+.markdownPopover {
+  top: calc(100% + 4px);
+  right: 0;
+  width: 280px;
+  box-shadow: var(--shadow-dropdown);
+}
+.markdownPopover .markdownSection { border: 0; }
+
+.usageBlock {
+  padding: 8px 12px;
+  border-block: 1px solid var(--border);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  padding: 0;
+  flex-direction: column;
+  gap: 6px;
 }

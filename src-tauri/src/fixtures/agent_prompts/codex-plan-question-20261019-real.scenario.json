@@ -1,0 +1,110 @@
+{
+  "recorded_at": "2026-10-19T07:15:56.955660+00:00",
+  "agent": "codex",
+  "binary": "/opt/homebrew/bin/codex",
+  "scenario": {
+    "agent": "codex",
+    "args": [
+      "--no-daemon",
+      "--no-alt-screen",
+      "--sandbox",
+      "read-only",
+      "--ask-for-approval",
+      "never",
+      "-m",
+      "gpt-6.1-sol",
+      "-c",
+      "model_reasoning_effort=\"medium\""
+    ],
+    "steps": [
+      {
+        "action": "dismiss",
+        "text": "Update available",
+        "key": "escape",
+        "timeout_secs": 15
+      },
+      {
+        "action": "settle",
+        "quiet_secs": 5,
+        "timeout_secs": 30
+      },
+      {
+        "action": "wait",
+        "expect": {
+          "awaiting": false
+        },
+        "timeout_secs": 15
+      },
+      {
+        "action": "slash",
+        "text": "/plan Use request_user_input now with one single-choice question titled Pick a colour and choices Red, Green, Blue. Use your native question tool, not prose. No commands or file inspection. After my answer reply only with the selected colour.",
+        "quiet_secs": 2,
+        "timeout_secs": 30
+      },
+      {
+        "action": "wait",
+        "text": "tab to add notes | enter to submit answer | esc to interrupt",
+        "timeout_secs": 90
+      },
+      {
+        "action": "wait",
+        "expect": {
+          "awaiting": true
+        },
+        "timeout_secs": 15
+      },
+      {
+        "action": "interrupt"
+      }
+    ]
+  },
+  "expected_states": [
+    {
+      "awaiting": false
+    },
+    {
+      "awaiting": true
+    }
+  ],
+  "status": "captured",
+  "daemon_health": {
+    "ok": true,
+    "uptime_secs": 0,
+    "session_count": 0,
+    "protocol_version": 1,
+    "build": {
+      "version": "2.0.0",
+      "target": "aarch64-apple-darwin",
+      "sha256": "384b3afed9dbfb8fa7d4c7fbf49a080b418e24527407346f6e711763482a2d10"
+    },
+    "socket_path": "<output>/tuic-mcp-a0d92bace275a196.sock",
+    "instance_id": "a3ba2e78-aa65-4db2-82bf-73887c933af5"
+  },
+  "observed_states": [
+    {
+      "agent": "idle",
+      "awaiting": false
+    },
+    {
+      "agent": "awaiting_input",
+      "awaiting": true
+    }
+  ],
+  "checks": [],
+  "markers": [
+    {
+      "session_id": "13efd99e-7d11-4dcb-8c92-925e15e06f40",
+      "agent_type": "codex",
+      "turns": 1,
+      "intent": 2,
+      "suggest": 0,
+      "intent_enabled": true,
+      "suggest_enabled": true
+    }
+  ],
+  "sessions": [
+    "13efd99e-7d11-4dcb-8c92-925e15e06f40"
+  ],
+  "sha256": "5ed03662b668b5d4df0ab24226c12eae87bfc80f59408c0653be53dbe0b53c06",
+  "capture": "<output>/raw/13efd99e-7d11-4dcb-8c92-925e15e06f40.tcap"
+}

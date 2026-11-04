@@ -71,12 +71,12 @@ function statsFor(ring: number[]): MetricStats {
 	if (ring.length === 0) {
 		return { count: 0, p50: 0, p95: 0, max: 0 };
 	}
-	const sorted = [...ring].sort((a, b) => a - b);
+	const sorted = ring.toSorted((a, b) => a - b);
 	return {
 		count: sorted.length,
 		p50: percentile(sorted, 50),
 		p95: percentile(sorted, 95),
-		max: sorted[sorted.length - 1],
+		max: sorted.at(-1)!,
 	};
 }
 
@@ -113,9 +113,13 @@ export function resetFrameTiming(sessionId?: string): void {
 
 let enabled = false;
 
-// Worker-mode terminals register here so toggling timing also reaches their
-// render worker (a separate module instance with its own `enabled` flag). Each
-// listener posts the new state to its worker; unregistered on terminal cleanup.
+// Broadcast hook for a second module instance that needs the same `enabled`
+// flag. It was added for a render worker that was never built, so today it has
+// NO production subscriber — only the frameTiming test registers a listener.
+//
+// DEFERRED (2026-09-05) — story 666-0998 corrected the comment but kept the
+// API. Deleting it also deletes its test, which is a code change outside a
+// docs-correction story. Remove both if no worker lands.
 const enabledListeners = new Set<(on: boolean) => void>();
 
 export function onFrameTimingEnabledChange(cb: (on: boolean) => void): () => void {

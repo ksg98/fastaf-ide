@@ -148,10 +148,15 @@ export const RenameBranchDialog: Component<RenameBranchDialogProps> = (props) =>
 						{error() && <p class={d.error}>{error()}</p>}
 					</div>
 					<div class={d.actions}>
-						<button class={d.cancelBtn} onClick={props.onClose} disabled={isRenaming()}>
+						<button type="button" class={d.cancelBtn} onClick={props.onClose} disabled={isRenaming()}>
 							{t("renameBranch.cancel", "Cancel")}
 						</button>
-						<button class={d.primaryBtn} onClick={handleRename} disabled={isRenaming() || !newName().trim()}>
+						<button
+							type="button"
+							class={d.primaryBtn}
+							onClick={handleRename}
+							disabled={isRenaming() || !newName().trim()}
+						>
 							{isRenaming() ? t("renameBranch.renaming", "Renaming...") : t("renameBranch.rename", "Rename")}
 						</button>
 					</div>

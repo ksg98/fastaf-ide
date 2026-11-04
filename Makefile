@@ -6,6 +6,19 @@ BINARY_NAME=tuicommander
 BUNDLE_ID=com.fastaf.ide
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
+# Optional runtime override used by isolated verification sessions. An empty
+# value preserves the production default; TUIC_APP_INSTANCE is intentionally
+# left undefined here so the test target can keep its own default below.
+TUIC_PORT?=
+
+# rtk (Rust Token Killer) is an optional output-compacting proxy: `rtk <cmd>`
+# runs <cmd> and trims its output. It is a personal tool, not a project
+# dependency, so every use below degrades to the raw command when it is absent.
+# Force the raw commands with `make RTK= check`.
+RTK?=$(shell command -v rtk)
+# `rtk err <cmd>` keeps only <cmd>'s errors; with no rtk, run <cmd> unfiltered.
+RTK_ERR=$(if $(RTK),$(RTK) err,)
+
 # Code signing identity: override with SIGN_IDENTITY env var.
 # Auto-detection order: Developer ID > ad-hoc.
 SIGN_IDENTITY?=-
@@ -14,20 +27,33 @@ SIGN_IDENTITY?=-
 TAURI_TARGET=src-tauri/target/release/bundle/macos
 APP_BUNDLE=$(TAURI_TARGET)/$(APP_NAME).app
 
-# whisper-rs-sys bundles whisper.cpp which uses std::filesystem::path (macOS 10.15+).
-# Must be exported so CMake subprocesses inherit it (.cargo/config.toml [env] alone is insufficient).
-export MACOSX_DEPLOYMENT_TARGET ?= 10.15
-
 # Distribution output
 DIST_DIR=dist-release
 
-.PHONY: all clean dev test build build-dmg check cov crap fmt sign verify-sign notarize release dist \
+# Updater artifacts (.sig/.tar.gz for auto-update) require TAURI_SIGNING_PRIVATE_KEY.
+# CI/release builds set it; local/dev builds don't, so skip updater artifact
+# generation in that case rather than failing the whole build.
+TAURI_BUILD_FLAGS=$(if $(TAURI_SIGNING_PRIVATE_KEY),,--config '{"bundle":{"createUpdaterArtifacts":false}}')
+
+
+.PHONY: all clean dev test agent-test agent-test-stop agent-test-github agent-test-github-stop test-shell build build-dmg check check-desktop-embedding check-chat-readability cov crap fmt sign verify-sign notarize release dist \
        nightly github-release preview bump release-notes hooks docs docs-serve \
        gh-debug-on gh-debug-off gh-debug-status gh-debug-logs gh-rate logs
 
 all: build sign
 
-# Install tracked git hooks (pre-push issue-keyword guard). Idempotent.
+# Directory searched by test-shell. Override for the runner's isolated fixture.
+SHELL_TEST_DIR ?= scripts
+
+# Run every repository shell test. New scripts named test-*.sh below scripts/
+# join this target automatically; local scripts git ignores do not.
+test-shell:
+	@SHELL_TEST_DIR="$(SHELL_TEST_DIR)" scripts/with-test-tmp.sh bash -c 'set -euo pipefail; found=0; while IFS= read -r script; do git check-ignore -q "$$script" 2>/dev/null && continue; found=1; echo "shell test: $$script"; bash "$$script"; done < <(find "$$SHELL_TEST_DIR" -type f -name "test-*.sh" -print | LC_ALL=C sort); [ "$$found" -eq 1 ] || { echo "no shell tests found under $$SHELL_TEST_DIR" >&2; exit 1; }'
+
+# Install tracked git hooks. Idempotent.
+#   pre-commit — Makefile TUIC_APP_INSTANCE scope (bypass: --no-verify) +
+#                agent-state fixture gate (bypass: TUIC_SKIP_FIXTURE_GATE=1)
+#   pre-push   — GitHub-issue closing-keyword guard (bypass: TUIC_SKIP_ISSUE_CHECK=1)
 hooks:
 	@bash scripts/hooks/install-hooks.sh
 
@@ -37,47 +63,114 @@ hooks:
 # (or its `.rs.tmp.*` scratch files) will NOT rebuild/restart the Rust backend.
 # Vite HMR still reloads the UI (it runs as a separate `beforeDevCommand` process).
 # Rust changes require a manual `make dev` restart — see AGENTS.md "Dev Hot Reload".
+# An inherited `TUIC_APP_INSTANCE` (a dotfile, direnv, or one copy-pasted
+# `TUIC_APP_INSTANCE=<id> make dev` still exported in the shell) beats the
+# Makefile the same way the old global assignment did, and the guard in
+# `scripts/check-make-instance-scope.sh` deliberately cannot see it. Say which
+# config directory this is starting on, so the wrong one is the first line of
+# output instead of something inferred from an empty repository list.
+# mbx sets CARGO_INCREMENTAL=0, and its learned incremental never engaged for
+# tuicommander_lib here, so every Rust edit recompiled the lib from scratch, twice
+# (tuic-remote without default features, then the desktop build). Measured
+# 2026-10-10 for `tuic-remote` after a one-line lib.rs change: 80s full compile,
+# 9s incremental.
+dev: export MBX_INCREMENTAL := 1
 dev: hooks
 	@pnpm build:sidecar
 	@pnpm exec vite build
-	RUST_LOG=tuicommander_lib=debug,info pnpm tauri dev --no-watch
+	@cd src-tauri && cargo build --bin tuic-remote --no-default-features
+	@cd src-tauri && cargo build -p tuic-bridge -p fastaf-cli
+	@echo "Starting Tauri dev on $(if $(TUIC_APP_INSTANCE),the ISOLATED config instance '$(TUIC_APP_INSTANCE)' (instances/$(TUIC_APP_INSTANCE)) — not the shared one,the shared default config directory)"
+	TUIC_APP_INSTANCE=$(TUIC_APP_INSTANCE) TUIC_PORT=$(TUIC_PORT) RUST_LOG=tuicommander_lib=debug,info pnpm tauri dev --no-watch -- --config 'target."cfg(target_os = \"macos\")".runner = ["python3", "$(CURDIR)/scripts/dev-exe-copy.py"]'
 
-# Build frontend + launch Tauri dev (for quick manual testing)
+# Build frontend + launch Tauri dev (for quick manual testing).
+#
+# Isolated by default (#763-d219): this target exists specifically for
+# throwaway manual verification, not as a daily-driver launch — unlike `make
+# dev`, which stays on the shared default config directory because it IS
+# Boss's actual long-running instance and switching it would look like every
+# repository had vanished. TUIC_APP_INSTANCE points this one at its own
+# `instances/tuic-test/` config namespace (see docs/backend/config.md), so a
+# verification session can add/remove repositories, worktrees, whatever it
+# needs, without ever touching production `repositories.json`. Override with
+# `make test TUIC_APP_INSTANCE=some-other-id`, or `TUIC_APP_INSTANCE= make
+# test` to opt back into the shared default instance for one run.
+#
+# Scoped to the `test` target on purpose (2026-09-17). Written as a bare
+# `TUIC_APP_INSTANCE?=tuic-test` this is a *global* make variable — position in
+# the file buys nothing — so `make dev` expanded it too and launched the daily
+# driver against an empty `instances/tuic-test/`, which is precisely the "every
+# repository had vanished" failure the paragraph above warns about. It cost no
+# data (production `repositories.json` was never opened) and a real scare.
+# Command-line and environment assignments still win over a target-specific
+# `?=`, so both overrides documented above keep working.
+test: TUIC_APP_INSTANCE?=tuic-test
 test:
 	@echo "Building Vite frontend..."
 	@pnpm exec vite build
-	@echo "Starting Tauri dev..."
-	TAURI_CLI_WATCHER_IGNORE_FILENAME=.taurignore pnpm tauri dev
+	@cd src-tauri && cargo build -p tuic-bridge -p fastaf-cli
+	@echo "Starting Tauri dev (isolated config instance: $(TUIC_APP_INSTANCE))..."
+	TAURI_CLI_WATCHER_IGNORE_FILENAME=.taurignore TUIC_APP_INSTANCE=$(TUIC_APP_INSTANCE) pnpm tauri dev
+
+# Agent desktop checks never use make dev/test or the daily executable.
+# Dedicated variables ignore inherited TUIC_* values; defaults cannot leak to dev.
+AGENT_TEST_INSTANCE?=agent-test
+AGENT_TEST_PORT?=19876
+AGENT_TEST_DRY_RUN?=0
+AGENT_TEST_SPEECH_OUTPUT?=0
+agent-test:
+	@python3 -B scripts/agent-test.py start --instance "$(AGENT_TEST_INSTANCE)" --port "$(AGENT_TEST_PORT)" $(if $(filter 1,$(AGENT_TEST_DRY_RUN)),--dry-run,) $(if $(filter 1,$(AGENT_TEST_SPEECH_OUTPUT)),--speech-output,)
+
+agent-test-stop:
+	@python3 -B scripts/agent-test.py stop --instance "$(AGENT_TEST_INSTANCE)" --port "$(AGENT_TEST_PORT)"
+
+# Reuse the already-authenticated isolated namespace across GitHub live checks.
+# Explicit recursive assignments prevent per-agent overrides from hiding its login.
+agent-test-github:
+	@$(MAKE) --no-print-directory agent-test AGENT_TEST_INSTANCE=agent-test-ghlive AGENT_TEST_PORT=19887
+
+agent-test-github-stop:
+	@$(MAKE) --no-print-directory agent-test-stop AGENT_TEST_INSTANCE=agent-test-ghlive AGENT_TEST_PORT=19887
 
 # Build .app only (default, fast — skips DMG)
 build:
 	@echo "Building FastAF $(VERSION)..."
-	pnpm tauri build
+	pnpm tauri build $(TAURI_BUILD_FLAGS)
 
 # Build .app + DMG (for distribution)
 build-dmg:
 	@echo "Building FastAF $(VERSION) with DMG..."
-	pnpm tauri build --bundles app,dmg
+	pnpm tauri build --bundles app,dmg $(TAURI_BUILD_FLAGS)
 
 # Auto-format frontend + Rust
 fmt:
 	@pnpm exec biome check --fix src/
 	@cd src-tauri && cargo fmt
 
+# Check the production embedding path; unit tests use fixed transport fixtures.
+check-desktop-embedding:
+	@bash scripts/check-desktop-embedding.sh
+
+# Local macOS landing gate for Chat CSS; real browser, isolated fixture Vite, no app launch.
+check-chat-readability:
+	@scripts/with-test-tmp.sh node scripts/check-chat-readability.mjs
+
 # Type-check, lint, format, and test (no Tauri build)
-check:
+check: test-shell check-desktop-embedding
 	@echo "Running checks..."
-	@rtk pnpm exec tsc --noEmit && echo "  tsc ✓"
-	@rtk pnpm exec biome check --max-diagnostics=100 src/ && echo "  biome ✓"
-	@rtk pnpm architecture:cycles && rtk pnpm architecture:cycles:test && echo "  architecture cycles ✓"
-	@bash -c 'caps=$$(sed -n "/const KNOWN_CAPABILITIES/,/];/p" src-tauri/src/plugins.rs | grep -oE "\"[a-z][a-z:_-]+\"" | tr -d "\""); miss=0; for c in $$caps; do for d in src-tauri/src/mcp_http/plugin_docs.rs docs/plugins.md; do grep -qF "$$c" "$$d" || { echo "  ✗ capability $$c missing from $$d"; miss=1; }; done; done; [ $$miss -eq 0 ]' && echo "  plugin-docs-sync ✓"
-	@cd src-tauri && rtk cargo fmt --check && echo "  rustfmt ✓"
-	@cd src-tauri && rtk cargo clippy --release -- -D warnings && echo "  clippy ✓"
-	@cd src-tauri && ulimit -n 10240 && rtk cargo nextest run --workspace && rtk cargo test --doc -q && echo "  rust tests ✓"
-	@bash -o pipefail -c 'rtk pnpm exec vitest run --reporter=dot 2>&1 | tail -3' && echo "  vitest ✓"
-	@bash -o pipefail -c 'rtk pnpm test:plugins 2>&1 | tail -3' && echo "  plugin tests ✓"
-	@rtk pnpm audit --audit-level=high && echo "  pnpm audit ✓"
-	@cd src-tauri && rtk err cargo audit -q --ignore RUSTSEC-2026-0097 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 && echo "  cargo audit ✓"
+	@scripts/with-test-tmp.sh $(RTK) pnpm exec tsc --noEmit && echo "  tsc ✓"
+	@scripts/with-test-tmp.sh $(RTK) pnpm exec biome check --max-diagnostics=100 src/ && echo "  biome ✓"
+	@scripts/with-test-tmp.sh $(RTK) pnpm architecture:cycles && scripts/with-test-tmp.sh $(RTK) pnpm architecture:cycles:test && echo "  architecture cycles ✓"
+	@scripts/with-test-tmp.sh bash -c 'caps=$$(sed -n "/const KNOWN_CAPABILITIES/,/];/p" src-tauri/src/plugins.rs | grep -oE "\"[a-z][a-z:_-]+\"" | tr -d "\""); miss=0; for c in $$caps; do for d in src-tauri/src/mcp_http/plugin_docs.rs docs/plugins.md; do grep -qF "$$c" "$$d" || { echo "  ✗ capability $$c missing from $$d"; miss=1; }; done; done; [ $$miss -eq 0 ]' && echo "  plugin-docs-sync ✓"
+	@scripts/with-test-tmp.sh bash scripts/check-make-instance-scope.sh && echo "  make-instance-scope ✓"
+	@scripts/with-test-tmp.sh bash scripts/check-make-dev-builds-sibling.sh && echo "  make-dev-builds-sibling ✓"
+	@cd src-tauri && ../scripts/with-test-tmp.sh $(RTK) cargo fmt --check && echo "  rustfmt ✓"
+# bm25 is a vendored third-party patch (patches/bm25): not ours to lint.
+	@cd src-tauri && ../scripts/with-test-tmp.sh $(RTK) cargo clippy --workspace --exclude bm25 --release -- -D warnings && echo "  clippy ✓"
+	@cd src-tauri && ulimit -n 10240 && ../scripts/with-test-tmp.sh $(RTK) cargo nextest run --workspace && ../scripts/with-test-tmp.sh $(RTK) cargo test --doc --workspace -q && echo "  rust tests ✓"
+	@bash -o pipefail -c 'scripts/with-test-tmp.sh $(RTK) pnpm exec vitest run --reporter=dot 2>&1 | tail -3' && echo "  vitest ✓"
+	@scripts/with-test-tmp.sh $(RTK) pnpm audit --audit-level=high && echo "  pnpm audit ✓"
+	@cd src-tauri && ../scripts/with-test-tmp.sh $(RTK_ERR) cargo audit -q && echo "  cargo audit ✓"
 
 # Rust coverage: cargo-llvm-cov + nextest. Terminal summary + HTML report.
 # Instrumented artifacts live in target/llvm-cov-target — the normal build
@@ -85,10 +178,24 @@ check:
 # included), so expect several minutes. Doctests are not measured
 # (doctest coverage requires nightly).
 cov:
-	@cd src-tauri && ulimit -n 10240 && rtk cargo llvm-cov nextest
-	@cd src-tauri && rtk cargo llvm-cov report --html
-	@cd src-tauri && rtk cargo llvm-cov report --lcov --output-path lcov.info
+	@cd src-tauri && ulimit -n 10240 && ../scripts/with-test-tmp.sh $(RTK) cargo llvm-cov nextest --workspace
+	@cd src-tauri && ../scripts/with-test-tmp.sh $(RTK) cargo llvm-cov report --html
+	@cd src-tauri && ../scripts/with-test-tmp.sh $(RTK) cargo llvm-cov report --lcov --output-path lcov.info
 	@echo "HTML report: src-tauri/target/llvm-cov/html/index.html"
+
+# Mutation testing over the Rust changes of a git range (default: last
+# commit). --in-diff only: one incremental build + one test run per mutant, so
+# a full-tree run is not offered. Runs --in-place in a disposable worktree
+# under .tmp/ — see scripts/mutants.sh for why not the default tree copy.
+RANGE?=HEAD~1
+MUTANTS_ARGS?=
+ifneq ($(filter mutants,$(MAKECMDGOALS)),)
+MUTANTS_TRAILING_ARGS := $(filter-out mutants,$(MAKECMDGOALS))
+.PHONY: $(MUTANTS_TRAILING_ARGS)
+$(MUTANTS_TRAILING_ARGS):
+endif
+mutants:
+	@scripts/mutants.sh $(RANGE) $(MUTANTS_ARGS) $(MUTANTS_TRAILING_ARGS)
 
 # CRAP metric (complexity² × uncovered³ + complexity) over the coverage data
 # from `make cov`. Thresholds and exclusions live in src-tauri/.cargo-crap.toml.
@@ -100,7 +207,7 @@ cov:
 # actually match.
 crap:
 	@cd src-tauri && test -f lcov.info || { echo "src-tauri/lcov.info missing — run 'make cov' first"; exit 1; }
-	@cd src-tauri && rtk cargo crap --lcov lcov.info --top 30
+	@cd src-tauri && $(RTK) cargo crap --lcov lcov.info --top 30
 
 # GitHub API debug logging — toggle at runtime, view logs
 gh-debug-on:
@@ -197,6 +304,7 @@ nightly:
 
 # Bump version across all manifests (no commit, no tag).
 # Usage: make bump V=0.6.2
+# Do not report a complete bump if release-note generation fails after version edits.
 bump:
 	@if [ -z "$(V)" ]; then echo "ERROR: specify version with V=x.y.z" && exit 1; fi; \
 	CUR=$$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'); \
@@ -215,7 +323,7 @@ bump:
 	sed -i '' 's/^## \[Unreleased\]/## [Unreleased]\n\n## [$(V)] - '"$$TODAY"'/' CHANGELOG.md; \
 	echo "  CHANGELOG.md          → $(V) ($$TODAY)"; \
 	echo "  release-notes.json   → generating..."; \
-	./scripts/generate-release-notes.sh $(V); \
+	./scripts/generate-release-notes.sh $(V) || { echo "ERROR: Release-note generation failed; version files are already updated. Release preparation is incomplete." >&2; exit 1; }; \
 	echo "==> Done. Run 'cargo check' or 'make github-release' to continue."
 
 # Generate AI-written release notes for a specific version.

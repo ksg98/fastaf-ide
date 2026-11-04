@@ -1,0 +1,14 @@
+# Every third-party action in .github/ is pinned to a full commit SHA with a
+# `# vX.Y.Z` comment (see .github/workflows/tests/test-supply-chain.py).
+# Dependabot reads that comment and opens a PR that moves the SHA and the
+# comment together, so the pins stay current without trusting a moving tag.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -25,11 +25,27 @@ describe("updateAppConfig", () => {
 		]);
 
 		expect(current).toEqual({ theme: "light", server_enabled: true });
+		expect(mockInvoke.mock.calls.filter(([command]) => command === "save_config").map(([, args]) => args)).toEqual([
+			{ base: { theme: "dark", server_enabled: false }, config: { theme: "light", server_enabled: false } },
+			{ base: { theme: "light", server_enabled: false }, config: { theme: "light", server_enabled: true } },
+		]);
 		expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual([
 			"load_config",
 			"save_config",
 			"load_config",
 			"save_config",
 		]);
+	});
+	it("keeps nested saved baselines isolated from the next config mutation", async () => {
+		mockInvoke.mockImplementation(async (command: string) =>
+			command === "load_config" ? { nested: { values: ["original"] } } : undefined,
+		);
+		await updateAppConfig<{ nested: { values: string[] } }>((config) => {
+			config.nested.values.push("edited");
+		});
+		expect(mockInvoke).toHaveBeenCalledWith("save_config", {
+			base: { nested: { values: ["original"] } },
+			config: { nested: { values: ["original", "edited"] } },
+		});
 	});
 });

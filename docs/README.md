@@ -15,8 +15,11 @@ Start with the [documentation home](index.md) or the [Getting Started](user-guid
 - [Settings](user-guide/settings.md) - Groups, diff panel, repository config
 - [Git Worktrees](user-guide/worktrees.md) - Worktree workflow, configuration, storage
 - [GitHub Integration](user-guide/github-integration.md) - PR monitoring, CI rings, merge state
+- [Project Progress](user-guide/project-progress.md) - Agent `done`/`blocked` journal, captured intents, storage, toggles
+- [Remote Access](user-guide/remote-access.md) - Mobile PWA, SSH tunnels, remote connections, the `tuic-remote` daemon
 - [Voice Dictation](user-guide/dictation.md) - Push-to-talk setup, models, corrections
 - [Prompt Library](user-guide/prompt-library.md) - Template management, variables
+- [Guided Event Configuration](user-guide/event-driven-templates.md) - Issue delivery, PR review and authorized repair setup
 
 ## Architecture
 
@@ -57,4 +60,4 @@ Start with the [documentation home](index.md) or the [Getting Started](user-guid
 
 - [Architecture overview](architecture/overview.md) — current system design
 - [Project history](guides/project-history.md) — historical milestones and repository context
-- [Product specification](https://github.com/sstraus/tuicommander/blob/main/SPEC.md) — product scope and implementation status
+- [Product specification](https://github.com/ksg98/fastaf-ide/blob/main/SPEC.md) — product scope and implementation status

@@ -109,7 +109,7 @@ fn process_content_inner(
 /// On Windows (`cmd /C`) we wrap in double quotes and escape embedded double
 /// quotes and shell metacharacters (`^`, `&`, `|`, `<`, `>`) with `^`. The two
 /// shells are invoked from `execute_shell_script` and share this entry point.
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     #[cfg(target_os = "windows")]
     {
         cmd_shell_quote(value)
@@ -510,13 +510,13 @@ mod tests {
     #[test]
     fn extract_variables_empty_string() {
         let vars = extract_variables("");
-        assert!(vars.is_empty());
+        assert_eq!(vars, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn extract_variables_no_vars() {
         let vars = extract_variables("Hello world!");
-        assert!(vars.is_empty());
+        assert_eq!(vars, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn extract_variables_unclosed_brace() {
         let vars = extract_variables("Hello {name");
-        assert!(vars.is_empty());
+        assert_eq!(vars, [] as [std::string::String; 0]);
     }
 
     // --- process_content tests ---
@@ -668,8 +668,8 @@ mod tests {
         // stdout text is not asserted (macOS /bin/sh may normalise trailing
         // quote artefacts); the security invariant we care about is that the
         // injected `touch` never executed.
-        let marker = std::env::temp_dir().join("tuictest_prompt_shell_safe_inject");
-        let _ = std::fs::remove_file(&marker);
+        let scratch = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let marker = scratch.path().join("tuictest_prompt_shell_safe_inject");
         let mut vars = HashMap::new();
         vars.insert(
             "branch".into(),

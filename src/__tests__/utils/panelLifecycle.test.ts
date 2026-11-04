@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockInvoke, mockEmitTo } = vi.hoisted(() => ({
 	mockInvoke: vi.fn().mockResolvedValue(undefined),
@@ -21,8 +21,10 @@ vi.mock("../../transport", () => ({
 	isTauri: () => true,
 }));
 
+import { createMarkdownDocumentPanelAdapter } from "../../panelAdapters/markdownDocument";
 import type { PanelAdapter } from "../../panelRouter";
 import { panelRegistry, registerPanel } from "../../panelRouter";
+import { mdTabsStore } from "../../stores/mdTabs";
 import { uiStore } from "../../stores/ui";
 
 function makeAdapter(overrides: Partial<PanelAdapter> = {}): PanelAdapter {
@@ -41,6 +43,7 @@ describe("panelLifecycle", () => {
 	let reattachPanel: typeof import("../../panelRouter").reattachPanel;
 
 	beforeEach(async () => {
+		mdTabsStore.clearAll();
 		mockInvoke.mockReset().mockResolvedValue(undefined);
 		mockEmitTo.mockReset().mockResolvedValue(undefined);
 
@@ -57,6 +60,10 @@ describe("panelLifecycle", () => {
 		detachPanel = mod.detachPanel;
 		togglePanel = mod.togglePanel;
 		reattachPanel = mod.reattachPanel;
+	});
+
+	afterEach(() => {
+		uiStore._testCancelPendingSave();
 	});
 
 	describe("togglePanel", () => {
@@ -102,6 +109,27 @@ describe("panelLifecycle", () => {
 	});
 
 	describe("detachPanel", () => {
+		it("opens a tuic://open Markdown document in a resizable panel window with its file path", async () => {
+			const tabId = mdTabsStore.addMcpFile("digest-1", "", "/Users/boss/report.md", false, false);
+			const adapter = createMarkdownDocumentPanelAdapter(tabId);
+			registerPanel(adapter);
+			await detachPanel(adapter.id);
+			expect(mockInvoke).toHaveBeenCalledWith("open_panel_window", {
+				panelId: adapter.id,
+				title: "report.md",
+				params: {
+					tabId,
+					filePath: "/Users/boss/report.md",
+					fileName: "report.md",
+					repoPath: "",
+					fsRoot: "",
+				},
+				width: 900,
+				height: 750,
+			});
+			expect(uiStore.isDetached(adapter.id)).toBe(true);
+		});
+
 		it("invokes open_panel_window with adapter config", async () => {
 			registerPanel(makeAdapter());
 

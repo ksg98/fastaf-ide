@@ -50,6 +50,27 @@ fi
 command -v curl >/dev/null || die "curl is required"
 command -v hdiutil >/dev/null || die "hdiutil is required"
 command -v ditto >/dev/null || die "ditto is required"
+command -v codesign >/dev/null || die "codesign is required to verify the download"
+
+# FastAF's Developer ID team. A bundle that is unsigned, ad-hoc signed, signed by
+# anyone else, or altered after signing never replaces the installed app: macOS
+# ties every permission the user granted (microphone, accessibility, files) to
+# this signature, and a download that only claims to be FastAF must not run.
+TEAM_ID="NH9933XQGX"
+
+# verify_signature <app>: die unless <app> carries an intact Developer ID
+# signature from FastAF's team.
+verify_signature() {
+  local app="$1" details
+  codesign --verify --deep --strict "$app" 2>/dev/null \
+    || die "the downloaded $APP_NAME failed signature verification (unsigned or altered). Nothing was installed."
+  details="$(codesign -dv --verbose=2 "$app" 2>&1)" \
+    || die "could not read the signature of the downloaded $APP_NAME. Nothing was installed."
+  grep -q '^Authority=Developer ID Application: ' <<<"$details" \
+    || die "the downloaded $APP_NAME is not signed with a Developer ID certificate. Nothing was installed."
+  grep -qx "TeamIdentifier=$TEAM_ID" <<<"$details" \
+    || die "the downloaded $APP_NAME is signed by another team, not FastAF's ($TEAM_ID). Nothing was installed."
+}
 
 # ── Resolve the release and its .dmg ─────────────────────────────────────────
 if [[ -n "$VERSION" ]]; then
@@ -87,7 +108,9 @@ note "Release $TAG"
 # ── Skip a no-op update ──────────────────────────────────────────────────────
 TARGET_APP="$INSTALL_DIR/$APP_NAME"
 INSTALLED=""
-if [[ -d "$TARGET_APP" ]]; then
+# Only from a real Info.plist: for a missing file PlistBuddy prints "File Doesn't
+# Exist, Will Create: <path>" and succeeds, and that text then named the backup.
+if [[ -f "$TARGET_APP/Contents/Info.plist" ]]; then
   INSTALLED="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$TARGET_APP/Contents/Info.plist" 2>/dev/null || true)"
 fi
@@ -177,16 +200,35 @@ if ! ditto "$SRC_APP" "$STAGED" 2>/dev/null; then
   die "cannot write to $INSTALL_DIR — re-run with sudo, or use --to ~/Applications"
 fi
 
+# The staged copy is what gets swapped in, so that is the copy to check.
+note "Verifying the signature"
+if ! ( verify_signature "$STAGED" ); then
+  rm -rf "$STAGED"
+  exit 1
+fi
+
+# Move the installed app aside, move the new one in, and only then drop the old
+# one: a failure at any step leaves a working FastAF.app behind.
+BACKUP=""
 if [[ -d "$TARGET_APP" ]]; then
   BACKUP="$INSTALL_DIR/$APP_NAME.bak-${INSTALLED:-prev}-$(date +%Y%m%d%H%M%S)"
-  mv "$TARGET_APP" "$BACKUP"
+  if ! mv "$TARGET_APP" "$BACKUP"; then
+    rm -rf "$STAGED"
+    die "cannot move the installed $APP_NAME aside. Nothing was installed."
+  fi
+fi
+if ! mv "$STAGED" "$TARGET_APP"; then
+  [[ -n "$BACKUP" ]] && mv "$BACKUP" "$TARGET_APP"
+  rm -rf "$STAGED"
+  die "could not move the new $APP_NAME into place. The previous version was restored."
+fi
+if [[ -n "$BACKUP" ]]; then
   if [[ $KEEP_BACKUP -eq 1 ]]; then
     note "Previous version kept at $BACKUP"
   else
     rm -rf "$BACKUP" || true
   fi
 fi
-mv "$STAGED" "$TARGET_APP"
 
 note "Installed FastAF ${TAG#v} to $TARGET_APP"
 note "Launch it with:  open -a FastAF"

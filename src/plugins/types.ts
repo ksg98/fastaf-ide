@@ -6,6 +6,21 @@
  * at runtime from {config_dir}/plugins/ via the plugin:// URI protocol.
  */
 
+import type { ReviewThreadsPage } from "../components/PrDiffTab/reviewThreads";
+import type { WorkItemRef } from "../types/work-items.gen";
+import type { PluginSettingsAction } from "./pluginSettings";
+
+export type { PluginSettingsAction, PluginSettingsDefinition } from "./pluginSettings";
+
+/** Account-scoped requests reuse the core B6/B7 policy and reviewed-head checks. */
+export type GitHubPrRequest =
+	| { action: "state" }
+	| { action: "auto_merge"; enabled: boolean; mergeMethod?: string; expectedHeadSha?: string }
+	| { action: "queue"; enqueued: boolean; expectedHeadSha?: string }
+	| { action: "merge"; mergeMethod: string; expectedHeadSha: string }
+	| { action: "rerun"; runId: number }
+	| { action: "review"; draft: { headSha: string; body: string; event: string; comments: unknown[] } };
+
 // ---------------------------------------------------------------------------
 // Disposable
 // ---------------------------------------------------------------------------
@@ -212,7 +227,7 @@ export interface StateChangeEvent {
 		| "awaiting-input-changed";
 	sessionId: string | null;
 	terminalId: string;
-	/** For branch-changed: the new branch name. For repo-changed: the new repo path (or null). */
+	/** New branch, repo path, shell state or awaiting-input kind; undefined when cleared. */
 	detail?: string;
 }
 
@@ -375,12 +390,19 @@ export interface HttpResponse {
 
 /** Options for an HTTP fetch request. */
 export interface HttpFetchOptions {
+	/** Cancels the backend request, including response body collection. */
+	signal?: AbortSignal;
 	/** HTTP method (default: "GET") */
 	method?: string;
 	/** Request headers */
 	headers?: Record<string, string>;
 	/** Request body */
 	body?: string;
+	/**
+	 * Account id. Rust injects the account credential; the URL must be under the
+	 * account host, and the manifest must declare the account's provider.
+	 */
+	account?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +446,7 @@ export interface DashboardOptions {
 	label?: string;
 	/** Optional inline SVG icon rendered before the label. */
 	icon?: string;
-	/** Called when the user clicks the dashboard button in Settings → Plugins. */
+	/** Called when the user clicks the dashboard button in Settings › Manage plugins. */
 	open: () => void | Promise<void>;
 }
 
@@ -454,8 +476,8 @@ export interface PanelHandle {
 	isVisible(): boolean;
 	/** Close the panel tab */
 	close(): void;
-	/** Send a message to the iframe via postMessage */
-	send(data: unknown): void;
+	/** Send a message to the iframe via postMessage, optionally transferring ownership. */
+	send(data: unknown, transfer?: Transferable[]): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +506,32 @@ export const INVOKE_WHITELIST: readonly string[] = [
  * - Tier 4: Scoped Tauri invoke (whitelisted commands only)
  */
 export interface PluginHost {
+	/** Describe/read/patch this plugin's registered settings. Secrets read as set/unset. */
+	settings(action: PluginSettingsAction): Promise<unknown>;
+	/** Register a data-only Tasks provider; auto-disposed on unload. */
+	registerWorkItemProvider(provider: import("./workItemProvider").WorkItemProvider): Disposable;
+
+	/** Link a worktree branch to a work item; the sidebar shows its key and state. Persisted. */
+	linkItem(repoPath: string, branch: string, link: import("../types/workItemLinks").WorkItemLink): Promise<void>;
+
+	/** Remove the work-item link of a worktree branch. Resolves true when a link existed. */
+	unlinkItem(repoPath: string, branch: string): Promise<boolean>;
+
+	/**
+	 * Create a worktree and branch, launch an agent from the repo's run config and
+	 * type `prompt` into it as an untrusted brief. Delivery defaults to "draft"
+	 * (Enter left to the user). Requires "pty:write" capability.
+	 */
+	startWork(
+		request: import("../hooks/git/startWork").StartWorkRequest,
+	): Promise<import("../hooks/git/startWork").StartWorkResult>;
+
+	/** Claim pasted URLs in the command palette; return null for a URL that is not yours. Auto-disposed on unload. */
+	registerUrlResolver(resolver: import("../components/CommandPalette/urlPaste").UrlResolver): Disposable;
+
 	// -- Tier 0: Logging (always available) --
 
-	/** Write a message to this plugin's log (visible in Settings > Plugins). */
+	/** Write a message to this plugin's log (visible in Settings › Manage plugins). */
 	log(level: "debug" | "info" | "warn" | "error", message: string, data?: unknown): void;
 
 	// -- Tier 1: Activity Center + watchers + providers (always available) --
@@ -590,6 +635,12 @@ export interface PluginHost {
 	 */
 	getGitDiff(repoPath: string, scope?: "staged" | "unstaged"): Promise<string>;
 
+	/**
+	 * List the git remotes of a repository. Requires "git:read" capability.
+	 * Credentials embedded in a remote URL are removed.
+	 */
+	getRemotes(repoPath: string): Promise<import("../types/workItemLinks").GitRemote[]>;
+
 	// -- Tier 3: Write actions (capability-gated) --
 
 	/**
@@ -628,6 +679,9 @@ export interface PluginHost {
 	 */
 	sendAgentInput(sessionId: string, text: string): Promise<void>;
 
+	/** Atomically submit only to an idle agent without an awaiting question or tracked draft. */
+	sendAgentInputIfEmpty(sessionId: string, text: string): Promise<boolean>;
+
 	/**
 	 * Read the VT100-decoded contents of a PTY session: the last N scrollback
 	 * lines concatenated with the current visible screen rows, joined by
@@ -640,7 +694,7 @@ export interface PluginHost {
 
 	/**
 	 * Register a dashboard entry point for this plugin.
-	 * Adds a "Dashboard" button to the plugin row in Settings → Plugins.
+	 * Adds a "Dashboard" button to the plugin row in Settings › Manage plugins.
 	 * Clicking it invokes `open()` — typically the plugin opens its main markdown
 	 * tab or HTML panel inside the callback.
 	 *
@@ -669,6 +723,13 @@ export interface PluginHost {
 	openMarkdownFile(absolutePath: string): void;
 
 	/**
+	 * Open a local markdown file as a pinned background tab without changing the
+	 * active pane. Returns false when no registered repository owns the path.
+	 * Requires "ui:markdown" capability. Path must be absolute.
+	 */
+	openMarkdownFileBackground(absolutePath: string): boolean;
+
+	/**
 	 * Play a notification sound. Requires "ui:sound" capability.
 	 * @param sound - One of NOTIFICATION_SOUNDS ("question" | "error" | "completion" | "warning" | "info"). Defaults to "info".
 	 */
@@ -690,8 +751,8 @@ export interface PluginHost {
 	 */
 	readFiles(absolutePaths: string[]): Promise<(string | null)[]>;
 
-	/** Read a file as base64-encoded bytes. Path must be absolute and within $HOME. Requires "fs:read". */
-	readFileBase64(absolutePath: string): Promise<string>;
+	/** Read a file as base64 bytes. Defaults to 10 MiB; maxBytes is positive and host-capped at 512 MiB. Requires "fs:read". */
+	readFileBase64(absolutePath: string, options?: { maxBytes?: number }): Promise<string>;
 
 	/**
 	 * Read the last N bytes of a file, skipping partial first line.
@@ -710,6 +771,9 @@ export interface PluginHost {
 
 	/** Write content to a file. Path must be absolute and within $HOME. Requires "fs:write". */
 	writeFile(absolutePath: string, content: string): Promise<void>;
+
+	/** Atomically write Base64 bytes. Defaults to 10 MiB; maxBytes is host-capped at 512 MiB. Requires "fs:write". */
+	writeFileBase64(absolutePath: string, content: string, options?: { maxBytes?: number }): Promise<void>;
 
 	/**
 	 * Rename/move a file. Both paths must be absolute and within $HOME. Requires "fs:rename".
@@ -815,6 +879,10 @@ export interface PluginHost {
 	 * Non-2xx status codes are returned normally (not thrown as errors).
 	 */
 	httpFetch(url: string, options?: HttpFetchOptions): Promise<HttpResponse>;
+	/** Read B6 enriched review threads using the selected GitHub account. Requires net:http. */
+	githubReviewThreads(account: string, reference: WorkItemRef, after: string | null): Promise<ReviewThreadsPage>;
+	/** Execute B7 policy through core using the selected GitHub account. Requires net:http. */
+	githubPrAction(account: string, reference: WorkItemRef, request: GitHubPrRequest): Promise<unknown>;
 
 	// -- Tier 3g: CLI execution (capability-gated) --
 
@@ -850,9 +918,10 @@ export interface TuiPlugin {
 	id: string;
 	/**
 	 * Called once when the plugin is registered.
-	 * Register sections, watchers, providers here.
+	 * Register sections, watchers, providers here. Async work is awaited.
+	 * The signal is aborted on unload/replacement; old host calls then throw.
 	 */
-	onload(host: PluginHost): void;
+	onload(host: PluginHost, signal?: AbortSignal): void | Promise<void>;
 	/**
 	 * Called when the plugin is unregistered.
 	 * Must dispose all Disposables obtained in onload().

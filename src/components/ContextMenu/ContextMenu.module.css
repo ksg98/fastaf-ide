@@ -4,7 +4,7 @@
 
 .menu {
   position: fixed;
-  min-width: 190px;
+  min-width: min(190px, calc(100vw - 16px));
   padding: 4px;
   overflow-y: auto;
   z-index: var(--z-dropdown);
@@ -84,7 +84,7 @@
 .submenu {
   position: fixed;
   width: max-content;
-  min-width: 170px;
+  min-width: min(170px, calc(100vw - 16px));
   max-height: 400px;
   overflow-y: auto;
   padding: 4px;

@@ -124,13 +124,22 @@ describe("ProvidersTab", () => {
 		expect(mockStore.removeProvider).toHaveBeenCalledWith("anthropic-main");
 	});
 
+	// Catches: the Providers page left on the pre-2.0 layout (bare h3 runs) while
+	// every other Settings page has a page header and cards.
+	it("opens with the page header and puts providers and slots in cards", () => {
+		const { container } = render(() => <ProvidersTab />);
+		expect(container.querySelector("[data-settings-page-header] h2")?.textContent).toBe("Providers");
+		const cards = Array.from(container.querySelectorAll("section h3")).map((h) => h.textContent);
+		expect(cards).toEqual(["Configured providers", "Slot assignments"]);
+	});
+
 	// -- Add provider form --
 
 	it("shows add provider form when + Add clicked", () => {
 		const { getByTestId, getByText } = render(() => <ProvidersTab />);
 		fireEvent.click(getByTestId("add-provider-btn"));
 		expect(getByTestId("add-provider-form")).toBeTruthy();
-		expect(getByText("Add Provider")).toBeTruthy();
+		expect(getByText("Add provider")).toBeTruthy();
 	});
 
 	it("cancels add provider form", () => {
@@ -336,15 +345,14 @@ describe("ProvidersTab", () => {
 		expect(getByTestId("slot-assignments")).toBeTruthy();
 	});
 
-	it("renders all 3 slot rows", () => {
-		const { getByTestId } = render(() => <ProvidersTab />);
-		for (const slot of ["main", "triage", "headless"]) {
+	it("renders the main and headless slot rows, without the retired triage slot", () => {
+		const { getByTestId, queryByTestId } = render(() => <ProvidersTab />);
+		for (const slot of ["main", "headless"]) {
 			expect(getByTestId(`slot-row-${slot}`)).toBeTruthy();
 		}
 		// headless slot-select is only shown when External API is active
-		for (const slot of ["main", "triage"]) {
-			expect(getByTestId(`slot-select-${slot}`)).toBeTruthy();
-		}
+		expect(getByTestId("slot-select-main")).toBeTruthy();
+		expect(queryByTestId("slot-row-triage")).toBeNull();
 	});
 
 	it("calls setSlot when slot dropdown changes", () => {

@@ -12,6 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 // Force isTauri() = true so persistence paths execute.
 vi.mock("../../transport", () => ({
 	isTauri: () => true,
+	owningConnectionFor: () => undefined,
+	rpc: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../stores/appLogger", () => ({
@@ -266,7 +268,7 @@ describe("conversationStore streaming — per-terminal (1408-a8d8)", () => {
 		store.setActiveTerminal("T1");
 		expect(store.isStreaming()).toBe(false);
 		const msgs = store.messages();
-		expect(msgs[msgs.length - 1]?.content).toBe("T1 response");
+		expect(msgs.at(-1)?.content).toBe("T1 response");
 
 		// T2 should still be streaming
 		store.setActiveTerminal("T2");

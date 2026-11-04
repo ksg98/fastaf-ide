@@ -3,7 +3,7 @@ import type { Disposable } from "./types";
 
 /**
  * Dashboard entry registered by a plugin via host.registerDashboard().
- * Powers the "Dashboard" button in Settings → Plugins for plugins that have
+ * Powers the "Dashboard" button in Settings › Manage plugins for plugins that have
  * a primary view (markdown tab or HTML panel) worth opening with one click.
  */
 export interface DashboardEntry {

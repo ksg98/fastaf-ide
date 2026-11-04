@@ -1,13 +1,21 @@
-//! AI improvement proposals for GitHub Ops.
+//! Improvement proposals for GitHub Ops, written by FastAF's built-in engine.
 //!
-//! This is intentionally a one-shot Headless-slot LLM call over a deterministic
-//! local repo snapshot. It does not run the autonomous agent engine and it never
-//! creates GitHub issues by itself; issue creation is a separate explicit command.
+//! Upstream runs this as an ego turn; FastAF runs it as one unattended turn on
+//! its own Headless provider slot (`llm_api::ask`), so it needs no ego. One
+//! turn over a deterministic local snapshot — the working
+//! tree plus the last twelve commits, assembled here rather than left for the
+//! model to go and find. Two properties that are the whole point:
+//!
+//! * **The snapshot is ours.** The turn has no tools, so what the model sees
+//!   is exactly what this module put in the prompt. That makes a
+//!   scan reproducible and keeps "do not invent facts outside the supplied
+//!   snapshot" a rule the prompt can actually hold the model to.
+//! * **It never files an issue.** Creating one is a separate command a person
+//!   invokes per proposal. A scan that could open issues by itself would be an
+//!   agent, which is the thing story 784 deleted.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-
-const IMPROVEMENT_SCAN_TIMEOUT_MS: u64 = 90_000;
 
 const IMPROVEMENT_SCAN_SYSTEM_PROMPT: &str = "\
 You are a senior software maintainer. Given a repository snapshot, propose a small \
@@ -66,11 +74,15 @@ struct ProposalEnvelope {
     proposals: Vec<ImprovementProposal>,
 }
 
-#[cfg(feature = "desktop")]
+/// Dual-emit, the same shape as `emit_review_progress` and
+/// `remote_runtime::publish`: only the window emit is gated on the desktop
+/// feature. `POST /repo/improvement-scan` is mounted unconditionally, and
+/// nothing but this event tells a browser client the scan is over.
 fn emit_proposals_ready(state: &crate::AppState, repo_path: &str, result: &ImprovementScanResult) {
-    use tauri::Emitter;
     let payload = serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}));
+    #[cfg(feature = "desktop")]
     if let Some(app) = state.app_handle.read().clone() {
+        use tauri::Emitter;
         let _ = app.emit(
             "proposals-ready",
             serde_json::json!({ "repo_path": repo_path, "payload": payload }),
@@ -84,18 +96,16 @@ fn emit_proposals_ready(state: &crate::AppState, repo_path: &str, result: &Impro
         });
 }
 
-#[cfg(not(feature = "desktop"))]
-fn emit_proposals_ready(
-    _state: &crate::AppState,
-    _repo_path: &str,
-    _result: &ImprovementScanResult,
-) {
-}
-
+/// Read the model's answer into proposals worth showing.
+///
+/// Strict where the changelog is lenient, and for a reason: a changelog that
+/// came back as prose is still a changelog, while a proposal that lost its
+/// `issue_body` is a card with a button that would file an empty issue. An
+/// incomplete proposal is dropped rather than repaired.
 pub(crate) fn parse_improvement_output(raw: &str) -> Result<Vec<ImprovementProposal>, String> {
-    let candidate = crate::diff_triage::extract_json(raw);
+    let candidate = crate::llm_api::extract_json(raw);
     let envelope: ProposalEnvelope = serde_json::from_str(candidate)
-        .map_err(|e| format!("Failed to parse proposals JSON: {e}"))?;
+        .map_err(|e| crate::llm_api::unparseable("proposals", e, candidate))?;
     Ok(envelope
         .proposals
         .into_iter()
@@ -205,7 +215,7 @@ pub(crate) fn proposal_issue_text(proposal: &ImprovementProposal) -> (String, St
 pub(crate) async fn run_improvement_scan_impl(
     repo_path: String,
     focus: ImprovementFocus,
-    state: &crate::AppState,
+    state: &std::sync::Arc<crate::AppState>,
 ) -> Result<ImprovementScanResult, String> {
     let status = crate::git::get_working_tree_status(repo_path.clone()).await?;
     let commits = tokio::task::spawn_blocking({
@@ -215,12 +225,7 @@ pub(crate) async fn run_improvement_scan_impl(
     .await
     .map_err(|e| format!("commit log task failed: {e}"))??;
     let prompt = build_improvement_prompt(&repo_path, focus, &status, &commits);
-    let raw = crate::llm_api::execute_api_prompt(
-        Some(IMPROVEMENT_SCAN_SYSTEM_PROMPT.to_string()),
-        prompt,
-        IMPROVEMENT_SCAN_TIMEOUT_MS,
-    )
-    .await?;
+    let raw = crate::llm_api::ask(IMPROVEMENT_SCAN_SYSTEM_PROMPT, prompt).await?;
     let proposals = parse_improvement_output(&raw)?;
     let result = ImprovementScanResult {
         repo_path: repo_path.clone(),
@@ -265,6 +270,34 @@ pub(crate) async fn create_issue_from_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same rule as `emit_review_progress`: `POST /repo/improvement-scan`
+    /// is mounted unconditionally, so the scan a browser starts against a
+    /// headless build has to announce its proposals on the bus. Nothing else
+    /// tells that client the scan is over.
+    #[test]
+    fn proposals_ready_reaches_the_bus_on_every_build() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let mut events = state.event_bus.subscribe();
+        let result = ImprovementScanResult {
+            repo_path: "/repo".to_string(),
+            focus: ImprovementFocus::Refactor,
+            proposals: Vec::new(),
+        };
+
+        emit_proposals_ready(&state, "/repo", &result);
+
+        match events
+            .try_recv()
+            .expect("the finished scan reaches the event bus")
+        {
+            crate::state::AppEvent::ProposalsReady { repo_path, payload } => {
+                assert_eq!(repo_path, "/repo");
+                assert_eq!(payload["repo_path"], "/repo");
+            }
+            other => panic!("expected ProposalsReady, got {other:?}"),
+        }
+    }
 
     fn sample_status() -> crate::git::WorkingTreeStatus {
         crate::git::WorkingTreeStatus {
@@ -321,10 +354,33 @@ mod tests {
         assert_eq!(proposals[0].labels, vec!["tech-debt"]);
     }
 
+    // An unusable answer must carry what ego actually said. "Failed to parse"
+    // on its own sends a person to the logs for something the toast already had.
     #[test]
-    fn parse_output_errors_on_unparseable_json() {
+    fn parse_output_errors_on_unparseable_json_and_quotes_the_answer() {
         let err = parse_improvement_output("not json at all").unwrap_err();
-        assert!(err.contains("Failed to parse proposals JSON"));
+        assert!(err.contains("proposals"), "{err}");
+        assert!(err.contains("not json at all"), "{err}");
+    }
+
+    // Five is the prompt's limit; a model that ignores it must not be able to
+    // push an unbounded list into the dashboard.
+    #[test]
+    fn no_more_than_five_proposals_survive_however_many_arrive() {
+        let one = r#"{"title":"T","summary":"S","rationale":"R","issue_title":"I","issue_body":"B","impact":"low","effort":"small"}"#;
+        let raw = format!("{{\"proposals\":[{}]}}", [one; 9].join(","));
+
+        assert_eq!(parse_improvement_output(&raw).unwrap().len(), 5);
+    }
+
+    // An envelope with no proposals at all is an answer, not a failure: the
+    // model looked and found nothing worth proposing.
+    #[test]
+    fn an_empty_proposal_list_is_not_an_error() {
+        assert_eq!(
+            parse_improvement_output(r#"{"proposals":[]}"#).unwrap(),
+            [] as [crate::improvement_scan::ImprovementProposal; 0]
+        );
     }
 
     #[test]

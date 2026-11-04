@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(feed(&mut d, 0.05, ms_to_frames(800)), TurnEvent::SpeechEnd);
         assert!(!d.is_speaking());
         let audio = d.take_utterance().expect("utterance should be available");
-        assert!(!audio.is_empty());
+        assert_ne!(audio.len(), 0);
         // Taking it twice must not hand out the same turn again.
         assert!(d.take_utterance().is_none());
     }

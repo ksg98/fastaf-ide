@@ -325,12 +325,6 @@
 }
 
 /* Ticker popover (right-click) */
-.tickerOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-}
-
 .tickerPopover {
   position: fixed;
   bottom: calc(var(--status-height) + 8px);
@@ -361,7 +355,11 @@
   background: transparent;
 }
 
+
 .tickerPopoverClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--fg-muted);
@@ -435,12 +433,6 @@
 }
 
 /* Info balloon (click on truncated status info) */
-.infoBalloonOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-}
-
 .infoBalloon {
   position: fixed;
   bottom: calc(var(--status-height) + 8px);
@@ -561,3 +553,23 @@
     animation: none;
   }
 }
+
+/* A remote machine holding registered repos is not answering. Deliberately in
+   the status bar and not only in Settings: the user must be able to see the
+   cause without going looking for it. */
+.remoteOffline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(var(--error-rgb, 248, 113, 113), 0.12);
+  font-size: var(--font-xs);
+  color: var(--error);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.toggleBtn { position: relative; overflow: visible; }
+@media (max-width: 600px) { .bar { height: auto; min-height: 44px; } }

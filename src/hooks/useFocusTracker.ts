@@ -103,8 +103,8 @@ function resolveRestoreTarget(newRepoPath: string | null): FocusTarget | null {
 
 	// Fallback: active terminal of the new repo's active branch.
 	const repo = repositoriesStore.get(newRepoPath);
-	if (repo?.activeBranch) {
-		const branch = repo.branches[repo.activeBranch];
+	if (repo?.activeWorkspaceId) {
+		const branch = repo.workspaces[repo.activeWorkspaceId];
 		const termId = branch?.lastActiveTerminal ?? branch?.terminals[0];
 		if (termId) return { kind: "terminal", terminalId: termId };
 	}

@@ -1,30 +1,50 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import { dictationStore } from "../../stores/dictation";
+import { t } from "../../i18n";
+import { dictationStore, playbackState } from "../../stores/dictation";
+import { Button } from "../ui/Button";
 import styles from "./DictationToast.module.css";
+import { handsFreePhaseLabel } from "./handsFreePhaseLabel";
 import { MicMeter } from "./MicMeter";
 
 /**
  * Floating toast that shows partial transcription results during streaming
- * dictation. Positioned above the status bar, auto-shows when partials arrive
- * and hides when recording stops.
+ * dictation, and the meter plus phase for as long as a hands-free
+ * conversation is armed. Positioned above the status bar; hides when neither
+ * is active.
  */
 export function DictationToast() {
 	const [visible, setVisible] = createSignal(false);
 	const [exiting, setExiting] = createSignal(false);
+	const handsFreeArmed = () => dictationStore.state.handsFree?.armed === true;
+	/** A replies-only conversation holds no microphone: its meter would be a flat line. */
+	const listeningConversation = () => handsFreeArmed() && dictationStore.state.handsFree?.listening !== false;
+	const playback = () => playbackState(dictationStore.state.speech);
+	const active = () =>
+		dictationStore.state.recording || listeningConversation() || (handsFreeArmed() && playback() !== "idle");
+	const spokenReplies = () => dictationStore.state.spokenReplies;
+
+	/** What the toast says when no partial transcript is showing. */
+	const statusText = () => {
+		if (!listeningConversation() && playback() === "idle") return "Listening";
+		if (playback() === "paused") return t("dictation.phasePaused", "Paused");
+		if (playback() === "speaking") return t("dictation.phaseSpeaking", "Speaking");
+		return handsFreePhaseLabel(dictationStore.state.handsFree?.phase);
+	};
 
 	// Show the preview as soon as capture starts, so the meter confirms input
 	// before Whisper has produced its first partial transcription — and keep it
 	// up while an AI rewrite is running.
 	createEffect(() => {
-		if (dictationStore.state.recording || dictationStore.state.partialText || dictationStore.state.rewriting) {
+		if (active() || dictationStore.state.partialText || dictationStore.state.rewriting) {
 			setExiting(false);
 			setVisible(true);
 		}
 	});
 
-	// Auto-hide when recording stops (but stay visible while rewriting)
+	// Auto-hide when recording stops and no conversation is armed (but stay
+	// visible while an AI rewrite is running)
 	createEffect(() => {
-		if (!dictationStore.state.recording && !dictationStore.state.rewriting && visible()) {
+		if (!active() && !dictationStore.state.rewriting && visible()) {
 			setExiting(true);
 			const timer = setTimeout(() => {
 				setVisible(false);
@@ -37,12 +57,112 @@ export function DictationToast() {
 	return (
 		<Show when={visible()}>
 			<div class={styles.toast} data-exiting={exiting()}>
-				<span class={styles.indicator} />
-				<MicMeter level={dictationStore.state.audioLevel} />
+				<Show
+					when={listeningConversation()}
+					fallback={
+						<>
+							<span class={styles.indicator} />
+							<MicMeter level={dictationStore.state.audioLevel} />
+						</>
+					}
+				>
+					{/* A conversation stays open for minutes, so its meter is one calm
+					    level line: no pulsing dot, no animated ellipsis. The store
+					    already gates the room noise and eases the fall. */}
+					<span
+						class={styles.voiceMeter}
+						role="meter"
+						aria-label={`Voice level ${Math.round(dictationStore.state.audioLevel * 100)}%`}
+						aria-valuemin="0"
+						aria-valuemax="100"
+						aria-valuenow={Math.round(dictationStore.state.audioLevel * 100)}
+					>
+						<span class={styles.voiceFill} style={{ transform: `scaleX(${dictationStore.state.audioLevel})` }} />
+					</span>
+				</Show>
 				<span class={styles.text}>
-					{dictationStore.state.rewriting ? "Rewriting with AI" : dictationStore.state.partialText || "Listening"}
-					<span class={styles.dots} />
+					{dictationStore.state.rewriting ? "Rewriting with AI" : dictationStore.state.partialText || statusText()}
+					<Show when={!listeningConversation()}>
+						<span class={styles.dots} />
+					</Show>
 				</span>
+				<Show when={handsFreeArmed() && playback() !== "idle"}>
+					<span class={styles.controls}>
+						<Show
+							when={playback() === "paused"}
+							fallback={
+								<Button
+									shape="icon"
+									variant="ghost"
+									type="button"
+									class={styles.control}
+									aria-label={t("dictation.pauseReply", "Pause reply")}
+									onClick={() => void dictationStore.pauseSpeech()}
+								>
+									<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+										<rect x="3" y="2" width="3.5" height="12" rx="1" />
+										<rect x="9.5" y="2" width="3.5" height="12" rx="1" />
+									</svg>
+								</Button>
+							}
+						>
+							<Button
+								shape="icon"
+								variant="ghost"
+								type="button"
+								class={styles.control}
+								aria-label={t("dictation.resumeReply", "Resume reply")}
+								onClick={() => void dictationStore.resumeSpeech()}
+							>
+								<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+									<path d="M4 2.5v11a.5.5 0 0 0 .76.43l9-5.5a.5.5 0 0 0 0-.86l-9-5.5A.5.5 0 0 0 4 2.5z" />
+								</svg>
+							</Button>
+						</Show>
+						<Button
+							shape="icon"
+							variant="ghost"
+							type="button"
+							class={styles.control}
+							aria-label={t("dictation.stopReply", "Stop reply")}
+							onClick={() => void dictationStore.stopSpeech()}
+						>
+							<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+								<rect x="3" y="3" width="10" height="10" rx="1.5" />
+							</svg>
+						</Button>
+					</span>
+				</Show>
+				<Show when={handsFreeArmed()}>
+					<Button
+						shape="icon"
+						variant="ghost"
+						type="button"
+						class={styles.control}
+						classList={{ [styles.controlOff]: !spokenReplies() }}
+						aria-label={t("dictation.spokenRepliesToggle", "Spoken replies")}
+						aria-pressed={spokenReplies()}
+						title={
+							spokenReplies()
+								? t("dictation.spokenRepliesOnTitle", "Spoken replies on: click to turn off")
+								: t("dictation.spokenRepliesOffTitle", "Spoken replies off: click to turn on")
+						}
+						onClick={() => dictationStore.setSpokenReplies(!spokenReplies())}
+					>
+						<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+							<path d="M2 6h2.5L8 3v10L4.5 10H2z" />
+							<Show
+								when={spokenReplies()}
+								fallback={
+									<path d="M10.5 6.2l3 3.6m0-3.6l-3 3.6" stroke="currentColor" stroke-width="1.4" fill="none" />
+								}
+							>
+								<path d="M10.2 5.8a3.2 3.2 0 0 1 0 4.4" stroke="currentColor" stroke-width="1.4" fill="none" />
+								<path d="M11.9 4.2a5.5 5.5 0 0 1 0 7.6" stroke="currentColor" stroke-width="1.4" fill="none" />
+							</Show>
+						</svg>
+					</Button>
+				</Show>
 			</div>
 		</Show>
 	);

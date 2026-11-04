@@ -19,8 +19,8 @@ function makePlugin(id: string, onload?: (host: PluginHost) => void, onunload?: 
 	};
 }
 
-beforeEach(() => {
-	pluginRegistry.clear();
+beforeEach(async () => {
+	await pluginRegistry.clear();
 	contextMenuActionsStore.clear();
 	activityStore.clearAll();
 	markdownProviderRegistry.clear();

@@ -11,7 +11,7 @@ vi.mock("../../transport", () => ({
 }));
 
 import { __resetMcpConfirmQueue, answerMcpConfirm, pendingConfirm, subscribeMcpConfirm } from "../../stores/mcpConfirm";
-import { rpc, subscribeEvents } from "../../transport";
+import { rpc } from "../../transport";
 
 const mockRpc = vi.mocked(rpc);
 
@@ -26,12 +26,16 @@ describe("mcpConfirm store", () => {
 		await subscribeMcpConfirm();
 	});
 
-	it("subscribes to both the request and the resolution", () => {
-		// Without the resolution event a dialog answered on another device would
-		// stay on screen here forever, since nothing else retracts it.
-		const calls = vi.mocked(subscribeEvents).mock.calls;
-		const types = calls[calls.length - 1][0];
-		expect(Object.keys(types).sort()).toEqual(["mcp-confirm", "mcp-confirm-resolved"]);
+	it("advances the visible queue when another client resolves the first request", () => {
+		// Catches: missing request/resolution delivery leaves a stale dialog blocking the next question.
+		emitRequest("r1", "First");
+		emitRequest("r2", "Second");
+		expect(pendingConfirm()?.title).toBe("First");
+		handlers["mcp-confirm-resolved"]({ request_id: "r1", confirmed: true });
+		expect(pendingConfirm()?.title).toBe("Second");
+		handlers["mcp-confirm-resolved"]({ request_id: "r2", confirmed: false });
+		expect(pendingConfirm()).toBeNull();
+		expect(mockRpc).not.toHaveBeenCalled();
 	});
 
 	it("shows a request an agent is blocked on", () => {
@@ -89,6 +93,45 @@ describe("mcpConfirm store", () => {
 		emitRequest("r1");
 		mockRpc.mockRejectedValueOnce(new Error("offline"));
 		await answerMcpConfirm("r1", false);
+		expect(pendingConfirm()).toBeNull();
+	});
+});
+
+// Catches: remote confirmation answers or resolutions target a same-id local request.
+describe("remote confirmation ownership", () => {
+	beforeEach(async () => {
+		vi.clearAllMocks();
+		__resetMcpConfirmQueue();
+		await subscribeMcpConfirm();
+	});
+	const origin = { connection: "mint", name: "Mint" };
+	function remoteRequest() {
+		handlers["mcp-confirm"]({ request_id: "r1", title: "Delete?", message: "remote", __tuic_origin: origin });
+	}
+	it("answers the owning daemon and displays its host", async () => {
+		remoteRequest();
+		expect(pendingConfirm()?.title).toBe("[Mint] Delete?");
+		await answerMcpConfirm("r1", true);
+		expect(mockRpc).toHaveBeenCalledWith("mcp_confirm_response", { requestId: "r1", confirmed: true }, "mint");
+	});
+	it("keeps local same-id requests when the daemon resolves", () => {
+		emitRequest("r1");
+		remoteRequest();
+		handlers["mcp-confirm-resolved"]({ request_id: "r1", __tuic_origin: origin });
+		expect(pendingConfirm()?.title).toBe("Delete branch?");
+	});
+	it("removes disconnected remote requests without answering or dropping local ones", async () => {
+		remoteRequest();
+		emitRequest("r1");
+		handlers["remote-connection-status"]({ id: "mint", status: "disconnected" });
+		expect(pendingConfirm()?.title).toBe("Delete branch?");
+		expect(mockRpc).not.toHaveBeenCalled();
+		handlers["mcp-confirm-resolved"]({ request_id: "r1" });
+		await answerMcpConfirm("r1", true);
+		expect(mockRpc).not.toHaveBeenCalled();
+	});
+	it("does not treat a malformed remote stamp as a local request", () => {
+		handlers["mcp-confirm"]({ request_id: "r1", title: "Delete?", message: "remote", __tuic_origin: {} });
 		expect(pendingConfirm()).toBeNull();
 	});
 });

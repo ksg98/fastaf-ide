@@ -32,6 +32,8 @@ describe("promptLibraryStore", () => {
 		});
 
 		store = (await import("../../stores/promptLibrary")).promptLibraryStore;
+		await store.hydrate();
+		mockInvoke.mockClear();
 	});
 
 	afterEach(() => {
@@ -63,6 +65,7 @@ describe("promptLibraryStore", () => {
 				});
 				vi.advanceTimersByTime(600); // flush debounced save
 				expect(mockInvoke).toHaveBeenCalledWith("save_prompt_library", {
+					base: expect.anything(),
 					config: expect.objectContaining({
 						prompts: expect.arrayContaining([
 							expect.objectContaining({ label: "Test", text: expect.stringContaining('"content":"content"') }),
@@ -159,7 +162,7 @@ describe("promptLibraryStore", () => {
 			testInScope(() => {
 				store.createPrompt({ name: "P1", content: "c1", category: "custom", isFavorite: false });
 				store.createPrompt({ name: "P2", content: "c2", category: "custom", isFavorite: false });
-				expect(store.getAllPrompts()).toHaveLength(2);
+				expect(store.getAllPrompts().filter((p) => !p.builtIn)).toHaveLength(2);
 			});
 		});
 	});
@@ -183,8 +186,8 @@ describe("promptLibraryStore", () => {
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				// Store should remain usable with empty state after failure
-				expect(store.getAllPrompts()).toEqual([]);
+				// Previously hydrated prompts remain available after a later load failure.
+				expect(store.getAllPrompts().every((p) => p.builtIn)).toBe(true);
 			});
 		});
 

@@ -88,6 +88,35 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 	// the active tab is always scrolled clear of the fades, so a narrow panel never
 	// shows a sliver of a tab ("ges") or hides the one that is open.
 	let tabsRef: HTMLDivElement | undefined;
+
+	/** Tab-list keys (WAI-ARIA tabs): arrows move to the neighbouring view, Home and
+	 *  End to the first and last; the focused tab is the open one. */
+	function navigateTabs(e: KeyboardEvent, current: GitTab) {
+		const at = TABS.findIndex((t) => t.id === current);
+		let next: number;
+		switch (e.key) {
+			case "ArrowRight":
+			case "ArrowDown":
+				next = (at + 1) % TABS.length;
+				break;
+			case "ArrowLeft":
+			case "ArrowUp":
+				next = (at - 1 + TABS.length) % TABS.length;
+				break;
+			case "Home":
+				next = 0;
+				break;
+			case "End":
+				next = TABS.length - 1;
+				break;
+			default:
+				return;
+		}
+		e.preventDefault();
+		const id = TABS[next].id;
+		setActiveTab(id);
+		tabsRef?.querySelector<HTMLButtonElement>(`[data-git-tab="${id}"]`)?.focus();
+	}
 	const [tabsClip, setTabsClip] = createSignal({ start: false, end: false });
 
 	function measureTabs() {
@@ -139,6 +168,8 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 			<div class={p.header}>
 				<div
 					ref={tabsRef}
+					role="tablist"
+					aria-label="Git views"
 					class={cx(s.tabs, tabsClip().start && s.tabsFadeStart, tabsClip().end && s.tabsFadeEnd)}
 					onScroll={measureTabs}
 					// The strip hides its scrollbar (see GitPanel.module.css); map vertical
@@ -155,10 +186,13 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 					{TABS.map((tab) => (
 						<button
 							type="button"
+							role="tab"
 							class={cx(s.tab, activeTab() === tab.id && s.tabActive)}
-							aria-pressed={activeTab() === tab.id}
-							aria-current={activeTab() === tab.id ? "true" : undefined}
+							aria-selected={activeTab() === tab.id}
+							tabIndex={activeTab() === tab.id ? 0 : -1}
+							data-git-tab={tab.id}
 							onClick={() => setActiveTab(tab.id)}
+							onKeyDown={(e) => navigateTabs(e, tab.id)}
 						>
 							{tab.label}
 						</button>

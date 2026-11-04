@@ -64,11 +64,24 @@ describe("NotificationManager", () => {
 			expect(mockInvoke).not.toHaveBeenCalled();
 		});
 
-		it("rate-limits rapid plays of same sound", async () => {
+		it("rate-limits rapid plays of the same sound", async () => {
 			await manager.play("question");
 			await manager.play("question");
 			// Only first call should go through
 			expect(mockInvoke).toHaveBeenCalledTimes(1);
+		});
+
+		it("rate-limits rapid plays across different sounds so native audio cannot overlap", async () => {
+			await manager.play("completion");
+			await manager.play("question");
+			await manager.play("attention");
+
+			expect(mockInvoke).toHaveBeenCalledTimes(1);
+			expect(mockInvoke).toHaveBeenCalledWith("play_notification_sound", {
+				sound: "completion",
+				volume: 0.5,
+				device: null,
+			});
 		});
 
 		it("allows play after rate limit interval", async () => {
@@ -76,7 +89,7 @@ describe("NotificationManager", () => {
 			expect(mockInvoke).toHaveBeenCalledTimes(1);
 			// Advance past the 500ms rate limit
 			await vi.advanceTimersByTimeAsync(600);
-			await manager.play("question");
+			await manager.play("completion");
 			expect(mockInvoke).toHaveBeenCalledTimes(2);
 		});
 
@@ -170,9 +183,16 @@ describe("NotificationManager", () => {
 			expect(manager.getConfig().volume).toBe(0);
 		});
 
-		it("setSoundEnabled updates specific sound", () => {
+		it("setSoundEnabled updates specific sound and leaves the others on", () => {
 			manager.setSoundEnabled("question", false);
 			expect(manager.getConfig().sounds.question).toBe(false);
+			expect(manager.getConfig().sounds.warning).toBe(true);
+		});
+
+		it("getConfig returns a copy, so callers cannot mutate the live config", () => {
+			const config = manager.getConfig();
+			config.volume = 0.99;
+			expect(manager.getConfig().volume).toBe(0.5);
 		});
 
 		it("updateConfig merges config", () => {

@@ -1,9 +1,16 @@
 name: macOS signing
 description: >
   Import the Developer ID certificate into a throwaway keychain and export the
-  signing + notarization env that the tauri bundler reads. Best-effort: a
-  missing or invalid secret warns and leaves every APPLE_* variable unset, so
-  the build falls through to an unsigned bundle instead of failing.
+  signing + notarization env that the tauri bundler reads.
+
+  With `require: true` (release builds) any missing or invalid secret fails the
+  job. A release must never ship an unsigned or un-notarized macOS build: the
+  updater would install it over the notarized app, and macOS would drop every
+  permission the user granted, because the code identity changed.
+
+  With `require: false` (nightly) it is best effort: a missing or invalid secret
+  leaves every APPLE_* variable unset, so the build falls through to an
+  unsigned bundle, and the job's run summary says so in a warning block.
 
   Exports via GITHUB_ENV:
     MACOS_SIGNING     true when a Developer ID identity was imported
@@ -20,6 +27,13 @@ description: >
   themselves — they are exported here only when they carry a value.
 
 inputs:
+  require:
+    description: >
+      'true' fails the job unless signing AND notarization are both configured.
+      'false' falls through to an unsigned or un-notarized bundle and says so
+      in the run summary.
+    required: false
+    default: 'false'
   cert-base64:
     description: Base64 of the Developer ID Application .p12
     required: false
@@ -42,15 +56,31 @@ runs:
     - name: Import Developer ID certificate
       shell: bash
       env:
+        REQUIRE: ${{ inputs.require }}
         CERT_BASE64: ${{ inputs.cert-base64 }}
         CERT_PASSWORD: ${{ inputs.cert-password }}
       run: |
         echo "MACOS_SIGNING=false" >> "$GITHUB_ENV"
         echo "MACOS_NOTARIZING=false" >> "$GITHUB_ENV"
 
-        if [ -z "$CERT_BASE64" ]; then
-          echo "::warning::DEVELOPER_ID_CERT_BASE64 secret not set — building unsigned macOS bundle"
+        # Required: fail the job. Best effort: warn, and put it in the run
+        # summary, where a skimmed green run still shows it.
+        unsigned() {
+          if [ "$REQUIRE" = "true" ]; then
+            echo "::error::$1 — a release build must be signed and notarized"
+            exit 1
+          fi
+          echo "::warning::$1 — building an UNSIGNED macOS bundle"
+          {
+            echo "> [!WARNING]"
+            echo "> **This macOS build is UNSIGNED.** $1."
+            echo "> Gatekeeper will block it, and installing it over a signed FastAF resets the user's macOS permissions."
+          } >> "$GITHUB_STEP_SUMMARY"
           exit 0
+        }
+
+        if [ -z "$CERT_BASE64" ]; then
+          unsigned "DEVELOPER_ID_CERT_BASE64 secret not set"
         fi
 
         KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
@@ -66,16 +96,15 @@ runs:
           -k "$KEYCHAIN_PATH" \
           -P "$CERT_PASSWORD" \
           -T /usr/bin/codesign; then
-          echo "::warning::Certificate import failed (invalid p12 or wrong password) — building unsigned macOS bundle"
           rm -f "$CERT_PATH"
           security delete-keychain "$KEYCHAIN_PATH" || true
-          exit 0
+          unsigned "Certificate import failed (invalid p12 or wrong password)"
         fi
         rm -f "$CERT_PATH"
 
         # A fresh runner may lack Apple's Developer ID G2 intermediate. Without
-        # it `find-identity -v` calls the identity invalid and the build quietly
-        # ships unsigned, so import it next to the certificate.
+        # it `find-identity -v` calls the identity invalid, so import it next to
+        # the certificate.
         G2_PATH=$RUNNER_TEMP/DeveloperIDG2CA.cer
         if curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$G2_PATH"; then
           security import "$G2_PATH" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
@@ -90,9 +119,8 @@ runs:
 
         IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application:" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
         if [ -z "$IDENTITY" ]; then
-          echo "::warning::No Developer ID Application identity in imported certificate — building unsigned macOS bundle"
           security delete-keychain "$KEYCHAIN_PATH" || true
-          exit 0
+          unsigned "No valid Developer ID Application identity in the imported certificate (expired or revoked?)"
         fi
         echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
         echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
@@ -102,12 +130,23 @@ runs:
       if: env.MACOS_SIGNING == 'true'
       shell: bash
       env:
+        REQUIRE: ${{ inputs.require }}
         NOTARIZE_KEY_BASE64: ${{ inputs.notarize-key-base64 }}
         NOTARIZE_KEY_ID: ${{ inputs.notarize-key-id }}
         NOTARIZE_ISSUER_ID: ${{ inputs.notarize-issuer-id }}
       run: |
         if [ -z "$NOTARIZE_KEY_BASE64" ] || [ -z "$NOTARIZE_KEY_ID" ] || [ -z "$NOTARIZE_ISSUER_ID" ]; then
-          echo "::warning::NOTARIZE_KEY_BASE64 / NOTARIZE_KEY_ID / NOTARIZE_ISSUER_ID not set — signed but NOT notarized"
+          MESSAGE="NOTARIZE_KEY_BASE64 / NOTARIZE_KEY_ID / NOTARIZE_ISSUER_ID not set"
+          if [ "$REQUIRE" = "true" ]; then
+            echo "::error::$MESSAGE — a release build must be signed and notarized"
+            exit 1
+          fi
+          echo "::warning::$MESSAGE — signed but NOT notarized"
+          {
+            echo "> [!WARNING]"
+            echo "> **This macOS build is signed but NOT notarized.** $MESSAGE."
+            echo "> Gatekeeper will warn on first launch."
+          } >> "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
         KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARIZE_KEY_ID}.p8"

@@ -1,6 +1,8 @@
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { invoke } from "../invoke";
+import { reportSettingsConflicts, settingsRefresh } from "../services/settingsRefresh";
+import { createConfigDeltaWriter } from "../utils/configDeltaWriter";
 import { appLogger } from "./appLogger";
 
 // ---- Layout Tree Types (geometry only) ----
@@ -46,6 +48,15 @@ export interface PaneLayoutState {
 	root: PaneNode | null;
 	groups: Record<string, PaneGroup>;
 	activeGroupId: string | null;
+}
+
+/** Match the Rust PaneLayout defaults before adopting or restoring raw owner JSON. */
+function normalizeLayout(saved: Partial<PaneLayoutState> | null | undefined): PaneLayoutState {
+	return {
+		root: saved?.root ?? null,
+		groups: saved?.groups ?? {},
+		activeGroupId: saved?.activeGroupId ?? null,
+	};
 }
 
 // ---- Constants ----
@@ -267,7 +278,7 @@ function firstLeaf(node: PaneNode): string {
 /** Get the last (rightmost/bottommost) leaf ID in a subtree */
 function lastLeaf(node: PaneNode): string {
 	if (node.type === "leaf") return node.id;
-	return lastLeaf(node.children[node.children.length - 1]);
+	return lastLeaf(node.children.at(-1)!);
 }
 
 // ---- Store ----
@@ -281,6 +292,7 @@ interface GroupsState {
 }
 
 function createPaneLayoutStore() {
+	const layoutWriter = createConfigDeltaWriter<PaneLayoutState>("save_pane_layout", "layout");
 	// Plain JS tree — no proxy wrapping
 	let tree: PaneNode | null = null;
 	let restoredFromDisk = false;
@@ -298,7 +310,7 @@ function createPaneLayoutStore() {
 	// Debounced persistence — serializes tree+groups directly (no `this` needed)
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-	function writeLayout(): void {
+	function layoutSnapshot(): PaneLayoutState {
 		const groups: Record<string, PaneGroup> = {};
 		for (const key of Object.keys(state.groups)) {
 			const g = state.groups[key];
@@ -313,21 +325,40 @@ function createPaneLayoutStore() {
 			groups,
 			activeGroupId: state.activeGroupId,
 		};
-		invoke("save_pane_layout", { layout: snapshot }).catch((err: unknown) =>
-			appLogger.warn("app", "Failed to save pane layout", err),
-		);
+		return snapshot;
+	}
+
+	function writeLayout(): Promise<void> {
+		return layoutWriter.save(layoutSnapshot());
 	}
 
 	function scheduleSave(): void {
 		if (saveTimer) clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
 			saveTimer = null;
-			writeLayout();
+			writeLayout().catch((err: unknown) => appLogger.warn("app", "Failed to save pane layout", err));
 		}, 500);
 	}
 
 	const result = {
 		state,
+		startRemoteSync(): () => void {
+			return settingsRefresh.register({
+				section: "pane_layout",
+				read: () => invoke<Partial<PaneLayoutState> | null>("load_pane_layout"),
+				apply: (remote) => {
+					const merged = layoutWriter.adopt(normalizeLayout(remote), layoutSnapshot());
+					const pendingSave = saveTimer !== null;
+					if (saveTimer) {
+						clearTimeout(saveTimer);
+						saveTimer = null;
+					}
+					result.restore(merged.value);
+					if (pendingSave && !merged.conflicts.length) scheduleSave();
+					reportSettingsConflicts(merged.conflicts);
+				},
+			});
+		},
 
 		/** Read the tree root. Call treeRevision() first to subscribe to changes. */
 		getRoot(): PaneNode | null {
@@ -452,7 +483,7 @@ function createPaneLayoutStore() {
 					if (!group) return;
 					group.tabs = group.tabs.filter((t) => t.id !== tabId);
 					if (group.activeTabId === tabId) {
-						group.activeTabId = group.tabs.length > 0 ? group.tabs[group.tabs.length - 1].id : null;
+						group.activeTabId = group.tabs.length > 0 ? group.tabs.at(-1)!.id : null;
 					}
 				}),
 			);
@@ -472,7 +503,7 @@ function createPaneLayoutStore() {
 					const from = s.groups[fromGroupId];
 					from.tabs = from.tabs.filter((t) => t.id !== tabId);
 					if (from.activeTabId === tabId) {
-						from.activeTabId = from.tabs.length > 0 ? from.tabs[from.tabs.length - 1].id : null;
+						from.activeTabId = from.tabs.length > 0 ? from.tabs.at(-1)!.id : null;
 					}
 					const to = s.groups[toGroupId];
 					if (!to.tabs.some((t) => t.id === tab.id && t.type === tab.type)) {
@@ -567,7 +598,8 @@ function createPaneLayoutStore() {
 		},
 
 		/** Restore layout from serialized state */
-		restore(saved: PaneLayoutState): void {
+		restore(snapshot: Partial<PaneLayoutState> | null): void {
+			const saved = normalizeLayout(snapshot);
 			const allIds = saved.root ? allLeafIds(saved.root) : [];
 			const maxNum = allIds.reduce((max, id) => {
 				const n = parseInt(id.replace("g", ""), 10);
@@ -575,17 +607,19 @@ function createPaneLayoutStore() {
 			}, 0);
 			groupCounter = maxNum;
 
-			tree = saved.root;
-			bumpTree();
-			// reconcile, not a wholesale node replace: `saved.groups` is always a
-			// fresh object, so a plain setState would hand every group and every
-			// PaneTab a new proxy and remount every CanvasTerminal in the layout.
-			setState(
-				reconcile({
-					groups: saved.groups,
-					activeGroupId: saved.activeGroupId,
-				}),
-			);
+			batch(() => {
+				tree = saved.root;
+				// reconcile, not a wholesale node replace: `saved.groups` is always a
+				// fresh object, so a plain setState would hand every group and every
+				// PaneTab a new proxy and remount every CanvasTerminal in the layout.
+				setState(
+					reconcile({
+						groups: saved.groups,
+						activeGroupId: saved.activeGroupId,
+					}),
+				);
+				bumpTree();
+			});
 		},
 
 		/** Remap terminal IDs in all groups (used after lazy restore creates new terminal IDs) */
@@ -636,8 +670,9 @@ function createPaneLayoutStore() {
 		/** Load pane layout from disk and restore (filtering non-terminal tabs) */
 		async loadFromDisk(): Promise<void> {
 			try {
-				const saved = await invoke<PaneLayoutState | null>("load_pane_layout");
-				if (!saved?.root) return;
+				const saved = normalizeLayout(await invoke<Partial<PaneLayoutState> | null>("load_pane_layout"));
+				layoutWriter.loaded(saved);
+				if (!saved.root) return;
 
 				// Filter out non-terminal tabs (md/diff/editor are session-bound)
 				for (const group of Object.values(saved.groups)) {
@@ -658,12 +693,18 @@ function createPaneLayoutStore() {
 
 	return {
 		...result,
+		/** Snapshot acknowledgement must wait for the latest layout write, including queued saves. */
+		async saveForBackground(): Promise<void> {
+			if (saveTimer) clearTimeout(saveTimer);
+			saveTimer = null;
+			await writeLayout();
+		},
 		/** Write a pending debounced save now — the app is going away. */
 		flushSave(): void {
 			if (!saveTimer) return;
 			clearTimeout(saveTimer);
 			saveTimer = null;
-			writeLayout();
+			writeLayout().catch((err: unknown) => appLogger.warn("app", "Failed to save pane layout", err));
 		},
 		_testCancelPendingSave(): void {
 			if (saveTimer) {

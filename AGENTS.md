@@ -6,6 +6,9 @@ Read [`docs/sync-matrix.md`](docs/sync-matrix.md) before any feature/API/config 
 
 ## Tests
 
+- Run standalone Rust, Vitest, and plugin test commands through `scripts/with-test-tmp.sh`; `make check`, `make test-shell`, `make cov`, and `make mutants` set their own repository-local test temp root. This does not apply to `make dev` or `cargo run`.
+- Bare `cargo test` Rust test binaries initialize `TMPDIR`, `TMP`, and `TEMP` from `TUIC_TEST_TMP_ROOT` or this checkout's `.tmp/tuic-tests` before libtest starts; Nextest does the same for every test binary through `src-tauri/.config/nextest.toml` setup scripts. New Rust tests must use `test_temp_root()` or assert their scratch paths stay inside it.
+- **Test only the changed behavior.** Routine validation uses the narrowest test filters that cover the code, protocol surface, fixtures or test support the task changed. Do not run full-crate, full-app or unrelated suites for reassurance; they waste shared build time and obscure the relevant evidence. Go broader only when a documented gate requires it, targeted evidence shows a cross-cutting risk, or Boss asks.
 - Tests are the spec. When a test fails after a code change, investigate BOTH sides before deciding which to fix.
 - **Finding a story partially implemented does NOT mean it's done.** When you pick up a story and discover the feature already exists, verify EVERY part of the story is honored — each acceptance criterion, edge case, and requirement — before marking it complete. Never assume the whole story is satisfied just because one part is implemented. Check each criterion against the code and prove it, or the story isn't done.
 - `to-test.md` tracks features awaiting manual testing — add items there for minor features.
@@ -16,6 +19,16 @@ Read [`docs/sync-matrix.md`](docs/sync-matrix.md) before any feature/API/config 
   4. **MCP maccontrol** — take screenshots, click UI elements, verify visual state
   5. **MCP invoke/JS** — call Tauri commands, inspect store state, trigger actions programmatically
   Only use `[HUMAN]` when the item genuinely requires real hardware (audio, IME, touch), multi-app interaction (drag to Finder, global hotkey from another app), or timing-sensitive observation that none of the above can capture. When code-verifying, change `[HUMAN]` to `[x]` with a `_(verified: file:line explanation)_` annotation. When code reveals the description is wrong, change to `[ ]` with a `_(NOTE: ...)_` correction.
+
+## Agent desktop verification
+
+Use `make agent-test` from a linked worktree for authorized macOS desktop live
+checks, never `make dev`, `make test` or the daily executable. Start with
+`make agent-test AGENT_TEST_DRY_RUN=1`; stop with `make agent-test-stop`.
+See [Development Setup](docs/guides/development-setup.md#isolated-agent-desktop-checks-macos)
+for the preset namespace, port, distinct binary and shared-resource audit.
+This target disables global shortcuts, microphone/dictation, Telegram and updater.
+It is not permission to launch a desktop window while Boss is working: ask first.
 
 ## Test instance vs orchestrator instance — READ BEFORE TESTING
 
@@ -35,7 +48,7 @@ You can exercise features through the **web UI** instead of the Tauri desktop ap
 - **Port:** the primary/only instance serves on **:9876**; if that's free (no conflict), point the browser there. If the orchestrator already holds 9876, bring up a **second debug instance** — it auto-retries to **:9877** (the single-instance lock is `#[cfg(not(debug_assertions))]`, so a *debug* build can run a 2nd copy alongside the orchestrator). Note: `TUIC_PORT` is honored ONLY by the headless `tuic-remote` binary — the desktop `make dev` build **ignores** it and relies on the `9876→9877→9878` retry. So: use :9876 when unconflicted, else :9877.
 - **Drive it with `agent-browser`**, always via the stealth wrapper (see global rules). `@ref` CDP clicks are trusted and work (open modals/panels/tabs); **JS-dispatched keydown is `isTrusted:false`** so app keyboard shortcuts (Cmd+P, etc.) are ignored — click UI, never synthesize keys. Use a persistent `--session <name>`, restart the browser periodically (snapshots/clicks degrade after many calls), and wrap each call in a `perl alarm` timeout (macOS has no `timeout`/`gtimeout`).
 - **Isolation caveat:** a 2nd debug instance has isolated backend/sessions (its own PTY/agent state), but there is no config-dir split — debug and release builds read and write the exact same config directory and the same `config.json`/`repositories.json` (see `docs/backend/config.md`), protected by a cross-process file lock so concurrent saves don't clobber each other. A toggle flipped in the dev build IS visible to the installed app and vice versa. It still **shares the filesystem** with the orchestrator — never run repo-mutating tests against Boss's repos, and expect possible SQLite contention on `tunnel_audit.db` (same shared dir, not covered by the config lock).
-- **Desktop-only features do NOT render in web mode** — Command Palette is `<Show when={isTauri()}>` (no Cmd+P/file/content search for browser users), plus IdeLauncher, Dictation, Global Hotkey, detach-panel windows, updater, native file drop, user-plugin install, MCP/hooks config. Built-in plugins DO load. See mdkb `web-mode-verification-2026-07-02` for the verified inventory before reporting a feature "missing".
+- **Desktop-only features do NOT render in web mode** — Command Palette is `<Show when={isTauri()}>` (no Cmd+P/file/content search for browser users), plus IdeLauncher, Dictation, Global Hotkey, detach-panel windows, updater, native file drop, user-plugin install, MCP/hooks config. The bundled Plan Tracker and Stories Ticker are external plugins now, and browser mode does not load external plugin code. See mdkb `web-mode-verification-2026-07-02` for the verified inventory before reporting a feature "missing".
 
 ## Visual
 
@@ -309,6 +322,22 @@ Do NOT flag these as security issues in reviews — they are intentional design 
 - **`opener:allow-open-path` scope `"**"`** — FileBrowser must open any file the user can see. Narrower globs break external drives and network mounts.
 - **Iframe sandbox = `allow-scripts allow-same-origin`** — ALL iframes MUST use this. NEVER use bare `sandbox=""` — it kills JavaScript.
 - **Plugin capabilities do not isolate plugins from each other.** `plugin_id` is caller-supplied and plugins load into the same JS realm as the host, so any plugin can pass another plugin's id and inherit its grants. This is known, documented at the capability check in `plugins.rs`, at the `import()` in `pluginLoader.ts`, and in `docs/plugins.md`. A per-plugin token was considered and rejected — same-realm JS can read or proxy it, so it would be security theatre. Real isolation needs Worker/iframe + a host-created MessagePort; it is deferred, not overlooked. Do NOT propose the token.
+
+## Security Scope
+
+FastAF is a **local coding tool for professionals**, not a SaaS and not multi-tenant. The human user IS the trust boundary. Do NOT flag or "harden" the following as vulnerabilities:
+
+- Local file access across any path the user can already see (repo browser, `read_external_file`, `opener:allow-open-path`).
+- Symlinks inside registered repos resolving outside them — the user put them there.
+- Unix/TCP loopback sockets without extra auth/permission bits — the OS user is the auth boundary.
+- An AI agent writing or keystroking into fullscreen TUIs (vim, lazygit, htop) without extra approval gates — agents driving TUIs is a feature.
+- The items under "Accepted Security Decisions" above.
+
+Hardening that would break pro workflows (blocking editor automation, restricting file scopes, requiring approval for normal agent ops) is over-engineering. Reject it unless Boss asks for it.
+
+## Alacritty Local Fork
+
+We maintain a patched `alacritty_terminal` at `src-tauri/patches/alacritty_terminal/`. When a CanvasTerminal feature needs terminal-level support (OSC handling, new grid queries, scroll APIs), **implement it in the fork first** rather than building JS workarounds. The fork is our code — treat it as a first-class module, not a fragile upstream dependency. See `docs/backend/alacritty-integration.md` for the patch inventory.
 
 ## Ideas
 

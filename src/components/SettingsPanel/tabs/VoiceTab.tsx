@@ -5,6 +5,7 @@ import { ConfirmDialog } from "../../ConfirmDialog/ConfirmDialog";
 import d from "../DictationSettings.module.css";
 import { SettingSelect, SettingSlider, SettingToggle } from "../SettingFields";
 import s from "../Settings.module.css";
+import { SectionCard, SettingPageHeader } from "../SettingsPrimitives";
 
 /** Inline progress bar, shown on whichever row is downloading. */
 const DownloadBar: Component = () => (
@@ -34,12 +35,16 @@ const ModelRow: Component<{ model: VoiceModelInfo }> = (props) => {
 			</div>
 			<Show when={!isDownloading()}>
 				<span class={cx(d.modelBadge, props.model.downloaded && d.downloaded)}>
-					{props.model.downloaded ? "Downloaded" : "Not Downloaded"}
+					{props.model.downloaded ? "Downloaded" : "Not downloaded"}
 				</span>
 			</Show>
 			<div class={d.modelActions}>
 				<Show when={props.model.downloaded && !isSelected()}>
-					<button class={d.modelSelect} onClick={() => voiceStore.saveConfig({ model: props.model.name })}>
+					<button
+						data-setting-exclusion="fastaf.voice_agent"
+						class={d.modelSelect}
+						onClick={() => voiceStore.saveConfig({ model: props.model.name })}
+					>
 						Use
 					</button>
 				</Show>
@@ -47,7 +52,11 @@ const ModelRow: Component<{ model: VoiceModelInfo }> = (props) => {
 					<span class={d.modelActiveLabel}>Active</span>
 				</Show>
 				<Show when={!props.model.downloaded && !isDownloading()}>
-					<button class={d.modelDownload} onClick={() => voiceStore.downloadModel(props.model.name)}>
+					<button
+						data-setting-exclusion="fastaf.voice_agent"
+						class={d.modelDownload}
+						onClick={() => voiceStore.downloadModel(props.model.name)}
+					>
 						Download
 					</button>
 				</Show>
@@ -55,7 +64,12 @@ const ModelRow: Component<{ model: VoiceModelInfo }> = (props) => {
 					<DownloadBar />
 				</Show>
 				<Show when={props.model.downloaded}>
-					<button class={d.modelDelete} onClick={() => setConfirmDelete(true)} title="Delete download">
+					<button
+						data-setting-exclusion="fastaf.voice_agent"
+						class={d.modelDelete}
+						onClick={() => setConfirmDelete(true)}
+						title="Delete download"
+					>
 						&times;
 					</button>
 				</Show>
@@ -99,7 +113,7 @@ const VoiceRow: Component<{ voice: VoiceInfo }> = (props) => {
 					<DownloadBar />
 				</Show>
 				<Show when={!isDownloading() && !(isSelected() && props.voice.downloaded)}>
-					<button class={d.modelSelect} onClick={() => void use()}>
+					<button data-setting-exclusion="fastaf.voice_agent" class={d.modelSelect} onClick={() => void use()}>
 						{props.voice.downloaded ? "Use" : "Get & use"}
 					</button>
 				</Show>
@@ -110,7 +124,12 @@ const VoiceRow: Component<{ voice: VoiceInfo }> = (props) => {
 					<span class={d.modelActiveLabel}>Active</span>
 				</Show>
 				<Show when={props.voice.downloaded && !isSelected()}>
-					<button class={d.modelDelete} onClick={() => voiceStore.deleteVoice(props.voice.id)} title="Delete download">
+					<button
+						data-setting-exclusion="fastaf.voice_agent"
+						class={d.modelDelete}
+						onClick={() => voiceStore.deleteVoice(props.voice.id)}
+						title="Delete download"
+					>
 						&times;
 					</button>
 				</Show>
@@ -139,6 +158,7 @@ const EngineRow: Component = () => {
 					when={voiceStore.state.engineState === "ready"}
 					fallback={
 						<button
+							data-setting-exclusion="fastaf.voice_agent"
 							class={d.modelDownload}
 							disabled={voiceStore.state.loadingEngine}
 							onClick={() => void voiceStore.loadEngine()}
@@ -148,6 +168,7 @@ const EngineRow: Component = () => {
 					}
 				>
 					<button
+						data-setting-exclusion="fastaf.voice_agent"
 						class={d.modelSelect}
 						disabled={voiceStore.state.sessionActive}
 						title={voiceStore.state.sessionActive ? "Stop the voice session first" : "Free the memory"}
@@ -176,69 +197,81 @@ export const VoiceTab: Component = () => {
 
 	return (
 		<div class={s.section}>
-			<h3>Voice</h3>
-			<p class={s.hint}>
-				Hands-free conversation in the AI Chat panel. Speech is recognized with the model from the Dictation tab and
-				spoken back with Kokoro, entirely on this machine.
-			</p>
+			<SettingPageHeader
+				title="Voice"
+				breadcrumb="AI / Voice"
+				scope="This machine"
+				description="Talk to AI Chat hands-free, entirely on this machine."
+			/>
 
 			<Show when={voiceStore.state.error}>
 				<p class={s.warning}>{voiceStore.state.error}</p>
 			</Show>
 
-			<h3>Speech model</h3>
-			<div class={d.modelList}>
-				<For each={voiceStore.state.models}>{(model) => <ModelRow model={model} />}</For>
-			</div>
-			<p class={s.hint}>The quantized model is a quarter the size and, at conversation speed, hard to tell apart.</p>
+			<SectionCard
+				title="Speech model"
+				description="Kokoro speaks the replies; what you say is recognized with the Dictation model. The quantized model is a quarter the size and, at conversation speed, hard to tell apart."
+			>
+				<div class={d.modelList}>
+					<For each={voiceStore.state.models}>{(model) => <ModelRow model={model} />}</For>
+				</div>
+			</SectionCard>
 
-			<h3>Memory</h3>
-			<div class={d.modelList}>
-				<EngineRow />
-			</div>
-			<p class={s.hint}>
-				Loading ahead of time means the first reply is spoken immediately; unloading frees the memory. A voice session
-				loads it automatically.
-			</p>
+			<SectionCard
+				title="Memory"
+				description="Loading ahead of time means the first reply is spoken immediately; unloading frees the memory. A voice session loads it automatically."
+			>
+				<div class={d.modelList}>
+					<EngineRow />
+				</div>
+			</SectionCard>
 
-			<h3>Voice</h3>
-			<div class={d.modelList}>
-				<For each={voiceStore.state.voices}>{(voice) => <VoiceRow voice={voice} />}</For>
-			</div>
+			<SectionCard title="Voices">
+				<div class={d.modelList}>
+					<For each={voiceStore.state.voices}>{(voice) => <VoiceRow voice={voice} />}</For>
+				</div>
+			</SectionCard>
 
-			<h3>Playback</h3>
-			<SettingSlider
-				label="Speaking rate"
-				min={50}
-				max={200}
-				step={5}
-				value={Math.round(voiceStore.state.config.speed * 100)}
-				onChange={(value) => voiceStore.saveConfig({ speed: value / 100 })}
-				formatValue={(value) => `${(value / 100).toFixed(2)}x`}
-			/>
-			<SettingSelect
-				label="Output device"
-				value={voiceStore.state.config.output_device ?? ""}
-				onChange={(value) => voiceStore.saveConfig({ output_device: value || null })}
-				options={[
-					{ value: "", label: "System default" },
-					...voiceStore.state.outputDevices.map((device) => ({
-						value: device.name,
-						label: device.is_default ? `${device.name} (default)` : device.name,
-					})),
-				]}
-			/>
-			<SettingToggle
-				label="Interrupt by speaking (barge-in)"
-				checked={voiceStore.state.config.barge_in}
-				onChange={(checked) => voiceStore.saveConfig({ barge_in: checked })}
-				hint={
-					"Keeps listening while the agent talks, so you can cut it off mid-sentence. " +
-					"Your own output is cancelled out of the microphone first, so this works on " +
-					"speakers as well as headphones. Turn it off to mute the microphone until the " +
-					"agent has finished instead."
-				}
-			/>
+			<SectionCard title="Playback">
+				<SettingSlider
+					data-setting-exclusion="fastaf.voice_agent"
+					row
+					label="Speaking rate"
+					min={50}
+					max={200}
+					step={5}
+					value={Math.round(voiceStore.state.config.speed * 100)}
+					onChange={(value) => voiceStore.saveConfig({ speed: value / 100 })}
+					formatValue={(value) => `${(value / 100).toFixed(2)}x`}
+				/>
+				<SettingSelect
+					data-setting-exclusion="fastaf.voice_agent"
+					row
+					label="Output device"
+					value={voiceStore.state.config.output_device ?? ""}
+					onChange={(value) => voiceStore.saveConfig({ output_device: value || null })}
+					options={[
+						{ value: "", label: "System default" },
+						...voiceStore.state.outputDevices.map((device) => ({
+							value: device.name,
+							label: device.is_default ? `${device.name} (default)` : device.name,
+						})),
+					]}
+				/>
+				<SettingToggle
+					data-setting-exclusion="fastaf.voice_agent"
+					row
+					label="Interrupt by speaking (barge-in)"
+					checked={voiceStore.state.config.barge_in}
+					onChange={(checked) => voiceStore.saveConfig({ barge_in: checked })}
+					hint={
+						"Keeps listening while the agent talks, so you can cut it off mid-sentence. " +
+						"Your own output is cancelled out of the microphone first, so this works on " +
+						"speakers as well as headphones. Turn it off to mute the microphone until the " +
+						"agent has finished instead."
+					}
+				/>
+			</SectionCard>
 
 			<Show when={!selectedModelReady() || !selectedVoiceReady()}>
 				<p class={s.warning}>

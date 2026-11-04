@@ -1,50 +1,74 @@
-.bar {
+.root {
+  composes: mobileCommand from "../../components/ui/FormControls.module.css";
+  position: relative;
   display: flex;
-  gap: 6px;
-  padding: 6px 12px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
   flex-shrink: 0;
 }
 
-.key {
-  flex-shrink: 0;
-  height: 32px;
-  min-width: 44px;
-  padding: 0 10px;
-  border-radius: var(--radius-md);
+.ctrlMenu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 12px;
+  z-index: 10;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  max-width: calc(100% - 24px);
+  max-height: 40vh;
+  overflow-y: auto;
   border: 1px solid var(--border);
-  background: var(--bg-tertiary);
-  color: var(--fg-secondary);
-  font-size: 13px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-dropdown);
+}
+
+.bar {
+  display: flex;
+  gap: 5.625px;
+  padding: 0 5.625px 0 11.25px;
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-secondary);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+
+.bar::-webkit-scrollbar {
+  display: none;
+}
+
+.key {
+  color: var(--fg-primary);
   font-family: var(--font-mono);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
 }
 
 .key:active {
   opacity: 0.6;
 }
 
+.key[aria-expanded="true"] {
+  color: var(--accent);
+  background: var(--bg-highlight);
+}
+
 .confirm {
   color: var(--accent);
-  border-color: var(--accent);
   font-weight: 600;
 }
 
 .danger {
   color: var(--error);
-  border-color: var(--error);
   font-weight: 600;
 }
 
 .accent {
   color: var(--accent);
-  border-color: var(--accent);
   font-weight: 700;
-  font-size: 16px;
+  font-size: 15px;
 }
 
 .sending {

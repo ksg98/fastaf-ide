@@ -2,16 +2,18 @@ import { describe, expect, it } from "vitest";
 import { compareBranches, type SortableBranch } from "../../utils/branchSort";
 
 function makeBranch(name: string, isMain: boolean): SortableBranch {
-	return { name, isMain };
+	return { branchName: name, isMain };
 }
 
 /** Sort an array of branches using compareBranches with optional PR state lookup */
 function sortBranches(branches: SortableBranch[], prStates: Record<string, { state?: string }> = {}): SortableBranch[] {
-	return [...branches].sort((a, b) => compareBranches(a, b, prStates[a.name] ?? null, prStates[b.name] ?? null));
+	return [...branches].sort((a, b) =>
+		compareBranches(a, b, prStates[a.branchName] ?? null, prStates[b.branchName] ?? null),
+	);
 }
 
 function names(branches: SortableBranch[]): string[] {
-	return branches.map((b) => b.name);
+	return branches.map((b) => b.branchName);
 }
 
 describe("compareBranches", () => {

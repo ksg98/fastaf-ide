@@ -1,0 +1,4 @@
+{"fixture":"src-tauri/src/fixtures/agent_prompts/claude-wrapped-suggest-question-synthetic.tcap","agent":"claude","geometry":[24,100]}
+{"record":0,"event":{"type":"shell-state","state":"busy","agent_type":"claude"}}
+{"record":0,"state":{"shell":1,"agent":"working","awaiting":false,"question":null,"confident":false,"last_question":null,"choice_sig":null,"fullscreen":false}}
+{"ring_len":219}

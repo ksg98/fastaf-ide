@@ -1,0 +1,30 @@
+[
+  {
+    "id": "tuic-auto-9e72b185-a675-4e40-81a1-37b5d9f5be5e-1791910397326",
+    "from_tuic_session": "9e72b185-a675-4e40-81a1-37b5d9f5be5e",
+    "from_name": "tuic",
+    "content": "{\"type\":\"state_change\",\"state\":\"idle\",\"session_id\":\"9e72b185-a675-4e40-81a1-37b5d9f5be5e\"}",
+    "timestamp": 1791910397326
+  },
+  {
+    "id": "tuic-auto-4927b7f5-14bf-4ca7-a22b-038e786645c6-1791910407627",
+    "from_tuic_session": "4927b7f5-14bf-4ca7-a22b-038e786645c6",
+    "from_name": "tuic",
+    "content": "{\"type\":\"state_change\",\"state\":\"idle\",\"session_id\":\"4927b7f5-14bf-4ca7-a22b-038e786645c6\"}",
+    "timestamp": 1791910407627
+  },
+  {
+    "id": "tuic-auto-cf31c36b-0dd6-48e4-b300-bf98d1b4119e-1791910418435",
+    "from_tuic_session": "cf31c36b-0dd6-48e4-b300-bf98d1b4119e",
+    "from_name": "tuic",
+    "content": "{\"type\":\"state_change\",\"state\":\"idle\",\"session_id\":\"cf31c36b-0dd6-48e4-b300-bf98d1b4119e\"}",
+    "timestamp": 1791910418435
+  },
+  {
+    "id": "tuic-auto-c38efdf3-b7c8-48ea-b7ac-aa58552dc027-1791910429393",
+    "from_tuic_session": "c38efdf3-b7c8-48ea-b7ac-aa58552dc027",
+    "from_name": "tuic",
+    "content": "{\"type\":\"state_change\",\"state\":\"idle\",\"session_id\":\"c38efdf3-b7c8-48ea-b7ac-aa58552dc027\"}",
+    "timestamp": 1791910429393
+  }
+]

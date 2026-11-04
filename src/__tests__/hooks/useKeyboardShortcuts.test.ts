@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../mocks/tauri";
+import * as handsFree from "../../actions/handsFreeConversation";
 import { type ShortcutHandlers, useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
+import { resetPlatformCache } from "../../platform";
+import { dictationStore } from "../../stores/dictation";
+import { globalWorkspaceStore } from "../../stores/globalWorkspace";
 import { paneLayoutStore, resetGroupCounter } from "../../stores/paneLayout";
+import { progressStore } from "../../stores/progress";
+import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { terminalsStore } from "../../stores/terminals";
 import { makeTerminal } from "../helpers/store";
+import { mockInvoke } from "../mocks/tauri";
 
 function resetStores() {
 	for (const id of terminalsStore.getIds()) {
@@ -27,12 +34,15 @@ function createMockHandlers(): ShortcutHandlers {
 		reopenClosedTab: vi.fn(),
 		navigateTab: vi.fn(),
 		focusLastTerminal: vi.fn(),
+		historyBack: vi.fn(),
+		historyForward: vi.fn(),
 		jumpWaitingTerminal: vi.fn(),
 		clearTerminal: vi.fn(),
 		terminalIds: vi.fn().mockReturnValue([]),
 		handleTerminalSelect: vi.fn(),
 		handleSplit: vi.fn(),
 		handleRunCommand: vi.fn(),
+		reloadActiveTab: vi.fn(() => true),
 		switchToBranchByIndex: vi.fn(),
 		isQuickSwitcherOpen: vi.fn().mockReturnValue(false),
 		toggleMarkdownPanel: vi.fn(),
@@ -41,7 +51,7 @@ function createMockHandlers(): ShortcutHandlers {
 		toggleTaskQueue: vi.fn(),
 		toggleGitOpsPanel: vi.fn(),
 		toggleHelpPanel: vi.fn(),
-		toggleNotesPanel: vi.fn(),
+		toggleIdeasPanel: vi.fn(),
 		toggleFileBrowserPanel: vi.fn(),
 		requestFileBrowserContentSearch: vi.fn(),
 		toggleOutlinePanel: vi.fn(),
@@ -75,7 +85,7 @@ function createMockHandlers(): ShortcutHandlers {
 		copyRelativeFilePath: vi.fn(),
 		openSecondaryWindow: vi.fn(),
 		toggleCommandOverview: vi.fn(),
-		openAiTriage: vi.fn(),
+		openTasks: vi.fn(),
 		toggleComposePanel: vi.fn(),
 		detachActivityDashboard: vi.fn(),
 		toggleProcessManager: vi.fn(),
@@ -109,6 +119,7 @@ describe("useKeyboardShortcuts", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+		resetPlatformCache();
 		resetStores();
 		handlers = createMockHandlers();
 		cleanup = useKeyboardShortcuts(handlers);
@@ -118,8 +129,26 @@ describe("useKeyboardShortcuts", () => {
 		vi.useRealTimers();
 		cleanup?.();
 		Object.defineProperty(navigator, "platform", { value: originalPlatform, configurable: true });
+		resetPlatformCache();
 		settingsStore._testCancelPendingSave();
 		paneLayoutStore._testCancelPendingSave();
+	});
+
+	// FastAF: the desktop has no upstream hands-free conversation (its voice agent
+	// is the one hands-free mode), so the chord is not dispatched there. Upstream's
+	// desktop hands-free chord tests were removed with that behaviour.
+	// Catches: primary+Alt+V arming the hidden upstream hands-free conversation.
+	it("leaves primary+Alt+V alone on the desktop", async () => {
+		mockInvoke.mockResolvedValue({ enabled: true, hotkey: "F5", language: "auto" });
+		await dictationStore.refreshConfig();
+		mockInvoke.mockReset().mockResolvedValue(undefined);
+		const toggle = vi.spyOn(handsFree, "toggleHandsFreeConversation").mockResolvedValue(undefined);
+		try {
+			fireKeydown("v", { metaKey: true, altKey: true });
+			expect(toggle).not.toHaveBeenCalled();
+		} finally {
+			toggle.mockRestore();
+		}
 	});
 
 	describe("zoom shortcuts", () => {
@@ -142,6 +171,19 @@ describe("useKeyboardShortcuts", () => {
 			fireKeydown("0", { metaKey: true });
 			expect(handlers.zoomReset).toHaveBeenCalled();
 		});
+	});
+
+	it("Cmd+Shift+P opens Progress for the active repository", () => {
+		progressStore.resetForTests();
+		repositoriesStore.add({ path: "/repo/progress", displayName: "Progress Repo" });
+		repositoriesStore.setActive("/repo/progress");
+		const event = fireKeydown("P", { metaKey: true, shiftKey: true });
+		expect(event.defaultPrevented).toBe(true);
+		expect(progressStore.dialogVisible()).toBe(true);
+		expect(progressStore.requestedProject()).toBe("/repo/progress");
+		progressStore.resetForTests();
+		repositoriesStore.remove("/repo/progress");
+		repositoriesStore._testCancelPendingSave();
 	});
 
 	describe("smart prompt shortcuts", () => {
@@ -273,15 +315,26 @@ describe("useKeyboardShortcuts", () => {
 
 		it("Cmd+Alt+N toggles notes panel", () => {
 			fireKeydown("n", { metaKey: true, altKey: true });
-			expect(handlers.toggleNotesPanel).toHaveBeenCalled();
+			expect(handlers.toggleIdeasPanel).toHaveBeenCalled();
 		});
 
 		it("Cmd+Alt+A toggles AI chat panel (option-modified key → å)", () => {
 			// On macOS, Cmd+Alt+A produces e.key="å" — combo must still resolve via e.code
 			settingsStore.setExperimentalFeaturesEnabled(true);
+			// FastAF gates AI Chat on its own toggle too (isAiChatEnabled).
 			settingsStore.setAiChatEnabled(true);
 			fireKeydown("å", { metaKey: true, altKey: true, code: "KeyA" });
 			expect(handlers.toggleAiChatPanel).toHaveBeenCalled();
+		});
+
+		it("Cmd+Alt+R toggles answers-only on the active terminal (option-modified key → ®)", () => {
+			// catches: the action bound but unreachable on macOS, where Option+R yields e.key="®"
+			const id = terminalsStore.add(makeTerminal());
+			terminalsStore.setActive(id);
+			fireKeydown("®", { metaKey: true, altKey: true, code: "KeyR" });
+			expect(terminalsStore.get(id)?.answersOnly).toBe(true);
+			fireKeydown("®", { metaKey: true, altKey: true, code: "KeyR" });
+			expect(terminalsStore.get(id)?.answersOnly).toBe(false);
 		});
 
 		it("Cmd+Alt+A does nothing when AI chat is disabled", () => {
@@ -318,14 +371,64 @@ describe("useKeyboardShortcuts", () => {
 	});
 
 	describe("run command", () => {
-		it("Cmd+R runs command", () => {
-			fireKeydown("r", { metaKey: true });
+		it("Cmd+Shift+R runs command", () => {
+			fireKeydown("R", { metaKey: true, shiftKey: true });
 			expect(handlers.handleRunCommand).toHaveBeenCalledWith(false);
 		});
 
-		it("Cmd+Shift+R edits run command", () => {
-			fireKeydown("R", { metaKey: true, shiftKey: true });
-			expect(handlers.handleRunCommand).toHaveBeenCalledWith(true);
+		it("Cmd+R reloads the active tab and never runs the command", () => {
+			fireKeydown("r", { metaKey: true });
+			expect(handlers.reloadActiveTab).toHaveBeenCalledOnce();
+			expect(handlers.handleRunCommand).not.toHaveBeenCalled();
+		});
+
+		it("Cmd+R is left to the platform when no tab can reload", () => {
+			vi.mocked(handlers.reloadActiveTab).mockReturnValue(false);
+			const event = fireKeydown("r", { metaKey: true });
+			expect(event.defaultPrevented).toBe(false);
+		});
+	});
+
+	describe("Cmd+Ctrl+N chord ownership", () => {
+		const promote = (ids: string[]) => {
+			for (const id of ids) {
+				globalWorkspaceStore.promote(id);
+			}
+			globalWorkspaceStore.activate();
+		};
+
+		afterEach(() => {
+			globalWorkspaceStore.deactivate();
+			for (const id of globalWorkspaceStore.getPromotedIds()) globalWorkspaceStore.unpromote(id);
+		});
+
+		it("in the global workspace Cmd+Ctrl+2 selects tab 2 and keeps the workspace active", () => {
+			promote(["t1", "t2", "t3"]);
+			const event = fireKeydown("2", { metaKey: true, ctrlKey: true });
+			expect(handlers.handleTerminalSelect).toHaveBeenCalledWith("t2");
+			expect(handlers.switchToBranchByIndex).not.toHaveBeenCalled();
+			expect(globalWorkspaceStore.isActive()).toBe(true);
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it("in the global workspace Cmd+Ctrl+N past the last tab does nothing", () => {
+			promote(["t1", "t2", "t3"]);
+			fireKeydown("5", { metaKey: true, ctrlKey: true });
+			expect(handlers.handleTerminalSelect).not.toHaveBeenCalled();
+			expect(handlers.switchToBranchByIndex).not.toHaveBeenCalled();
+		});
+
+		it("in the global workspace Cmd+2 selects the second workspace tab, not a branch tab", () => {
+			(handlers.terminalIds as ReturnType<typeof vi.fn>).mockReturnValue(["b1", "b2"]);
+			promote(["t1", "t2", "t3"]);
+			fireKeydown("2", { metaKey: true });
+			expect(handlers.handleTerminalSelect).toHaveBeenCalledWith("t2");
+		});
+
+		it("outside the global workspace Cmd+Ctrl+2 still switches to branch 2", () => {
+			fireKeydown("2", { metaKey: true, ctrlKey: true });
+			expect(handlers.switchToBranchByIndex).toHaveBeenCalledWith(2);
+			expect(handlers.handleTerminalSelect).not.toHaveBeenCalled();
 		});
 	});
 

@@ -52,6 +52,19 @@ vi.mock("../../stores/terminals", () => ({
 
 vi.mock("../../hooks/initPanelWindow", () => ({ initPanelWindow: h.initPanelWindow }));
 
+// Upstream 2.0's adapter tests that hold for FastAF's adapter too: the registry
+// entry every opener goes through, detaching, and the table action.
+const addVirtual = vi.hoisted(() => vi.fn());
+vi.mock("../../stores/mdTabs", () => ({ mdTabsStore: { addVirtual } }));
+
+const ui = vi.hoisted(() => ({
+	toggleAiChatPanel: vi.fn(),
+	setAiChatPanelVisible: vi.fn(),
+	setFileBrowserExternalRoot: vi.fn(),
+	setFileBrowserPanelVisible: vi.fn(),
+}));
+vi.mock("../../stores/ui", () => ({ uiStore: ui }));
+
 // Render the binding the adapter hands down, so a test can assert on what the
 // detached window will actually send with.
 vi.mock("../../components/AIChatPanel/AIChatPanel", () => ({
@@ -216,5 +229,39 @@ describe("detached AI Chat panel adapter", () => {
 
 		expect(h.invalidateTerminal).toHaveBeenCalledWith("tuic-1");
 		expect(h.loadConversation).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * Without this adapter the AI Chat panel has no registry entry, and every way
+ * of opening it is a silent no-op: `togglePanel("ai-chat")` returns at
+ * `if (!adapter?.toggle) return false`, which is what `Cmd+Alt+A`, the
+ * status-bar button, the command-palette entry and the detach control all go
+ * through. That failure is invisible — no error, no log, nothing on screen —
+ * so it is worth a test of its own.
+ */
+describe("the AI Chat panel adapter registry entry", () => {
+	it("registers under the id every opener uses", () => {
+		expect(aiChatPanelAdapter.id).toBe("ai-chat");
+		expect(aiChatPanelAdapter.toggle).toBeDefined();
+	});
+
+	it("toggles the panel", () => {
+		aiChatPanelAdapter.toggle?.();
+		expect(ui.toggleAiChatPanel).toHaveBeenCalled();
+	});
+
+	it("hides the inline panel when it moves into its own window", () => {
+		aiChatPanelAdapter.onDetach?.();
+		expect(ui.setAiChatPanelVisible).toHaveBeenCalledWith(false);
+	});
+
+	// Catches: detached table actions being dropped, or lossy document content.
+	it("opens an addressed table as a read-only Markdown document", () => {
+		const source = "| A | B |\n| --- | --- |\n| **first** | second |";
+		aiChatPanelAdapter.handleAction?.("open-table", { source });
+		const [title, uri] = addVirtual.mock.calls[0];
+		expect(title).toBe("AI Chat table");
+		expect(new URL(uri).searchParams.get("source")).toBe(source);
 	});
 });

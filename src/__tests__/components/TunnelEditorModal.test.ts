@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { convertForwardType, normalizeForwardForType } from "../../components/TunnelsPanel/TunnelEditorModal";
-import type { ForwardSpec } from "../../stores/tunnels";
+import { render } from "@solidjs/testing-library";
+import { createComponent } from "solid-js";
+import { describe, expect, it, vi } from "vitest";
+import {
+	convertForwardType,
+	normalizeForwardForType,
+	TunnelEditorModal,
+} from "../../components/TunnelsPanel/TunnelEditorModal";
+import type { ForwardSpec, TunnelProfile } from "../../stores/tunnels";
+
+vi.mock("../../invoke", () => ({ invoke: vi.fn().mockResolvedValue(null) }));
 
 describe("TunnelEditorModal forward shaping", () => {
 	it("normalizes Remote forwards to the backend local_host/local_port shape", () => {
@@ -49,5 +57,27 @@ describe("TunnelEditorModal forward shaping", () => {
 			remote_host: "example.com",
 			remote_port: 8080,
 		});
+	});
+});
+
+describe("TunnelEditorModal forward row", () => {
+	// Catches: forward-row fields left at the 36px default beside the 22px "x" remove button.
+	it("sizes the type select and every port/host field compact, like the remove button", () => {
+		const profile: TunnelProfile = {
+			id: "p1",
+			name: "db",
+			host: "bastion",
+			port: 22,
+			user: "me",
+			identity_file: null,
+			forwards: [{ type: "Local", bind_port: 5432, remote_host: "db.internal", remote_port: 5432 }],
+			options: {} as TunnelProfile["options"],
+			auto_connect: false,
+		};
+		const { container } = render(() => createComponent(TunnelEditorModal, { profile, onClose: () => {} }));
+		const row = container.querySelector('input[placeholder="bind"]')?.parentElement as HTMLElement;
+		const fields = [...row.querySelectorAll("select, input")];
+		expect(fields).toHaveLength(4);
+		for (const field of fields) expect(field.className).toMatch(/compact/);
 	});
 });

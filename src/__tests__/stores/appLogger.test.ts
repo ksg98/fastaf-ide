@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isPerfDebug, setPerfDebug } from "../../utils/perfDebug";
 import { testInScope, testInScopeAsync } from "../helpers/store";
 
 // Mock rpc before importing appLogger
@@ -74,6 +75,98 @@ describe("appLogger", () => {
 			const levels = appLogger.getEntries().map((e) => e.level);
 			expect(levels).toEqual(["error", "warn", "info", "debug"]);
 		});
+	});
+
+	// ---- Browser console mirror ----
+
+	// Catches: debug telemetry reaches Web Inspector while the runtime diagnostic gate is off.
+	it("does not send debug data to the console when perfDebug is off", () => {
+		const previous = isPerfDebug();
+		try {
+			setPerfDebug(false);
+			const consoleDebug = vi.spyOn(console, "debug").mockImplementation(() => {});
+			appLogger.debug("terminal", "frame rendered", { frame: [1, 2, 3] });
+			expect(consoleDebug).not.toHaveBeenCalled();
+			expect(appLogger.getEntries()[0].message).toBe("frame rendered");
+		} finally {
+			setPerfDebug(previous);
+		}
+	});
+
+	// Catches: the diagnostic toggle silences useful debug messages as well as the idle flood.
+	it("sends a debug message without its data object when perfDebug is on", () => {
+		const previous = isPerfDebug();
+		try {
+			setPerfDebug(true);
+			const consoleDebug = vi.spyOn(console, "debug").mockImplementation(() => {});
+			appLogger.debug("terminal", "frame rendered", { frame: [1, 2, 3] });
+			expect(consoleDebug).toHaveBeenCalledExactlyOnceWith("[terminal]", "frame rendered");
+		} finally {
+			setPerfDebug(previous);
+		}
+	});
+
+	// Catches: one non-debug level still passes large data objects to Web Inspector.
+	it.each([
+		["info", "info"],
+		["warn", "warn"],
+		["error", "error"],
+	] as const)("sends %s message without its data object to console.%s", (level, method) => {
+		const consoleCall = vi.spyOn(console, method).mockImplementation(() => {});
+		appLogger[level]("network", `${level} message`, { payload: [1, 2, 3] });
+		expect(consoleCall).toHaveBeenCalledExactlyOnceWith("[network]", `${level} message`);
+	});
+
+	it("mirrors repeated stall metadata instead of losing the second event to UI dedup", async () => {
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		appLogger.info("app", "journal transport ready");
+		await Promise.resolve();
+		mockRpc.mockClear();
+		const message = "SLOW git.refreshBatch:/repo: 500ms (body 20ms + flush 480ms)";
+		appLogger.warn("app", message, { worktree_count: 40 });
+		appLogger.warn("app", message, { worktree_count: 41 });
+		const pushes = mockRpc.mock.calls.filter(([command]) => command === "push_log");
+		expect(pushes).toHaveLength(2);
+		expect(JSON.parse(pushes[1][1].dataJson)).toEqual({ worktree_count: 41 });
+		expect(appLogger.getEntries().filter((entry) => entry.message === message)).toHaveLength(1);
+	});
+
+	// Catches: debug-only phone traces stay local and cannot be read from the host log ring.
+	it("mirrors only enabled mobile Send press summaries to the backend", async () => {
+		const previous = isPerfDebug();
+		vi.spyOn(console, "debug").mockImplementation(() => {});
+		try {
+			setPerfDebug(true);
+			appLogger.debug("mobile-send", "Mobile Send press: 1/1", { sendCalled: false, events: [] });
+			appLogger.debug("mobile-send", "unrelated debug", { ignored: true });
+			appLogger.debug("terminal", "Mobile Send press: 1/2", { ignored: true });
+			await Promise.resolve();
+			const pushes = mockRpc.mock.calls.filter(([command]) => command === "push_log");
+			expect(pushes).toHaveLength(1);
+			expect(pushes[0][1]).toMatchObject({
+				level: "debug",
+				source: "mobile-send",
+				message: "Mobile Send press: 1/1",
+				audience: "diagnostic",
+			});
+			expect(JSON.parse(pushes[0][1].dataJson)).toEqual({ sendCalled: false, events: [] });
+		} finally {
+			setPerfDebug(previous);
+		}
+	});
+
+	// Catches: the backend debug allowlist bypasses the production diagnostic gate.
+	it("does not mirror mobile Send debug summaries with perfDebug disabled", async () => {
+		const previous = isPerfDebug();
+		try {
+			setPerfDebug(false);
+			appLogger.debug("mobile-send", "Mobile Send press: 2/1", { events: [] });
+			await Promise.resolve();
+			expect(mockRpc.mock.calls.filter(([command]) => command === "push_log")).toHaveLength(0);
+		} finally {
+			setPerfDebug(previous);
+		}
 	});
 
 	// ---- Data field ----
@@ -215,6 +308,23 @@ describe("appLogger", () => {
 		expect(parsed.error.message).toBe("boom");
 		expect(parsed.error.name).toBe("Error");
 		expect(typeof parsed.error.stack).toBe("string");
+	});
+
+	it("serializes DOMException in data with name and message", async () => {
+		const err = new DOMException("Write permission denied.", "NotAllowedError");
+		testInScope(() => {
+			appLogger.error("app", "clipboard write failed", err);
+		});
+
+		await vi.waitFor(() => {
+			expect(mockRpc).toHaveBeenCalledWith("push_log", expect.objectContaining({ level: "error", source: "app" }));
+		});
+		const call = mockRpc.mock.calls.find((c) => c[0] === "push_log");
+		// Plain JSON.stringify would emit {} — DOMException is not an Error subclass.
+		expect(JSON.parse((call![1] as { dataJson: string }).dataJson)).toMatchObject({
+			name: "NotAllowedError",
+			message: "Write permission denied.",
+		});
 	});
 
 	it("push sends null dataJson when no data provided", async () => {

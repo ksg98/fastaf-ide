@@ -1,0 +1,12 @@
+// A session offering ego's three generation controls, and one of them set.
+//
+// `effort` is grouped and `model` is not, because a client that only walks the
+// flat list would refuse a value the agent really did offer. The response
+// carries the whole set, because setting one option can change another.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"}]},{"id":"effort","name":"Reasoning effort","category":"thought_level","type":"select","currentValue":"medium","options":[{"group":"reasoning","name":"Reasoning","options":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"high","name":"High"}]}]},{"id":"verbose","name":"Verbose","category":"mode","type":"boolean","currentValue":false}]}}
+{"step":"expect","method":"session/set_config_option","params":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configId":"effort","value":"high"},"capture":"config"}
+{"step":"respond","to":"config","result":{"configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"opus","options":[{"value":"opus","name":"Opus"}]},{"id":"effort","name":"Reasoning effort","category":"thought_level","type":"select","currentValue":"high","options":[{"group":"reasoning","name":"Reasoning","options":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"high","name":"High"}]}]}]}}
+{"step":"await_stdin_eof"}

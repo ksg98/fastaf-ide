@@ -1,10 +1,16 @@
 import { createStore, produce, reconcile } from "solid-js/store";
 import { invoke, listen } from "../invoke";
+import { groupGitHubPollingPaths } from "../services/githubPollingPaths";
+import { notifyPrTransition } from "../services/prNativeNotifications";
+import { rpc } from "../transport";
+import { getRemoteBaseUrl, getRepoConnection } from "../transportRuntime";
 import type { BranchPrStatus, CheckDetail, CheckSummary, GitHubIssue, GitHubStatus } from "../types";
+import { type RemoteEventPayload, remoteEventOrigin } from "../utils/remoteEventOrigin";
 import { appLogger } from "./appLogger";
 import { isNotificationType, prNotificationsStore } from "./prNotifications";
 import { repositoriesStore } from "./repositories";
 import { settingsStore } from "./settings";
+import { workItemLinksStore } from "./workItemLinks";
 
 /** Per-repo remote tracking data (ahead/behind from local git) */
 interface RepoRemoteStatus {
@@ -26,6 +32,8 @@ interface RepoGitHubData {
 /** GitHub store state */
 interface GitHubStoreState {
 	repos: Record<string, RepoGitHubData>;
+	/** Ahead/behind of checkouts that are not a polled repo root (linked worktrees), by path */
+	checkoutStatus: Record<string, RepoRemoteStatus>;
 	issuesLoading: boolean;
 	circuitBreakerOpen: boolean;
 	viewerLogin: string | null;
@@ -34,6 +42,7 @@ interface GitHubStoreState {
 function createGitHubStore() {
 	const [state, setState] = createStore<GitHubStoreState>({
 		repos: {},
+		checkoutStatus: {},
 		issuesLoading: false,
 		circuitBreakerOpen: false,
 		viewerLogin: null,
@@ -149,9 +158,14 @@ function createGitHubStore() {
 		return repo.branches[branch] ?? null;
 	}
 
-	/** Get remote tracking status (ahead/behind) for a repo */
-	function getRemoteStatus(repoPath: string): GitHubStatus | null {
-		return state.repos[repoPath]?.remoteStatus ?? null;
+	/** Get remote tracking status (ahead/behind) for a repo root or a worktree checkout */
+	function getRemoteStatus(path: string): GitHubStatus | null {
+		return state.repos[path]?.remoteStatus ?? state.checkoutStatus[path] ?? null;
+	}
+
+	/** Milliseconds of the last remote poll of a repo; 0 when it was never polled */
+	function getLastPolled(repoPath: string): number {
+		return state.repos[repoPath]?.lastPolled ?? 0;
 	}
 
 	/** Get issues for a repo */
@@ -189,7 +203,10 @@ function createGitHubStore() {
 		try {
 			const remoteStatus = await invoke<GitHubStatus>("get_github_status", { path });
 			if (remoteStatus) {
-				setState("repos", path, "remoteStatus", remoteStatus);
+				// A path without a repo entry is a worktree checkout: writing it under `repos`
+				// would create a phantom repo without `branches`.
+				if (state.repos[path]) setState("repos", path, "remoteStatus", remoteStatus);
+				else setState("checkoutStatus", path, remoteStatus);
 			}
 		} catch {
 			// Remote status is best-effort — ignore failures
@@ -266,24 +283,86 @@ function createGitHubStore() {
 	/** Handle transition events from Rust poller. `type` is the raw poller tag — a
 	 *  superset of the renderable notification types (it also carries watcher-only
 	 *  `pushed`/`opened`), so gate the notification add behind `isNotificationType`. */
-	function handleTransition(t: {
-		type: string;
-		repo_path: string;
-		branch: string;
-		pr_number: number;
-		title: string;
-	}): void {
+	function ownsNotice(payload: RemoteEventPayload & { repo_path: string }): boolean {
+		const origin = remoteEventOrigin(payload);
+		if (payload.__tuic_origin !== undefined && !origin) return false;
+		return (
+			getRepoConnection(payload.repo_path) === origin?.connection && (!origin || !!getRemoteBaseUrl(origin.connection))
+		);
+	}
+
+	async function handleTransition(
+		t: RemoteEventPayload & {
+			type: string;
+			repo_path: string;
+			branch: string;
+			pr_number: number;
+			title: string;
+		},
+	): Promise<void> {
+		if (!ownsNotice(t)) return;
+		const origin = remoteEventOrigin(t);
 		// Watcher-only transitions (pushed/opened) have no popover label — skip them.
 		if (!isNotificationType(t.type)) return;
 
+		if (origin) {
+			const duplicate = prNotificationsStore.state.notifications.some(
+				(n) =>
+					!n.dismissed &&
+					n.connectionId === origin.connection &&
+					n.repoPath === t.repo_path &&
+					n.prNumber === t.pr_number &&
+					n.type === t.type,
+			);
+			if (duplicate) return;
+			// The event precedes the snapshot; fetch from its owner rather than local cached URLs.
+			try {
+				const statuses = await rpc<BranchPrStatus[]>("get_repo_pr_statuses", { path: t.repo_path }, origin.connection);
+				if (!ownsNotice(t)) return;
+				updateRepoData(t.repo_path, statuses);
+			} catch (error) {
+				appLogger.debug("github", "Remote PR snapshot refresh failed", error);
+				return;
+			}
+			if (
+				prNotificationsStore.state.notifications.some(
+					(n) =>
+						!n.dismissed &&
+						n.connectionId === origin.connection &&
+						n.repoPath === t.repo_path &&
+						n.prNumber === t.pr_number &&
+						n.type === t.type,
+				)
+			)
+				return;
+		}
+		const pr = getPrStatus(t.repo_path, t.branch);
+		const url = pr?.url?.replace(/\/pull\/\d+(?:[?#].*)?$/, `/pull/${t.pr_number}`);
 		prNotificationsStore.add({
 			repoPath: t.repo_path,
 			branch: t.branch,
 			prNumber: t.pr_number,
-			title: t.title,
+			url,
+			title: origin ? `[${origin.name}] ${t.title}` : t.title,
+			...(origin ? { connectionId: origin.connection } : {}),
 			type: t.type,
 		});
 
+		// Transitions are emitted before `github-pr-update`, so the store can still hold the branch's
+		// previous PR: take only the repo base from its URL and address the transitioning PR number.
+		if (url) {
+			notifyPrTransition({
+				repoName: `${origin ? `[${origin.name}] ` : ""}${repositoriesStore.get(t.repo_path)?.displayName ?? t.repo_path}`,
+				prNumber: t.pr_number,
+				title: t.title,
+				type: t.type,
+				linkedItem: origin ? undefined : workItemLinksStore.get(t.repo_path, t.branch),
+				url,
+			});
+		}
+
+		// Remote transitions may notify but must never trigger local repository automation.
+		if (origin) return;
 		if ((t.type === "merged" || t.type === "closed") && prTerminalCallback) {
 			prTerminalCallback(t.repo_path, t.branch, t.pr_number, t.type);
 		}
@@ -310,23 +389,46 @@ function createGitHubStore() {
 		const issueFilter = settingsStore.state.issueFilter ?? "disabled";
 
 		const prHideDrafts = settingsStore.state.prHideDrafts;
-		invoke("github_start_polling", { paths, issueFilter, prHideDrafts }).catch((err) =>
-			appLogger.warn("github", "Failed to start GitHub poller", err),
-		);
+		const grouped = groupGitHubPollingPaths(paths);
+		for (const [owner, ownedPaths] of grouped) {
+			if (owner && !getRemoteBaseUrl(owner)) continue;
+			const args = { paths: ownedPaths, issueFilter, prHideDrafts };
+			const start = owner ? rpc("github_start_polling", args, owner) : invoke("github_start_polling", args);
+			start.catch((err) => appLogger.warn("github", "Failed to start GitHub poller", err));
+		}
 		fetchViewerLogin();
 
-		listen<{ repo_path: string; statuses: BranchPrStatus[] }>("github-pr-update", (event) => {
+		listen<RemoteEventPayload & { repo_path: string; statuses: BranchPrStatus[] }>("github-pr-update", (event) => {
+			if (!ownsNotice(event.payload)) return;
 			updateRepoData(event.payload.repo_path, event.payload.statuses);
 			pollRemoteStatus(event.payload.repo_path);
+			for (const checkout of Object.keys(state.checkoutStatus)) pollRemoteStatus(checkout);
 		}).then((unsub) => unlisteners.push(unsub));
 
-		listen<{ type: string; repo_path: string; branch: string; pr_number: number; title: string }>(
+		listen<RemoteEventPayload & { type: string; repo_path: string; branch: string; pr_number: number; title: string }>(
 			"github-transition",
-			(event) => handleTransition(event.payload),
+			(event) => void handleTransition(event.payload),
 		).then((unsub) => unlisteners.push(unsub));
 
-		listen<{ repo_path: string; issues: GitHubIssue[] }>("github-issues-update", (event) => {
+		listen<RemoteEventPayload & { repo_path: string; issues: GitHubIssue[] }>("github-issues-update", (event) => {
+			if (!ownsNotice(event.payload)) return;
 			updateRepoIssues(event.payload.repo_path, event.payload.issues);
+		}).then((unsub) => unlisteners.push(unsub));
+
+		listen<RemoteEventPayload & { id: string; status: string }>("remote-connection-status", (event) => {
+			const notice = event.payload;
+			if (notice.__tuic_origin !== undefined || notice.status !== "connected" || !getRemoteBaseUrl(notice.id)) return;
+			const ownedPaths = groupGitHubPollingPaths(repositoriesStore.getActivePaths()).get(notice.id) ?? [];
+			if (!ownedPaths.length) return;
+			rpc(
+				"github_start_polling",
+				{
+					paths: ownedPaths,
+					issueFilter: settingsStore.state.issueFilter ?? "disabled",
+					prHideDrafts: settingsStore.state.prHideDrafts,
+				},
+				notice.id,
+			).catch((error) => appLogger.debug("github", "Remote GitHub poller restart failed", error));
 		}).then((unsub) => unlisteners.push(unsub));
 
 		document.addEventListener("visibilitychange", onVisibilityChange);
@@ -359,6 +461,7 @@ function createGitHubStore() {
 		getRemoteOnlyPrs,
 		getAllOpenPrs,
 		getRemoteStatus,
+		getLastPolled,
 		setRemoteStatus,
 		getRepoIssues,
 		setIssueFilter,
@@ -375,6 +478,7 @@ function createGitHubStore() {
 		},
 		loadCheckDetails,
 		pollRepo,
+		pollRemoteStatus,
 		startPolling,
 		stopPolling,
 		/** Register a callback for PR terminal state transitions (merged/closed) */

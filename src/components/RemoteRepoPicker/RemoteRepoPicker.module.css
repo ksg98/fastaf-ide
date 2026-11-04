@@ -1,0 +1,53 @@
+.list {
+	margin-top: 8px;
+	max-height: 320px;
+	overflow-y: auto;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	background: var(--bg-secondary);
+}
+
+button[data-control-layout="row"].row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 6px 10px;
+	border: none;
+	background: transparent;
+	color: var(--text);
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.row:hover:not(:disabled) {
+	background: var(--bg-hover);
+}
+
+.row:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+
+.name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.hint,
+.error {
+	margin: 0;
+	padding: 10px;
+	font-size: 12px;
+}
+
+.hint {
+	color: var(--text-dimmed);
+}
+
+.error {
+	color: var(--error);
+	word-break: break-word;
+}

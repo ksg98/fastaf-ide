@@ -57,6 +57,7 @@ export const ChatGptSignIn: Component = () => {
 							<>
 								<div class={s.passwordRow}>
 									<button
+										data-setting-exclusion="fastaf.chatgpt"
 										class={s.saveBtn}
 										data-testid="chatgpt-sign-in-btn"
 										onClick={signIn}
@@ -80,6 +81,7 @@ export const ChatGptSignIn: Component = () => {
 								</Show>
 							</span>
 							<button
+								data-setting-exclusion="fastaf.chatgpt"
 								class={s.testBtn}
 								data-testid="chatgpt-sign-out-btn"
 								onClick={() => void auth.logout()}
@@ -106,15 +108,29 @@ export const ChatGptSignIn: Component = () => {
 						<div class={s.passwordRow}>
 							<Show when={prompt().code}>
 								{(code) => (
-									<button class={s.testBtn} onClick={() => void copyCode(code())}>
+									<button
+										data-setting-exclusion="fastaf.chatgpt"
+										class={s.testBtn}
+										onClick={() => void copyCode(code())}
+									>
 										{copied() ? "Copied" : "Copy code"}
 									</button>
 								)}
 							</Show>
-							<button class={s.testBtn} data-testid="chatgpt-open-page" onClick={() => handleOpenUrl(prompt().url)}>
+							<button
+								data-setting-exclusion="fastaf.chatgpt"
+								class={s.testBtn}
+								data-testid="chatgpt-open-page"
+								onClick={() => handleOpenUrl(prompt().url)}
+							>
 								Open sign-in page
 							</button>
-							<button class={s.testBtn} data-testid="chatgpt-cancel-btn" onClick={() => void auth.cancelLogin()}>
+							<button
+								data-setting-exclusion="fastaf.chatgpt"
+								class={s.testBtn}
+								data-testid="chatgpt-cancel-btn"
+								onClick={() => void auth.cancelLogin()}
+							>
 								Cancel
 							</button>
 						</div>

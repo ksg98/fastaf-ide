@@ -97,6 +97,7 @@ mod tests {
         let mut vt = VtLogBuffer::new(2, 80, 5000);
         vt.process(bytes);
         state
+            .grid
             .vt_log_buffers
             .insert(sid.to_string(), parking_lot::Mutex::new(vt));
     }
@@ -143,7 +144,13 @@ mod tests {
             feed.push_str(&format!("L{i:04}\r\n"));
         }
         insert_session(&st, "s", feed.as_bytes());
-        let total = st.vt_log_buffers.get("s").unwrap().lock().total_lines();
+        let total = st
+            .grid
+            .vt_log_buffers
+            .get("s")
+            .unwrap()
+            .lock()
+            .total_lines();
         assert!(
             total > MAX_LINES,
             "fixture must exceed the clamp, got {total}"

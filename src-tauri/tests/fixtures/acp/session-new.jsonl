@@ -1,0 +1,8 @@
+// A session created and then listed, with the recorded ego capabilities.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result_file":"ego-initialize.json"}
+{"step":"expect","method":"session/new","forbid_params":["allow","deny","roots"],"capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","configOptions":[]}}
+{"step":"expect","method":"session/list","capture":"list"}
+{"step":"respond","to":"list","result":{"sessions":[{"sessionId":"01932d5e-0000-7000-8000-00000000abcd","cwd":"/tmp/one"}]}}
+{"step":"await_stdin_eof"}

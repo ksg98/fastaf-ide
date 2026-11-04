@@ -1163,17 +1163,19 @@ mod tests {
         );
 
         // A finished message item repeats text already streamed — no chunk.
-        assert!(
+        assert_eq!(
             writer
                 .on_event(&json!({ "type": "response.output_item.done", "item": { "type": "message", "content": [] } }))
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
-        assert!(
+        assert_eq!(
             writer
                 .on_event(&json!({ "type": "response.completed", "response": { "usage": { "input_tokens": 3, "output_tokens": 2 } } }))
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
 
         let tail = writer.finish();
@@ -1199,7 +1201,7 @@ mod tests {
     #[test]
     fn sse_decoder_handles_split_chunks_crlf_and_huge_lines() {
         let mut decoder = SseDecoder::default();
-        assert!(decoder.push(b"event: x\r\ndata: {\"a\":").is_empty());
+        assert_eq!(decoder.push(b"event: x\r\ndata: {\"a\":").len(), 0);
         assert_eq!(
             decoder.push(b"1}\r\n\r\ndata: [DONE]\n\n"),
             vec!["{\"a\":1}", "[DONE]"]
@@ -1210,7 +1212,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].len(), big.len());
 
-        assert!(decoder.push(b"data: tail").is_empty());
+        assert_eq!(decoder.push(b"data: tail").len(), 0);
         assert_eq!(decoder.finish(), vec!["tail"]);
     }
 

@@ -8,7 +8,8 @@
 //! - Immediate keyring persistence after every token operation
 
 use anyhow::{Context, Result, bail};
-use oauth2::PkceCodeChallenge;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -25,6 +26,7 @@ use crate::mcp_upstream_credentials::{OAuthTokenSet, is_token_valid, save_oauth_
 pub(crate) struct TokenManager {
     /// Upstream name (used as keyring key).
     upstream_name: String,
+    upstream_url: String,
     /// OAuth client ID.
     client_id: String,
     /// OAuth client secret (confidential clients only).
@@ -35,6 +37,7 @@ pub(crate) struct TokenManager {
     resource: Option<String>,
     /// Guards concurrent refresh — only one refresh executes at a time.
     refresh_lock: Arc<Mutex<()>>,
+    settings_publisher: crate::settings::changes::Publisher,
 }
 
 /// Result of generating a PKCE challenge for the authorization request.
@@ -47,9 +50,14 @@ pub(crate) struct PkceChallengePair {
     pub(crate) verifier: String,
 }
 
+fn pkce_s256(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
 impl TokenManager {
     pub(crate) fn new(
         upstream_name: String,
+        upstream_url: String,
         client_id: String,
         client_secret: Option<String>,
         token_endpoint: String,
@@ -57,21 +65,31 @@ impl TokenManager {
     ) -> Self {
         Self {
             upstream_name,
+            upstream_url,
             client_id,
             client_secret,
             token_endpoint,
             resource,
             refresh_lock: Arc::new(Mutex::new(())),
+            settings_publisher: Default::default(),
         }
+    }
+
+    pub(crate) fn with_settings_publisher(
+        mut self,
+        publisher: crate::settings::changes::Publisher,
+    ) -> Self {
+        self.settings_publisher = publisher;
+        self
     }
 
     /// Generate a new PKCE S256 challenge pair for an authorization request.
     pub(crate) fn generate_pkce() -> PkceChallengePair {
-        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+        let verifier = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
         PkceChallengePair {
-            challenge: challenge.as_str().to_string(),
+            challenge: pkce_s256(&verifier),
             method: "S256".to_string(),
-            verifier: verifier.secret().to_string(),
+            verifier,
         }
     }
 
@@ -123,7 +141,9 @@ impl TokenManager {
             .context("Failed to parse token exchange response")?;
 
         let token_set = self.token_response_to_set(token_resp);
-        save_oauth_tokens(&self.upstream_name, &token_set).map_err(|e| anyhow::anyhow!("{e}"))?;
+        save_oauth_tokens(&self.upstream_name, &token_set, &self.upstream_url)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.settings_publisher.publish("upstreams", true);
         Ok(token_set)
     }
 
@@ -155,9 +175,10 @@ impl TokenManager {
         let _guard = self.refresh_lock.lock().await;
 
         // Double-check: re-read from keyring in case another caller refreshed
-        if let Ok(Some(cred)) =
-            crate::mcp_upstream_credentials::read_stored_credential(&self.upstream_name)
-            && let crate::mcp_upstream_credentials::StoredCredential::Oauth2(ref fresh) = cred
+        if let Ok(Some(cred)) = crate::mcp_upstream_credentials::read_stored_credential_for_url(
+            &self.upstream_name,
+            &self.upstream_url,
+        ) && let crate::mcp_upstream_credentials::StoredCredential::Oauth2(ref fresh) = cred
             && fresh.access_token != current.access_token
             && is_token_valid(fresh)
         {
@@ -211,7 +232,9 @@ impl TokenManager {
             token_set.refresh_token = current.refresh_token.clone();
         }
 
-        save_oauth_tokens(&self.upstream_name, &token_set).map_err(|e| anyhow::anyhow!("{e}"))?;
+        save_oauth_tokens(&self.upstream_name, &token_set, &self.upstream_url)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.settings_publisher.publish("upstreams", true);
         Ok(Some(token_set))
     }
 
@@ -279,12 +302,38 @@ struct TokenResponse {
 mod tests {
     use super::*;
 
+    // Catches wrong S256 encoding and generating a challenge for another verifier.
+    #[test]
+    fn pkce_s256_matches_rfc7636_appendix_b() {
+        assert_eq!(
+            pkce_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+
+        let pair = TokenManager::generate_pkce();
+        assert_eq!(pair.method, "S256");
+        assert!((43..=128).contains(&pair.verifier.len()));
+        assert!(
+            pair.verifier
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+        );
+        // Use independent primitives, not pkce_s256 or its SHA/base64 helpers.
+        let digest = ring::digest::digest(&ring::digest::SHA256, pair.verifier.as_bytes());
+        assert_eq!(
+            pair.challenge,
+            Base64UrlUnpadded::encode_string(digest.as_ref())
+        );
+    }
+
     #[test]
     fn pkce_generates_s256() {
         let pair = TokenManager::generate_pkce();
         assert_eq!(pair.method, "S256");
-        assert!(!pair.challenge.is_empty());
-        assert!(!pair.verifier.is_empty());
+        assert_ne!(pair.challenge, "");
+        assert_ne!(pair.verifier, "");
         // Challenge and verifier must differ
         assert_ne!(pair.challenge, pair.verifier);
     }
@@ -301,6 +350,7 @@ mod tests {
     fn token_response_to_set_with_all_fields() {
         let mgr = TokenManager::new(
             "test".into(),
+            "https://api.example.com/mcp".into(),
             "client-1".into(),
             None,
             "https://auth.example.com/token".into(),
@@ -326,6 +376,7 @@ mod tests {
     fn token_response_to_set_without_optionals() {
         let mgr = TokenManager::new(
             "test".into(),
+            "https://api.example.com/mcp".into(),
             "client-1".into(),
             None,
             "https://auth.example.com/token".into(),
@@ -346,6 +397,8 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_code_error_response() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut events = state.event_bus.subscribe();
         let mut server = mockito::Server::new_async().await;
         server
             .mock("POST", "/token")
@@ -356,20 +409,28 @@ mod tests {
 
         let mgr = TokenManager::new(
             "test-exchange".into(),
+            "https://api.example.com/mcp".into(),
             "client".into(),
             None,
             format!("{}/token", server.url()),
             None,
-        );
+        )
+        .with_settings_publisher(crate::settings::changes::Publisher::new(&state));
         let err = mgr
             .exchange_code("bad-code", "verifier", "http://localhost/callback")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("400"), "got: {err}");
+        assert!(
+            events.try_recv().is_err(),
+            "failed OAuth must not publish persistence"
+        );
     }
 
     #[tokio::test]
     async fn exchange_code_happy_path() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut events = state.event_bus.subscribe();
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/token")
@@ -396,11 +457,13 @@ mod tests {
 
         let mgr = TokenManager::new(
             "test-exchange-happy".into(),
+            "https://api.example.com/mcp".into(),
             "my-client".into(),
             None,
             format!("{}/token", server.url()),
             None,
-        );
+        )
+        .with_settings_publisher(crate::settings::changes::Publisher::new(&state));
         let set = mgr
             .exchange_code(
                 "auth-code-123",
@@ -413,6 +476,18 @@ mod tests {
         assert_eq!(set.refresh_token, Some("new-rt".into()));
         assert_eq!(set.scope, Some("read".into()));
         mock.assert_async().await;
+        let notice = match events
+            .try_recv()
+            .expect("OAuth credential persistence must refresh Settings")
+        {
+            crate::state::AppEvent::SettingsChanged(notice) => notice,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(notice.section, "upstreams");
+        assert!(notice.persisted && notice.applied);
+        assert!(!serde_json::to_string(&notice).unwrap().contains("new-at"));
+        assert!(!serde_json::to_string(&notice).unwrap().contains("new-rt"));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -438,6 +513,7 @@ mod tests {
 
         let mgr = TokenManager::new(
             "test-resource".into(),
+            "https://api.example.com/mcp".into(),
             "client".into(),
             None,
             format!("{}/token", server.url()),
@@ -475,6 +551,7 @@ mod tests {
 
         let mgr = TokenManager::new(
             "test-confidential".into(),
+            "https://api.example.com/mcp".into(),
             "conf-client".into(),
             Some("s3cret".into()),
             format!("{}/token", server.url()),
@@ -493,6 +570,7 @@ mod tests {
     async fn refresh_if_needed_skips_when_valid() {
         let mgr = TokenManager::new(
             "test-refresh-skip".into(),
+            "https://api.example.com/mcp".into(),
             "client".into(),
             None,
             "https://unused/token".into(),
@@ -525,6 +603,7 @@ mod tests {
         // is held, as is the case here). #1269-99f2.
         let mgr = TokenManager::new(
             "test-refresh-none-expiry".into(),
+            "https://api.example.com/mcp".into(),
             "client".into(),
             None,
             "https://unused/token".into(),
@@ -555,6 +634,7 @@ mod tests {
     async fn refresh_if_needed_errors_without_refresh_token() {
         let mgr = TokenManager::new(
             "test-refresh-notoken".into(),
+            "https://api.example.com/mcp".into(),
             "client".into(),
             None,
             "https://unused/token".into(),
@@ -604,6 +684,7 @@ mod tests {
 
         let mgr = Arc::new(TokenManager::new(
             "test-concurrent-refresh".into(),
+            "https://api.example.com/mcp".into(),
             "client".into(),
             None,
             format!("{}/token", server.url()),
@@ -686,9 +767,21 @@ mod tests {
             scope: None,
             resource: None,
         };
-        crate::mcp_upstream_credentials::save_oauth_tokens(name, &stored).unwrap();
+        crate::mcp_upstream_credentials::save_oauth_tokens(
+            name,
+            &stored,
+            "https://api.example.com/mcp",
+        )
+        .unwrap();
 
-        let mgr = TokenManager::new(name.into(), "client".into(), None, endpoint, None);
+        let mgr = TokenManager::new(
+            name.into(),
+            "https://api.example.com/mcp".into(),
+            "client".into(),
+            None,
+            endpoint,
+            None,
+        );
         let refreshed = mgr
             .refresh_after_rejection(&stored, "revoked-but-unexpired")
             .await
@@ -724,9 +817,21 @@ mod tests {
             scope: None,
             resource: None,
         };
-        crate::mcp_upstream_credentials::save_oauth_tokens(name, &rotated).unwrap();
+        crate::mcp_upstream_credentials::save_oauth_tokens(
+            name,
+            &rotated,
+            "https://api.example.com/mcp",
+        )
+        .unwrap();
 
-        let mgr = TokenManager::new(name.into(), "client".into(), None, endpoint, None);
+        let mgr = TokenManager::new(
+            name.into(),
+            "https://api.example.com/mcp".into(),
+            "client".into(),
+            None,
+            endpoint,
+            None,
+        );
         let result = mgr
             .refresh_after_rejection(&rotated, "the-one-we-got-401-on")
             .await

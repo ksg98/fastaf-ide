@@ -13,9 +13,13 @@ vi.mock("../../hooks/usePty", () => ({
 
 import { ComposeDock } from "../../components/ComposeDock/ComposeDock";
 import { buildStartTargets, type StartTarget, startCommandFor } from "../../components/ComposeDock/composeTargets";
+import { composeDockBridge } from "../../components/ComposeDock/dockBridge";
+import { dockSendMode } from "../../components/ComposeDock/dockSend";
+import { chatViewStore } from "../../stores/chatView";
 import { dictationStore } from "../../stores/dictation";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
 
 const REPO = "/repo/demo";
 
@@ -40,7 +44,10 @@ function type(field: HTMLTextAreaElement, value: string): void {
 beforeEach(async () => {
 	ptyMocks.sendCommand.mockClear();
 	ptyMocks.enqueueCommand.mockClear();
-	mockInvoke.mockReset().mockResolvedValue(undefined);
+	// saveConfig reads the stored config first and refuses to write without one.
+	mockInvoke
+		.mockReset()
+		.mockImplementation(async (cmd: string) => (cmd === "get_dictation_config" ? { enabled: false } : undefined));
 	for (const id of terminalsStore.getIds()) terminalsStore.remove(id);
 	repositoriesStore.setActive(null);
 	// saveConfig updates the store only after the (mocked) backend call resolves.
@@ -56,7 +63,7 @@ afterEach(() => {
 describe("composeTargets", () => {
 	it("offers only agents that take a starting prompt — never a shell that would run the text", () => {
 		const targets = buildStartTargets([
-			{ type: "aider", name: "Aider", command: "aider" },
+			{ type: "goose", name: "Goose", command: "goose" },
 			{ type: "claude", name: "Claude Code", command: "claude --model opus" },
 			{ type: "codex", name: "Codex CLI", command: "codex" },
 		]);
@@ -255,5 +262,117 @@ describe("ComposeDock (hero)", () => {
 		expect(container.querySelector("h1")?.textContent).toBe("What should we build?");
 		expect(input(container).disabled).toBe(true);
 		expect(input(container).placeholder).toBe("Add a repository to start");
+	});
+});
+
+/**
+ * FastAF's dock is the one input for the active terminal, Chat view included:
+ * Chat does not bring back upstream's own composer while the dock is on screen
+ * (Terminal.tsx), so the dock must deliver a Chat prompt exactly as that
+ * composer did.
+ */
+describe("ComposeDock in front of the Chat view", () => {
+	const renderDock = () =>
+		render(() => <ComposeDock variant="dock" onDictationStart={vi.fn()} onDictationStop={vi.fn()} />);
+	const sendFromDock = (container: HTMLElement, text: string) => {
+		fireEvent.click(container.querySelector('[data-testid="compose-type"]') as HTMLButtonElement);
+		type(input(container), text);
+		fireEvent.keyDown(input(container), { key: "Enter" });
+	};
+	const chatTerminal = (sessionId: string, patch: Parameters<typeof terminalsStore.update>[1] = {}) => {
+		const id = addTerminal("Claude Code", "claude", sessionId);
+		terminalsStore.update(id, patch);
+		terminalsStore.setViewMode(id, "chat");
+		terminalsStore.setActive(id);
+		return id;
+	};
+
+	afterEach(() => vi.restoreAllMocks());
+
+	// Catches: a Chat prompt typed into the hidden agent box mid-turn instead of the queue the transcript lists.
+	it("queues a prompt sent while the agent works, and refreshes the transcript's queue", async () => {
+		const refresh = vi.spyOn(chatViewStore, "refreshQueue").mockResolvedValue();
+		chatTerminal("session-busy", { shellState: "busy" });
+		const { container } = renderDock();
+		sendFromDock(container, "then add a test");
+		await waitFor(() => expect(ptyMocks.enqueueCommand).toHaveBeenCalledWith("session-busy", "then add a test"));
+		expect(ptyMocks.sendCommand).not.toHaveBeenCalled();
+		expect(refresh).toHaveBeenCalledWith("session-busy");
+	});
+
+	// Catches: the dock reaching the agent while the open transcript never shows the prompt was sent.
+	it("sends to an idle agent now and shows the prompt pending in the transcript", async () => {
+		const rollback = vi.fn();
+		const begin = vi.spyOn(chatViewStore, "beginSubmission").mockReturnValue(rollback);
+		chatTerminal("session-idle", { shellState: "idle" });
+		const { container } = renderDock();
+		sendFromDock(container, "explain the retry loop");
+		await waitFor(() =>
+			expect(ptyMocks.sendCommand).toHaveBeenCalledWith("session-idle", "explain the retry loop", "claude"),
+		);
+		expect(begin).toHaveBeenCalledWith("session-idle", "explain the retry loop");
+		expect(rollback).not.toHaveBeenCalled();
+		expect(ptyMocks.enqueueCommand).not.toHaveBeenCalled();
+	});
+
+	// Catches: a failed send leaving a pending turn in the transcript for a prompt nobody received.
+	it("takes the pending turn back, and keeps the draft, when the send fails", async () => {
+		const rollback = vi.fn();
+		vi.spyOn(chatViewStore, "beginSubmission").mockReturnValue(rollback);
+		// The failure toast's auto-dismiss timer would outlive the test.
+		const toast = vi.spyOn(toastsStore, "add").mockImplementation(() => 1);
+		ptyMocks.sendCommand.mockRejectedValueOnce(new Error("pty gone"));
+		chatTerminal("session-fail", { shellState: "idle" });
+		const { container } = renderDock();
+		sendFromDock(container, "still here");
+		await waitFor(() => expect(rollback).toHaveBeenCalledTimes(1));
+		expect(input(container).value).toBe("still here");
+		expect(toast).toHaveBeenCalledWith("Could not send to the terminal", "Error: pty gone", "error");
+	});
+
+	// Catches: an answer to the agent's own question parked behind the turn that is waiting for it.
+	it("answers a waiting agent right away even though it reads as busy", () => {
+		expect(
+			dockSendMode({ agentType: "claude", viewMode: "chat", shellState: "busy", awaitingInput: "question" }, "now"),
+		).toBe("now");
+		expect(dockSendMode({ agentType: "claude", viewMode: "cli", shellState: "busy", awaitingInput: null }, "now")).toBe(
+			"now",
+		);
+		expect(
+			dockSendMode({ agentType: "claude", viewMode: "chat", shellState: "busy", awaitingInput: null }, "now"),
+		).toBe("queue");
+		expect(dockSendMode({ agentType: null, viewMode: "cli", shellState: "busy", awaitingInput: null }, "queue")).toBe(
+			"now",
+		);
+		expect(
+			dockSendMode({ agentType: "codex", viewMode: "cli", shellState: "idle", awaitingInput: null }, "queue"),
+		).toBe("queue");
+	});
+
+	// Catches: Chat typing, the compose shortcut or a smart prompt having nowhere to go once Chat's own composer is gone.
+	it("lets the terminal open it with typed text or a replacement draft, and leaves when unmounted", () => {
+		chatTerminal("session-open");
+		const { container, unmount } = renderDock();
+		expect(composeDockBridge.present()).toBe(true);
+		expect(composeDockBridge.open({ insert: "h" })).toBe(true);
+		const field = input(container);
+		expect(field.value).toBe("h");
+		expect(document.activeElement).toBe(field);
+		expect(composeDockBridge.open({ insert: "i" })).toBe(true);
+		expect(field.value).toBe("hi");
+		expect(composeDockBridge.open({ replace: "Review the diff" })).toBe(true);
+		expect(input(container).value).toBe("Review the diff");
+		unmount();
+		expect(composeDockBridge.present()).toBe(false);
+		expect(composeDockBridge.open({ insert: "x" })).toBe(false);
+	});
+
+	// Catches: typing swallowed into a dock that cannot send (no session), with the keystroke lost.
+	it("refuses to open while the active terminal has no session", () => {
+		const id = chatTerminal("");
+		terminalsStore.update(id, { sessionId: null });
+		const { container } = renderDock();
+		expect(composeDockBridge.open({ insert: "h" })).toBe(false);
+		expect(container.querySelector('[data-testid="compose-input"]')).toBeNull();
 	});
 });

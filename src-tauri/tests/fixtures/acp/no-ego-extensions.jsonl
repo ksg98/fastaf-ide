@@ -1,0 +1,9 @@
+// A full ACP agent that is not ego: every baseline and session capability is
+// there (including mcpCapabilities.acp, without which session/new is refused),
+// and `_meta.ego` is not. Pause, resume and compact have no method to
+// call, so nothing may be written for them.
+{"step":"expect","method":"initialize","params":{"protocolVersion":1},"capture":"init"}
+{"step":"respond","to":"init","result":{"protocolVersion":1,"agentInfo":{"name":"not-ego","version":"fixture"},"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":false,"sse":false,"acp":true},"promptCapabilities":{"image":true,"audio":false,"embeddedContext":false},"sessionCapabilities":{"list":{},"delete":{},"fork":{},"resume":{},"close":{}}}}}
+{"step":"expect","method":"session/new","capture":"new"}
+{"step":"respond","to":"new","result":{"sessionId":"01932d5e-0000-7000-8000-0000000000aa","configOptions":[]}}
+{"step":"expect_no_frame"}

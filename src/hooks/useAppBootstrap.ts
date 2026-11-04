@@ -1,5 +1,4 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { onMount } from "solid-js";
 import { initDeepLinkHandler } from "../deep-link-handler";
 import { invoke } from "../invoke";
@@ -9,8 +8,8 @@ import { agentConfigsStore } from "../stores/agentConfigs";
 import { appLogger } from "../stores/appLogger";
 import { dictationStore } from "../stores/dictation";
 import { githubStore } from "../stores/github";
+import { ideasStore } from "../stores/ideas";
 import { keybindingsStore } from "../stores/keybindings";
-import { notesStore } from "../stores/notes";
 import { notificationsStore } from "../stores/notifications";
 import { prNotificationsStore } from "../stores/prNotifications";
 import { promptLibraryStore } from "../stores/promptLibrary";
@@ -30,11 +29,13 @@ import { startAutoFetch } from "./useAutoFetch";
 // `registerRepo` is omitted too: it is supplied below from `openRepoPath`, so the
 // caller passes one repo-registration function and both consumers (the deep link
 // and the parked-tab toast) share it.
-type InitOptions = Omit<AppInitDeps, "stores" | "applyPlatformClass" | "onCloseRequested" | "registerRepo">;
+type InitOptions = Omit<AppInitDeps, "stores" | "applyPlatformClass" | "registerRepo">;
 
 export type AppBootstrapOptions = InitOptions & {
 	detectAgents: () => Promise<unknown>;
 	restoreDetachedPanels: () => void;
+	/** After an update restart, resume the agent tabs of every branch. */
+	resumeAgentTabsAfterUpdate: () => Promise<void>;
 	setWhatsNewVersion: (version: string) => void;
 	openSettings: (tab?: string) => void;
 	/** Add a repo by path — wired to the deep link `tuic://open-repo` (`fastaf <dir>`). */
@@ -57,10 +58,11 @@ async function hydrateStores(): Promise<void> {
 		repoSettingsStore.hydrate(),
 		repoDefaultsStore.hydrate(),
 		promptLibraryStore.hydrate(),
-		notesStore.hydrate(),
+		ideasStore.hydrate(),
 		activityStore.hydrate(),
 		keybindingsStore.hydrate(),
 		agentConfigsStore.hydrate(),
+		// FastAF: the built-in AI engine reads its configured providers from here.
 		providerRegistryStore.hydrate(),
 	]);
 	const failures = results.filter((result) => result.status === "rejected");
@@ -124,6 +126,7 @@ export async function runAppBootstrap(options: AppBootstrapOptions): Promise<voi
 	const {
 		detectAgents,
 		restoreDetachedPanels,
+		resumeAgentTabsAfterUpdate,
 		setWhatsNewVersion,
 		openSettings,
 		openRepoPath,
@@ -141,23 +144,26 @@ export async function runAppBootstrap(options: AppBootstrapOptions): Promise<voi
 			startAutoFetch,
 			startPrNotificationTimer: prNotificationsStore.startFocusTimer,
 			loadFontFromConfig: settingsStore.loadFontFromConfig,
+			startDictationSettingsSync: () => dictationStore.startRemoteSync(),
 			refreshDictationConfig: () =>
 				dictationStore.refreshConfig().then(() => {
-					if (dictationStore.state.enabled) dictationStore.refreshStatus();
+					if (!dictationStore.state.enabled) return;
+					dictationStore.refreshStatus();
+					// A conversation outlives a WebView reload: reading its status
+					// finds one still armed and brings its toast back. Reading
+					// never opens the microphone.
+					dictationStore.refreshHandsFree();
 				}),
 			startUserActivityListening: userActivityStore.startListening,
 		},
 		applyPlatformClass,
-		onCloseRequested: (handler) => {
-			if (!isTauri()) return;
-			void getCurrentWindow().onCloseRequested(async (event) => handler(event));
-		},
 	}).catch((error) => {
 		appLogger.error("app", "Fatal initialization error", error);
 		options.setStatusInfo("Error: App failed to initialize — check error log");
 		document.getElementById("splash")?.remove();
 	});
 
+	resumeAgentTabsAfterUpdate().catch((error) => appLogger.warn("app", "Resuming agents after update failed", error));
 	detectAgents().catch((error) => appLogger.debug("app", "Agent detection failed", error));
 
 	restoreDetachedPanels();

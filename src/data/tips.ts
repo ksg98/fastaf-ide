@@ -8,7 +8,441 @@ import { isMacOS } from "../platform";
 
 const mod = isMacOS() ? "Cmd" : "Ctrl";
 
+export const CONTEXTUAL_TIPS = {
+	preventSleep: {
+		feature: "Keep long agent runs awake",
+		description:
+			"A long agent run can be interrupted by idle sleep, especially on battery. In General settings, enable Prevent sleep when busy to keep the system awake during agent work.",
+		shortcut: null,
+	},
+	hooks: {
+		feature: "More precise agent status",
+		description:
+			"This agent supports optional global hooks for busy, idle and waiting status. Enable Install hooks globally in this agent's expert settings. Hooks apply on the next launch; heuristics remain available without them.",
+		shortcut: null,
+	},
+	autoRetry: {
+		feature: "Retry temporary API failures",
+		description:
+			"This agent hit a server error. Optional Auto-retry on server errors in this agent's expert settings can send continue after temporary server failures, up to three attempts. Authentication and other errors are not retried.",
+		shortcut: null,
+	},
+} satisfies Record<string, Tip>;
+
 export const TIPS: Tip[] = [
+	{
+		feature: "Talk with AI Chat",
+		description:
+			"In Voice settings, choose an attached AI Chat as the hands-free Target. Docked and detached chats share the same prompt queue and spoken replies.",
+		shortcut: null,
+	},
+	{
+		feature: "Send a pending Chat prompt now",
+		description:
+			"While an agent is busy, Session Chat keeps your next prompt in the host queue. Use the return-key button beside Pending to stop the current request and send it now, or Cancel to remove it. Send now supports Claude and Codex.",
+		shortcut: null,
+	},
+	{
+		feature: "Move a native story between phases",
+		description:
+			"Drag a Kanban card to an outlined legal destination, or choose a Phase in its List row. Story detail keeps Phase beside Edit. Backend refusals leave the story in place.",
+		shortcut: null,
+	},
+	{
+		feature: "Recall a queued prompt",
+		description:
+			"In an empty desktop Compose or AI Chat editor, press ArrowUp to withdraw the latest host-owned text prompt for editing. Native CLI Pending bubbles cannot be recalled this way.",
+		shortcut: "ArrowUp",
+	},
+	{
+		feature: "Connected PR conversations",
+		description:
+			"Open comments from a PR popover, its unresolved-thread count or a PR notification. Tasks shows the conversation and a return action for an existing branch; without a provider, GitHub opens instead.",
+		shortcut: null,
+	},
+	{
+		feature: "Progress popup mute",
+		description:
+			"Select Mute on a completion popup to quiet this app session. Reports remain in Terminal Progress, where Unmute restores future popups. Blocked reports still appear.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile URL paste",
+		description:
+			"Paste a web link into a mobile terminal or AI Chat draft. A space separates the URL from your next words unless whitespace already follows it.",
+		shortcut: null,
+	},
+	{
+		feature: "Archived worktree retention",
+		description:
+			"Set retention days in Git & GitHub Worktree Defaults or override them per repository. 0 keeps archives; cleanup keeps dirty work and preserves commit recovery refs.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile session state filters",
+		description:
+			"Tap Working, Idle or Awaiting on the mobile Sessions screen to filter by those states. Select multiple counters or clear all to show every session; search and sorting still apply.",
+		shortcut: null,
+	},
+	{
+		feature: "Review-only PR automation",
+		description:
+			"Opt in with pull_request_reviews in the host automations.json. The host reviews the latest GitHub head and posts a COMMENT review without pushing branches or creating another PR. Unknown publication is not retried.",
+		shortcut: null,
+	},
+	{
+		feature: "Optional issue triage",
+		description:
+			"Configure event_intake.triage on the owning daemon to evaluate trusted authors' open issues before labelled implementation. The read-only profile is operator-attested; FastAF does not enforce credential isolation.",
+		shortcut: null,
+	},
+	{
+		feature: "Delete instead of archive",
+		description:
+			"The Archive workspace checklist shows changed files, commits outside the base branch and open sessions. Delete is disabled when a check fails; Archive keeps the branch and changes.",
+		shortcut: null,
+	},
+	{
+		feature: "Story drafts from requests",
+		description:
+			"In New story, describe what you need and choose Fill with AI. Review and edit the generated fields before Create story saves them. Cancel fill stops the owned model turn and keeps your request.",
+		shortcut: null,
+	},
+	{
+		feature: "Stories across plans",
+		description:
+			"Choose All plans in Plans and Stories to see a combined list or Kanban board. Cards show their plan; select one plan to filter back or create a story.",
+		shortcut: null,
+	},
+	{
+		feature: "AI Chat across devices",
+		description:
+			"Select an AI Chat conversation on desktop, phone or tablet to show it on the other connected devices. An offline device catches up when it reconnects; session CLI and Chat views stay local.",
+		shortcut: null,
+	},
+	{
+		feature: "AI Chat slash commands",
+		description:
+			"Type / in AI Chat to see available agent commands and local actions such as compact, fork and quit. Use the arrows and Tab to complete a name before sending.",
+		shortcut: null,
+	},
+	{
+		feature: "Markdown references in AI Chat",
+		description:
+			"Select a passage in a Markdown file and choose Send to AI Chat to stage its path, source lines and quote in your open conversation without sending.",
+		shortcut: null,
+	},
+	{
+		feature: "Compose queue count",
+		description:
+			"The collapsed Compose button counts queued commands and messages. Hover or focus it for a breakdown, or open Compose to inspect the queue.",
+		shortcut: `${mod}+I`,
+	},
+	{
+		feature: "Native story notes",
+		description:
+			"Select a story to read Notes and evidence or append a permanent note. Refresh notes loads entries added by agents or other windows without changing the story revision.",
+		shortcut: null,
+	},
+	{
+		feature: "Story origin and history",
+		description:
+			"Select a native story to inspect its origin, claiming session and recorded transitions. New story can link the work to a plan step.",
+		shortcut: null,
+	},
+	{
+		feature: "Edit native stories",
+		description:
+			"Select an unclaimed Backlog or Ready story and choose Edit to change metadata, requirements and dependencies together. Save checks the original revision; Cancel discards the draft. QA and active work cannot be amended.",
+		shortcut: null,
+	},
+	{
+		feature: "Native story QA",
+		description:
+			"Prefix human checks with [MANUAL]. When development checks pass, the story enters QA; use the QA filter or Kanban column to find checks that wait for a person.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile session usage",
+		description:
+			"Open More session actions on mobile to read the session profile's account quota. Unknown and stale usage are labelled explicitly.",
+		shortcut: null,
+	},
+	{
+		feature: "Telegram sender replies",
+		description:
+			"Agents can send Telegram notices without taking inbound ownership. Reply to a sender-prefixed notice in Telegram to reach that live agent; new messages still reach the inbound owner.",
+		shortcut: null,
+	},
+	{
+		feature: "Abandoned shells",
+		description:
+			"Plain shells with no running processes are marked abandoned after one idle hour. Settings → Agents → Idle agent hibernation has an expert setting to close them after a chosen number of hours; automatic closure is off by default.",
+		shortcut: null,
+	},
+	{
+		feature: "Session identifiers",
+		description:
+			"Right-click a sidebar session row to copy its PTY session ID, live child process ID, or MCP alias. Hover an entry to see its value.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile font sizes",
+		description:
+			"Use the Terminal and Chat controls in mobile Settings → Appearance to set each reading size independently. The choices stay on this device; composers and UI controls do not change.",
+		shortcut: null,
+	},
+	{
+		feature: "Launch playbook modules",
+		description:
+			"In Settings > Agents, select launch modules and add global or per-agent instructions without copying generated rules. Changes apply to new launches.",
+		shortcut: null,
+	},
+	{
+		feature: "All settings inspector",
+		description:
+			"Turn on Expert in Settings, then open All settings (Expert) for typed catalogue fields without a dedicated page. Select the owner and existing record key, then read before saving. Credentials stay in their domain workflows.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile latest output",
+		description:
+			"When you scroll back in mobile CLI or Chat output, tap the down-arrow above Send to return to the latest output without sending a terminal key.",
+		shortcut: null,
+	},
+	{
+		feature: "AI Chat table actions",
+		description:
+			"Use Markdown to inspect a table's exact source, Copy as Markdown to copy it, or Open as document to read it outside the conversation.",
+		shortcut: null,
+	},
+	{
+		feature: "Hands-free conversation shortcut",
+		description: `Press ${mod}+Alt+V to start or stop hands-free on the active terminal when dictation is enabled. Customize the chord in Keyboard Shortcuts.`,
+		shortcut: `${mod}+Alt+V`,
+	},
+	{
+		feature: "Tab shortcut hints",
+		description: `Hold ${mod} alone for 450 ms to show shortcuts on the first nine terminal tabs. Release it or use another key, mouse button, or scroll to hide the hints.`,
+		shortcut: null,
+	},
+	{
+		feature: "Delete AI Chat conversations",
+		description:
+			"Open ⋯ → Delete conversation… in AI Chat and use a row’s trash button to permanently delete its history after confirming the name.",
+
+		shortcut: null,
+	},
+	{
+		feature: "Idle agent hibernation",
+		description:
+			"Settings → Agents can hibernate unattended agent tabs after awake idle time. Open a hibernated tab or send it input to resume its saved session.",
+		shortcut: null,
+	},
+	{
+		feature: "Follow Tasks comments",
+		description:
+			"Follow an item in Tasks detail, then enable OS notifications for Tasks in Settings → Notifications. Existing detail refreshes notify for new comments; no extra background polling is added.",
+		shortcut: null,
+	},
+	{
+		feature: "Tasks local queries",
+		description:
+			"Tasks loads complete scopes of at most 1,000 items for all-field sorting, grouping and filtering. Unknown or larger totals use the provider-supported server controls.",
+		shortcut: null,
+	},
+	{
+		feature: "Claude Chat on mobile",
+		description:
+			"Select Chat in a Claude session header to read the conversation. Use the same input to reply, and switch to CLI for prompts missing from Chat.",
+		shortcut: null,
+	},
+	{
+		feature: "Plugin settings",
+		description:
+			"Find loaded plugin settings under Integrations, or search for a field in Settings. Plugin pages disappear when the plugin unloads.",
+		shortcut: null,
+	},
+	{
+		feature: "Desktop Markdown on mobile",
+		description:
+			"Open a session’s More actions menu on your phone to read the Markdown files open on desktop for that repository.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile composer actions",
+		description:
+			"Tap + beside a mobile draft to attach a file, take a photo, or use the draft and queue actions supported by that conversation.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile keyboard correction",
+		description:
+			"In the mobile Settings tab, use the Input section to disable autocorrect and spellcheck for literal terminal command entry. The choice stays on your device.",
+		shortcut: null,
+	},
+	{
+		feature: "Close to background",
+		description:
+			"In desktop Settings > General, choose Ask, Background or Quit for main-window close. Background keeps sessions running. The tray or menu-bar icon shows working and awaiting agents and offers Show and Quit.",
+		shortcut: null,
+	},
+	{
+		feature: "Compose images",
+		description:
+			"Drop images on Compose or use Attach images beside Send to choose several. Paste still works; image paths appear in your draft.",
+		shortcut: null,
+	},
+	{
+		feature: "Tasks view memory",
+		description:
+			"Tasks remembers your source, view, grouping, sort and filters separately for each repository and provider account.",
+		shortcut: null,
+	},
+	{
+		feature: "Tasks board",
+		description:
+			"Use More in any lane to load the next board page. Select Move… on a card to change its lane without dragging.",
+		shortcut: null,
+	},
+	{
+		feature: "Terminal Chat answers",
+		description:
+			"Hover or focus an answer card to copy the whole reply. Pasted terminal output shows two lines; select + N lines to expand it.",
+		shortcut: null,
+	},
+	{
+		feature: "Agent toast cards",
+		description:
+			"Normal agent notices show a card only on their active origin terminal tab; other tabs receive bell entries only. Turn off Show cards from the active terminal in Settings > Notifications to keep only urgent cards.",
+		shortcut: null,
+	},
+	{
+		feature: "New chat text",
+		description:
+			"While reading earlier chat messages, select New text below to return to the latest reply. Toggle the indicator in Settings > Appearance > Chat.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile prompt queue",
+		description:
+			"Hold Send and select Queue to submit your current agent draft at its next ready window. Chat shows pending text above the input, with Cancel and Clear all. Tap Hide to keep only the live count, then Show to reopen it. Tap Send to submit now.",
+		shortcut: null,
+	},
+	{
+		feature: "Tasks roadmap",
+		description:
+			"Switch Month or Quarter in the Tasks roadmap to change the timeline scale. Tasks without usable dates stay in the side list.",
+		shortcut: null,
+	},
+	{
+		feature: "Design Mode",
+		description:
+			"Right-click a terminal web link and choose Start in Design Mode to connect that agent and open the page directly. Pick elements and comment in the browser sidebar before sending.",
+		shortcut: null,
+	},
+	{
+		feature: "Spoken replies",
+		description:
+			"Turn off Spoken replies in mobile hands-free or Settings > Voice to keep dictating while the agent answers in text.",
+		shortcut: null,
+	},
+	{
+		feature: "Mobile Control Keys",
+		description:
+			"Tap Ctrl in the mobile terminal keybar to send Ctrl+C, Ctrl+B, Ctrl+D or the agent-aware Ctrl+Enter key.",
+		shortcut: null,
+	},
+	{
+		feature: "Automations",
+		description:
+			"Open Automations from the command palette to edit schedules. Enable Include precheck stdout in the agent prompt to add bounded check results before your unchanged prompt. Select Runs for history and saved output.",
+		shortcut: null,
+	},
+	{
+		feature: "Terminal Chat Input",
+		description:
+			"Switch a Claude terminal to Chat to reply in docked Compose. Enter sends now; Ctrl+Enter or Shift+Enter adds a line; Shift+Ctrl+Enter queues. Answer permission prompts in CLI.",
+		shortcut: null,
+	},
+	{
+		feature: "Launch Instruction Inspector",
+		description:
+			"Right-click a terminal and choose Inspect Launch Instructions to read captured launch sections, sources and byte sizes.",
+		shortcut: null,
+	},
+	{
+		feature: "AI Chat Repository Pin",
+		description:
+			"Use the pin beside Repository in the AI Chat card to keep one repository while you browse elsewhere. The document button parks or restores your draft.",
+		shortcut: null,
+	},
+	{
+		feature: "Child Agent Navigation",
+		description:
+			"In the rich sidebar, click the agent count below a parent to open its children in another repository.",
+		shortcut: null,
+	},
+	{
+		feature: "Touch Branch Actions",
+		description: "Swipe a sidebar branch left for More, Add Terminal, and worktree removal. Hold + to choose an agent.",
+		shortcut: null,
+	},
+	{
+		feature: "Private Secret Forms",
+		description:
+			"Ask an agent to request named credentials in a private form. Review the exact command before allowing it to use them.",
+		shortcut: null,
+	},
+	{
+		feature: "AI Chat Prompt Parking",
+		description:
+			"Park a half-written AI Chat prompt to ask something else; it returns after your next Send. On phones, tap Park.",
+		shortcut: "Ctrl+S",
+	},
+	{
+		feature: "Mobile Session Search",
+		description:
+			"On the phone, tap the magnifier above Sessions to find an agent by name, repository, branch, or type.",
+		shortcut: null,
+	},
+	{
+		feature: "Parallel AI Chats",
+		description: "With AI Chat focused, open another tab for a separate conversation and draft in the same repository.",
+		shortcut: `${mod}+T`,
+	},
+	{
+		feature: "AI Chat Images",
+		description: "Paste an image into AI Chat, review its preview, then send it with or without text.",
+		shortcut: `${mod}+V`,
+	},
+	{
+		feature: "Open Editor Links",
+		description: `Hold ${mod} and click a web link or file path in the code editor to open it.`,
+		shortcut: `${mod}+Click`,
+	},
+	{
+		feature: "Remote Machine Updates",
+		description:
+			"Remote Machines shows when a connected daemon is out of date. Update & restart confirms the live sessions that will close.",
+		shortcut: null,
+	},
+	{
+		feature: "Editor Line Wrapping",
+		description: "Press Alt+Z in the editor to wrap long lines. Text and code files remember separate choices.",
+		shortcut: "Alt+Z",
+	},
+	{
+		feature: "Plans and Stories",
+		description:
+			"Open Plans and Stories from the project toolbar. On desktop, use its header to detach it into a resizable window.",
+		shortcut: null,
+	},
+	{
+		feature: "Workflow Run History",
+		description: "Open Run history in Plans and Stories to follow a plan's persisted workflow timeline.",
+		shortcut: null,
+	},
 	{
 		feature: "Command Palette",
 		description: "Search and run any action by name — shortcuts, settings, panels, everything.",
@@ -21,6 +455,18 @@ export const TIPS: Tip[] = [
 		shortcut: `${mod}+P then ! or ?`,
 	},
 	{
+		feature: "Open an Agent Tab",
+		description:
+			"Hold the + in the tab bar to pick an agent. The new tab starts it directly instead of opening a shell.",
+		shortcut: null,
+	},
+	{
+		feature: "Agent Scrollback",
+		description:
+			"Agent commands in new terminals keep native scrollback when supported. Change Prevent alternate screen per agent in Settings.",
+		shortcut: null,
+	},
+	{
 		feature: "Activity Dashboard",
 		description: "See all agent sessions, CPU usage, and errors in one panel.",
 		shortcut: `${mod}+K`,
@@ -29,6 +475,12 @@ export const TIPS: Tip[] = [
 		feature: "Terminal Context",
 		description:
 			"Expand Context above an agent terminal to see its current intent, assigned task, and last submitted prompt.",
+		shortcut: null,
+	},
+	{
+		feature: "Design Mode",
+		description:
+			"Right-click an agent terminal tab to inspect an element in Chrome and paste its details into that agent's input.",
 		shortcut: null,
 	},
 	{
@@ -71,7 +523,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "Plugin File Previews",
 		description:
-			"Install preview plugins from Settings > Plugins > Browse to open formats like DOCX directly from the File Browser.",
+			"Install preview plugins from Settings > Manage plugins > Browse to open DOCX and XLSX files or inspect, filter, explain, and edit SQLite databases directly from the File Browser.",
 		shortcut: null,
 	},
 	{
@@ -83,7 +535,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "Prompts",
 		description:
-			"Press Cmd+Shift+K to open the Prompts dropdown — 24 built-in context-aware prompts for git, review, PR, and more.",
+			"Open the Prompts dropdown and search Configure for guided issue-to-draft-PR, incoming PR review and authorized bounded-fix setup. The guides verify prerequisites before configuration.",
 		shortcut: `${mod}+Shift+K`,
 	},
 	{
@@ -92,13 +544,19 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
+		feature: "Automation worktree cleanup",
+		description:
+			"Open Automations → Runs to inspect a completed run’s worktree and remove it when the backend confirms it is safe.",
+		shortcut: null,
+	},
+	{
 		feature: "Worktree Manager",
 		description: "Create, delete, and merge worktrees in a unified panel.",
 		shortcut: `${mod}+Shift+W`,
 	},
 	{
-		feature: "Notes Panel",
-		description: "A per-repo scratchpad for context, links, and commands — click the Notes icon in the toolbar.",
+		feature: "Ideas Panel",
+		description: "A per-repo scratchpad for context, links, and commands — click the Ideas icon in the toolbar.",
 		shortcut: null,
 	},
 	{
@@ -112,6 +570,12 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
+		feature: "Project Progress",
+		description:
+			"Open Terminal Progress from the toolbar bell to see what agents did while you were away, even when there are no unread updates.",
+		shortcut: "Cmd+Shift+P",
+	},
+	{
 		feature: "Plan Panel",
 		description: "When an agent creates a plan file, the Plan panel opens automatically — track progress live.",
 		shortcut: null,
@@ -123,12 +587,13 @@ export const TIPS: Tip[] = [
 	},
 	{
 		feature: "MCP Proxy",
-		description: "Go to Settings → Services to add upstream MCP servers — all connected agents can use them.",
+		description: "Go to Settings → MCP to add upstream MCP servers — all connected agents can use them.",
 		shortcut: null,
 	},
 	{
 		feature: "Kitty Keyboard Protocol",
-		description: "Enable in Settings → Agents for full Shift+Enter, Ctrl+Alt, and other modifier combos.",
+		description:
+			"Always on: agents that request it, such as Claude Code, get full Shift+Enter, Ctrl+Backspace, and other modifier combos. There is nothing to enable.",
 		shortcut: null,
 	},
 	{
@@ -229,7 +694,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "Post-Merge Cleanup",
 		description:
-			"After merging a PR or worktree branch, a cleanup dialog lets you archive/delete the worktree, switch branch, pull, and delete the merged branch — all via backend, even while an agent runs in the terminal.",
+			"Before removing a worktree, review its branch history, uncommitted files, and live terminal sessions in the confirmation dialog. Cleanup can interrupt an agent working there.",
 		shortcut: null,
 	},
 	{
@@ -268,9 +733,9 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
-		feature: "Image Paste in Notes",
+		feature: "Image Paste in Ideas",
 		description:
-			"Paste images into the Notes panel with Ctrl+V — thumbnails render inline, and paths are sent to agents so they can read the files.",
+			"Paste images into the Ideas panel with Ctrl+V — thumbnails render inline, and paths are sent to agents so they can read the files.",
 		shortcut: null,
 	},
 	{
@@ -294,7 +759,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "GitHub Login",
 		description:
-			"Sign in to GitHub from Settings > GitHub for automatic PR and CI monitoring. No need to manage tokens manually.",
+			"Sign in to GitHub from Settings > Git & GitHub for automatic PR and CI monitoring. No need to manage tokens manually.",
 		shortcut: null,
 	},
 	{
@@ -346,9 +811,14 @@ export const TIPS: Tip[] = [
 		shortcut: `${mod}+Shift+= / ${mod}+Shift+- / ${mod}+Shift+0`,
 	},
 	{
+		feature: "Code Editor Zoom",
+		description: "Zoom the open code editor without changing your terminal or another editor tab.",
+		shortcut: `${mod}+= / ${mod}+- / ${mod}+0`,
+	},
+	{
 		feature: "Global Workspace",
 		description:
-			"Promote terminals from different repos into a single cross-repo view. Right-click a tab → Promote, then toggle the workspace with the shortcut. Tabs show a globe icon when promoted.",
+			"Promote terminals from different repos into a single cross-repo view. Right-click a tab or sidebar session row → Add to Global Workspace, then toggle the workspace with the shortcut. Tabs show a globe icon when promoted.",
 		shortcut: `${mod}+Shift+X`,
 	},
 	{
@@ -399,6 +869,12 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
+		feature: "Managed Agent Workspace Trust",
+		description:
+			"Agents spawned by another agent can start in a new folder without a trust question. Change this for Claude or direct Codex in Settings > Agents.",
+		shortcut: null,
+	},
+	{
 		feature: "fastaf as tmux",
 		description:
 			"Run 'fastaf alias' to create a tmux compatibility symlink. Any tool expecting tmux (like Claude Code) will use FastAF instead.",
@@ -414,6 +890,12 @@ export const TIPS: Tip[] = [
 		feature: "SSH Tunnel Auto-Connect",
 		description:
 			"Enable Auto-Connect on a tunnel profile to have it start automatically when FastAF launches — no manual clicks needed.",
+		shortcut: null,
+	},
+	{
+		feature: "Remote Machine Deploy",
+		description:
+			"Choose Deploy on connect in Settings > Remote Machines to stage and launch the matching daemon over SSH automatically.",
 		shortcut: null,
 	},
 	{
@@ -452,13 +934,19 @@ export const TIPS: Tip[] = [
 	{
 		feature: "Native Agent Hooks",
 		description:
-			"Let Claude or Gemini report status through their own hooks for precise busy/idle/waiting state — enable per agent in Settings → Agents. TUIC installs and removes the hooks cleanly and never touches your own.",
+			"Let Claude or Gemini report status through their own hooks for precise busy/idle/waiting state — enable per agent in Settings → Agents. FastAF installs and removes the hooks cleanly and never touches your own.",
 		shortcut: null,
 	},
 	{
 		feature: "Sign in with ChatGPT",
 		description:
 			"Use your ChatGPT Plus, Pro or Team plan for AI Chat and agents, no API key: Settings › Providers › Add › ChatGPT (sign in).",
+		shortcut: null,
+	},
+	{
+		feature: "Automation Templates",
+		description:
+			"Choose a built-in template in a new automation draft after entering its repository and run config. Review it and save it paused before enabling runs.",
 		shortcut: null,
 	},
 ];

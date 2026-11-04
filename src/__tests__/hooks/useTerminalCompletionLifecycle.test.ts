@@ -16,15 +16,11 @@ vi.mock("../../stores/appLogger", () => ({
 }));
 
 import { handleAgentExitCompletion } from "../../components/Terminal/agentExitCompletion";
-import { useIdleTriage } from "../../hooks/useIdleTriage";
 import { useTerminalCompletionNotifications } from "../../hooks/useTerminalCompletionNotifications";
 import { activityStore } from "../../stores/activityStore";
-import { aiTriageStore } from "../../stores/aiTriageStore";
 import { notificationsStore } from "../../stores/notifications";
 import { repositoriesStore } from "../../stores/repositories";
-import { settingsStore } from "../../stores/settings";
 import { terminalsStore } from "../../stores/terminals";
-import { uiStore } from "../../stores/ui";
 
 type SystemWakeHandler = (event: { payload: number }) => void;
 
@@ -49,7 +45,6 @@ const resetStores = () => {
 	for (const id of terminalsStore.getIds()) terminalsStore.remove(id);
 	for (const path of repositoriesStore.getPaths()) repositoriesStore.remove(path);
 	activityStore.clearAll();
-	uiStore.setAiTriagePanelVisible(false);
 };
 
 describe("useTerminalCompletionNotifications", () => {
@@ -141,7 +136,7 @@ describe("useTerminalCompletionNotifications", () => {
 
 	it("keeps a remote exit fallback silent while still claiming the cycle", async () => {
 		const id = addTerminal("claude");
-		terminalsStore.update(id, { isRemote: true });
+		terminalsStore.update(id, { isExternallyCreated: true });
 		terminalsStore.setActive(null);
 		notificationsStore.setSilenceRemoteCompletions(true);
 
@@ -196,81 +191,5 @@ describe("useTerminalCompletionNotifications", () => {
 
 		expect(mockUnlisten).toHaveBeenCalledOnce();
 		expect(playCompletion).not.toHaveBeenCalled();
-	});
-});
-
-describe("useIdleTriage", () => {
-	let dispose: (() => void) | undefined;
-	let runTriage: ReturnType<typeof vi.spyOn>;
-	let triageEnabled: ReturnType<typeof vi.spyOn>;
-
-	beforeEach(() => {
-		vi.useFakeTimers();
-		vi.setSystemTime(1_000_000);
-		resetStores();
-		runTriage = vi.spyOn(aiTriageStore, "runTriage").mockImplementation(() => {});
-		triageEnabled = vi.spyOn(settingsStore, "isAiTriageEnabled").mockReturnValue(false);
-		createRoot((rootDispose) => {
-			dispose = rootDispose;
-			useIdleTriage();
-		});
-	});
-
-	afterEach(() => {
-		dispose?.();
-		dispose = undefined;
-		runTriage.mockRestore();
-		triageEnabled.mockRestore();
-		resetStores();
-		vi.useRealTimers();
-	});
-
-	const configureRepo = (terminalId: string) => {
-		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
-		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
-		repositoriesStore.addTerminalToBranch("/repo", "main", terminalId);
-	};
-
-	it("runs triage for an agent repository when the visible feature is enabled", async () => {
-		const id = addTerminal("claude");
-		configureRepo(id);
-		triageEnabled.mockReturnValue(true);
-		uiStore.setAiTriagePanelVisible(true);
-
-		await runBusyCycle(id);
-
-		expect(runTriage).toHaveBeenCalledWith("/repo");
-	});
-
-	it("does not run triage while its panel is hidden", async () => {
-		const id = addTerminal("claude");
-		configureRepo(id);
-		triageEnabled.mockReturnValue(true);
-
-		await runBusyCycle(id);
-
-		expect(runTriage).not.toHaveBeenCalled();
-	});
-
-	it("does not run triage for a plain shell", async () => {
-		const id = addTerminal();
-		configureRepo(id);
-		triageEnabled.mockReturnValue(true);
-		uiStore.setAiTriagePanelVisible(true);
-
-		await runBusyCycle(id);
-
-		expect(runTriage).not.toHaveBeenCalled();
-	});
-
-	it("does not run triage below the meaningful-work threshold", async () => {
-		const id = addTerminal("claude");
-		configureRepo(id);
-		triageEnabled.mockReturnValue(true);
-		uiStore.setAiTriagePanelVisible(true);
-
-		await runBusyCycle(id, 4_999);
-
-		expect(runTriage).not.toHaveBeenCalled();
 	});
 });

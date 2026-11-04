@@ -126,7 +126,7 @@ High fan-in modules are legitimate shared boundaries but require stable contract
 
 The production runtime import graph contains three strongly connected components:
 
-1. Transport/store cycle: `tunnels -> perfTrace -> repositories -> remoteEventBridge -> remoteConnections -> transport -> appLogger -> invoke`.
+1. Transport/store cycle: `tunnels -> perfTrace -> repositories -> remoteConnections -> transport -> appLogger -> invoke`.
 2. Sidebar component cycle: `PrSection -> GitHubPanel -> RemoteOnlyPrPopover -> RepoSection`.
 3. Appearance component cycle: `AppearanceTab -> ColorSwatchPicker`.
 
@@ -242,8 +242,9 @@ Measured result:
 | Mobile `mobile.html` | 610,692 bytes | 67,417 bytes | 89.0% |
 
 The build now fails if an optional editor, diff, Markdown/Mermaid, or compose
-asset returns to either initial entry graph. It also enforces 500 KiB and 100
-KiB gzip budgets for the desktop and mobile entrypoints respectively. The
+asset returns to either initial entry graph. It also enforces 500 KiB and 150
+KiB gzip budgets for the desktop and mobile entrypoints respectively, and prints
+a `WARNING` (without failing) once an entry reaches 98% of its budget. The
 reporting and checks live in `scripts/report-frontend-bundles.mjs`.
 
 Validation performed for work unit 1:

@@ -47,6 +47,8 @@ const basePr: BranchPrStatus = {
 	merge_commit_allowed: true,
 	squash_merge_allowed: true,
 	rebase_merge_allowed: true,
+	unresolved_threads: 0,
+	unresolved_threads_truncated: false,
 };
 
 /** Derive merge_state_label from mergeable/merge_state_status when not explicitly set.
@@ -202,7 +204,6 @@ export const PRESETS: Record<string, Preset> = {
 			rateLimitFor("claude", 15),
 			rateLimitFor("gemini", 10),
 			rateLimitFor("opencode", 20),
-			rateLimitFor("aider", 5),
 			rateLimitFor("codex", 30),
 		],
 	},

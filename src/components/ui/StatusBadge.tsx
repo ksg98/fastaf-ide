@@ -1,5 +1,6 @@
 import type { Component } from "solid-js";
-import { cx } from "../../utils";
+import { cx } from "../../utils/cx";
+import { PR_READINESS_SEVERITY, type PrReadinessKind } from "../../utils/prReadiness";
 import s from "./StatusBadge.module.css";
 
 export type BadgeVariant =
@@ -77,32 +78,27 @@ export const BranchBadge: Component<BranchBadgeProps> = (props) => {
 	return <StatusBadge label={label()} variant={variant()} title={title()} onClick={props.onClick} />;
 };
 
-/** PR status badge */
+/** PR status badge. The variant comes from the shared readiness verdict (utils/prReadiness),
+ *  never from raw mergeable/merge-state fields, so it cannot disagree with the sidebar badge. */
 export interface PrBadgeProps {
 	number: number;
 	title: string;
-	state: string;
-	mergeable?: string;
-	mergeStateStatus?: string;
+	readiness: PrReadinessKind;
 	onClick?: () => void;
 }
 
 export const PrBadge: Component<PrBadgeProps> = (props) => {
 	const variant = (): BadgeVariant => {
-		switch (props.state.toLowerCase()) {
-			case "merged":
-				return "merged";
-			case "closed":
-				return "closed";
+		if (props.readiness === "merged") return "merged";
+		if (props.readiness === "closed") return "closed";
+		switch (PR_READINESS_SEVERITY[props.readiness]) {
+			case "critical":
+				return "error";
+			case "warn":
+				return "warning";
+			case "ok":
+				return "success";
 			default:
-				// Show warning/error for merge problems on open PRs
-				if (props.mergeable === "CONFLICTING") return "error";
-				if (
-					props.mergeStateStatus === "BEHIND" ||
-					props.mergeStateStatus === "BLOCKED" ||
-					props.mergeStateStatus === "UNSTABLE"
-				)
-					return "warning";
 				return "pr";
 		}
 	};

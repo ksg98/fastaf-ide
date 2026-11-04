@@ -1,0 +1,11 @@
+{
+  "id": "tasks-provider-plain",
+  "name": "Tasks provider without settings",
+  "version": "0.1.0",
+  "minAppVersion": "0.0.0",
+  "main": "main.js",
+  "description": "FastAF test fixture: a work-item provider that signs in with a core account and keeps only Tasks data.",
+  "capabilities": ["net:http"],
+  "allowedUrls": ["https://tasks.example.invalid/*"],
+  "providers": ["github"]
+}

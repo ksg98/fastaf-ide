@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- @include head -->
+  <title>Download — FastAF</title>
+  <meta name="description" content="Download FastAF for macOS, Windows and Linux, install it from the shell, or follow the nightly channel." />
+  <meta property="og:title" content="Download — FastAF" />
+  <meta property="og:description" content="FastAF for macOS, Windows and Linux." />
+  <meta property="og:url" content="https://tuicommander.com/download.html" />
+  <meta name="twitter:title" content="Download — FastAF" />
+  <meta name="twitter:description" content="FastAF for macOS, Windows and Linux." />
+  <link rel="canonical" href="https://tuicommander.com/download.html" />
+</head>
+<body>
+  <!-- @include nav -->
+
+  <header class="page-head">
+    <div class="container">
+      <p class="eyebrow">Download</p>
+      <h1>Get <em>FastAF</em>.</h1>
+      <p>Free and open source, for macOS, Windows and Linux. Newest release: <span class="version-badge">2.0</span>.</p>
+    </div>
+  </header>
+
+  <section>
+    <div class="container">
+      <div class="os-grid">
+        <div class="os-card" data-os="macos">
+          <h3>macOS</h3>
+          <p>Disk image for Apple silicon, signed and notarized. macOS 12 Monterey or later.</p>
+          <a class="btn btn-primary" href="https://github.com/ksg98/fastaf-ide/releases" data-download="macos" rel="noopener noreferrer">Download .dmg</a>
+        </div>
+        <div class="os-card" data-os="windows">
+          <h3>Windows</h3>
+          <p>Installer for 64-bit Windows. Uses the WebView2 runtime.</p>
+          <a class="btn btn-primary" href="https://github.com/ksg98/fastaf-ide/releases" data-download="windows" rel="noopener noreferrer">Download .exe</a>
+        </div>
+        <div class="os-card" data-os="linux">
+          <h3>Linux</h3>
+          <p>AppImage for x86_64. A <code>.deb</code> and an <code>.rpm</code> are on the release page. Uses WebKitGTK.</p>
+          <a class="btn btn-primary" href="https://github.com/ksg98/fastaf-ide/releases" data-download="linux" rel="noopener noreferrer">Download .AppImage</a>
+        </div>
+      </div>
+      <p class="note center">Prefer the last stable release? <a href="https://github.com/ksg98/fastaf-ide/releases/latest" rel="noopener noreferrer">Stable <span class="stable-badge"></span></a> · <a href="https://github.com/ksg98/fastaf-ide/releases" rel="noopener noreferrer">All releases</a></p>
+    </div>
+  </section>
+
+  <section class="install" id="install">
+    <div class="container">
+      <div class="section-head">
+        <h2>Install from the shell</h2>
+        <p>The shell installer installs the stable release. An installed nightly stays on its channel when you run the shell installer again. On macOS it checks the download's Developer ID signature (FastAF's team, NH9933XQGX) in a private temporary folder before it replaces the app; if any check fails, nothing is installed.</p>
+      </div>
+      <!-- @include install -->
+    </div>
+  </section>
+
+  <section>
+    <div class="container prose">
+      <h2>Channels</h2>
+      <p>The buttons above give the newest stable release. To install the nightly from the shell on macOS or Linux, pass the channel name:</p>
+      <div class="install-code"><code>curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/website/public/install.sh | sh -s nightly</code><button class="copy-btn" title="Copy" type="button" aria-label="Copy"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button></div>
+      <p>The <a href="https://github.com/ksg98/fastaf-ide/releases/tag/nightly" rel="noopener noreferrer">nightly</a> build follows <code>main</code>. In the app, <strong>Settings → General → Update Channel</strong> (Expert) selects Stable or Nightly for updates. FastAF publishes no beta channel.</p>
+
+      <h2>System requirements</h2>
+      <ul>
+        <li><strong>macOS</strong> 12 Monterey or later. Mermaid diagrams need the system WebKit of Safari 17.4 or later.</li>
+        <li><strong>Windows</strong> 64-bit with the WebView2 runtime.</li>
+        <li><strong>Linux</strong> x86_64 with WebKitGTK.</li>
+      </ul>
+      <p>The <code>tuic-remote</code> daemon (beta) has its own binaries for Linux, macOS and Windows on each release page.</p>
+
+      <h2>What changed</h2>
+      <p>Read <a href="/2.0.html">what is new in 2.0</a>, or the full <a href="https://github.com/ksg98/fastaf-ide/blob/main/CHANGELOG.md" rel="noopener noreferrer">changelog</a>.</p>
+    </div>
+  </section>
+
+  <!-- @include footer -->
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

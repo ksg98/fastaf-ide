@@ -1,3 +1,7 @@
+@import "./styles/foreground-tokens.css";
+@import "./styles/chat-tokens.css";
+@import "./styles/ready-actions.css";
+
 /* FastAF — Global Styles */
 
 /*
@@ -239,6 +243,21 @@
   --search-match-border: #fb923c;
   --tweak-highlight: #fbbf24;
 
+  /* Upstream 2.0 semantic tokens, aliased onto FastAF's palette so the
+     components that read them render in FastAF's colours. */
+  --success-marker: var(--success);
+  --identity-on-light: #000000;
+  --identity-on-dark: #ffffff;
+  --settings-foreground: color-mix(in srgb, var(--fg-primary) 30%, var(--fg-secondary));
+  --link-foreground: color-mix(in srgb, var(--accent) 85%, var(--fg-primary));
+  --text-on-merged: #170f2e;
+  --diff-del: var(--error);
+  /* Names some components read that no stylesheet ever defined (upstream as
+     well) — aliased so they stop falling through to nothing. */
+  --bg-hover: var(--bg-highlight);
+  --text-dimmed: var(--fg-muted);
+  --danger: var(--error);
+
   /* Tab-type colors (shared between TabBar and PaneTree) */
   --tab-diff-rgb: 248, 113, 113;     /* red */
   --tab-edit-rgb: 96, 165, 250;      /* blue */
@@ -323,17 +342,9 @@
 
   /* ── Type ──────────────────────────────────────────────────────────────
      Chrome reads at 13px; 12px for secondary/meta; 11px only for badges.
-     Mono is reserved for terminal, code, paths and hashes. */
-  --font-3xs: 8px;
-  --font-2xs: 10px;
-  --font-xs: 11px;
-  --font-sm: 12px;
-  --font-md: 13px;
-  --font-base: 14px;
-  --font-lg: 15px;
-  --font-xl: 17px;
-  --font-2xl: 20px;
-  --font-3xl: 24px;
+     Mono is reserved for terminal, code, paths and hashes. The scale itself
+     (--font-3xs 8px … --font-3xl 24px) lives in styles/chat-tokens.css,
+     imported above, so desktop and the standalone mobile entry share one copy. */
 
   /* List-row rhythm — shared by every tree/list panel (sidebar branches, file
      browser, …). Text always starts at: tree-indent*depth + row-pad-x +
@@ -467,6 +478,47 @@ html.tonal.theme-light {
   }
 }
 
+/* Same system font as every native app, but WebKit defaults to subpixel
+   smoothing, which dilates light-on-dark strokes and is what made the UI read
+   as "web" next to native apps. Those apps force the grayscale
+   rasterization Cocoa uses; so do we. (Upstream adds 0.01em tracking here;
+   FastAF's chrome keeps the default tracking its layout was measured at.) */
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Clean theme: a neutral dark look. Colors live in
+   src-tauri/src/themes/clean.json; applyAppTheme() sets data-theme on <html>.
+   Not anchored to html on purpose: the theme gallery (theme-gallery.html)
+   sets the same attribute on one card per theme. */
+[data-theme="clean"] {
+  /* Tab-type tints are fixed hues in :root (red diff, blue editor, green
+     markdown, purple panel, cyan remote). On a neutral palette they read as
+     six unrelated tab styles, so here they all tint with the muted gray and
+     only the icon keeps the semantic color. */
+  --tab-diff-rgb: 115, 115, 115;
+  --tab-edit-rgb: 115, 115, 115;
+  --tab-md-rgb: 115, 115, 115;
+  --tab-panel-rgb: 115, 115, 115;
+  --tab-html-rgb: 115, 115, 115;
+  --tab-remote-rgb: 115, 115, 115;
+}
+
+/* On a light surface lightening the red lowers its contrast instead. Repo
+   colors are picked against a dark UI; shade them for repo names on white
+   (getRepoTextColor). */
+[data-theme="vscode-light"] {
+  /* These semantic tokens also label branch/PR markers, not just swatches. */
+  --success-marker: #176f30;
+  --attention: #895003;
+  --changes: #805900;
+  --merged: #7540b0;
+  --text-on-merged: #ffffff;
+  --diff-del: var(--error);
+  --repo-text-shade: 40%;
+}
+
 html, body {
   height: 100%;
   overflow: hidden;
@@ -505,6 +557,13 @@ html {
 
 body {
   background: var(--app-gloss), var(--bg-app);
+}
+
+html.theme-light,
+html.theme-light body,
+html[data-theme="vscode-light"],
+html[data-theme="vscode-light"] body {
+  color-scheme: light;
 }
 
 #app {
@@ -587,10 +646,15 @@ button > span > svg {
   border-radius: 8px;
 }
 
-/* Touch device: eliminate double-tap-to-activate caused by sticky :hover. */
+/* Touch device: eliminate double-tap-to-activate caused by sticky :hover.
+ * touch-action: pan-x pan-y pinch-zoom disables double-tap-to-zoom, removing the
+ * 300ms click delay that causes the browser to use first tap for :hover
+ * and second tap for click. Desktop behavior is unaffected.
+ * Not `manipulation`: on iOS it blocks pan-scroll recognition (3b02a2ed2 had
+ * to override it per view), so the panels would not scroll with a finger. */
 @media (hover: none) {
   *, *::before, *::after {
-    touch-action: manipulation;
+    touch-action: pan-x pan-y pinch-zoom;
     -webkit-tap-highlight-color: transparent;
   }
 }

@@ -1,6 +1,5 @@
 use crate::pty::spawn_reader_thread;
-use crate::state::{OUTPUT_RING_BUFFER_CAPACITY, VT_LOG_BUFFER_CAPACITY, VtLogBuffer};
-use crate::{AppState, MAX_CONCURRENT_SESSIONS, OutputRingBuffer, PtySession};
+use crate::{AppState, MAX_CONCURRENT_SESSIONS, PtySession};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -9,7 +8,7 @@ use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "desktop")]
 use tauri::Emitter;
 use uuid::Uuid;
@@ -18,17 +17,16 @@ use super::guards::{Authenticated, require_local_or_auth};
 use super::types::*;
 
 pub(super) async fn detect_agents() -> impl IntoResponse {
-    let results: Vec<serde_json::Value> = crate::agent::KNOWN_AGENT_BINARIES
-        .iter()
-        .map(|name| {
-            let detection = crate::agent::detect_agent_binary(name.to_string());
-            serde_json::json!({
-                "name": name,
-                "path": detection.path,
-                "version": detection.version,
-            })
-        })
-        .collect();
+    let mut results = Vec::new();
+    for name in crate::agent::KNOWN_AGENT_BINARIES {
+        let detection = crate::agent::detect_agent_binary(name.to_string()).await;
+        results.push(serde_json::json!({
+            "name": name,
+            "path": detection.path,
+            "version": detection.version,
+            "supports_no_alt_screen": detection.supports_no_alt_screen,
+        }));
+    }
     Json(results)
 }
 
@@ -36,11 +34,31 @@ pub(super) async fn detect_agent_binary_http(Query(q): Query<DetectBinaryQuery>)
     if !crate::agent::KNOWN_AGENT_BINARIES.contains(&q.binary.as_str()) {
         return Json(serde_json::json!({"error": "Unknown agent"})).into_response();
     }
-    let detection = crate::agent::detect_agent_binary(q.binary);
+    let detection = crate::agent::detect_agent_binary(q.binary).await;
     Json(serde_json::json!({
         "path": detection.path,
         "version": detection.version,
+        "supports_no_alt_screen": detection.supports_no_alt_screen,
     }))
+    .into_response()
+}
+
+pub(super) async fn prepare_agent_launch_args_http(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: Option<Extension<Authenticated>>,
+    Json(body): Json<PrepareAgentLaunchArgsRequest>,
+) -> Response {
+    if let Err(response) = require_local_or_auth(&addr, auth.is_some()) {
+        return response.into_response();
+    }
+    Json(
+        crate::agent_hook_launch::prepare_agent_launch_args(
+            body.agent_type,
+            body.binary_path,
+            body.args,
+        )
+        .await,
+    )
     .into_response()
 }
 
@@ -151,6 +169,8 @@ pub(super) async fn execute_headless_prompt_http(
     }
 }
 
+/// Smart Prompts `api` mode on FastAF's built-in engine (`llm_api`), the
+/// HTTP twin of the `execute_api_prompt` command.
 pub(super) async fn execute_api_prompt_http(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth: Option<Extension<Authenticated>>,
@@ -232,7 +252,7 @@ pub(super) async fn spawn_agent_session(
     if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
         return resp.into_response();
     }
-    if state.sessions.len() >= MAX_CONCURRENT_SESSIONS {
+    if state.session_maps.sessions.len() >= MAX_CONCURRENT_SESSIONS {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Max concurrent sessions reached"})),
@@ -261,7 +281,7 @@ pub(super) async fn spawn_agent_session(
         }
         path.clone()
     } else if let Some(ref agent_type) = body.agent_type {
-        let detection = crate::agent::detect_agent_binary(agent_type.clone());
+        let detection = crate::agent::detect_agent_binary(agent_type.clone()).await;
         match detection.path {
             Some(p) => p,
             None => {
@@ -273,7 +293,7 @@ pub(super) async fn spawn_agent_session(
         }
     } else {
         // Default to claude
-        let detection = crate::agent::detect_agent_binary("claude".to_string());
+        let detection = crate::agent::detect_agent_binary("claude".to_string()).await;
         match detection.path {
             Some(p) => p,
             None => {
@@ -316,6 +336,35 @@ pub(super) async fn spawn_agent_session(
     }
     let session_id = Uuid::new_v4().to_string();
 
+    let attachment_dir =
+        match crate::attachments::prepare_session_directory(&state.data_dir, "pty", &session_id) {
+            Ok(directory) => directory,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
+            }
+        };
+
+    let scoped_environment = match body
+        .scope
+        .as_deref()
+        .map(|scope| state.secrets.scope_environment(scope))
+        .transpose()
+    {
+        Ok(environment) => environment,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+    let scoped_environment = Arc::new(scoped_environment);
+    let spawn_secrets = Arc::clone(&scoped_environment);
     let spawn_binary_path = binary_path.clone();
     let spawn_args = body.args.clone();
     let spawn_prompt = body.prompt.clone();
@@ -323,6 +372,15 @@ pub(super) async fn spawn_agent_session(
     let spawn_output_format = body.output_format.clone();
     let spawn_print_mode = body.print_mode;
     let spawn_cwd = body.cwd.clone();
+    let spawn_env = body.env.clone();
+    let spawn_state = Arc::clone(&state);
+    let spawn_session_id = session_id.clone();
+    let spawn_agent_type = body
+        .agent_type
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+    let launch_receipt = Arc::new(Mutex::new(None));
+    let captured_receipt = Arc::clone(&launch_receipt);
     let (pair, child) = match crate::pty::spawn_pty_pair_with_retry_async(
         PtySize {
             rows,
@@ -334,24 +392,57 @@ pub(super) async fn spawn_agent_session(
             let mut cmd = CommandBuilder::new(&spawn_binary_path);
             crate::pty::sanitize_pty_parent_env(&mut cmd);
 
+            let mut launch_args = Vec::new();
             if let Some(ref args) = spawn_args {
-                for arg in args {
-                    cmd.arg(arg);
-                }
+                launch_args.extend(args.iter().cloned());
             } else {
                 if spawn_print_mode.unwrap_or(false) {
-                    cmd.arg("--print");
+                    launch_args.push("--print".to_string());
                 }
                 if let Some(ref format) = spawn_output_format {
-                    cmd.arg("--output-format");
-                    cmd.arg(format);
+                    launch_args.push("--output-format".to_string());
+                    launch_args.push(format.clone());
                 }
                 if let Some(ref model) = spawn_model {
-                    cmd.arg("--model");
-                    cmd.arg(model);
+                    launch_args.push("--model".to_string());
+                    launch_args.push(model.clone());
                 }
-                cmd.arg(&spawn_prompt);
+                launch_args.push(spawn_prompt.clone());
             }
+            crate::pty::apply_agent_screen_env(&mut cmd, &spawn_env);
+            let final_args = crate::agent_hook_launch::launch_args(
+                &spawn_agent_type,
+                &spawn_binary_path,
+                &launch_args,
+                &crate::config::config_dir(),
+                &attachment_dir,
+            );
+            crate::launch_instructions::apply_env(
+                &mut cmd,
+                &spawn_agent_type,
+                &launch_args,
+                &crate::config::config_dir(),
+            );
+            *captured_receipt.lock() = Some(crate::prompt_receipt::PromptReceipt::capture(
+                &spawn_prompt,
+                "TUIC HTTP agent spawn",
+                &final_args,
+                spawn_cwd.as_deref(),
+                false,
+            ));
+            for arg in final_args {
+                cmd.arg(arg);
+            }
+
+            for (key, value) in &spawn_env {
+                cmd.env(key, value);
+            }
+
+            if let Some(environment) = spawn_secrets.as_ref() {
+                environment.apply_to(&mut cmd);
+            }
+
+            crate::pty::bind_pty_identity(&spawn_state, &mut cmd, &spawn_session_id, None);
 
             if let Some(ref cwd) = spawn_cwd {
                 cmd.cwd(crate::cli::expand_tilde(cwd));
@@ -363,6 +454,7 @@ pub(super) async fn spawn_agent_session(
     {
         Ok(pair_and_child) => pair_and_child,
         Err(e) => {
+            state.unbind_live_pty(&session_id);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
@@ -374,6 +466,7 @@ pub(super) async fn spawn_agent_session(
     let writer = match pair.master.take_writer() {
         Ok(w) => w,
         Err(e) => {
+            state.unbind_live_pty(&session_id);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("Failed to get PTY writer: {}", e)})),
@@ -385,6 +478,7 @@ pub(super) async fn spawn_agent_session(
     let reader = match pair.master.try_clone_reader() {
         Ok(r) => r,
         Err(e) => {
+            state.unbind_live_pty(&session_id);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("Failed to get PTY reader: {}", e)})),
@@ -393,82 +487,75 @@ pub(super) async fn spawn_agent_session(
         }
     };
 
+    if let Some(environment) = scoped_environment.as_ref() {
+        state.secrets.bind_scope(&session_id, environment);
+    }
     let paused = Arc::new(AtomicBool::new(false));
-    state.sessions.insert(
-        session_id.clone(),
-        Mutex::new(PtySession {
-            writer: Arc::new(Mutex::new(writer)),
-            master: pair.master,
-            _child: child,
-            paused: paused.clone(),
-            worktree: None,
-            cwd: body.cwd.clone(),
-            display_name: None,
-            display_name_is_custom: false,
-            is_remote: true,
-            shell: binary_path.clone(),
-        }),
-    );
-    state.assign_term_alias(&session_id);
-    state.metrics.total_spawned.fetch_add(1, Ordering::Relaxed);
-    state
-        .metrics
-        .active_sessions
-        .fetch_add(1, Ordering::Relaxed);
-
-    // Pre-set the session's agent type (mirrors session.rs spawn_pty_session) so the
-    // PTY reader's agent_active gate turns on immediately and intent/suggest protocol
-    // tokens are parsed from the first line of output.
-    let mut session_state = crate::state::SessionState::default();
+    // Pre-set the session's agent type so the PTY reader's agent_active gate turns
+    // on immediately and intent/suggest protocol tokens are parsed from the first
+    // line of output. Seeded before registration because that is what publishes
+    // `session-created`.
+    let mut session_state = crate::state::SessionState {
+        spawn_root_role: crate::state::SpawnRootRole::DirectProgram,
+        ..Default::default()
+    };
     if let Some(ref agent_type) = body.agent_type {
         session_state.hook_instrumented = crate::pty::hook_instrumented_for(
             &crate::config::load_agents_config(),
             Some(agent_type.as_str()),
         );
-        session_state.agent_type = Some(agent_type.clone());
+        session_state.seed_configured_agent(Some(agent_type.clone()));
     }
     state
+        .session_maps
         .session_states
         .insert(session_id.clone(), session_state);
 
-    state.output_buffers.insert(
-        session_id.clone(),
-        Mutex::new(OutputRingBuffer::new(OUTPUT_RING_BUFFER_CAPACITY)),
+    // Buffers, alias, metrics, grid watch and the session-created broadcast,
+    // sharing one helper with session::spawn_pty_session so the VT screen can only
+    // ever be built at the geometry the PTY was opened with.
+    super::session::register_pty_session(
+        &state,
+        &session_id,
+        PtySession {
+            launch_receipt: launch_receipt.lock().take(),
+            writer: Arc::new(Mutex::new(writer)),
+            master: pair.master,
+            _child: child,
+            paused: paused.clone(),
+            worktree: None,
+            initial_cwd: body.cwd.clone(),
+            cwd: body.cwd.clone(),
+            display_name: None,
+            display_name_is_custom: false,
+            display_name_from_spawn: false,
+            is_remote: true,
+            shell: binary_path.clone(),
+        },
+        rows,
+        cols,
+        body.agent_type.clone(),
+        None,
+        None,
     );
-    state.vt_log_buffers.insert(
-        session_id.clone(),
-        Mutex::new(VtLogBuffer::new(24, 220, VT_LOG_BUFFER_CAPACITY)),
-    );
-    state
-        .last_output_ms
-        .insert(session_id.clone(), std::sync::atomic::AtomicU64::new(0));
-    // Register the grid_watch channel so `GET /sessions/{id}/stream?format=grid`
-    // works for agent sessions — without it handle_ws_grid_session finds no entry
-    // and silently closes the socket. Mirrors session.rs spawn_pty_session.
-    let grid_watch_tx = crate::grid_gate::new_grid_watch();
-    state.grid_watch.insert(session_id.clone(), grid_watch_tx);
 
-    // Broadcast to SSE/WebSocket consumers (before state is moved to reader thread)
-    state.emit_pty_event(crate::state::AppEvent::SessionCreated {
-        session_id: session_id.clone(),
-        cwd: body.cwd.clone(),
-        agent_type: body.agent_type.clone(),
-        display_name: None,
-    });
-
+    crate::prompt_receipt::adopt_mcp_instructions(&state, &session_id);
     #[cfg(feature = "desktop")]
     let state_ref = state.clone();
     spawn_reader_thread(reader, paused, session_id.clone(), state, None);
 
     #[cfg(feature = "desktop")]
     if let Some(app) = state_ref.app_handle.read().as_ref() {
-        let _ = app.emit(
-            "session-created",
-            serde_json::json!({
-                "session_id": session_id,
-                "cwd": body.cwd,
-                "display_name": null,
-            }),
+        super::session::emit_native_agent_session_created(
+            |event, payload| {
+                let _ = app.emit(event, payload);
+            },
+            &state_ref,
+            &session_id,
+            body.cwd.as_deref(),
+            body.agent_type.as_deref(),
+            None,
+            None,
         );
     }
 
@@ -483,8 +570,251 @@ pub(super) async fn spawn_agent_session(
 mod tests {
     use super::*;
 
+    // Catches: HTTP/MCP readers start without the identity inherited by the
+    // child, so a genuine native Codex hook cannot authorize its Chat transcript.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_spawned_codex_pty_accepts_its_native_binding() {
+        exercise_native_binding(false).await;
+    }
+
+    // Catches: session listing holds the PTY mutex while native binding
+    // validation tries to acquire the same mutex, deadlocking HTTP and IPC.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bound_codex_session_listing_does_not_relock_pty() {
+        exercise_native_binding(true).await;
+    }
+
+    #[cfg(unix)]
+    async fn exercise_native_binding(check_listing: bool) {
+        use base64::Engine;
+        let scratch = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _config = crate::config::set_config_dir_override(scratch.path().join("config"));
+        crate::config::save_agents_config(
+            crate::config::AgentsConfig::default(),
+            crate::config::AgentsConfig {
+                launch_instructions: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let cwd = scratch.path().canonicalize().unwrap();
+        let mut hook: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/chat_view/codex/http-user-prompt-submit.json"
+        ))
+        .unwrap();
+        hook["cwd"] = cwd.to_string_lossy().as_ref().into();
+        hook["transcript_path"] = cwd.join("rollout.jsonl").to_string_lossy().as_ref().into();
+        let mut header: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/chat_view/codex/session-meta.json"
+        ))
+        .unwrap();
+        header["payload"]["id"] = hook["session_id"].clone();
+        header["payload"]["cwd"] = hook["cwd"].clone();
+        std::fs::write(
+            hook["transcript_path"].as_str().unwrap(),
+            format!(
+                "{header}\n{}",
+                include_str!("../fixtures/chat_view/codex/completed.jsonl")
+            ),
+        )
+        .unwrap();
+        // Like ForegroundIdentityProbe: this is an OS process-name probe,
+        // not a fake implementation of Codex. The hook bytes are recorded.
+        let probe = cwd.join("codex");
+        std::fs::copy("/bin/cat", &probe).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            let signed = std::process::Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&probe)
+                .output()
+                .unwrap();
+            assert!(signed.status.success(), "sign the local process-name probe");
+        }
+        let frame = cwd.join("hook-frame");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(hook.to_string());
+        let script = crate::test_support::fake_ssh_script(
+            "codex-http-native-binding",
+            "if [ \"$1\" = '--help' ]; then exit 0; fi; printf '\\033]7770;codex-session=%s:%s\\033\\\\\\nHOOK_REPLAY_DONE\\n' \"$TUIC_SESSION\" \"$CODEX_HOOK\" > \"$CODEX_FRAME\"; exec \"$CODEX_PROBE\" \"$CODEX_FRAME\" -",
+            "exit /b 0",
+        );
+        let mut failures = Vec::new();
+        for path in ["http", "mcp", "generic-restored"] {
+            let state = Arc::new(crate::state::tests_support::make_test_app_state());
+            let sid = match path {
+                "http" => {
+                    let body: SpawnAgentRequest = serde_json::from_value(serde_json::json!({
+                        "prompt": "ignored", "agent_type": "codex", "args": [],
+                        "binary_path": script, "cwd": cwd, "env": {"CODEX_HOOK": encoded, "CODEX_FRAME": frame, "CODEX_PROBE": probe}
+                    })).unwrap();
+                    let response = spawn_agent_session(
+                        State(state.clone()),
+                        ConnectInfo(loopback()),
+                        None,
+                        Json(body),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::CREATED);
+                    response_json(response).await["session_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                }
+                "mcp" => {
+                    let result = super::super::mcp_transport_session_agent::handle_agent(
+                        &state,
+                        loopback(),
+                        &serde_json::json!({
+                            "action": "spawn", "prompt": "ignored", "agent_type": "codex", "args": [],
+                            "binary_path": script, "cwd": cwd, "env": {"CODEX_HOOK": encoded, "CODEX_FRAME": frame, "CODEX_PROBE": probe}
+                        }),
+                        None,
+                    );
+                    result["session_id"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("MCP spawn failed: {result}"))
+                        .to_owned()
+                }
+                _ => super::super::session::spawn_pty_session(
+                    state.clone(),
+                    "/bin/sh".into(),
+                    Some(cwd.to_string_lossy().into()),
+                    24,
+                    80,
+                    None,
+                    super::super::session::RequestedIdentity {
+                        tuic_session: Some("restored-codex-owner".into()),
+                        startup_command: Some(format!(
+                            "CODEX_HOOK='{encoded}' CODEX_FRAME='{}' CODEX_PROBE='{}' exec '{}'",
+                            frame.display(),
+                            probe.display(),
+                            script.display()
+                        )),
+                        agent_type: Some("codex".into()),
+                        ..Default::default()
+                    },
+                )
+                .expect("generic shell launch")
+                .to_owned(),
+            };
+            let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    if state.grid.vt_log_buffers.get(&sid).is_some_and(|vt| {
+                        vt.lock()
+                            .screen_rows()
+                            .join("\n")
+                            .contains("HOOK_REPLAY_DONE")
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            // Wait for the reader to finish processing the chunk that painted the
+            // marker, not for a protocol deadline: this is setup, not the subject.
+            let result = if ready.is_ok() {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if state
+                            .session_maps
+                            .session_states
+                            .get(&sid)
+                            .is_some_and(|s| s.codex_binding.is_some())
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .ok();
+                // Observe the real exec'd process through the production probe;
+                // the generic shell path must discover its agent, not hand-set it.
+                super::super::session::get_foreground_process(
+                    State(state.clone()),
+                    axum::extract::Path(sid.clone()),
+                )
+                .await;
+                crate::chat_view::chat_view_snapshot(&state, &sid, None, 0)
+            } else {
+                Err("hook replay never reached the reader".into())
+            };
+            if check_listing && result.is_ok() {
+                let pid = state
+                    .session_maps
+                    .sessions
+                    .get(&sid)
+                    .unwrap()
+                    .lock()
+                    ._child
+                    .process_id()
+                    .unwrap();
+                let listed_state = state.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let listing = std::thread::spawn(move || {
+                    let rows = super::super::session::local_session_rows(&listed_state);
+                    let mcp = super::super::mcp_transport_session_agent::handle_session(
+                        &listed_state,
+                        &serde_json::json!({"action":"list"}),
+                        None,
+                    );
+                    let _ = tx.send((rows, mcp));
+                });
+                let (rows, mcp) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        // The failed worker owns the locked session. Do not
+                        // deadlock cleanup on it: kill only our spawned probe.
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                        panic!("{path}: session listing deadlocked on native binding: {error}");
+                    }
+                };
+                listing.join().unwrap();
+                assert!(
+                    mcp.as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["session_id"] == sid),
+                    "MCP must list the same bound PTY"
+                );
+                let row = rows.iter().find(|row| row.session_id == sid).unwrap();
+                assert_eq!(
+                    row.state
+                        .as_ref()
+                        .unwrap()
+                        .codex_binding
+                        .as_ref()
+                        .unwrap()
+                        .session_id,
+                    hook["session_id"].as_str().unwrap()
+                );
+            }
+            crate::pty::close_pty_core(&state, &sid, false);
+            match result {
+                Ok(snapshot) => assert!(
+                    serde_json::to_string(&snapshot.updates)
+                        .unwrap()
+                        .contains("Recorded reply"),
+                    "{path}: wrong transcript"
+                ),
+                Err(error) => failures.push(format!("{path}: {error}")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "native binding lost: {}",
+            failures.join("; ")
+        );
+    }
+
     fn spawn_request() -> SpawnAgentRequest {
         SpawnAgentRequest {
+            scope: None,
             rows: Some(24),
             cols: Some(80),
             cwd: None,
@@ -500,7 +830,218 @@ mod tests {
                     .into_owned(),
             ),
             args: Some(vec!["--help".into()]),
+            env: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn http_typed_agent_launch_uses_the_same_rust_screen_policy() {
+        let script = crate::test_support::fake_ssh_script(
+            "http-terminal-screen-args",
+            "printf '%s\\n' '--no-alt-screen'",
+            "echo --no-alt-screen",
+        );
+        let request = PrepareAgentLaunchArgsRequest {
+            agent_type: "codex".into(),
+            binary_path: script.to_string_lossy().into_owned(),
+            args: vec!["resume".into()],
+        };
+        let response =
+            prepare_agent_launch_args_http(ConnectInfo(loopback()), None, Json(request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!(["--no-alt-screen", "resume"])
+        );
+
+        let forbidden = PrepareAgentLaunchArgsRequest {
+            agent_type: "codex".into(),
+            binary_path: script.to_string_lossy().into_owned(),
+            args: vec!["resume".into()],
+        };
+        let response =
+            prepare_agent_launch_args_http(ConnectInfo(lan()), None, Json(forbidden)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn launch_args_request_rejects_removed_screen_override() {
+        let request = serde_json::json!({
+            "agentType": "codex",
+            "binaryPath": "codex",
+            "args": [],
+            "allowAltScreen": true,
+        });
+        assert!(serde_json::from_value::<PrepareAgentLaunchArgsRequest>(request).is_err());
+    }
+
+    #[test]
+    fn spawn_request_rejects_removed_screen_override() {
+        for key in ["allow_alt_screen", "allowAltScreen"] {
+            let mut request = serde_json::json!({
+                "rows": 24,
+                "cols": 80,
+                "prompt": "work",
+            });
+            request[key] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<SpawnAgentRequest>(request).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_request_accepts_browser_transport_body() {
+        let body = include_str!("../../tests/fixtures/spawn_agent_http_body.json");
+        let parsed: SpawnAgentRequest = serde_json::from_str(body).expect("HTTP spawn request");
+        assert_eq!(parsed.rows, Some(30));
+        assert_eq!(parsed.cols, Some(100));
+        assert_eq!(parsed.cwd.as_deref(), Some("/agent"));
+        assert_eq!(parsed.env.get("PROFILE").map(String::as_str), Some("work"));
+    }
+
+    #[tokio::test]
+    async fn http_agent_spawn_uses_per_agent_screen_setting() {
+        let script = crate::test_support::fake_ssh_script(
+            "http-agent-screen-choice",
+            "if [ \"$1\" = '--help' ]; then printf '%s\\n' '--no-alt-screen'; else printf 'ARGS=%s\\nTUIC_SESSION=%s\\n' \"$*\" \"$TUIC_SESSION\"; read unused; fi",
+            "if \"%1\"==\"--help\" (echo --no-alt-screen) else (echo ARGS=%* & echo TUIC_SESSION=%TUIC_SESSION% & set /p HOLD=)",
+        );
+        // Launch instructions off: this test pins the argv around the screen flag.
+        let config_root = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _config = crate::config::set_config_dir_override(config_root.path().join("config"));
+        crate::config::save_agents_config(
+            crate::config::AgentsConfig::default(),
+            crate::config::AgentsConfig {
+                launch_instructions: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let body: SpawnAgentRequest = serde_json::from_value(serde_json::json!({
+            "rows": 24,
+            "cols": 80,
+            "prompt": "ignored",
+            "agent_type": "codex",
+            "binary_path": script.to_string_lossy(),
+            "args": ["resume"],
+        }))
+        .unwrap();
+        let response = spawn_agent_session(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            None,
+            Json(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let session_id = response_json(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Catches: HTTP agent creation labels a direct program as a shell,
+        // so its own foreground root would revoke the configured identity.
+        assert_eq!(
+            state
+                .session_maps
+                .session_states
+                .get(&session_id)
+                .unwrap()
+                .spawn_root_role,
+            crate::state::SpawnRootRole::DirectProgram
+        );
+        assert!(
+            state
+                .session_maps
+                .sessions
+                .get(&session_id)
+                .unwrap()
+                .lock()
+                ._child
+                .process_id()
+                .is_some()
+        );
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(buffer) = state.grid.vt_log_buffers.get(&session_id) {
+                    let text = buffer.lock().screen_rows().join("\n");
+                    // PTY reads may split the two output lines. Wait for the identity
+                    // line before checking either assertion; the first line is not readiness.
+                    if text.contains(&format!("TUIC_SESSION={session_id}")) {
+                        break text;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fake agent output");
+        assert!(output.contains("ARGS=--no-alt-screen resume"), "{output}");
+        assert!(
+            output.contains(&format!("TUIC_SESSION={session_id}")),
+            "the spawned process must know its terminal identity: {output}"
+        );
+        let row = super::super::session::local_session_rows(&state)
+            .into_iter()
+            .find(|row| row.session_id == session_id)
+            .unwrap();
+        assert_eq!(row.tuic_session.as_deref(), Some(session_id.as_str()));
+        super::super::session::close_session(State(state), axum::extract::Path(session_id)).await;
+    }
+
+    #[tokio::test]
+    async fn http_agent_spawn_accepts_model_and_env_with_ipc_field_names() {
+        let script = crate::test_support::fake_ssh_script(
+            "http-agent-model-env",
+            "printf 'ARG=%s\n' \"$@\"; printf 'SPAWN_VALUE=%s\nTUIC_SESSION=%s\n' \"$SPAWN_VALUE\" \"$TUIC_SESSION\"; read unused",
+            "for %%a in (%*) do @echo ARG=%%~a
+ echo SPAWN_VALUE=%SPAWN_VALUE% & echo TUIC_SESSION=%TUIC_SESSION% & set /p HOLD=",
+        );
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let body: SpawnAgentRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "task",
+            "agent_type": "claude",
+            "binary_path": script.to_string_lossy(),
+            "model": "sonnet",
+            "env": {"SPAWN_VALUE": "caller"},
+        }))
+        .unwrap();
+        let response = spawn_agent_session(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            None,
+            Json(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let session_id = response_json(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(buffer) = state.grid.vt_log_buffers.get(&session_id) {
+                    let text = buffer.lock().screen_rows().join("\n");
+                    if text.contains("SPAWN_VALUE=") {
+                        break text;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fake agent output");
+        assert!(output.contains("ARG=--model"), "{output}");
+        assert!(output.contains("ARG=sonnet"), "{output}");
+        assert!(output.contains("ARG=task"), "{output}");
+        assert!(output.contains("SPAWN_VALUE=caller"), "{output}");
+        assert!(
+            output.contains(&format!("TUIC_SESSION={session_id}")),
+            "{output}"
+        );
+        super::super::session::close_session(State(state), axum::extract::Path(session_id)).await;
     }
 
     async fn response_json(response: Response) -> serde_json::Value {
@@ -652,7 +1193,7 @@ mod tests {
                 .unwrap()
                 .contains("bare prompt")
         );
-        assert!(state.sessions.is_empty());
+        assert!(state.session_maps.sessions.is_empty());
     }
 
     #[tokio::test]
@@ -671,6 +1212,39 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(response_json(response).await["error"].is_string());
-        assert!(state.sessions.is_empty());
+        assert!(state.session_maps.sessions.is_empty());
     }
+}
+
+/// Body of `POST /agents/detect-all`.
+#[derive(serde::Deserialize)]
+pub(super) struct DetectAllBinariesRequest {
+    pub binaries: Vec<String>,
+}
+
+/// `POST /agents/detect-all` — mirror of the `detect_all_agent_binaries`
+/// command. Returns the same binary-name -> detection map.
+pub(super) async fn detect_all_agent_binaries_http(
+    Json(body): Json<DetectAllBinariesRequest>,
+) -> impl IntoResponse {
+    Json(crate::agent::detect_all_agent_binaries(body.binaries).await)
+}
+
+/// Body of `POST /agents/open-in-app`.
+#[derive(serde::Deserialize)]
+pub(super) struct OpenInAppRequest {
+    pub path: String,
+    pub app: String,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub col: Option<u32>,
+}
+
+/// `POST /agents/open-in-app` — mirror of the `open_in_app` command. The
+/// command resolves to nothing, so this answers the `null` IPC returns.
+pub(super) async fn open_in_app_http(Json(body): Json<OpenInAppRequest>) -> Response {
+    super::json_result(crate::agent::open_in_app(
+        body.path, body.app, body.line, body.col,
+    ))
 }

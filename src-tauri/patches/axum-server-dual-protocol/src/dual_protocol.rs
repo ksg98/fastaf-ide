@@ -1,0 +1,397 @@
+//! Dual-protocol server implementation.
+//!
+//! See [`bind_dual_protocol()`] and [`DualProtocolAcceptor`].
+
+use std::fmt::{self, Debug, Formatter};
+use std::future::Future;
+use std::io::ErrorKind;
+use std::net::{SocketAddr, TcpListener};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::{io, slice};
+
+use axum_server::accept::Accept;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use axum_server::{Address, Server};
+use bytes::Bytes;
+use http::{Request, Response};
+use http_body_util::{Either as BodyEither, Empty};
+use pin_project::pin_project;
+use tokio::io::ReadBuf;
+use tokio::net::TcpStream;
+use tokio_rustls::server::TlsStream;
+use tokio_util::either::Either as TokioEither;
+use tower_service::Service as TowerService;
+
+use crate::UpgradeHttp;
+
+/// Create a [`Server`] that will bind to the provided address, accepting both
+/// HTTP and HTTPS on the same port.
+#[must_use]
+pub fn bind_dual_protocol(
+	address: SocketAddr,
+	config: RustlsConfig,
+) -> Server<SocketAddr, DualProtocolAcceptor> {
+	let acceptor = DualProtocolAcceptor::new(config);
+
+	Server::bind(address).acceptor(acceptor)
+}
+
+/// Create a [`Server`] from an existing [`TcpListener`], accepting both
+/// HTTP and HTTPS on the same port.
+///
+/// # Errors
+///
+/// Returns the error from putting `listener` into non-blocking mode. axum-server
+/// 0.8 moved that fallible step into `from_tcp`, which used to be infallible.
+pub fn from_tcp_dual_protocol(
+	listener: TcpListener,
+	config: RustlsConfig,
+) -> io::Result<Server<SocketAddr, DualProtocolAcceptor>> {
+	let acceptor = DualProtocolAcceptor::new(config);
+
+	Ok(axum_server::from_tcp(listener)?.acceptor(acceptor))
+}
+
+/// Supplies configuration methods for [`Server`] with [`DualProtocolAcceptor`].
+///
+/// See [`bind_dual_protocol()`] for easy creation.
+pub trait ServerExt {
+	/// Set if HTTP connections should be automatically upgraded to HTTPS.
+	///
+	/// See [`UpgradeHttp`] for more details.
+	#[must_use]
+	fn set_upgrade(self, upgrade: bool) -> Self;
+}
+
+impl<A: Address> ServerExt for Server<A, DualProtocolAcceptor> {
+	fn set_upgrade(mut self, upgrade: bool) -> Self {
+		self.get_mut().set_upgrade(upgrade);
+		self
+	}
+}
+
+/// The protocol used by this connection. See
+/// [`Request::extensions()`](Request::extensions()).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Protocol {
+	/// This connection is encrypted with TLS.
+	Tls,
+	/// This connection is unencrypted.
+	Plain,
+}
+
+/// Simultaneous HTTP and HTTPS [`Accept`]or.
+#[derive(Debug, Clone)]
+pub struct DualProtocolAcceptor {
+	/// [`RustlsAcceptor`] re-used to handle HTTPS requests.
+	rustls: RustlsAcceptor,
+	/// Stores if HTTP connections should be automatically upgraded to HTTPS.
+	///
+	/// See [`UpgradeHttp`] for more details.
+	upgrade: bool,
+}
+
+impl DualProtocolAcceptor {
+	/// Create a new [`DualProtocolAcceptor`].
+	#[must_use]
+	pub fn new(config: RustlsConfig) -> Self {
+		Self {
+			rustls: RustlsAcceptor::new(config),
+			upgrade: false,
+		}
+	}
+
+	/// Set if HTTP connections should be automatically upgraded to HTTPS.
+	///
+	/// See [`UpgradeHttp`] for more details.
+	pub fn set_upgrade(&mut self, upgrade: bool) {
+		self.upgrade = upgrade;
+	}
+}
+
+impl<Service: Clone> Accept<TcpStream, Service> for DualProtocolAcceptor {
+	type Stream = TokioEither<TlsStream<TcpStream>, TcpStream>;
+	type Service = DualProtocolService<Service>;
+	type Future = DualProtocolAcceptorFuture<Service>;
+
+	fn accept(&self, stream: TcpStream, service: Service) -> Self::Future {
+		let service = if self.upgrade {
+			DualProtocolServiceBuilder::new_upgrade(service)
+		} else {
+			DualProtocolServiceBuilder::new_service(service)
+		};
+
+		DualProtocolAcceptorFuture::new(stream, service, self.rustls.clone())
+	}
+}
+
+/// [`Future`](Accept::Future) type for [`DualProtocolAcceptor`].
+#[derive(Debug)]
+#[pin_project(project = DualProtocolAcceptorFutureProj)]
+pub struct DualProtocolAcceptorFuture<Service: Clone>(
+	/// State. `enum` variants can't be private, so this solution was used to
+	/// hide implementation details.
+	#[pin]
+	FutureState<Service>,
+);
+
+/// State of accepting a new request for [`DualProtocolAcceptorFuture`].
+#[derive(Debug)]
+#[pin_project(project = FutuereStateProj)]
+enum FutureState<Service: Clone> {
+	/// Peeking state, still trying to determine if the incoming request is HTTP
+	/// or HTTPS.
+	Peek(Option<PeekState<Service>>),
+	/// HTTPS state, it was determined that the incoming request is HTTPS, now
+	/// the [`RustlsAcceptor`] has to be polled to completion.
+	Https(#[pin] <RustlsAcceptor as Accept<TcpStream, DualProtocolService<Service>>>::Future),
+}
+
+/// Data necessary to peek and proceed to the next state.
+#[derive(Debug)]
+struct PeekState<Service> {
+	/// Transport.
+	stream: TcpStream,
+	/// User-provided [`Service`](TowerService)
+	service: DualProtocolServiceBuilder<Service>,
+	/// Used to proceed to the [`Https`](FutureState::Https) state if
+	/// necessary.
+	rustls: RustlsAcceptor,
+}
+
+impl<Service: Clone> DualProtocolAcceptorFuture<Service> {
+	/// Create a new [`DualProtocolAcceptorFuture`] in the
+	/// [`Peek`](FutureState::Peek) state.
+	const fn new(
+		stream: TcpStream,
+		service: DualProtocolServiceBuilder<Service>,
+		rustls: RustlsAcceptor,
+	) -> Self {
+		Self(FutureState::Peek(Some(PeekState {
+			stream,
+			service,
+			rustls,
+		})))
+	}
+}
+
+impl<Service: Clone> DualProtocolAcceptorFutureProj<'_, Service> {
+	/// Proceed to the [`Https`](FutureState::Https) state.
+	fn upgrade(
+		&mut self,
+		future: <RustlsAcceptor as Accept<TcpStream, DualProtocolService<Service>>>::Future,
+	) {
+		self.0.set(FutureState::Https(future));
+	}
+}
+
+impl<Service: Clone> Future for DualProtocolAcceptorFuture<Service> {
+	type Output = io::Result<(
+		TokioEither<TlsStream<TcpStream>, TcpStream>,
+		DualProtocolService<Service>,
+	)>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let mut this = self.project();
+
+		// After successfully peeking, continue without unnecessary yielding.
+		loop {
+			match this.0.as_mut().project() {
+				FutuereStateProj::Peek(inner) => {
+					let peek = inner.as_mut().expect("polled again after `Poll::Ready`");
+
+					let mut byte = 0;
+					let mut buffer = ReadBuf::new(slice::from_mut(&mut byte));
+
+					match peek.stream.poll_peek(cx, &mut buffer) {
+						// If `MSG_PEEK` returns `0`, the socket was closed.
+						Poll::Ready(Ok(0)) => {
+							return Poll::Ready(Err(ErrorKind::UnexpectedEof.into()))
+						}
+						Poll::Ready(Ok(_)) => {
+							let PeekState {
+								stream,
+								service,
+								rustls,
+							} = inner.take().expect("`inner` was already consumed");
+
+							// The first byte in the TLS protocol is always `0x16`.
+							if byte == 0x16 {
+								this.upgrade(rustls.accept(stream, service.build(Protocol::Tls)));
+							} else {
+								return Poll::Ready(Ok((
+									TokioEither::Right(stream),
+									service.build(Protocol::Plain),
+								)));
+							}
+						}
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending => return Poll::Pending,
+					}
+				}
+				FutuereStateProj::Https(future) => {
+					return future
+						.poll(cx)
+						.map_ok(|(stream, service)| (TokioEither::Left(stream), service))
+				}
+			}
+		}
+	}
+}
+
+/// Hold the user-supplied app until the protocol type is determined.
+#[derive(Debug)]
+struct DualProtocolServiceBuilder<Service>(ServiceServe<Service>);
+
+/// [`Service`](TowerService) wrapping user-supplied app to apply global
+/// [`Layer`](tower_layer::Layer)s according to configuration.
+#[derive(Clone, Debug)]
+pub struct DualProtocolService<Service: Clone> {
+	/// The user-supplied [`Service`](TowerService).
+	service: ServiceServe<Service>,
+	/// The protocol this connection is using.
+	protocol: Protocol,
+}
+
+/// Holds [`Service`](TowerService) to serve for [`DualProtocolService`].
+#[derive(Clone, Debug)]
+enum ServiceServe<Service> {
+	/// No configuration applied, so we will pass-through the user-supplied
+	/// [`Service`](TowerService) as is.
+	Service(Service),
+	/// Configured to automatically upgrade HTTP requests to HTTPS, so we wrap
+	/// the user-supplied [`Service`](TowerService) in the [`UpgradeHttp`]
+	/// [`Service`](TowerService).
+	Upgrade(UpgradeHttp<Service>),
+}
+
+impl<Service: Clone> DualProtocolServiceBuilder<Service> {
+	/// Create a [`DualProtocolService`] in the
+	/// [`Service`](ServiceServe::Service) state.
+	const fn new_service(service: Service) -> Self {
+		Self(ServiceServe::Service(service))
+	}
+
+	/// Create a [`DualProtocolService`] in the
+	/// [`Upgrade`](ServiceServe::Upgrade) state.
+	const fn new_upgrade(service: Service) -> Self {
+		Self(ServiceServe::Upgrade(UpgradeHttp::new(service)))
+	}
+
+	/// Create a [`DualProtocolService`] when the protocol is established.
+	fn build(self, protocol: Protocol) -> DualProtocolService<Service> {
+		DualProtocolService {
+			service: self.0,
+			protocol,
+		}
+	}
+}
+
+impl<Service, RequestBody, ResponseBody> TowerService<Request<RequestBody>>
+	for DualProtocolService<Service>
+where
+	Service: Clone + TowerService<Request<RequestBody>, Response = Response<ResponseBody>>,
+{
+	type Response = Response<BodyEither<ResponseBody, BodyEither<ResponseBody, Empty<Bytes>>>>;
+	type Error = Service::Error;
+	type Future = DualProtocolServiceFuture<Service, RequestBody, ResponseBody>;
+
+	fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		match &mut self.service {
+			ServiceServe::Service(service) => service.poll_ready(cx),
+			ServiceServe::Upgrade(service) => service.poll_ready(cx),
+		}
+	}
+
+	fn call(&mut self, mut req: Request<RequestBody>) -> Self::Future {
+		let _ = req.extensions_mut().insert(self.protocol);
+
+		match &mut self.service {
+			ServiceServe::Service(service) => {
+				DualProtocolServiceFuture::new_service(service.call(req))
+			}
+			ServiceServe::Upgrade(service) => {
+				DualProtocolServiceFuture::new_upgrade(service.call(req))
+			}
+		}
+	}
+}
+
+/// [`Future`](TowerService::Future) type for [`DualProtocolService`].
+#[pin_project]
+pub struct DualProtocolServiceFuture<Service, RequestBody, ResponseBody>(
+	#[pin] FutureServe<Service, RequestBody, ResponseBody>,
+)
+where
+	Service: TowerService<Request<RequestBody>, Response = Response<ResponseBody>>;
+
+/// Holds [`Future`] to serve for [`DualProtocolServiceFuture`].
+#[derive(Debug)]
+#[pin_project(project = DualProtocolServiceFutureProj)]
+enum FutureServe<Service, RequestBody, ResponseBody>
+where
+	Service: TowerService<Request<RequestBody>, Response = Response<ResponseBody>>,
+{
+	/// Pass-through the user-supplied [`Future`](TowerService::Future).
+	Service(#[pin] Service::Future),
+	/// Use the [`UpgradeHttp`] [`Future`](TowerService::Future).
+	Upgrade(#[pin] <UpgradeHttp<Service> as TowerService<Request<RequestBody>>>::Future),
+}
+
+// Rust can't figure out the correct bounds.
+impl<Service, RequestBody, ResponseBody> Debug
+	for DualProtocolServiceFuture<Service, RequestBody, ResponseBody>
+where
+	Service: TowerService<Request<RequestBody>, Response = Response<ResponseBody>>,
+	FutureServe<Service, RequestBody, ResponseBody>: Debug,
+{
+	fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+		formatter
+			.debug_tuple("DualProtocolServiceFuture")
+			.field(&self.0)
+			.finish()
+	}
+}
+
+impl<Service, RequestBody, ResponseBody>
+	DualProtocolServiceFuture<Service, RequestBody, ResponseBody>
+where
+	Service: TowerService<Request<RequestBody>, Response = Response<ResponseBody>>,
+{
+	/// Create a [`DualProtocolServiceFuture`] in the
+	/// [`Service`](FutureServe::Service) state.
+	const fn new_service(future: Service::Future) -> Self {
+		Self(FutureServe::Service(future))
+	}
+
+	/// Create a [`DualProtocolServiceFuture`] in the
+	/// [`Upgrade`](FutureServe::Upgrade) state.
+	const fn new_upgrade(
+		future: <UpgradeHttp<Service> as TowerService<Request<RequestBody>>>::Future,
+	) -> Self {
+		Self(FutureServe::Upgrade(future))
+	}
+}
+
+impl<Service, RequestBody, ResponseBody> Future
+	for DualProtocolServiceFuture<Service, RequestBody, ResponseBody>
+where
+	Service: TowerService<Request<RequestBody>, Response = Response<ResponseBody>>,
+{
+	type Output = Result<
+		Response<BodyEither<ResponseBody, BodyEither<ResponseBody, Empty<Bytes>>>>,
+		Service::Error,
+	>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		match self.project().0.project() {
+			DualProtocolServiceFutureProj::Service(future) => future
+				.poll(cx)
+				.map_ok(|response| response.map(BodyEither::Left)),
+			DualProtocolServiceFutureProj::Upgrade(future) => future
+				.poll(cx)
+				.map_ok(|response| response.map(BodyEither::Right)),
+		}
+	}
+}

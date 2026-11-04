@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock @tauri-apps/api/core before importing invoke
 const mockTauriInvoke = vi.fn();
@@ -11,9 +11,15 @@ vi.mock("@tauri-apps/api/event", () => ({
 	listen: (...args: unknown[]) => mockTauriListen(...args),
 }));
 
+const routing = vi.hoisted(() => ({ owner: undefined as string | undefined, rpc: vi.fn() }));
+
 // Mock transport to simulate Tauri mode
 vi.mock("../transport", () => ({
 	isTauri: () => true,
+	// These suites are desktop-only and register no remote repo, so nothing
+	// diverts off local IPC.
+	owningConnectionFor: () => routing.owner,
+	rpc: (...args: unknown[]) => routing.rpc(...args),
 }));
 
 // Import after mocks are set up
@@ -209,5 +215,56 @@ describe("listen() unlisten error handling", () => {
 		await new Promise((r) => setTimeout(r, 20));
 		process.off("unhandledRejection", onUnhandled);
 		expect(seen).toEqual([]);
+	});
+});
+
+describe("development backend mismatch boundary", () => {
+	beforeEach(() => {
+		mockTauriInvoke.mockReset();
+		routing.owner = undefined;
+		routing.rpc.mockReset();
+		_inflight_TEST_ONLY.clear();
+	});
+	afterEach(() => {
+		routing.owner = undefined;
+		vi.unstubAllEnvs();
+	});
+
+	it("preserves ordinary command errors instead of misdiagnosing backend skew", async () => {
+		for (const failure of [new Error("connection failed"), "Command nested_helper not found", { message: "missing" }]) {
+			mockTauriInvoke.mockRejectedValueOnce(failure);
+			await expect(invoke("select_ai_chat_conversation")).rejects.toBe(failure);
+		}
+	});
+
+	it("leaves release unknown-command errors unchanged", async () => {
+		vi.stubEnv("DEV", false);
+		const failure = "Command select_ai_chat_conversation not found";
+		mockTauriInvoke.mockRejectedValueOnce(failure);
+		await expect(invoke("select_ai_chat_conversation")).rejects.toBe(failure);
+	});
+
+	it("does not tell a satellite to restart its local backend for a remote failure", async () => {
+		routing.owner = "remote-host";
+		const failure = "Command select_ai_chat_conversation not found";
+		routing.rpc.mockRejectedValueOnce(failure);
+		await expect(invoke("select_ai_chat_conversation")).rejects.toBe(failure);
+		expect(mockTauriInvoke).not.toHaveBeenCalled();
+	});
+
+	it("explains deduplicated missing reads to every caller and releases the failed entry", async () => {
+		mockTauriInvoke.mockRejectedValueOnce("Command load_config not found");
+		const first = invoke("load_config");
+		const second = invoke("load_config");
+		const failures = await Promise.allSettled([first, second]);
+		for (const result of failures) {
+			expect(result.status).toBe("rejected");
+			if (result.status === "rejected") {
+				expect(result.reason.message).toContain("Backend/frontend version mismatch");
+				expect(result.reason.message).toContain("Restart make dev");
+			}
+		}
+		expect(mockTauriInvoke).toHaveBeenCalledOnce();
+		expect(_inflight_TEST_ONLY.size).toBe(0);
 	});
 });

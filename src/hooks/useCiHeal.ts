@@ -70,6 +70,7 @@ type HealKind = "ci" | "conflict";
 function isExpectedHealFailure(message: string): boolean {
 	return (
 		message.includes("external CI (not supported)") ||
+		message.includes("CircleCI token not configured") ||
 		message.includes("No failed GitHub Actions job found") ||
 		message.includes("Timeout waiting for agent idle") ||
 		message.includes("Terminal no longer exists")
@@ -80,7 +81,7 @@ function isExpectedHealFailure(message: string): boolean {
  * Auto-heal a blocked PR by handing the problem to an agent terminal.
  *
  * Triggers on two transitions when auto-heal is enabled on the branch:
- * - CI failure (`ci`): fetches `gh run view --log-failed` and asks the agent to fix.
+ * - CI failure (`ci`): fetches account-scoped CI logs over HTTP and asks the agent to fix.
  * - Merge conflict (`conflict`): asks the agent to resolve conflicts with the base branch.
  *
  * In both cases it waits for the agent to be idle/awaiting input, writes the fix
@@ -103,16 +104,22 @@ export function useCiHeal(): void {
 		const key = `${repoPath}:${branch}`;
 		if (healing.has(key)) return;
 
+		// CI reports a BRANCH, and the auto-heal flag lives on a workspace row, so
+		// the row is resolved through the single branch->id seam. Its DEFERRED note
+		// covers this caller too: with two workspaces on one branch, a CI failure
+		// names the ref that broke and not which checkout should fix it.
+		const workspaceId = repositoriesStore.workspaceIdOnBranch(repoPath, branch) ?? branch;
+
 		// Check if auto-heal is enabled for this branch
 		const repo = repositoriesStore.state.repositories[repoPath];
 		if (!repo) return;
-		const branchState = repo.branches[branch];
+		const branchState = repo.workspaces[workspaceId];
 		if (!branchState?.ciAutoHeal?.enabled) return;
 
 		// Check attempt count
 		if ((branchState.ciAutoHeal.attempts ?? 0) >= MAX_ATTEMPTS) {
 			appLogger.warn("ci-heal", `Auto-heal exhausted after ${MAX_ATTEMPTS} attempts for ${branch}`);
-			repositoriesStore.setCiAutoHeal(repoPath, branch, {
+			repositoriesStore.setCiAutoHeal(repoPath, workspaceId, {
 				...branchState.ciAutoHeal,
 				healing: false,
 			});
@@ -120,7 +127,7 @@ export function useCiHeal(): void {
 		}
 
 		// Find an agent terminal on this branch
-		const agentTerminal = findAgentTerminal(repoPath, branch);
+		const agentTerminal = findAgentTerminal(repoPath, workspaceId);
 		if (!agentTerminal) {
 			appLogger.debug("ci-heal", `No agent terminal found for ${branch}, skipping auto-heal`);
 			// Surface why nothing happened — auto-heal injects the fix request into an
@@ -136,7 +143,7 @@ export function useCiHeal(): void {
 		}
 
 		healing.add(key);
-		triggerHeal(repoPath, branch, agentTerminal, kind).finally(() => healing.delete(key));
+		triggerHeal(repoPath, workspaceId, branch, agentTerminal, kind).finally(() => healing.delete(key));
 	}
 
 	/** Build the fix prompt for a heal kind. CI fetches failure logs; conflict is self-describing. */
@@ -148,8 +155,16 @@ export function useCiHeal(): void {
 		return `\n\n${body}\n\n`;
 	}
 
-	async function triggerHeal(repoPath: string, branch: string, terminalId: string, kind: HealKind): Promise<void> {
-		const branchState = repositoriesStore.state.repositories[repoPath]?.branches[branch];
+	/** `workspaceId` carries the auto-heal counters; `branch` is what the CI logs,
+	 *  the prompt and the toast are about. */
+	async function triggerHeal(
+		repoPath: string,
+		workspaceId: string,
+		branch: string,
+		terminalId: string,
+		kind: HealKind,
+	): Promise<void> {
+		const branchState = repositoriesStore.state.repositories[repoPath]?.workspaces[workspaceId];
 		if (!branchState?.ciAutoHeal) return;
 
 		const attempt = (branchState.ciAutoHeal.attempts ?? 0) + 1;
@@ -158,7 +173,7 @@ export function useCiHeal(): void {
 		// Mark the operation as in-flight, but do not consume the attempt until the
 		// fix prompt has actually reached the agent. Log-fetch, terminal, or PTY
 		// failures are delivery failures rather than heal attempts.
-		repositoriesStore.setCiAutoHeal(repoPath, branch, {
+		repositoriesStore.setCiAutoHeal(repoPath, workspaceId, {
 			...branchState.ciAutoHeal,
 			healing: true,
 		});
@@ -194,11 +209,13 @@ export function useCiHeal(): void {
 				prompt.trimEnd(),
 				terminal.agentType,
 				shellFamily,
+				true,
+				terminal.sessionId,
 			);
 
-			const delivered = repositoriesStore.state.repositories[repoPath]?.branches[branch]?.ciAutoHeal;
+			const delivered = repositoriesStore.state.repositories[repoPath]?.workspaces[workspaceId]?.ciAutoHeal;
 			if (delivered) {
-				repositoriesStore.setCiAutoHeal(repoPath, branch, {
+				repositoriesStore.setCiAutoHeal(repoPath, workspaceId, {
 					...delivered,
 					attempts: attempt,
 				});
@@ -211,7 +228,8 @@ export function useCiHeal(): void {
 			// fetch, no failed GHA job at the head yet, an agent that never went
 			// idle, or a vanished terminal) log at warn to avoid error noise;
 			// anything unexpected stays at error.
-			if (isExpectedHealFailure(message)) {
+			const expectedFailure = isExpectedHealFailure(message);
+			if (expectedFailure) {
 				appLogger.warn("ci-heal", `Auto-heal couldn't run for ${branch}: ${message}`);
 			} else {
 				appLogger.error("ci-heal", `Auto-heal failed for ${branch}`, err);
@@ -219,12 +237,16 @@ export function useCiHeal(): void {
 			// Surface WHY it couldn't proceed — without this the user sees nothing.
 			// Common case: failing checks are on external CI (CircleCI, Codacy)
 			// whose logs auto-heal can't fetch — the backend error names them.
-			toastsStore.add(t("ciHeal.failedTitle", "Auto-heal couldn't run"), `${branch}: ${message}`, "warn");
+			toastsStore.add(
+				t("ciHeal.failedTitle", "Auto-heal couldn't run"),
+				`${branch}: ${message}`,
+				expectedFailure ? "warn" : "error",
+			);
 		} finally {
 			// Clear healing flag (keep attempts)
-			const current = repositoriesStore.state.repositories[repoPath]?.branches[branch]?.ciAutoHeal;
+			const current = repositoriesStore.state.repositories[repoPath]?.workspaces[workspaceId]?.ciAutoHeal;
 			if (current) {
-				repositoriesStore.setCiAutoHeal(repoPath, branch, {
+				repositoriesStore.setCiAutoHeal(repoPath, workspaceId, {
 					...current,
 					healing: false,
 				});
@@ -233,7 +255,8 @@ export function useCiHeal(): void {
 	}
 
 	function handleCiRecovered(repoPath: string, branch: string, _prNumber: number): void {
-		const branchState = repositoriesStore.state.repositories[repoPath]?.branches[branch];
+		const workspaceId = repositoriesStore.workspaceIdOnBranch(repoPath, branch) ?? branch;
+		const branchState = repositoriesStore.state.repositories[repoPath]?.workspaces[workspaceId];
 		if (!branchState?.ciAutoHeal?.enabled) return;
 		if ((branchState.ciAutoHeal.attempts ?? 0) === 0) return;
 
@@ -241,7 +264,7 @@ export function useCiHeal(): void {
 		appLogger.info("ci-heal", `CI healed after ${attempts} attempt(s) for ${branch}`);
 
 		// Reset attempts but keep enabled
-		repositoriesStore.setCiAutoHeal(repoPath, branch, {
+		repositoriesStore.setCiAutoHeal(repoPath, workspaceId, {
 			enabled: true,
 			attempts: 0,
 			healing: false,
@@ -258,11 +281,11 @@ export function useCiHeal(): void {
 	});
 }
 
-/** Find an agent terminal assigned to the given branch */
-function findAgentTerminal(repoPath: string, branch: string): string | null {
+/** Find an agent terminal filed under the given workspace */
+function findAgentTerminal(repoPath: string, workspaceId: string): string | null {
 	const repo = repositoriesStore.state.repositories[repoPath];
 	if (!repo) return null;
-	const branchState = repo.branches[branch];
+	const branchState = repo.workspaces[workspaceId];
 	if (!branchState) return null;
 
 	for (const termId of branchState.terminals) {

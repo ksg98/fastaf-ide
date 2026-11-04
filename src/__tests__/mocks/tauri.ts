@@ -31,6 +31,14 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 	message: vi.fn().mockResolvedValue(undefined),
 }));
 
+// The file pickers moved off the plugin and onto our own guarded command — see
+// utils/nativeDialog.ts. The plugin mock above stays for `ask`/`message`, which
+// did not move.
+vi.mock("../../utils/nativeDialog", () => ({
+	openDialog: vi.fn().mockResolvedValue(null),
+	saveDialog: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock("@tauri-apps/plugin-opener", () => ({
 	openUrl: vi.fn().mockResolvedValue(undefined),
 }));

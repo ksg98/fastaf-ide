@@ -1,4 +1,4 @@
-import { createStore } from "solid-js/store";
+import { createStore, reconcile } from "solid-js/store";
 import { invoke } from "../invoke";
 import {
 	DEFAULT_NOTIFICATION_CONFIG,
@@ -6,11 +6,20 @@ import {
 	type NotificationSound,
 	notificationManager,
 } from "../notifications";
+import { showNativeNotice } from "../services/nativeNotifications";
+import { reportSettingsConflicts, settingsRefresh } from "../services/settingsRefresh";
 import { isTauri } from "../transport";
+import { createConfigDeltaWriter } from "../utils/configDeltaWriter";
 import { appLogger } from "./appLogger";
+import { terminalsStore } from "./terminals";
+import { setToastBellMirrorResolver } from "./toasts";
 
 interface PlayOptions {
 	terminalId?: string;
+	/** MCP notice origin: apply session policy without adding a terminal OS notice. */
+	originSessionId?: string;
+	/** A repeat of an earlier notice: the OS notice also goes out in a focused window unless the user is looking at this terminal, and is off with notifications or this sound disabled. */
+	reminder?: boolean;
 }
 
 const OS_NOTIFICATION_TITLES: Record<NotificationSound, string> = {
@@ -22,40 +31,19 @@ const OS_NOTIFICATION_TITLES: Record<NotificationSound, string> = {
 	attention: "Agent needs you",
 };
 
-let osNotificationPermission: NotificationPermission | null = null;
+// Card routing is a per-client view preference, like editor wrapping.
+const AUTO_TOAST_CARDS_KEY = "tui-commander-auto-toast-cards";
 
-async function ensureNotificationPermission(): Promise<boolean> {
-	if (!("Notification" in window)) return false;
-	if (osNotificationPermission === null) {
-		osNotificationPermission = Notification.permission;
+function loadAutoToastCards(): boolean {
+	try {
+		return localStorage.getItem(AUTO_TOAST_CARDS_KEY) !== "false";
+	} catch {
+		return true;
 	}
-	if (osNotificationPermission === "granted") return true;
-	if (osNotificationPermission === "denied") return false;
-	osNotificationPermission = await Notification.requestPermission();
-	return osNotificationPermission === "granted";
-}
-
-function sendOsNotification(sound: NotificationSound, terminalId: string, tabName: string): void {
-	const n = new Notification(OS_NOTIFICATION_TITLES[sound], {
-		body: tabName,
-		silent: true,
-	});
-	n.onclick = () => {
-		n.close();
-		if (isTauri()) {
-			import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-				getCurrentWindow().setFocus();
-			});
-		} else {
-			window.focus();
-		}
-		import("../utils/navigateToTerminal").then(({ navigateToTerminal }) => {
-			navigateToTerminal(terminalId);
-		});
-	};
 }
 
 const LEGACY_STORAGE_KEY = "tui-commander-notifications";
+const notificationWriter = createConfigDeltaWriter<NotificationConfig>("save_notification_config");
 
 /** Create a fresh copy of the default config */
 function copyDefaults(): NotificationConfig {
@@ -68,13 +56,12 @@ function copyDefaults(): NotificationConfig {
 
 /** Persist config to Rust backend (fire-and-forget) */
 function saveConfig(config: NotificationConfig): void {
-	invoke("save_notification_config", { config }).catch((err) =>
-		appLogger.debug("config", "Failed to save notification config", err),
-	);
+	notificationWriter.save(config).catch((err) => appLogger.debug("config", "Failed to save notification config", err));
 }
 
 /** Notifications store state */
 interface NotificationsState {
+	autoToastCards: boolean;
 	config: NotificationConfig;
 	isAvailable: boolean;
 	badgeCount: number;
@@ -84,30 +71,70 @@ interface NotificationsState {
 function createNotificationsStore() {
 	const defaults = copyDefaults();
 	notificationManager.updateConfig(defaults);
+	const notifiedAcpInteractions = new Set<string>();
 
 	const [state, setState] = createStore<NotificationsState>({
 		config: defaults,
+		autoToastCards: loadAutoToastCards(),
 		isAvailable: notificationManager.isAvailable(),
 		badgeCount: 0,
 	});
 
 	const actions = {
+		startRemoteSync(): () => void {
+			return settingsRefresh.register({
+				section: "notifications",
+				read: () => invoke<NotificationConfig>("load_notification_config"),
+				apply: (loaded) => {
+					const merged = notificationWriter.adopt({ ...copyDefaults(), ...loaded }, state.config);
+					setState("config", reconcile(merged.value));
+					notificationManager.updateConfig(merged.value);
+					reportSettingsConflicts(merged.conflicts);
+				},
+			});
+		},
+		/** Show a card when an MCP notice arrives from a terminal the user is not viewing. */
+		setAutoToastCards(enabled: boolean): void {
+			setState("autoToastCards", enabled);
+			try {
+				localStorage.setItem(AUTO_TOAST_CARDS_KEY, String(enabled));
+			} catch (err) {
+				appLogger.warn("config", "Failed to persist automatic toast cards", err);
+			}
+		},
+		/** Send one native notice per pending ACP question; a notice still in flight is dropped once the question settles. */
+		syncAcpAttention(interactions: { id: string; kind: "permission" | "elicitation" }[]): void {
+			const pending = new Set(interactions.map((interaction) => interaction.id));
+			for (const id of notifiedAcpInteractions) if (!pending.has(id)) notifiedAcpInteractions.delete(id);
+			for (const interaction of interactions) {
+				if (notifiedAcpInteractions.has(interaction.id)) continue;
+				notifiedAcpInteractions.add(interaction.id);
+				void showNativeNotice({
+					title: "AI Chat needs input",
+					body: interaction.kind === "permission" ? "Permission requested" : "Form requested",
+					key: `acp:${interaction.id}`,
+					target: { kind: "aichat", id: interaction.id },
+					isCurrent: () => notifiedAcpInteractions.has(interaction.id),
+				}).catch((error: unknown) => appLogger.warn("ai-chat", "Could not show ACP notification", error));
+			}
+		},
 		/** Load config from Rust backend; migrate from localStorage on first run */
 		async hydrate(): Promise<void> {
 			try {
+				const loaded = await invoke<NotificationConfig>("load_notification_config");
+				notificationWriter.loaded(loaded ?? copyDefaults());
 				// One-time migration from localStorage
 				const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
 				if (legacy) {
 					try {
 						const parsed = { ...copyDefaults(), ...JSON.parse(legacy) };
-						await invoke("save_notification_config", { config: parsed });
+						await notificationWriter.save(parsed);
 					} catch {
 						/* ignore corrupt legacy data */
 					}
 					localStorage.removeItem(LEGACY_STORAGE_KEY);
 				}
 
-				const loaded = await invoke<NotificationConfig>("load_notification_config");
 				const config = { ...copyDefaults(), ...loaded };
 				setState("config", config);
 				notificationManager.updateConfig(config);
@@ -138,9 +165,17 @@ function createNotificationsStore() {
 			saveConfig(state.config);
 		},
 
-		/** Silence (or restore) the completion chime for MCP/HTTP-created sessions.
-		 *  Not forwarded to notificationManager: this is a per-terminal policy applied
-		 *  at the completion call site, not a property of the audio playback. */
+		/** One parentage source for every session-scoped sound and native notice.
+		 * Backend events can name the tab, PTY, or stable TUIC peer identity. */
+		isSessionSilenced(id?: string): boolean {
+			if (!id || !state.config.silence_remote_completions) return false;
+			const terminal =
+				terminalsStore.get(id) ??
+				Object.values(terminalsStore.state.terminals).find((term) => term.sessionId === id || term.tuicSession === id);
+			return !!terminal?.parentSession;
+		},
+
+		/** Keep the existing persisted key and default for the expanded subagent policy. */
 		setSilenceRemoteCompletions(silence: boolean): void {
 			setState("config", "silence_remote_completions", silence);
 			saveConfig(state.config);
@@ -151,6 +186,12 @@ function createNotificationsStore() {
 		 *  not about audio. */
 		setToastsInBell(mirror: boolean): void {
 			setState("config", "toasts_in_bell", mirror);
+			saveConfig(state.config);
+		},
+
+		/** OS notifications for PR transitions (ready, CI failed, changes requested, merged). */
+		setPrNativeNotifications(enabled: boolean): void {
+			setState("config", "pr_native_notifications", enabled);
 			saveConfig(state.config);
 		},
 
@@ -170,25 +211,40 @@ function createNotificationsStore() {
 					.map((l) => l.trim())
 					.join(" <- ") ?? "unknown";
 			appLogger.debug("app", `[Notification.Play] sound=${sound} focused=${document.hasFocus()} caller=${caller}`);
+			if (actions.isSessionSilenced(opts?.terminalId ?? opts?.originSessionId)) return;
 			await notificationManager.play(sound);
-			if (!document.hasFocus()) {
-				actions.incrementBadge();
-				if (opts?.terminalId) {
-					ensureNotificationPermission().then((ok) => {
-						if (!ok) return;
-						import("./terminals").then(({ terminalsStore }) => {
-							const term = terminalsStore.get(opts.terminalId!);
-							const tabName = term?.name ?? opts.terminalId!;
-							sendOsNotification(sound, opts.terminalId!, tabName);
+			const unfocused = !document.hasFocus();
+			if (unfocused) actions.incrementBadge();
+			if (opts?.terminalId && (unfocused || (opts.reminder && actions.isSoundEnabled(sound)))) {
+				const terminalId = opts.terminalId;
+				void import("./terminals")
+					.then(({ terminalsStore }) => {
+						const isViewed = () =>
+							document.hasFocus() &&
+							terminalsStore.state.activeId === terminalId &&
+							!terminalsStore.isDetached(terminalId);
+						if (actions.isSessionSilenced(terminalId) || (opts.reminder && isViewed())) return;
+						return showNativeNotice({
+							title: OS_NOTIFICATION_TITLES[sound],
+							body: terminalsStore.get(terminalId)?.name ?? terminalId,
+							key: `${opts.reminder ? "reminder:" : ""}${sound}:${terminalId}`,
+							target: { kind: "terminal", id: terminalId },
+							isCurrent: () => !actions.isSessionSilenced(terminalId) && (!opts.reminder || !isViewed()),
+							...(opts.reminder ? { ignoreFocus: true } : {}),
 						});
-					});
-				}
+					})
+					.catch((error: unknown) => appLogger.warn("app", "Could not show terminal notification", error));
 			}
 		},
 
 		/** Play question notification */
 		async playQuestion(terminalId?: string): Promise<void> {
 			await actions.play("question", { terminalId });
+		},
+
+		/** Repeat the question notification for a question left unanswered */
+		async playQuestionReminder(terminalId: string): Promise<void> {
+			await actions.play("question", { terminalId, reminder: true });
 		},
 
 		/** Play error notification */
@@ -251,6 +307,7 @@ function createNotificationsStore() {
 
 		/** Reset to defaults */
 		reset(): void {
+			actions.setAutoToastCards(true);
 			const defaults = copyDefaults();
 			setState("config", defaults);
 			notificationManager.updateConfig(defaults);
@@ -272,3 +329,5 @@ function createNotificationsStore() {
 }
 
 export const notificationsStore = createNotificationsStore();
+
+setToastBellMirrorResolver(() => notificationsStore.state.config.toasts_in_bell);
