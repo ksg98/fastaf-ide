@@ -2639,6 +2639,8 @@ pub fn run(mut context: tauri::Context<tauri::Wry>) {
             #[cfg(feature = "dictation")]
             voice::commands::voice_speak,
             #[cfg(feature = "dictation")]
+            voice::commands::voice_announce,
+            #[cfg(feature = "dictation")]
             voice::commands::voice_cancel_speech,
             #[cfg(feature = "dictation")]
             voice::commands::voice_get_config,

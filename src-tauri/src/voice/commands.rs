@@ -442,6 +442,95 @@ pub async fn voice_speak(app: AppHandle, text: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Longest an announcement may hold the speaker. A sentence is a few seconds;
+/// this only bounds a device that never reports itself drained.
+const ANNOUNCE_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Say one sentence when no conversation is running: an agent needs the user,
+/// or has finished ("FastAF speaks first").
+///
+/// A conversation already has a speaker open and `voice_speak` uses it, so
+/// during one this simply queues behind whatever is being said. Outside one it
+/// opens the speaker for the length of the sentence and, if it had to load the
+/// engine to do so, frees it again — a notice must not leave the model
+/// resident for the rest of the day.
+#[tauri::command]
+pub async fn voice_announce(app: AppHandle, text: String) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(());
+    }
+    if app.state::<VoiceState>().active.load(Ordering::Acquire) {
+        return voice_speak(app, text).await;
+    }
+    if app
+        .state::<VoiceState>()
+        .announcing
+        .swap(true, Ordering::AcqRel)
+    {
+        return Ok(());
+    }
+    let result = announce(&app, text).await;
+    app.state::<VoiceState>()
+        .announcing
+        .store(false, Ordering::Release);
+    if let Err(e) = &result {
+        tracing::warn!(source = "voice", "Announcement failed: {e}");
+    }
+    result
+}
+
+async fn announce(app: &AppHandle, text: String) -> Result<(), String> {
+    let loaded_here = app.state::<VoiceState>().loaded_model.lock().is_none();
+    if loaded_here {
+        voice_load_engine(app.clone()).await?;
+    }
+
+    let config = config::load();
+    let playback = Playback::open(config.device())?;
+    let speed = config.clamped_speed();
+    let speaker = playback.clone();
+    let worker = app.clone();
+    let spoken = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let state = worker.state::<VoiceState>();
+        let samples = {
+            let mut engine_lock = state.kokoro.lock();
+            let engine = engine_lock
+                .as_mut()
+                .ok_or_else(|| "The voice engine is not loaded".to_string())?;
+            let voice_lock = state.voice.lock();
+            let voice = voice_lock
+                .as_ref()
+                .ok_or_else(|| "No voice is loaded".to_string())?;
+            engine.synthesize(&text, voice, speed)?
+        };
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let generation = speaker.generation();
+        speaker.enqueue(samples, super::kokoro::SAMPLE_RATE, generation);
+        // Keep the speaker open until the sentence has been heard.
+        let deadline = std::time::Instant::now() + ANNOUNCE_MAX;
+        while speaker.is_speaking() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Announcement task panicked: {e}"));
+
+    playback.stop_all();
+    drop(playback);
+    // Give the memory back, unless a conversation started meanwhile and now
+    // depends on the engine this call loaded.
+    let state = app.state::<VoiceState>();
+    if loaded_here && !state.active.load(Ordering::Acquire) {
+        state.clear_engine();
+        *state.voice.lock() = None;
+    }
+    spoken?
+}
+
 /// Barge-in: drop queued audio and invalidate synthesis already under way.
 #[tauri::command]
 pub fn voice_cancel_speech(voice: State<'_, VoiceState>) {

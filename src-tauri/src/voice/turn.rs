@@ -17,6 +17,10 @@
 
 use super::silero::{FRAME as SILERO_FRAME, Silero};
 
+/// Quiet frames after which the speaker counts as pausing, for
+/// [`TurnDetector::speech_so_far`] — about an eighth of a second.
+const CAPTION_QUIET_FRAMES: usize = 4;
+
 /// Samples per scored frame — 32 ms at 16 kHz, fixed by the Silero graph.
 pub const FRAME: usize = SILERO_FRAME;
 const SAMPLE_RATE: usize = 16_000;
@@ -193,6 +197,20 @@ impl TurnDetector {
         self.finished.take()
     }
 
+    /// The turn in progress, for a live caption: the audio heard so far, or
+    /// `None` when nobody is speaking or the speaker has just paused.
+    ///
+    /// The pause is excluded on purpose. A caption pass started in the silence
+    /// that is about to end the turn would still hold the model when the real
+    /// transcription wants it, and the reply would wait behind a caption nobody
+    /// needs any more.
+    pub fn speech_so_far(&self) -> Option<&[f32]> {
+        if !self.speaking || self.quiet_frames > CAPTION_QUIET_FRAMES {
+            return None;
+        }
+        Some(&self.current)
+    }
+
     /// Whether a turn is currently in progress. Test-facing — the listening
     /// loop reacts to `TurnEvent` as it arrives rather than polling this.
     #[cfg(test)]
@@ -232,6 +250,49 @@ mod tests {
             last = detector.push_scored(&frame(0.5), score);
         }
         last
+    }
+
+    /// A caption shows the turn while it is being spoken, so it needs the
+    /// audio before the turn ends — and must not be offered once it has.
+    #[test]
+    fn the_turn_in_progress_is_readable_only_while_someone_is_speaking() {
+        let mut d = detector();
+        assert!(d.speech_so_far().is_none(), "nothing before anyone speaks");
+
+        feed(&mut d, 0.7, 10);
+        let early = d.speech_so_far().expect("speech in progress").len();
+        feed(&mut d, 0.7, 10);
+        let later = d.speech_so_far().expect("speech in progress").len();
+        assert!(
+            later > early,
+            "the caption source grows with the turn: {early} -> {later}"
+        );
+
+        feed(&mut d, 0.05, ms_to_frames(800));
+        assert!(
+            d.speech_so_far().is_none(),
+            "a finished turn belongs to the final transcript"
+        );
+    }
+
+    /// A caption pass started in the pause that ends a turn would hold the
+    /// model while the real transcription waits for it.
+    #[test]
+    fn a_pause_withholds_the_turn_from_captions_until_speech_resumes() {
+        let mut d = detector();
+        feed(&mut d, 0.7, 30);
+
+        feed(&mut d, 0.05, CAPTION_QUIET_FRAMES + 1);
+        assert!(
+            d.speech_so_far().is_none(),
+            "paused: the turn may be about to end"
+        );
+
+        feed(&mut d, 0.7, 1);
+        assert!(
+            d.speech_so_far().is_some(),
+            "speech resumed inside the same turn"
+        );
     }
 
     #[test]

@@ -96,6 +96,10 @@ pub struct VoiceState {
     /// samples away, so nothing muted can be detected, transcribed or sent —
     /// the same discipline half-duplex already applies while the agent speaks.
     pub muted: Arc<AtomicBool>,
+    /// An announcement is being spoken outside a session (`voice_announce`).
+    /// One at a time: a second notice while the first plays is dropped rather
+    /// than opening a second speaker over it.
+    pub announcing: AtomicBool,
 }
 
 impl VoiceState {
@@ -109,6 +113,7 @@ impl VoiceState {
             session: Mutex::new(None),
             active: AtomicBool::new(false),
             muted: Arc::new(AtomicBool::new(false)),
+            announcing: AtomicBool::new(false),
         }
     }
 

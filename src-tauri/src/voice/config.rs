@@ -28,6 +28,11 @@ pub struct VoiceConfig {
     /// Output device name. None or empty = system default.
     #[serde(default)]
     pub output_device: Option<String>,
+    /// Say so out loud when an agent needs the user or has finished, without
+    /// being asked. On by default: it only ever speaks once the voice has been
+    /// downloaded, which is the user choosing to have FastAF talk.
+    #[serde(default = "default_speak_up")]
+    pub speak_up: bool,
 }
 
 fn default_model() -> String {
@@ -46,6 +51,10 @@ fn default_barge_in() -> bool {
     true
 }
 
+fn default_speak_up() -> bool {
+    true
+}
+
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
@@ -54,6 +63,7 @@ impl Default for VoiceConfig {
             speed: default_speed(),
             barge_in: default_barge_in(),
             output_device: None,
+            speak_up: default_speak_up(),
         }
     }
 }
@@ -111,6 +121,15 @@ mod tests {
         // Notably not `false` — serde's bool default would silently disable
         // interruption for anyone with an existing config file.
         assert!(config.barge_in);
+        // Same trap: a config written before this field existed must not read
+        // as "the user turned speaking up off".
+        assert!(config.speak_up);
+    }
+
+    #[test]
+    fn a_stored_choice_not_to_speak_up_is_kept() {
+        let config: VoiceConfig = serde_json::from_str(r#"{"speak_up": false}"#).unwrap();
+        assert!(!config.speak_up);
     }
 
     #[test]

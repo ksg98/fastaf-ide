@@ -2448,6 +2448,17 @@ pub(crate) async fn transcribe_voice_utterance(
     Ok(corrected.replace('\n', " "))
 }
 
+/// Whether the voice agent can caption a turn while it is still being spoken:
+/// only with local whisper.
+///
+/// A caption is a transcription of the turn so far, repeated about once a
+/// second. Through a cloud provider that would upload the same speech again
+/// and again and bill for every pass, so there the words appear when the turn
+/// ends, as they did before captions existed.
+pub(crate) fn voice_captions_available() -> bool {
+    cloud_stt_model(&get_dictation_config()).is_none()
+}
+
 /// Load the configured whisper model if it isn't already resident, and hand back
 /// a shared handle to it. The voice agent's way into [`ensure_transcriber`].
 pub(crate) fn ensure_local_transcriber(

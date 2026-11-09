@@ -10,7 +10,8 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
@@ -175,6 +176,10 @@ fn listen_loop(
     // and waiting for its transcript to prove it contains words.
     let mut pending_barge = false;
     let mut was_muted = false;
+    // Live captions: the turn so far, transcribed about once a second.
+    let caption_busy = Arc::new(AtomicBool::new(false));
+    let turn_serial = Arc::new(AtomicU64::new(0));
+    let mut last_caption = Instant::now();
     let mut cleaned: Vec<f32> = Vec::with_capacity(FRAME * 4);
     let mut playback_generation = playback.generation();
 
@@ -279,6 +284,8 @@ fn listen_loop(
             match event {
                 TurnEvent::SpeechStart => {
                     turn_started = std::time::Instant::now();
+                    turn_serial.fetch_add(1, Ordering::AcqRel);
+                    last_caption = Instant::now();
                     let speaking_out = playback.is_speaking();
                     tracing::info!(source = "voice", speaking_out, "Speech started");
                     if path == EchoPath::Software && speaking_out {
@@ -299,6 +306,8 @@ fn listen_loop(
                     }
                 }
                 TurnEvent::SpeechEnd | TurnEvent::Truncated => {
+                    // Any caption still being made belongs to a turn that is over.
+                    turn_serial.fetch_add(1, Ordering::AcqRel);
                     if event == TurnEvent::Truncated {
                         // Only reachable if the detector never scores the room
                         // quiet — the failure mode that made turns run for over
@@ -328,6 +337,7 @@ fn listen_loop(
                     }
                 }
                 TurnEvent::Misfire => {
+                    turn_serial.fetch_add(1, Ordering::AcqRel);
                     if pending_barge {
                         pending_barge = false;
                         playback.restore_volume();
@@ -346,6 +356,26 @@ fn listen_loop(
             }
         }
         pending.drain(..offset);
+
+        // Show the words while they are still being said. Local whisper only:
+        // see `voice_captions_available`.
+        if let Some(audio) = detector.speech_so_far()
+            && caption_due(
+                last_caption.elapsed(),
+                audio.len(),
+                caption_busy.load(Ordering::Acquire),
+                pending_barge,
+            )
+            && crate::dictation::commands::voice_captions_available()
+        {
+            last_caption = Instant::now();
+            spawn_caption(
+                app.clone(),
+                audio.to_vec(),
+                Arc::clone(&turn_serial),
+                Arc::clone(&caption_busy),
+            );
+        }
     }
 
     // A duck must not survive the session that applied it.
@@ -459,6 +489,51 @@ fn spawn_transcription(app: AppHandle, audio: Vec<f32>, barge_gate: Option<Playb
     });
 }
 
+/// How often the words of a turn in progress are sent to the dock.
+const CAPTION_EVERY: Duration = Duration::from_millis(900);
+/// Less speech than this transcribes to a guess, and a caption that changes
+/// its mind is worse than none: 0.8 s at 16 kHz.
+const CAPTION_MIN_SAMPLES: usize = 12_800;
+
+/// Whether to start a caption pass now.
+///
+/// One pass at a time: a second would queue behind the first on the model and
+/// arrive stale. Not while a detection over our own playback is unsettled — on
+/// the software echo path that audio may be the agent's voice, and a caption
+/// would show the user saying what the agent said.
+fn caption_due(since_last: Duration, samples: usize, busy: bool, unsettled_barge: bool) -> bool {
+    !busy && !unsettled_barge && samples >= CAPTION_MIN_SAMPLES && since_last >= CAPTION_EVERY
+}
+
+/// Transcribe the turn so far and show it, unless the turn has moved on.
+///
+/// `turn_serial` changes whenever a turn starts or ends. A pass that finishes
+/// after its turn did must stay silent: the final transcript is on its way and
+/// is the only thing that may be shown for that turn.
+fn spawn_caption(
+    app: AppHandle,
+    audio: Vec<f32>,
+    turn_serial: Arc<AtomicU64>,
+    busy: Arc<AtomicBool>,
+) {
+    let turn = turn_serial.load(Ordering::Acquire);
+    busy.store(true, Ordering::Release);
+    tauri::async_runtime::spawn(async move {
+        let result = crate::dictation::commands::transcribe_voice_utterance(&app, audio).await;
+        busy.store(false, Ordering::Release);
+        if turn_serial.load(Ordering::Acquire) != turn {
+            return;
+        }
+        if let Ok(text) = result {
+            let text = text.trim();
+            if !text.is_empty() {
+                // The words are shown, never logged.
+                let _ = app.emit("voice-partial", serde_json::json!({ "text": text }));
+            }
+        }
+    });
+}
+
 fn emit_state(app: &AppHandle, state: &str) {
     let _ = app.emit("voice-state", serde_json::json!({ "state": state }));
 }
@@ -496,6 +571,36 @@ mod tests {
         assert_eq!(echo_path(true, true, true), Os, "OS cancellation wins even if aec3 would build");
         assert_eq!(echo_path(true, false, true), Software);
         assert_eq!(echo_path(true, false, false), HalfDuplex, "barge-in without any canceller would self-interrupt");
+    }
+
+    /// One caption pass at a time, about once a second, and never on audio
+    /// that may be the agent's own voice.
+    #[test]
+    fn captions_are_paced_and_never_made_from_unsettled_audio() {
+        let enough = CAPTION_MIN_SAMPLES;
+        assert!(caption_due(CAPTION_EVERY, enough, false, false));
+
+        assert!(
+            !caption_due(
+                CAPTION_EVERY - Duration::from_millis(1),
+                enough,
+                false,
+                false
+            ),
+            "too soon after the last one"
+        );
+        assert!(
+            !caption_due(CAPTION_EVERY, enough - 1, false, false),
+            "too little speech to transcribe without guessing"
+        );
+        assert!(
+            !caption_due(CAPTION_EVERY, enough, true, false),
+            "a pass is still running; a second would arrive stale"
+        );
+        assert!(
+            !caption_due(CAPTION_EVERY, enough, false, true),
+            "speech over our own playback is not yet known to be the user"
+        );
     }
 
     #[test]
