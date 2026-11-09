@@ -461,6 +461,21 @@ When modifying git operations, worktree logic, or GitHub API:
 | `docs/FEATURES.md` | Sections 7 (Git) and 8 (GitHub) |
 | `docs/api/tauri-commands.md` | Git/worktree commands |
 
+### Talk mode and the voice agent (FastAF, desktop)
+When modifying `src-tauri/src/voice/**`, `src/stores/{talk,talkController,talkFlash,agentAsk,speakUp,voiceSetup,voice}.ts`, `src/components/ComposeDock/TalkStage.tsx` or `src/components/Onboarding/VoiceWelcome.tsx`:
+
+| File | What to update |
+|------|----------------|
+| `docs/FEATURES.md` | 1.20a (dock), 1.20c (talk mode), 1.20d (speaks first), 1.20e (first launch) |
+| `docs/frontend/STYLE_GUIDE.md` | Composer › Talk — sizes, the orb, chips |
+| `docs/user-guide/keyboard-shortcuts.md` | `toggle-hands-free`: talk mode on desktop, upstream's conversation in a browser |
+| `src/data/tips.ts` | "Talk to FastAF", "FastAF speaks first" |
+| `to-test.md` | Anything heard or spoken is `[HUMAN]`: no harness has a microphone or a speaker |
+
+Voice is desktop-only by decision (`voice/mod.rs`): its commands are in `INTENTIONALLY_UNMAPPED` and its events are not bridged to `/events`. Events: `voice-state`, `voice-error`, `voice-speech-start`, `voice-partial` (the turn so far, about once a second, local Whisper only), `voice-utterance` (the finished turn). Commands a new one must sit beside: `voice_start`, `voice_stop`, `voice_speak`, `voice_announce` (one sentence outside a session).
+
+Screenshots: `.tmp/talk-harness/` is the whole-app harness (fake Tauri backend) with a `__demo` driver for utterances, replies and tool calls; restart its Vite after editing files under `.tmp/` — the watcher ignores them.
+
 ### Voice dictation, spoken replies and hands-free
 When modifying `src-tauri/src/dictation/**`, `src-tauri/crates/tuic-dictation/**`, or the Dictation settings page (`DictationSettings.tsx`):
 

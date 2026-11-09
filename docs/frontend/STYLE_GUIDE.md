@@ -27,7 +27,7 @@ state*. Colour is spent only on things that need a glance.
 │  ⌕ Search projects │   #terminal-panes (--bg-primary)         │  frame tone      │
 │  Projects    [⏷][+]│                                          │                  │
 │  📂 repo           │                                          │                  │
-│     branch  (30px) │   #compose-dock (Speak · Type · target)  │                  │
+│     branch  (30px) │   #compose-dock (Dictate · Type · Talk · target) │                  │
 │ ───────────────── │                                          │                  │
 │ [↓][↑][⟳][▤]  [⚙]  │                                          │                  │
 └────────────────────┴──────────────────────────────────────────┴──────────────────┘
@@ -225,7 +225,7 @@ Compose from these; never hand-roll a button.
 - Multiview tiles: square, `outline: 1px` into a 1px grid gap so neighbours share one hairline; the active tile's outline is 60 % accent. 24px flat header (12px muted label, 11px status word).
 
 ### Status cluster (title bar)
-- There is no bottom status bar: `StatusBar` renders with `placement="toolbar"` as a `display: contents` cluster inside the title bar's right end. Transient status text (anything but "Ready"), agent usage and PR/CI badges flow before the notifications; the panel toggles (Ideas, Files, Markdown, Git, Chat) end the row as 28px ghost buttons — an **open panel lights its toggle** with `--row-selected`. Zoom shows only when it is not 100 %. The cwd and the hold-to-talk mic stay out (the compose dock's Speak replaces the mic). `placement="bar"` keeps the old strip for any surface that still wants it.
+- There is no bottom status bar: `StatusBar` renders with `placement="toolbar"` as a `display: contents` cluster inside the title bar's right end. Transient status text (anything but "Ready"), agent usage and PR/CI badges flow before the notifications; the panel toggles (Ideas, Files, Markdown, Git, Chat) end the row as 28px ghost buttons — an **open panel lights its toggle** with `--row-selected`. Zoom shows only when it is not 100 %. The cwd and the hold-to-talk mic stay out (the compose dock's Dictate replaces the mic). `placement="bar"` keeps the old strip for any surface that still wants it.
 
 ### Side panels (`shared/panel.module.css`; Files, Git)
 - 40px header, 13px/500 title, 28px icon buttons on the right, one divider below; one divider on the panel's left edge (`--hairline-w` / `--hairline`; the resize handle draws no second line — it lights accent only while hovered or dragged). A panel with tabs (Git) puts them where the title goes: 28px pills, radius 8, 13px/500 in every state, `--fg-muted` at rest, `--row-selected` behind the active one — no ring, no counts. When the strip overflows (below ~330px) it scrolls sideways, a cut-off end fades out over 16px, and the open tab is always scrolled clear of the fades. A pair of view toggles (Files' List / Tree): the pressed one is `--row-selected`, the other hovers a step lighter (`--wash-0`), so pointing at it never shows two pressed buttons.
@@ -288,13 +288,15 @@ A conversation, not a control panel (`components/AIChatPanel`):
 Speaking and typing are the first thing the window offers, the way Codex's composer is
 (reference: `docs/design/codex-reference/`, shots 32b/36b). Two shapes, one component:
 
-- **The bar** (dock at rest, 40px, flush under the terminal column, on `--bg-primary`): a
-  **Speak** pill — the one bright object on the row, `--fg-primary` fill with `--bg-primary`
-  text, 30px — then a ghost **Type** button, then at the right the target chip (state dot ·
-  agent name · branch in `--fg-muted`) and a `--wash-1` "N queued" count when there is one. No
+- **The bar** (dock at rest, 40px, flush under the terminal column, on `--bg-primary`): three
+  zones in a `1fr auto 1fr` grid, so the middle one sits on the column's centre line. Left: ghost
+  **Dictate** and **Type** buttons, 30px. Middle: the **Talk** orb (below). Right: the target chip
+  (state dot · agent name · branch in `--fg-muted`) and a `--wash-1` "N queued" count when there
+  is one. Where talk mode is not on offer (browser clients) Dictate is the bright pill instead —
+  `--fg-primary` fill with `--bg-primary` text. No
   text box: the agent in the terminal already draws its own prompt, so a second one only appears
   when there is text to look at.
-- **The card** (Speak, Type, a saved draft, or the hero): a raised object — `--surface-composer`
+- **The card** (Dictate, Type, a saved draft, or the hero): a raised object — `--surface-composer`
   on the well, no border, 18px radius, padding 14/12/12/16. Glass in a flat theme (`--sheen`
   over the fill, a `--rim` light on top), plain in a tonal one. Field on top, 15px
   `--font-lg`, grows to 200px then scrolls, placeholder in `--fg-muted` ("Speak or type a
@@ -311,6 +313,37 @@ Speaking and typing are the first thing the window offers, the way Codex's compo
   `<select>` dressed as a ghost chip).
 - Never two text boxes stacked: the field folds back into the bar after Enter sends, on Esc, or
   when an empty card loses focus. ⌥Enter queues and keeps the card open for the next prompt.
+
+### Talk (`ComposeDock/TalkStage`)
+
+Voice is the one thing in the window that glows. Everything else in the dock is ghost.
+
+- **At rest**: the `VoiceOrb` at 28px (a 47px canvas — the sphere is 60 % of its canvas, the
+  rest is room for the halo) with the word **Talk** and its shortcut in a `--wash-1` kbd, as one
+  36px ghost capsule. The orb is a still frame; the breath is a CSS animation on the canvas
+  (scale 1 → 1.06, brightness 1 → 1.14, 4.2 s), so nothing runs in script while the window is
+  idle. `prefers-reduced-motion` stops it.
+- **Talking**: the bar grows to 72px and the same orb grows in place to 78px, centred on the
+  column and rising 12px over the terminal's bottom edge (`z-index: var(--z-toolbar)`, above the
+  panes). Everything in the stage is placed from the centre line outward: the agent count
+  (`--font-sm`, `--fg-secondary`, 6px state dots) ends 62px left of centre; the caption starts
+  62px right of it — a 10.5px uppercase label (`--accent` for FastAF, `--fg-secondary` for You)
+  over two lines of 14px/20px text, the newest words kept in view. Controls at the far right are
+  30px round ghosts; the one bright control is the ✕ that ends the conversation.
+- **Chips**: 30px pills on `--bg-tertiary` with the `--rim` and a soft shadow, stacked above the
+  orb, 12.5px text, the recipient in `--fg-primary` 600. An arrow in `--accent` for an action, a
+  check in `--success` for an approval. They slide up 10px as they appear.
+- **Answers** (approve/deny, download/not now): 26px `--wash-1` pills left of the orb; the one
+  that moves things on is filled `--fg-primary`.
+- **The terminal that was acted in** rings once: a 1px `--accent` inset line and a wide inset
+  glow, fading over 1.8 s.
+- The orb is opaque glass: a body gradient lit from the top left, three slow inner lights above
+  60px, a shade toward the lower edge and a thin rim. A translucent highlight reads as a grey
+  smudge at this size. Halo = microphone, core = its voice, orbiting glint = thinking, grey with
+  a slash = muted.
+- **First launch** (`Onboarding/VoiceWelcome`): the orb at 112px, a 28px/500 sentence, a 15px
+  line under it, one 40px `--fg-primary` pill and a `--fg-muted` text button. While it sets up, a
+  2px `--accent` ring fills around the orb and the sentence it is saying is set at 24px/500.
 
 ## Onboarding
 

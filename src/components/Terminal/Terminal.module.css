@@ -7,6 +7,40 @@
   height: 100%;
 }
 
+/* Talk mode just did something in this terminal: one ring of accent that
+   fades, so what was said and where it landed are visibly the same event.
+   Duration matches TALK_FLASH_MS (stores/talkFlash.ts). */
+.wrapper[data-talk-flash]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-sticky);
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 1px rgba(var(--accent-rgb), 0.6),
+    inset 0 0 90px rgba(var(--accent-rgb), 0.12);
+  animation: talkFlash 1.8s ease-out forwards;
+}
+
+@keyframes talkFlash {
+  0% {
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wrapper[data-talk-flash]::after {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
 .content {
   position: relative;
   display: flex;

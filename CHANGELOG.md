@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Talk mode in the dock. A Talk orb sits in the middle of the bar under the terminal. Press it, or
+  `Cmd+Alt+V`, and speak: the bar becomes the conversation, with your words and FastAF's as captions, a chip
+  for each thing FastAF does in a terminal (that terminal flashes), a count of agents working or waiting on
+  you, and mute, transcript and end buttons. You can still type to the terminal while you talk.
+- Live captions. Your words appear in the dock while you are still speaking. Local speech recognition only;
+  with a cloud speech provider they appear when you stop, as before.
+- Answer by voice. When FastAF's agent asks to run a command, say "approve" or "deny", or click the buttons
+  in the dock.
+- FastAF speaks first. When an agent in another terminal stops on a question or finishes, FastAF says so out
+  loud. A yes-or-no question also shows in the dock with Approve and Deny, so you can answer it without
+  switching terminals. On by default once the voice is downloaded; switch it off in Settings › Voice.
+- One-click voice setup. Talk on an install without voice asks first, then downloads the speech model (the
+  574 MB one, not the 1.6 GB default) and the voice, and switches dictation and AI Chat on.
+- A first-launch screen, "Talk to your agents", on new desktop installs, with one button to turn voice on. It
+  greets you out loud straight away from a short recording that ships with the app.
+- "Talk to FastAF" in the Command Palette.
+
+### Changed
+- The dock's Speak button is now Dictate and is drawn like Type; the Talk orb is the one bright thing in the
+  row. Dictation itself works as before.
+- A voice conversation no longer lives inside the AI Chat panel. Closing the panel does not end it, and the
+  panel holds the written transcript. The panel's own voice strip remains only in a detached chat window.
+- The voice orb is redrawn as opaque glass, so it holds up at the size the dock shows it.
+- Talk mode says so when AI Chat has no model connected, with a button that opens Settings › AI Providers,
+  instead of failing on the first sentence.
+
 ## [2.1.1] - 2026-11-04
 
 ### Added

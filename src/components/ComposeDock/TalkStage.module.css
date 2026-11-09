@@ -1,0 +1,484 @@
+/* Talk mode in the dock (docs/frontend/STYLE_GUIDE.md › Composer › Talk).
+
+   At rest it is one breathing orb in the middle of the bar. Talking, the same
+   orb grows in place — the bar gets taller, the terminal above it does not
+   move sideways — and the conversation sits around it: agents to its left,
+   words to its right, what it did above. The orb is always on the centre line
+   of the terminal column, so the eye has one place to look. */
+
+/* ── At rest ───────────────────────────────────────────────────── */
+.talk {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 12px 0 5px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-primary);
+  font-family: inherit;
+  font-size: var(--font-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.talk:hover:not(:disabled) {
+  background: var(--wash-1);
+}
+
+.talk:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.talk:focus-visible,
+.ghost:focus-visible,
+.round:focus-visible,
+.answer:focus-visible,
+.chip:focus-visible,
+.orbStage:focus-visible,
+.fleetLink:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.3);
+}
+
+.kbd {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--wash-1);
+  color: var(--fg-muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* The canvas is larger than the sphere it draws (room for the halo), so the
+   box is sized to the sphere and the canvas hangs over its edges. */
+.orbBox {
+  position: relative;
+  flex-shrink: 0;
+  display: block;
+}
+
+.orbBox > canvas {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* A still frame that breathes on the compositor: no script runs while the
+   window is idle. */
+.orbRest > canvas {
+  animation: orbBreath 4.2s ease-in-out infinite;
+}
+
+@keyframes orbBreath {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.06);
+    filter: brightness(1.14);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbRest > canvas {
+    animation: none;
+  }
+}
+
+/* FastAF speaks first, at rest: who is asking, and the two answers. */
+.ask {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 4px 0 5px;
+}
+
+.askText {
+  min-width: 0;
+  max-width: 340px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--font-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.askText:hover {
+  color: var(--fg-primary);
+}
+
+.askText b {
+  color: var(--fg-primary);
+  font-weight: 500;
+}
+
+/* ── Talking ───────────────────────────────────────────────────── */
+.stageBar {
+  position: relative;
+  /* Above the terminal panes (the active pane is z-index 20 in the same
+     stacking context): the orb rises over the terminal's bottom edge and the
+     chips float above it. Below menus and overlays. */
+  z-index: var(--z-toolbar);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 72px;
+  min-width: 0;
+}
+
+/* With the typing card open above it, the orb would rise into the card. */
+.belowCard {
+  margin-top: 14px;
+}
+
+.spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 13px 0 11px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--font-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.ghost:hover:not(:disabled) {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.ghost:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Everything in the stage is placed from the centre line outward. */
+.stage {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.stage > * {
+  pointer-events: auto;
+}
+
+.orbStage {
+  position: absolute;
+  left: calc(50% - 39px);
+  bottom: 6px;
+  width: 78px;
+  height: 78px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  cursor: pointer;
+}
+
+.orbStage:disabled {
+  cursor: default;
+}
+
+.fleet {
+  position: absolute;
+  right: calc(50% + 62px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+}
+
+.fleetItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.fleetLink {
+  height: 24px;
+  padding: 0 8px;
+  margin: 0 -8px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.fleetLink:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--fg-muted);
+  opacity: 0.7;
+}
+
+.dotBusy {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.dotWaiting {
+  background: var(--warning);
+  opacity: 1;
+}
+
+.sayLabel {
+  color: var(--fg-muted);
+}
+
+.answer {
+  height: 26px;
+  padding: 0 11px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--fg-primary);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.answer:hover {
+  background: var(--wash-2);
+}
+
+/* The answer that moves things on: download, connect a model. */
+.answerMain,
+.answerMain:hover {
+  background: var(--fg-primary);
+  color: var(--bg-primary);
+}
+
+.caption {
+  position: absolute;
+  left: calc(50% + 62px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: min(430px, calc(50% - 62px - 124px));
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 16px;
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.whoName {
+  color: var(--fg-secondary);
+}
+
+.whoAgent .whoName {
+  color: var(--accent);
+}
+
+/* Two lines at most; when the reply runs longer the newest words stay in
+   view and the oldest scroll out of the top. */
+.words {
+  display: flex;
+  flex-direction: column-reverse;
+  max-height: 40px;
+  margin-top: 3px;
+  overflow: hidden;
+}
+
+.wordsText {
+  flex-shrink: 0;
+  min-height: 20px;
+  color: var(--fg-primary);
+  font-size: 14px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.wordsQuiet {
+  color: var(--fg-muted);
+}
+
+.wordsProblem {
+  color: var(--error);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.round {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.round:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.roundOn {
+  background: var(--wash-2);
+  color: var(--fg-primary);
+}
+
+/* The one bright control: it ends the conversation. */
+.roundEnd,
+.roundEnd:hover {
+  margin-left: 4px;
+  background: var(--fg-primary);
+  color: var(--bg-primary);
+}
+
+/* ── What it did: one chip per action, above the orb ───────────── */
+.chips {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 22px);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 13px 0 10px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--bg-tertiary);
+  box-shadow:
+    var(--rim),
+    0 0 0 1px var(--border-subtle),
+    0 10px 30px rgba(0, 0, 0, 0.55);
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  animation: chipIn var(--duration-slow) var(--ease-out) both;
+}
+
+.chip:disabled {
+  cursor: default;
+}
+
+.chip b {
+  color: var(--fg-primary);
+  font-weight: 600;
+}
+
+.chip > svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.chipSettled > svg {
+  color: var(--success);
+}
+
+@keyframes chipIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── Narrow terminal columns (a side panel is open) ────────────── */
+@container (max-width: 760px) {
+  .fleet {
+    display: none;
+  }
+
+  .kbd {
+    display: none;
+  }
+}
+
+@container (max-width: 520px) {
+  .ghost > span {
+    display: none;
+  }
+
+  .caption {
+    width: calc(50% - 62px - 92px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip {
+    animation: none;
+  }
+}

@@ -18,8 +18,11 @@ import { dockSendMode } from "../../components/ComposeDock/dockSend";
 import { chatViewStore } from "../../stores/chatView";
 import { dictationStore } from "../../stores/dictation";
 import { repositoriesStore } from "../../stores/repositories";
+import { talkStore } from "../../stores/talk";
 import { terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
+import { voiceSetup } from "../../stores/voiceSetup";
+import { enableAiChat, voiceInstallAnswer } from "../helpers/voiceReady";
 
 const REPO = "/repo/demo";
 
@@ -93,12 +96,16 @@ describe("ComposeDock (dock)", () => {
 		fireEvent.click(el as HTMLButtonElement);
 	};
 
-	it("rests as one row — Speak, Type, and which terminal they go to — with no second text box", () => {
+	it("rests as one row — Dictate, Type, and which terminal they go to — with no second text box", () => {
 		terminalsStore.setActive(addTerminal("Claude Code", "claude"));
 		const { container } = renderDock();
 		expect(bar(container)).not.toBeNull();
 		expect(container.querySelector('[data-testid="compose-input"]')).toBeNull();
-		expect(container.querySelector('[data-testid="compose-speak"]')?.textContent).toBe("Speak");
+		// "Speak" became "Dictate" when Talk arrived: the two words side by side
+		// said the same thing about two different things.
+		expect(container.querySelector('[data-testid="compose-speak"]')?.textContent).toBe("Dictate");
+		// Talk is offered only where the app says a conversation can run.
+		expect(container.querySelector('[data-testid="talk-start"]')).toBeNull();
 		expect(container.querySelector('[data-testid="compose-type"]')?.textContent).toBe("Type");
 		expect(container.querySelector('[data-testid="compose-target"]')?.textContent).toContain("Claude Code");
 	});
@@ -177,7 +184,7 @@ describe("ComposeDock (dock)", () => {
 		await waitFor(() => expect(input(container).value).toBe("half a thought"));
 	});
 
-	it("Speak opens the card and focuses the field before dictation starts, so the transcript lands here", async () => {
+	it("Dictate opens the card and focuses the field before dictation starts, so the transcript lands here", async () => {
 		terminalsStore.setActive(addTerminal("Claude Code", "claude"));
 		const seen: { focusedAtStart: Element | null } = { focusedAtStart: null };
 		const onStart = vi.fn(() => {
@@ -205,6 +212,154 @@ describe("ComposeDock (dock)", () => {
 		const { container } = renderDock();
 		expect((container.querySelector('[data-testid="compose-speak"]') as HTMLButtonElement).disabled).toBe(true);
 		expect((container.querySelector('[data-testid="compose-type"]') as HTMLButtonElement).disabled).toBe(true);
+	});
+});
+
+describe("ComposeDock talk mode", () => {
+	const calls = (cmd: string) => mockInvoke.mock.calls.filter(([name]) => name === cmd).length;
+	const q = (container: HTMLElement, testId: string) =>
+		container.querySelector(`[data-testid="${testId}"]`) as HTMLButtonElement | null;
+	const renderTalkDock = (props: { onDictationStart?: () => void; onOpenTranscript?: () => void } = {}) =>
+		render(() => (
+			<ComposeDock
+				variant="dock"
+				talk
+				onDictationStart={props.onDictationStart ?? vi.fn()}
+				onDictationStop={vi.fn()}
+				onOpenTranscript={props.onOpenTranscript}
+			/>
+		));
+	let disableAiChat: () => void;
+
+	beforeEach(() => {
+		// An install where voice is set up; one test below takes that away.
+		mockInvoke.mockImplementation(async (cmd: string) => voiceInstallAnswer(cmd));
+		disableAiChat = enableAiChat();
+		terminalsStore.setActive(addTerminal("Claude Code", "claude"));
+	});
+
+	afterEach(async () => {
+		// The conversation belongs to the window, not to the dock that was
+		// unmounted, so each test hangs up what it started.
+		await talkStore.stop();
+		voiceSetup.dismiss();
+		disableAiChat();
+	});
+
+	it("puts the Talk orb in the row, between what you type and where it goes", () => {
+		const { container } = renderTalkDock();
+		const row = [...(container.querySelector('[data-testid="compose-bar"]') as HTMLElement).children];
+		const position = (testId: string) =>
+			row.findIndex(
+				(zone) => zone.matches(`[data-testid="${testId}"]`) || !!zone.querySelector(`[data-testid="${testId}"]`),
+			);
+
+		expect(q(container, "talk-start")?.textContent).toContain("Talk");
+		expect(position("compose-type")).toBe(0);
+		expect(position("talk-start")).toBe(1);
+		expect(position("compose-target")).toBe(2);
+	});
+
+	it("starts the conversation from the orb and gives the row over to it", async () => {
+		const { container } = renderTalkDock();
+
+		fireEvent.click(q(container, "talk-start") as HTMLElement);
+
+		await waitFor(() => expect(q(container, "talk-stage")).not.toBeNull());
+		expect(calls("voice_start")).toBe(1);
+		expect(container.querySelector('[data-testid="compose-bar"]')).toBeNull();
+		await waitFor(() => expect(talkStore.active()).toBe(true));
+	});
+
+	it("ends the conversation from the stage and gives the row back", async () => {
+		const { container } = renderTalkDock();
+		fireEvent.click(q(container, "talk-start") as HTMLElement);
+		await waitFor(() => expect(talkStore.active()).toBe(true));
+
+		fireEvent.click(q(container, "talk-end") as HTMLElement);
+
+		await waitFor(() => expect(container.querySelector('[data-testid="compose-bar"]')).not.toBeNull());
+		expect(calls("voice_stop")).toBe(1);
+		expect(q(container, "talk-stage")).toBeNull();
+	});
+
+	// Catches: typing made impossible for as long as a conversation runs.
+	it("still lets you type to the terminal while talking, with the stage staying put", async () => {
+		const { container } = renderTalkDock();
+		fireEvent.click(q(container, "talk-start") as HTMLElement);
+		await waitFor(() => expect(talkStore.active()).toBe(true));
+
+		fireEvent.click(q(container, "compose-type") as HTMLElement);
+
+		expect(container.querySelector('[data-testid="compose-input"]')).not.toBeNull();
+		expect(q(container, "talk-stage")).not.toBeNull();
+		// The card is open, so the stage no longer needs its own Type button.
+		expect(q(container, "compose-type")).toBeNull();
+	});
+
+	// Catches: dictation asked to start under a running conversation. The
+	// microphone has one owner; Rust refuses, and the card would sit open
+	// "listening" for a transcript that never comes.
+	it("does not start dictation while the conversation holds the microphone", async () => {
+		const onDictationStart = vi.fn();
+		const { container } = renderTalkDock({ onDictationStart });
+		fireEvent.click(q(container, "talk-start") as HTMLElement);
+		await waitFor(() => expect(talkStore.active()).toBe(true));
+		fireEvent.click(q(container, "compose-type") as HTMLElement);
+
+		const mic = q(container, "compose-mic") as HTMLButtonElement;
+		expect(mic.disabled).toBe(true);
+		fireEvent.click(mic);
+		expect(onDictationStart).not.toHaveBeenCalled();
+	});
+
+	it("says why when the voice cannot start, and stays a bar", async () => {
+		mockInvoke.mockImplementation(async (cmd: string) => {
+			if (cmd === "voice_start") throw new Error("Failed to open an audio output device");
+			return voiceInstallAnswer(cmd);
+		});
+		// Stubbed: a real toast would leave its dismiss timer running after the test.
+		const added = vi.spyOn(toastsStore, "add").mockImplementation(() => 0);
+		try {
+			const { container } = renderTalkDock();
+			fireEvent.click(q(container, "talk-start") as HTMLElement);
+
+			await waitFor(() => expect(added).toHaveBeenCalled());
+			expect(added.mock.calls[0]?.[0]).toBe("Could not start the conversation");
+			expect(String(added.mock.calls[0]?.[1])).toContain("audio output device");
+			expect(container.querySelector('[data-testid="compose-bar"]')).not.toBeNull();
+			expect(talkStore.active()).toBe(false);
+		} finally {
+			added.mockRestore();
+		}
+	});
+
+	// Catches: Talk failing with "voice is not downloaded" on a new install, or
+	// worse, starting a 660 MB download nobody agreed to.
+	it("asks before downloading when voice is not set up, and opens no microphone", async () => {
+		mockInvoke.mockImplementation(async (cmd: string) => voiceInstallAnswer(cmd, { speech: false, voice: false }));
+		const { container } = renderTalkDock();
+
+		fireEvent.click(q(container, "talk-start") as HTMLElement);
+
+		await waitFor(() => expect(q(container, "talk-setup-download")).not.toBeNull());
+		expect(q(container, "talk-words")?.textContent).toContain("one-time download of about 660 MB");
+		expect(calls("voice_start")).toBe(0);
+		expect(calls("download_whisper_model")).toBe(0);
+
+		fireEvent.click(q(container, "talk-setup-later") as HTMLElement);
+		await waitFor(() => expect(container.querySelector('[data-testid="compose-bar"]')).not.toBeNull());
+	});
+
+	it("starts the conversation from the round button of an empty card", async () => {
+		const { container } = renderTalkDock();
+		fireEvent.click(q(container, "compose-type") as HTMLElement);
+
+		fireEvent.click(q(container, "compose-voice") as HTMLElement);
+
+		await waitFor(() => expect(talkStore.active()).toBe(true));
+		// The empty card folds away so the conversation has the row.
+		expect(container.querySelector('[data-testid="compose-input"]')).toBeNull();
 	});
 });
 

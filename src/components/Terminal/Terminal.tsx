@@ -25,6 +25,7 @@ import { notificationsStore } from "../../stores/notifications";
 import { paneLayoutStore } from "../../stores/paneLayout";
 import { rateLimitStore } from "../../stores/ratelimit";
 import { settingsStore } from "../../stores/settings";
+import { talkFlash } from "../../stores/talkFlash";
 import { type AwaitingInputType, isShellState, terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
 import { HttpRpcError, isTauri, subscribePty, type Unsubscribe } from "../../transport";
@@ -1461,6 +1462,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			class={s.wrapper}
 			data-terminal-id={props.id}
 			data-focus-target="terminal"
+			data-talk-flash={talkFlash.terminalId() === props.id ? "" : undefined}
 			onKeyDown={handleChatTyping}
 			onFocusIn={handleChatFocusIn}
 			onDragOver={handleFileDragOver}

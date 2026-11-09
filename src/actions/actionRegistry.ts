@@ -16,6 +16,7 @@ import { settingsStore } from "../stores/settings";
 import { storiesUi } from "../stores/storiesUi";
 import { terminalsStore } from "../stores/terminals";
 import { tunnelPanelStore } from "../stores/tunnelPanel";
+import { isTauri } from "../transport";
 import { comboToDisplay } from "../utils/hotkey";
 
 export interface ActionEntry {
@@ -115,8 +116,10 @@ const ACTION_META: Partial<Record<ActionName, ActionMeta>> = {
 	"block-search-toggle": { label: "Search in block", category: "Terminal" },
 	"answers-only": { label: "Toggle answers-only view", category: "Terminal" },
 	"toggle-compose-panel": { label: "Toggle compose panel", category: "Panels" },
-	// No "toggle-hands-free": FastAF's voice agent is its one hands-free mode, so
-	// upstream's dictation conversation stays out of the palette.
+	// On the desktop this id is FastAF's talk mode, its one hands-free
+	// conversation. Upstream's dictation conversation, which the same chord
+	// starts in a browser client, stays out of the palette (see the filter below).
+	"toggle-hands-free": { label: "Talk to FastAF", category: "Panels" },
 };
 
 /**
@@ -220,6 +223,7 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		"block-search-toggle": handlers.blockSearchToggle,
 		"answers-only": () => terminalsStore.toggleAnswersOnly(),
 		"toggle-compose-panel": handlers.toggleComposePanel,
+		"toggle-hands-free": handlers.toggleTalk,
 	};
 
 	// Defensive dedup-by-id — today ACTION_META is a Record so ids are unique by
@@ -230,6 +234,8 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 		if (!meta) continue;
 		if (seen.has(actionId)) continue;
 		if (actionId === "toggle-ai-chat" && !settingsStore.isAiChatEnabled()) continue;
+		// Talk mode needs the desktop voice engine, like the orb in the dock.
+		if (actionId === "toggle-hands-free" && !isTauri()) continue;
 		if (actionId === "toggle-multiview" && !settingsStore.state.multiviewEnabled) continue;
 		// With no provider and no work-item plugin installed, Tasks can only offer
 		// installs this build does not bundle.

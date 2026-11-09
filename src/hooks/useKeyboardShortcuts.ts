@@ -99,6 +99,8 @@ export interface ShortcutHandlers {
 	toggleCommandOverview: () => void;
 	openTasks: () => void;
 	toggleComposePanel: () => void;
+	/** Desktop: start or end talk mode, the hands-free conversation in the dock. */
+	toggleTalk: () => void;
 	detachActivityDashboard: () => void;
 	toggleProcessManager: () => void;
 	toggleGenerators: () => void;
@@ -374,9 +376,13 @@ function dispatchAction(action: ActionName, handlers: ShortcutHandlers): boolean
 			terminalsStore.toggleAnswersOnly();
 			return true;
 		case "toggle-hands-free":
-			// Desktop: FastAF's voice agent is the one hands-free mode, and upstream's
-			// hands-free conversation is not offered there. Let the key pass through.
-			if (isTauri()) return false;
+			// Desktop: FastAF's talk mode is the one hands-free conversation, so the
+			// chord starts or ends that. Browser clients have no voice engine and
+			// keep upstream's dictation conversation.
+			if (isTauri()) {
+				handlers.toggleTalk();
+				return true;
+			}
 			if (dictationStore.state.enabled) void toggleHandsFreeConversation();
 			return true;
 		case "detach-activity-dashboard":

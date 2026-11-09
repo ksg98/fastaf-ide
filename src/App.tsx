@@ -113,6 +113,8 @@ import { repoDefaultsStore } from "./stores/repoDefaults";
 import { repoSettingsStore } from "./stores/repoSettings";
 import { locateFile, repositoriesStore } from "./stores/repositories";
 import { settingsStore } from "./stores/settings";
+import { speakUp } from "./stores/speakUp";
+import { talkStore, toggleTalk } from "./stores/talk";
 import { tasksStore } from "./stores/tasks";
 import { terminalsStore } from "./stores/terminals";
 import { TOAST_ACTIVITY_SECTION_ID } from "./stores/toasts";
@@ -521,10 +523,20 @@ const App: Component = () => {
 	// The dock sends to the active terminal; it steps aside while a diff,
 	// markdown or editor tab is in front, since those are not what it targets.
 	const composeDockVisible = () =>
-		!!terminalsStore.state.activeId &&
-		!diffTabsStore.state.activeId &&
-		!mdTabsStore.state.activeId &&
-		!editorTabsStore.state.activeId;
+		// A conversation stays on screen whatever tab is in front of it.
+		talkStore.engaged() ||
+		(!!terminalsStore.state.activeId &&
+			!diffTabsStore.state.activeId &&
+			!mdTabsStore.state.activeId &&
+			!editorTabsStore.state.activeId);
+
+	/**
+	 * Talk mode is the conversation with FastAF's own agent, spoken. It needs
+	 * the desktop voice engine; everything else it needs (AI Chat, the speech
+	 * model, the voice) its one-click setup turns on or downloads the first
+	 * time Talk is pressed. Browser clients keep dictation.
+	 */
+	const talkAvailable = () => isTauri();
 
 	/** The hero shows in the empty well once the welcome card is dismissed. */
 	const composeHeroVisible = () =>
@@ -734,6 +746,10 @@ const App: Component = () => {
 
 	useQuickSwitcherVisibility(setQuickSwitcherVisible, setTabHintsVisible);
 	const shortcutHandlers = useAppShortcutHandlers({
+		// The same condition as the orb in the dock.
+		toggleTalk: () => {
+			if (talkAvailable()) toggleTalk();
+		},
 		terminalLifecycle,
 		gitOps,
 		splitPanes,
@@ -793,6 +809,10 @@ const App: Component = () => {
 			},
 			signal,
 		);
+
+	// FastAF speaks first: say it out loud when an agent needs you or finishes.
+	// Desktop only — the voice that says it lives in the desktop backend.
+	if (isTauri()) onCleanup(speakUp.start());
 
 	onCleanup(
 		registerTaskWorkspaceOpener((repoPath, workspaceId) => {
@@ -1035,7 +1055,10 @@ const App: Component = () => {
 									variant="dock"
 									onDictationStart={dictation.handleDictationStart}
 									onDictationStop={dictation.handleDictationStop}
-									onOpenVoiceChat={settingsStore.isAiChatEnabled() ? () => togglePanel("ai-chat") : undefined}
+									talk={talkAvailable()}
+									onOpenTranscript={() => togglePanel("ai-chat")}
+									onFocusTerminal={terminalLifecycle.handleTerminalSelect}
+									onOpenSettings={openSettings}
 								/>
 							</Show>
 						)}

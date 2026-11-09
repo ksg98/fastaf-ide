@@ -92,6 +92,7 @@ function createOptions() {
 		{ get: (target, key) => Reflect.get(target, key) ?? (key === "terminalIds" ? vi.fn(() => []) : vi.fn()) },
 	);
 	return {
+		toggleTalk: vi.fn(),
 		terminalLifecycle,
 		gitOps: {
 			handleNewTab: vi.fn(),
@@ -128,6 +129,17 @@ describe("useAppShortcutHandlers", () => {
 		mockStores.prompts.getAllPrompts.mockReset().mockReturnValue([]);
 		mockInvoke.mockReset().mockResolvedValue(undefined);
 		vi.clearAllMocks();
+	});
+
+	// Talk mode's toggle is the app's to decide (it knows whether a conversation
+	// can run here); the handlers only carry it to the shortcut and the palette.
+	// Catches: this module importing the conversation itself, which opens the
+	// voice store's backend listeners in every window that only wants shortcuts.
+	it("carries the app's talk toggle through unchanged", () => {
+		const options = createOptions();
+		const handlers = useAppShortcutHandlers(options as never);
+		handlers.toggleTalk();
+		expect(options.toggleTalk).toHaveBeenCalledOnce();
 	});
 
 	// FastAF: Cmd +/-/0 zoom the whole app (like Cursor and VS Code), so the

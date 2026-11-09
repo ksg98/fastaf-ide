@@ -15,6 +15,8 @@
   flex-direction: column;
   padding: 0 12px 10px;
   background: var(--bg-primary);
+  /* The talk stage drops its side detail when a side panel narrows the column. */
+  container-type: inline-size;
 }
 
 /* The empty state passes clicks through (pointer-events: none) so drops reach
@@ -54,6 +56,25 @@
   min-width: 0;
 }
 
+/* At rest the bar has three zones, so the Talk orb sits on the centre line of
+   the terminal column whatever is on either side of it. */
+.barRest {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+}
+
+.barSide {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.barSideEnd {
+  justify-content: flex-end;
+}
+
 .speakBtn,
 .typeBtn {
   display: inline-flex;
@@ -78,7 +99,9 @@
   flex-shrink: 0;
 }
 
-/* The one bright object on the row — voice is the first thing the dock offers. */
+/* Without talk mode (browser clients, AI Chat off) dictation is the voice the
+   dock offers, and its button is the one bright object on the row. With talk
+   mode the orb is, and Dictate is drawn like Type. */
 .speakBtn {
   background: var(--fg-primary);
   color: var(--bg-primary);

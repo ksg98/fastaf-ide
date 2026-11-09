@@ -36,6 +36,26 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Talk mode, live captions, FastAF speaks first, voice setup (2026-11-09, **Rust change — needs a rebuild**)
+
+Built and checked without sound: 12k frontend tests, the Rust voice tests (`cargo test --lib --features
+dictation voice::`, 56 pass), and screenshots of every state in the real frontend on a fake backend
+(`.tmp/talk-harness`, headless WebKit, both themes). Nothing below can be heard or spoken to there.
+
+- [HUMAN] Talk: press the orb in the bar under a terminal (or `Cmd+Alt+V`). The bar grows, the orb rises over the terminal edge, "Just talk. I am listening." Speak a sentence: the orb's halo follows your voice and **your words appear while you are still speaking**, then FastAF answers out loud with its words as the caption. ✕ ends it and the bar comes back.
+- [HUMAN] Live captions do not slow the answer: with a long sentence, the reply should start as quickly as it did in 2.1.1 (the caption pass and the final transcription share one model). If it feels slower, say so.
+- [HUMAN] Live captions never show FastAF's own voice as yours: talk over a reply on the laptop speakers (no headphones) — the caption must be what you said.
+- [HUMAN] Ask FastAF to do something in another terminal ("tell the Claude in <repo> to …"): a chip "Sent to Claude Code · <repo>" appears above the orb and that terminal's pane rings once in accent. Click the chip: that terminal comes to the front.
+- [HUMAN] Approval by voice: in Ask mode ask for something that needs approval. The stage shows "Wants to run … Approve?" with Approve / Deny. Say "approve" — it runs, and the turn is **not** cancelled by you starting to speak. Repeat and say "no".
+- [HUMAN] Close the AI Chat panel during a conversation: it keeps going, and the panel shows the transcript when reopened. In a **detached** chat window the old strip is still there and closing the window ends the conversation.
+- [HUMAN] FastAF speaks first: with an agent working in terminal A, look at terminal B. When A stops on a permission prompt, FastAF says "<agent> in <repo> needs you. <question>" and the bar shows who asks with Approve / Deny. Click Approve: A continues, without you switching to it. When A finishes, it says "<agent> in <repo> is done."
+- [HUMAN] It stays quiet about the terminal you are looking at, about a terminal you have silenced, and entirely with Settings › Voice › "Speak up when an agent needs you" off.
+- [HUMAN] An announcement outside a conversation (`voice_announce`) opens the speaker, says the sentence to the end and releases it: dictation and Talk both still start right after one. Activity Monitor: FastAF's memory returns to what it was (the voice engine is freed again when the announcement loaded it).
+- [ ] Voice setup on a machine without the models: move `ggml-large-v3-turbo-q5_0.bin` and `kokoro-*` out of `~/Library/Application Support/com.tuic.commander/models`, press Talk. The stage asks "a one-time download of about 660 MB" with Download / Not now; Download shows the percentage and then starts the conversation; the files are back.
+- [ ] First launch: on a profile with no repositories and a cleared `fastaf.onboarding.v1` in localStorage, the window opens on "Talk to your agents." **Turn on voice** greets out loud at once (bundled recording), shows the ring, then "What should we build?". **Not now, I'll type** shows the terminals introduction instead.
+- [ ] With AI Chat's main model removed (Settings › AI Providers), Talk shows "AI Chat has no model to think with yet" and **Connect a model** opens that settings tab.
+- [ ] Narrow terminal column (Files and Git open): the agent count hides before anything overlaps; the caption keeps two readable lines.
+
 ## Upstream 2.0.0 sync (2026-11-03)
 
 Branch `sync/upstream-2.0.0`. Rust compiled (`cargo check --workspace --features dictation --tests`) and

@@ -271,6 +271,19 @@ export const VoiceTab: Component = () => {
 						"agent has finished instead."
 					}
 				/>
+				<SettingToggle
+					data-setting-exclusion="fastaf.voice_agent"
+					row
+					label="Speak up when an agent needs you"
+					checked={voiceStore.state.config.speak_up}
+					onChange={(checked) => voiceStore.saveConfig({ speak_up: checked })}
+					hint={
+						"FastAF says so out loud when an agent in another terminal stops on a question " +
+						"or finishes, without being asked. It follows the notification sounds: a " +
+						"terminal you have silenced stays silent, and nothing is said about the " +
+						"terminal you are looking at."
+					}
+				/>
 			</SectionCard>
 
 			<Show when={!selectedModelReady() || !selectedVoiceReady()}>

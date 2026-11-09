@@ -1,310 +1,88 @@
 import { createRoot } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockListen, mockConversationStore, mockVoiceStore, listeners, replyObserver } = vi.hoisted(() => {
-	const listeners = new Map<string, (event: { payload: unknown }) => void>();
-	const replyObserver: {
-		current: { onDelta?: (t: string) => void; onTurnEnd?: () => void } | null;
-	} = { current: null };
+const { mockTalk, unbind } = vi.hoisted(() => {
+	const unbind = vi.fn();
 	return {
-		listeners,
-		replyObserver,
-		mockListen: vi.fn((event: string, handler: (e: { payload: unknown }) => void) => {
-			listeners.set(event, handler);
-			return Promise.resolve(vi.fn());
-		}),
-		mockConversationStore: {
-			isStreaming: vi.fn(() => false),
-			agentState: vi.fn(() => "idle"),
-			unrestricted: vi.fn(() => false),
-			sendMessage: vi.fn().mockResolvedValue(undefined),
-			startAgent: vi.fn(),
-			cancelStream: vi.fn().mockResolvedValue(undefined),
-			cancelAgent: vi.fn().mockResolvedValue(undefined),
-			observeReply: vi.fn((observer: { onDelta?: (t: string) => void; onTurnEnd?: () => void }) => {
-				replyObserver.current = observer;
-				return vi.fn();
-			}),
-		},
-		mockVoiceStore: {
-			state: { agentState: "idle", error: "", muted: false },
-			startSession: vi.fn().mockResolvedValue(undefined),
-			stopSession: vi.fn().mockResolvedValue(undefined),
-			speak: vi.fn(),
-			cancelSpeech: vi.fn(),
-			setAgentState: vi.fn(),
+		unbind,
+		mockTalk: {
+			active: vi.fn(() => false),
+			start: vi.fn().mockResolvedValue(undefined),
+			stop: vi.fn().mockResolvedValue(undefined),
+			toggle: vi.fn(),
+			bargeIn: vi.fn(),
+			bind: vi.fn(() => unbind),
 		},
 	};
 });
 
-vi.mock("../../invoke", () => ({ listen: mockListen, invoke: vi.fn() }));
-vi.mock("../../stores/conversationStore", () => ({ conversationStore: mockConversationStore }));
-vi.mock("../../stores/voice", () => ({ voiceStore: mockVoiceStore }));
-vi.mock("../../stores/appLogger", () => ({
-	appLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-}));
+vi.mock("../../stores/talk", () => ({ talkStore: mockTalk }));
 
-import { useVoiceAgent } from "../../hooks/useVoiceAgent";
+import { useVoiceAgent, type VoiceAgentOptions } from "../../hooks/useVoiceAgent";
 
-/** Mount the hook with controllable deps and return its API plus a disposer. */
-function mount(options: { autonomy?: string; sessionId?: string | null } = {}) {
+const deps = {
+	sessionId: () => "sess-1",
+	autonomy: () => "assisted",
+	turnOptions: () => ({ modelOverride: "gpt-x" }),
+};
+
+/** Mount the hook the way a chat panel does and return its API plus a disposer. */
+function mount(options?: VoiceAgentOptions) {
 	let api!: ReturnType<typeof useVoiceAgent>;
 	const dispose = createRoot((dispose) => {
-		api = useVoiceAgent({
-			sessionId: () => options.sessionId ?? "sess-1",
-			autonomy: () => options.autonomy ?? "assisted",
-			turnOptions: () => ({ modelOverride: "gpt-x", reasoningEffort: "high" }),
-		});
+		api = useVoiceAgent(deps, options);
 		return dispose;
 	});
 	return { api, dispose };
 }
 
-/** Deliver a `voice-utterance` as Rust would, then let the hook's awaits settle. */
-async function speakToAgent(text: string) {
-	listeners.get("voice-utterance")?.({ payload: { text } });
-	await vi.waitFor(() => {
-		expect(
-			mockConversationStore.sendMessage.mock.calls.length + mockConversationStore.startAgent.mock.calls.length,
-		).toBeGreaterThan(0);
-	});
-}
-
 beforeEach(() => {
 	vi.clearAllMocks();
-	listeners.clear();
-	replyObserver.current = null;
-	mockConversationStore.isStreaming.mockReturnValue(false);
-	mockConversationStore.agentState.mockReturnValue("idle");
-	mockVoiceStore.state.agentState = "idle";
-	mockVoiceStore.state.muted = false;
+	mockTalk.active.mockReturnValue(false);
 });
 
+// The conversation itself is covered in stores/talkController.test.ts. This is
+// only the panel's side of it: lending its settings, and taking them back.
 describe("useVoiceAgent", () => {
-	it("starts inactive and does not touch the microphone until asked", () => {
-		const { api, dispose } = mount();
-		expect(api.active()).toBe(false);
-		expect(mockVoiceStore.startSession).not.toHaveBeenCalled();
-		dispose();
-	});
-
-	it("becomes active once the session starts", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		expect(mockVoiceStore.startSession).toHaveBeenCalledOnce();
-		expect(api.active()).toBe(true);
-		dispose();
-	});
-
-	it("stays inactive when the session fails to start", async () => {
-		mockVoiceStore.startSession.mockRejectedValueOnce(new Error("microphone_denied"));
-		const { api, dispose } = mount();
-		await api.start();
-		expect(api.active()).toBe(false);
-		dispose();
-	});
-
-	it("routes an utterance to sendMessage in assisted mode", async () => {
-		const { api, dispose } = mount({ autonomy: "assisted" });
-		await api.start();
-		await speakToAgent("what changed in this file");
-
-		expect(mockConversationStore.sendMessage).toHaveBeenCalledWith("what changed in this file", "sess-1", {
-			modelOverride: "gpt-x",
-			reasoningEffort: "high",
-		});
-		expect(mockConversationStore.startAgent).not.toHaveBeenCalled();
-		dispose();
-	});
-
-	it("routes an utterance to startAgent in autonomous mode", async () => {
-		const { api, dispose } = mount({ autonomy: "autonomous" });
-		await api.start();
-		await speakToAgent("fix the failing test");
-
-		expect(mockConversationStore.startAgent).toHaveBeenCalledWith("sess-1", "fix the failing test", false, {
-			modelOverride: "gpt-x",
-			reasoningEffort: "high",
-		});
-		expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
-		dispose();
-	});
-
-	it("ignores utterances while inactive, so a stale event cannot send a turn", async () => {
+	it("lends the panel's settings to the window's conversation while it is open", () => {
 		const { dispose } = mount();
-		listeners.get("voice-utterance")?.({ payload: { text: "should be ignored" } });
-		await Promise.resolve();
-		expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
+		expect(mockTalk.bind).toHaveBeenCalledWith(deps);
+		expect(unbind).not.toHaveBeenCalled();
 		dispose();
+		expect(unbind).toHaveBeenCalledOnce();
 	});
 
-	it("ignores an empty transcript", async () => {
+	it("hands the panel the same controls the dock uses", () => {
 		const { api, dispose } = mount();
-		await api.start();
-		listeners.get("voice-utterance")?.({ payload: { text: "   " } });
-		await Promise.resolve();
-		expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
+		api.toggle();
+		api.bargeIn();
+		expect(mockTalk.toggle).toHaveBeenCalledOnce();
+		expect(mockTalk.bargeIn).toHaveBeenCalledOnce();
+		expect(api.active).toBe(mockTalk.active);
 		dispose();
 	});
 
-	it("speaks each sentence as the reply streams", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-
-		replyObserver.current?.onDelta?.("The build finished without errors. ");
-		expect(mockVoiceStore.speak).toHaveBeenCalledWith("The build finished without errors.");
-
-		// A partial sentence waits for the boundary rather than being spoken.
-		mockVoiceStore.speak.mockClear();
-		replyObserver.current?.onDelta?.("Nothing else to");
-		expect(mockVoiceStore.speak).not.toHaveBeenCalled();
-
-		// ...and the remainder goes out when the turn ends.
-		replyObserver.current?.onTurnEnd?.();
-		expect(mockVoiceStore.speak).toHaveBeenCalledWith("Nothing else to");
-		dispose();
-	});
-
-	it("does not speak replies when voice mode is off", () => {
+	// Catches: closing AI Chat hanging up a conversation the dock is still showing.
+	it("leaves a running conversation alone when a docked panel closes", () => {
+		mockTalk.active.mockReturnValue(true);
 		const { dispose } = mount();
-		replyObserver.current?.onDelta?.("A complete sentence that would be spoken. ");
-		expect(mockVoiceStore.speak).not.toHaveBeenCalled();
 		dispose();
+		expect(mockTalk.stop).not.toHaveBeenCalled();
 	});
 
-	it("barge-in cancels speech and the streaming turn in assisted mode", async () => {
-		const { api, dispose } = mount({ autonomy: "assisted" });
-		await api.start();
-		mockConversationStore.isStreaming.mockReturnValue(true);
-
-		listeners.get("voice-speech-start")?.({ payload: {} });
-
-		expect(mockVoiceStore.cancelSpeech).toHaveBeenCalled();
-		expect(mockConversationStore.cancelStream).toHaveBeenCalled();
+	// Catches: a detached chat window closing with the microphone still held —
+	// it is a process-wide singleton, so dictation and the next conversation
+	// would both be refused.
+	it("ends the conversation with a detached window, its only surface", () => {
+		mockTalk.active.mockReturnValue(true);
+		const { dispose } = mount({ stopOnCleanup: true });
 		dispose();
+		expect(mockTalk.stop).toHaveBeenCalledOnce();
 	});
 
-	it("barge-in cancels the agent in autonomous mode", async () => {
-		const { api, dispose } = mount({ autonomy: "autonomous" });
-		await api.start();
-		mockConversationStore.agentState.mockReturnValue("running");
-
-		listeners.get("voice-speech-start")?.({ payload: {} });
-
-		expect(mockConversationStore.cancelAgent).toHaveBeenCalledWith("sess-1");
-		expect(mockConversationStore.cancelStream).not.toHaveBeenCalled();
+	it("does not stop a conversation that is not running", () => {
+		const { dispose } = mount({ stopOnCleanup: true });
 		dispose();
-	});
-
-	it("barge-in still silences audio when no turn is in flight", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		listeners.get("voice-speech-start")?.({ payload: {} });
-
-		expect(mockVoiceStore.cancelSpeech).toHaveBeenCalled();
-		expect(mockConversationStore.cancelStream).not.toHaveBeenCalled();
-		dispose();
-	});
-
-	it("stop releases the microphone and silences any queued speech", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		await api.stop();
-
-		expect(api.active()).toBe(false);
-		expect(mockVoiceStore.cancelSpeech).toHaveBeenCalled();
-		expect(mockVoiceStore.stopSession).toHaveBeenCalledOnce();
-		dispose();
-	});
-
-	it("disposing an active session releases the microphone", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		dispose();
-		await vi.waitFor(() => expect(mockVoiceStore.stopSession).toHaveBeenCalled());
-	});
-
-	it("drops an utterance rather than queueing it when the chat stays busy", async () => {
-		vi.useFakeTimers();
-		try {
-			const { api, dispose } = mount();
-			await api.start();
-			mockConversationStore.isStreaming.mockReturnValue(true);
-
-			listeners.get("voice-utterance")?.({ payload: { text: "spoken while busy" } });
-			await vi.advanceTimersByTimeAsync(5000);
-
-			expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
-			dispose();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("sends an utterance once an in-flight turn finishes", async () => {
-		vi.useFakeTimers();
-		try {
-			const { api, dispose } = mount();
-			await api.start();
-			mockConversationStore.isStreaming.mockReturnValue(true);
-
-			listeners.get("voice-utterance")?.({ payload: { text: "queued behind a turn" } });
-			await vi.advanceTimersByTimeAsync(500);
-			expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
-
-			mockConversationStore.isStreaming.mockReturnValue(false);
-			await vi.advanceTimersByTimeAsync(500);
-
-			expect(mockConversationStore.sendMessage).toHaveBeenCalledWith(
-				"queued behind a turn",
-				"sess-1",
-				expect.anything(),
-			);
-			dispose();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-});
-
-describe("useVoiceAgent while muted", () => {
-	it("drops an utterance that lands after the mute", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		mockVoiceStore.state.muted = true;
-
-		// Rust stops feeding the detector the moment the flag flips, but a turn
-		// that already finished transcribing is on its way here regardless.
-		listeners.get("voice-utterance")?.({ payload: { text: "thinking out loud" } });
-		await Promise.resolve();
-
-		expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
-		dispose();
-	});
-
-	it("resumes sending once unmuted", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		mockVoiceStore.state.muted = true;
-		listeners.get("voice-utterance")?.({ payload: { text: "dropped" } });
-		await Promise.resolve();
-
-		mockVoiceStore.state.muted = false;
-		await speakToAgent("heard");
-
-		expect(mockConversationStore.sendMessage).toHaveBeenCalledOnce();
-		expect(mockConversationStore.sendMessage).toHaveBeenCalledWith("heard", "sess-1", expect.anything());
-		dispose();
-	});
-
-	it("keeps speaking the reply — mute is the microphone, not the agent", async () => {
-		const { api, dispose } = mount();
-		await api.start();
-		mockVoiceStore.state.muted = true;
-
-		replyObserver.current?.onDelta?.("Here is the answer. ");
-
-		expect(mockVoiceStore.speak).toHaveBeenCalledWith("Here is the answer.");
-		dispose();
+		expect(mockTalk.stop).not.toHaveBeenCalled();
 	});
 });

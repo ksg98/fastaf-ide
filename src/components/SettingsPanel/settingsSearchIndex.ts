@@ -910,6 +910,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ tab: "voice", section: "Playback", label: "Speaking rate" },
 	{ tab: "voice", section: "Playback", label: "Output device" },
 	{ tab: "voice", section: "Playback", label: "Interrupt by speaking (barge-in)" },
+	{ tab: "voice", section: "Playback", label: "Speak up when an agent needs you" },
 ];
 
 /** Section heading as rendered, i18n applied. */

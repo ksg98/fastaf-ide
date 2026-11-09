@@ -508,14 +508,22 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		if (ownsRecording() && dictationStore.state.recording) void dictationStore.stopRecording();
 	});
 
-	// ── Hands-free voice mode ──────────────────────────────────────────────
+	// ── Talk mode ──────────────────────────────────────────────────────────
 	// Shares the microphone with dictation above, so the two are mutually
 	// exclusive — enforced in Rust as well, not just by the disabled buttons.
-	const voice = useVoiceAgent({
-		sessionId: activeSessionId,
-		autonomy,
-		turnOptions: () => ({ modelOverride: modelOverride(), reasoningEffort: effort() }),
-	});
+	// The conversation belongs to the window, not to this panel: the panel lends
+	// it the session, mode and model picked here. A detached chat window is the
+	// conversation's only surface, so there it also ends with the panel.
+	const voice = useVoiceAgent(
+		{
+			sessionId: activeSessionId,
+			autonomy,
+			turnOptions: () => ({ modelOverride: modelOverride(), reasoningEffort: effort() }),
+		},
+		{ stopOnCleanup: props.terminal !== undefined },
+	);
+	/** The dock under the terminal shows a running conversation; only a detached window needs the strip here. */
+	const showVoiceStrip = () => voice.active() && props.terminal !== undefined;
 
 	const voiceHint = () => {
 		switch (voiceStore.state.agentState) {
@@ -1020,7 +1028,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			{/* Voice session strip. The meter goes flat while the agent speaks —
 			    in half-duplex mode the microphone really is muted then — and while
 			    muted, where Rust reports a level of zero rather than the live one. */}
-			<Show when={voice.active()}>
+			<Show when={showVoiceStrip()}>
 				<div class={s.voiceStage} data-testid="chat-voice-live">
 					<VoiceOrb
 						state={voiceStore.state.agentState}

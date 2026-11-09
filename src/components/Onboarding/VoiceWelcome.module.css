@@ -1,0 +1,168 @@
+/* First launch: FastAF is something you talk to (STYLE_GUIDE › Composer › Talk).
+   One orb, one sentence, one button. The empty state passes clicks through
+   (pointer-events: none), so this takes them back. */
+
+.welcome {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  pointer-events: auto;
+}
+
+.orbBox {
+  position: relative;
+  flex-shrink: 0;
+  display: block;
+}
+
+.orbBox > canvas {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.ring {
+  position: absolute;
+  inset: -11px;
+  width: calc(100% + 22px);
+  height: calc(100% + 22px);
+}
+
+.ringTrack,
+.ringFill {
+  fill: none;
+  stroke-width: 2;
+}
+
+.ringTrack {
+  stroke: var(--wash-2);
+}
+
+.ringFill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  transition: stroke-dashoffset var(--duration-slow) linear;
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(640px, 100%);
+  min-height: 190px;
+  margin-top: 34px;
+}
+
+.title {
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.lede {
+  max-width: 470px;
+  margin: 12px 0 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-lg);
+  line-height: 1.5;
+}
+
+.problem {
+  max-width: 470px;
+  margin: 14px 0 0;
+  color: var(--error);
+  font-size: var(--font-md);
+  line-height: 1.45;
+}
+
+.go {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: 40px;
+  margin-top: 26px;
+  padding: 0 20px 0 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--fg-primary);
+  color: var(--bg-primary);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.go:hover {
+  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
+}
+
+.later {
+  height: 28px;
+  margin-top: 10px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--font-md);
+  cursor: pointer;
+}
+
+.later:hover {
+  color: var(--fg-primary);
+}
+
+.go:focus-visible,
+.later:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.3);
+}
+
+.who {
+  height: 16px;
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.say {
+  max-width: 560px;
+  margin: 10px 0 0;
+  color: var(--fg-primary);
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+}
+
+.progress {
+  margin: 14px 0 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 30px;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}

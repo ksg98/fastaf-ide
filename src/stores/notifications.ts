@@ -14,6 +14,16 @@ import { appLogger } from "./appLogger";
 import { terminalsStore } from "./terminals";
 import { setToastBellMirrorResolver } from "./toasts";
 
+/** An agent in a terminal wants attention: it is waiting on a question, or has finished. */
+export interface AgentNotice {
+	sound: NotificationSound;
+	terminalId: string;
+	/** A repeat of a notice already given for the same question. */
+	reminder: boolean;
+}
+
+const agentNoticeObservers = new Set<(notice: AgentNotice) => void>();
+
 interface PlayOptions {
 	terminalId?: string;
 	/** MCP notice origin: apply session policy without adding a terminal OS notice. */
@@ -212,6 +222,16 @@ function createNotificationsStore() {
 					.join(" <- ") ?? "unknown";
 			appLogger.debug("app", `[Notification.Play] sound=${sound} focused=${document.hasFocus()} caller=${caller}`);
 			if (actions.isSessionSilenced(opts?.terminalId ?? opts?.originSessionId)) return;
+			if (opts?.terminalId) {
+				const notice: AgentNotice = { sound, terminalId: opts.terminalId, reminder: opts.reminder === true };
+				for (const observer of agentNoticeObservers) {
+					try {
+						observer(notice);
+					} catch (err) {
+						appLogger.warn("app", "Agent notice observer failed", err);
+					}
+				}
+			}
 			await notificationManager.play(sound);
 			const unfocused = !document.hasFocus();
 			if (unfocused) actions.incrementBadge();
@@ -235,6 +255,16 @@ function createNotificationsStore() {
 					})
 					.catch((error: unknown) => appLogger.warn("app", "Could not show terminal notification", error));
 			}
+		},
+
+		/**
+		 * Hear about every agent notice that passes the silencing rules — the
+		 * same moments a sound would play. "FastAF speaks first" uses this to say
+		 * the notice out loud. Returns the function that stops listening.
+		 */
+		observeAgentNotices(observer: (notice: AgentNotice) => void): () => void {
+			agentNoticeObservers.add(observer);
+			return () => agentNoticeObservers.delete(observer);
 		},
 
 		/** Play question notification */

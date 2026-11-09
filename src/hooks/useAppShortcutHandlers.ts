@@ -37,6 +37,8 @@ import type { useSplitPanes } from "./useSplitPanes";
 import type { useTerminalLifecycle } from "./useTerminalLifecycle";
 
 interface AppShortcutHandlerOptions {
+	/** Start or end talk mode. Supplied by the app, which knows whether it is on offer. */
+	toggleTalk: () => void;
 	terminalLifecycle: ReturnType<typeof useTerminalLifecycle>;
 	gitOps: ReturnType<typeof useGitOperations>;
 	splitPanes: ReturnType<typeof useSplitPanes>;
@@ -278,6 +280,7 @@ export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): Shor
 		toggleCommandOverview: mdTabsStore.addCommandOverview,
 		openTasks: mdTabsStore.addTasks,
 		toggleComposePanel: () => terminalsStore.getActive()?.ref?.toggleCompose(),
+		toggleTalk: options.toggleTalk,
 		detachActivityDashboard: () => {
 			if (!isTauri()) return;
 			detachPanel("activity").catch((error) =>

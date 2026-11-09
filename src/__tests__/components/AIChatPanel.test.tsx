@@ -384,13 +384,39 @@ describe("AIChatPanel voice mute", () => {
 		mockVoiceStore.stopSession.mockClear();
 	});
 
-	/** Start a voice session the way the user does, and wait for its strip. */
+	/**
+	 * Start a voice session the way the user does, and wait for its strip. The
+	 * strip belongs to a detached chat window, the one place the conversation
+	 * has no dock to be shown in.
+	 */
 	async function startVoice() {
-		const view = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		const view = render(() => (
+			<AIChatPanel
+				visible={true}
+				onClose={() => {}}
+				terminal={() => ({ sessionId: "sess-detached", name: "Terminal 7", attached: true })}
+			/>
+		));
 		view.getByTestId("chat-voice-btn").click();
 		await view.findByTestId("chat-voice-live");
 		return view;
 	}
+
+	// Catches: the conversation drawn twice in the main window — once in the
+	// dock under the terminal, once more in a strip inside this panel.
+	it("leaves a running conversation to the dock when the panel is docked", async () => {
+		const view = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		const button = view.getByTestId("chat-voice-btn");
+
+		button.click();
+		await vi.waitFor(() => expect(button.getAttribute("aria-pressed")).toBe("true"));
+		expect(view.queryByTestId("chat-voice-live")).toBeNull();
+
+		// A docked panel does not end the conversation when it unmounts, so this
+		// test hangs up itself.
+		button.click();
+		await vi.waitFor(() => expect(button.getAttribute("aria-pressed")).toBe("false"));
+	});
 
 	it("offers mute for the whole session, not only while the agent speaks", async () => {
 		const view = await startVoice();
@@ -401,7 +427,13 @@ describe("AIChatPanel voice mute", () => {
 	});
 
 	it("is absent until a session is running", () => {
-		const view = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		const view = render(() => (
+			<AIChatPanel
+				visible={true}
+				onClose={() => {}}
+				terminal={() => ({ sessionId: "sess-detached", name: "Terminal 7", attached: true })}
+			/>
+		));
 		expect(view.queryByTestId("chat-voice-mute-btn")).toBeNull();
 	});
 

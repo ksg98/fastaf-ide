@@ -24,12 +24,14 @@ import { repositoriesStore } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
 import { terminalsStore } from "../stores/terminals";
 import { uiStore } from "../stores/ui";
+import { isTauri } from "../transport";
 import { markdownDocumentPanelId } from "../utils/markdownDocumentPanelId";
 import { applyTrackResize, computeGrid } from "../utils/multiviewGrid";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { getRepoColor } from "../utils/repoColor";
 import { shouldAutoSubmitSuggestion } from "../utils/sendCommand";
 import { sendTextToSession } from "../utils/sendToActiveTerminal";
+import { VoiceWelcome } from "./Onboarding/VoiceWelcome";
 import { WelcomeWell } from "./Onboarding/WelcomeWell";
 import { PaneNodeView } from "./PaneTree/PaneTree";
 import SuggestOverlay from "./SuggestOverlay/SuggestOverlay";
@@ -94,6 +96,18 @@ const SuggestOverlayContainer: Component = () => {
 		</Show>
 	);
 };
+
+/**
+ * What the empty well shows before the user has seen the introduction. On the
+ * desktop voice comes first — it is the front door, and the only part of the
+ * introduction that needs a download — then the terminals. A browser client
+ * has no voice engine and goes straight to the terminals.
+ */
+const FirstLaunch: Component = () => (
+	<Show when={isTauri() && !onboardingStore.isDismissed("voice")} fallback={<WelcomeWell />}>
+		<VoiceWelcome />
+	</Show>
+);
 
 export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 	const { isDragging, attachTo } = useFileDrop();
@@ -265,7 +279,7 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 						}
 					>
 						<div class={s.emptyState}>
-							<Show when={onboardingStore.isDismissed("welcome")} fallback={<WelcomeWell />}>
+							<Show when={onboardingStore.isDismissed("welcome")} fallback={<FirstLaunch />}>
 								<Show
 									when={props.hero}
 									fallback={

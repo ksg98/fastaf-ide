@@ -87,6 +87,7 @@ function createMockHandlers(): ShortcutHandlers {
 		toggleCommandOverview: vi.fn(),
 		openTasks: vi.fn(),
 		toggleComposePanel: vi.fn(),
+		toggleTalk: vi.fn(),
 		detachActivityDashboard: vi.fn(),
 		toggleProcessManager: vi.fn(),
 		toggleGenerators: vi.fn(),
@@ -253,13 +254,29 @@ describe("actionRegistry", () => {
 			expect(handlers.closeTerminal).not.toHaveBeenCalled();
 		});
 
-		// Catches: upstream's dictation hands-free conversation competing in the palette
-		// with FastAF's voice agent, its one hands-free mode.
-		it("never offers the upstream hands-free toggle, even with dictation on", async () => {
+		// Catches: talk mode reachable only from the dock, with nothing to find in
+		// the palette, and the entry running upstream's conversation instead.
+		it("offers talk mode on the desktop, and runs the talk handler", async () => {
 			await enableDictation();
-			const ids = getActionEntries(createMockHandlers()).map((entry) => entry.id);
-			expect(ids).not.toContain("toggle-hands-free");
-			expect(dictationStore.state.enabled).toBe(true);
+			const handlers = createMockHandlers();
+			const entry = getActionEntries(handlers).find((e) => e.id === "toggle-hands-free");
+			expect(entry?.label).toBe("Talk to FastAF");
+			entry?.execute();
+			expect(handlers.toggleTalk).toHaveBeenCalledOnce();
+		});
+
+		// Catches: upstream's dictation hands-free conversation, which the same
+		// chord starts in a browser client, offered in the palette there.
+		it("keeps the hands-free chord out of a browser client's palette, even with dictation on", async () => {
+			await enableDictation();
+			(globalThis as Record<string, unknown>).__TAURI_SHIM__ = true;
+			try {
+				const ids = getActionEntries(createMockHandlers()).map((entry) => entry.id);
+				expect(ids).not.toContain("toggle-hands-free");
+				expect(dictationStore.state.enabled).toBe(true);
+			} finally {
+				delete (globalThis as Record<string, unknown>).__TAURI_SHIM__;
+			}
 		});
 
 		it("execute calls the corresponding handler", () => {

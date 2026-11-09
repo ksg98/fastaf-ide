@@ -10,6 +10,8 @@ export interface VoiceConfig {
 	speed: number;
 	barge_in: boolean;
 	output_device: string | null;
+	/** Say so out loud when an agent needs you or has finished. */
+	speak_up: boolean;
 }
 
 /** A downloadable Kokoro graph. */
@@ -85,6 +87,8 @@ const DEFAULT_CONFIG: VoiceConfig = {
 	// Mirrors the Rust default; echo cancellation is what makes it safe.
 	barge_in: true,
 	output_device: null,
+	// Mirrors the Rust default.
+	speak_up: true,
 };
 
 function normalizeLevel(value: number | undefined): number {
@@ -330,6 +334,17 @@ function createVoiceStore() {
 		},
 
 		/**
+		 * Say one sentence whether or not a conversation is running. Rust opens
+		 * the speaker for it when there is none. Failures are logged, never
+		 * surfaced: a notice that could not be spoken is still on screen.
+		 */
+		announce(text: string): void {
+			void invoke("voice_announce", { text }).catch((err) => {
+				appLogger.warn("voice", "Failed to announce", err);
+			});
+		},
+
+		/**
 		 * Mute or unmute the microphone without ending the session.
 		 *
 		 * Rust keeps the capture device open and drops the samples, so this is
@@ -365,3 +380,15 @@ function createVoiceStore() {
 }
 
 export const voiceStore = createVoiceStore();
+
+/**
+ * The voice FastAF speaks with is on disk: the selected speech graph and the
+ * selected voice. Without both there is nothing to answer or announce with.
+ */
+export function voiceIsReady(): boolean {
+	const { config, models, voices } = voiceStore.state;
+	return (
+		models.some((model) => model.name === config.model && model.downloaded) &&
+		voices.some((voice) => voice.id === config.voice && voice.downloaded)
+	);
+}

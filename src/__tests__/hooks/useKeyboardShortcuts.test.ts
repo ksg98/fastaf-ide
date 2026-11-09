@@ -87,6 +87,7 @@ function createMockHandlers(): ShortcutHandlers {
 		toggleCommandOverview: vi.fn(),
 		openTasks: vi.fn(),
 		toggleComposePanel: vi.fn(),
+		toggleTalk: vi.fn(),
 		detachActivityDashboard: vi.fn(),
 		toggleProcessManager: vi.fn(),
 		toggleGenerators: vi.fn(),
@@ -134,17 +135,19 @@ describe("useKeyboardShortcuts", () => {
 		paneLayoutStore._testCancelPendingSave();
 	});
 
-	// FastAF: the desktop has no upstream hands-free conversation (its voice agent
-	// is the one hands-free mode), so the chord is not dispatched there. Upstream's
-	// desktop hands-free chord tests were removed with that behaviour.
-	// Catches: primary+Alt+V arming the hidden upstream hands-free conversation.
-	it("leaves primary+Alt+V alone on the desktop", async () => {
+	// FastAF: on the desktop the hands-free chord is talk mode, the conversation
+	// in the dock. Upstream's dictation conversation, which the same chord starts
+	// in a browser client, is never armed there.
+	// Catches: primary+Alt+V arming the hidden upstream hands-free conversation,
+	// and the chord doing nothing at all, which is what it did before talk mode.
+	it("starts or ends talk mode with primary+Alt+V on the desktop", async () => {
 		mockInvoke.mockResolvedValue({ enabled: true, hotkey: "F5", language: "auto" });
 		await dictationStore.refreshConfig();
 		mockInvoke.mockReset().mockResolvedValue(undefined);
 		const toggle = vi.spyOn(handsFree, "toggleHandsFreeConversation").mockResolvedValue(undefined);
 		try {
 			fireKeydown("v", { metaKey: true, altKey: true });
+			expect(handlers.toggleTalk).toHaveBeenCalledOnce();
 			expect(toggle).not.toHaveBeenCalled();
 		} finally {
 			toggle.mockRestore();

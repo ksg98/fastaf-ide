@@ -425,19 +425,19 @@ A multi-line editor docked under the terminal for writing a prompt without fight
 - **Pin** — the pin button docks the panel under the terminal instead of over it: the terminal shrinks and the PTY resizes, so no output hides behind the panel. A pinned panel stays open after a send or a queue and removes the sent text, so it can replace the agent's own input box. Text typed while the send runs is kept, and a second send before the first finishes is ignored. When the terminal has no session or the send fails, a toast shows the error and the text stays. `Esc` and `Cmd+I` move the caret between the panel and the terminal instead of closing it. Per tab, not persisted
 - **Close button** — the ✕ in the status bar closes the panel and releases the pin; `Esc` closes an unpinned panel
 
-### 1.20a Compose Dock ("Speak or type")
+### 1.20a Compose Dock ("Dictate or type")
 
-A one-row bar under the terminal column, on screen while a terminal tab is in front: **Speak**, **Type**, and the terminal they go to. It is the voice-first way to write to an agent; the per-terminal `Compose ⌘I` hint steps aside while it shows (`Cmd+I` still opens the multi-line editor above). The bar sits under the terminal panes only — never under the Files or Git panel. Component: `src/components/ComposeDock/`; the shape follows Codex's composer (`docs/frontend/STYLE_GUIDE.md` › Composer).
+A one-row bar under the terminal column, on screen while a terminal tab is in front: **Dictate**, **Type**, the **Talk** orb in the middle (desktop, 1.20c), and the terminal typed text goes to. It is the voice-first way to write to an agent; the per-terminal `Compose ⌘I` hint steps aside while it shows (`Cmd+I` still opens the multi-line editor above). The bar sits under the terminal panes only — never under the Files or Git panel. Component: `src/components/ComposeDock/`; the shape follows Codex's composer (`docs/frontend/STYLE_GUIDE.md` › Composer).
 
-- **No second text box at rest** — the agent in the terminal already draws its own prompt. The bar opens into a card (field + control row) only when there is text to look at: Speak, Type, or a saved draft. The card folds back into the bar after Enter sends, on `Esc`, or when an empty card loses focus
-- **Speak** — opens the card, focuses the field, then starts dictation, so the transcript lands in the field instead of the terminal. While recording the words show as the field's placeholder, the row becomes a dotted live waveform with a stop button, and the mic's stop ends it. With **Auto-send** on, the transcript is sent as soon as it lands. Dictation started from the hotkey while the terminal has focus still goes straight to the terminal; the bar shows the waveform and the words meanwhile. Speak is hidden when dictation is off
+- **No second text box at rest** — the agent in the terminal already draws its own prompt. The bar opens into a card (field + control row) only when there is text to look at: Dictate, Type, or a saved draft. The card folds back into the bar after Enter sends, on `Esc`, or when an empty card loses focus
+- **Dictate** (called Speak before talk mode) — opens the card, focuses the field, then starts dictation, so the transcript lands in the field instead of the terminal. While recording the words show as the field's placeholder, the row becomes a dotted live waveform with a stop button, and the mic's stop ends it. With **Auto-send** on, the transcript is sent as soon as it lands. Dictation started from the hotkey while the terminal has focus still goes straight to the terminal; the bar shows the waveform and the words meanwhile. Dictate is hidden when dictation is off, and refuses to start while a talk-mode conversation holds the microphone. It is drawn like Type when the Talk orb is in the row, and as the bright pill where it is not (browser clients)
 - **Type** — opens the card for the keyboard. `Enter` sends through `sendCommand` (agent-aware Enter semantics, same as the Compose panel); `Shift+Enter` is a newline; `Esc` hands focus back to the terminal
 - **Queue** — `Option+Enter` queues for an agent's next idle window (`enqueue_command`), keeps the card open for the next prompt, and an `N queued` chip shows while commands wait
 - **Chat's input** — in terminal Chat the dock is the only text box: typing on the conversation opens the dock with that key, `Enter` sends, a prompt sent while the agent is busy (and not awaiting an answer) is queued instead (`dockSendMode` in `dockSend.ts`), and the dictation hotkey types into the dock's field
 - **Target** — the chip at the right names who receives the text (the detected agent, else the tab name), its branch, and a state dot (grey idle, blue pulse busy, orange awaiting input); clicking it focuses the terminal
-- **Voice chat** — when AI Chat is enabled, the round button opens it while the field is empty (voice mode lives there)
+- **Talk** — the orb in the middle of the bar, and the round button of an empty card, start talk mode (1.20c)
 - **Drafts** — unsent text is kept per terminal across tab switches; a terminal with a draft reopens the card
-- **Hidden** when no terminal is active, or while a diff, markdown or editor tab is in front. The dictation toast stays away while the dock or the empty-state composer is on screen
+- **Hidden** when no terminal is active, or while a diff, markdown or editor tab is in front — except during a talk-mode conversation, which keeps the dock on screen whatever tab is in front. The dictation toast stays away while the dock or the empty-state composer is on screen
 
 ### 1.20b Empty-state composer ("What should we build?")
 
@@ -447,6 +447,34 @@ Once the welcome card is dismissed, the empty well shows "What should we build i
 - **Enter** opens a terminal on the active branch and, on its first idle prompt, starts that agent with the text as its first prompt (`claude '…'`, one shell-quoted argument; a prompt starting with `-` goes after `--`). The agent's launch command is stored without the prompt, so a resume never replays it
 - **No shell target, on purpose** — the text may come straight from dictation; it is only ever handed to an agent as a quoted prompt, never run as a command nobody has read
 - Disabled, and says why, until a repository exists ("Add a repository to start") or while no prompt-taking agent is installed
+
+### 1.20c Talk mode (desktop)
+
+The hands-free conversation with FastAF's own agent, in the dock. Code: `src/stores/talkController.ts` (the conversation), `src/stores/talk.ts` (the window's one instance), `src/components/ComposeDock/TalkStage.tsx` (what the dock draws). Voice engine: section 9.
+
+- **At rest** — a breathing orb and the word **Talk** in the middle of the bar, with its shortcut. It is a still frame animated in CSS; no script runs while the window is idle. Shown on every desktop install
+- **Start / end** — the orb, `Cmd+Alt+V` (`toggle-hands-free`), "Talk to FastAF" in the Command Palette, or the round button of an empty card. The bright ✕ ends it. Starting needs an active terminal; the conversation is with the AI Chat agent attached to that terminal and follows the terminal in front, as AI Chat does
+- **The stage** — while talking the bar is 72px and the orb (78px) grows in place on the centre line, rising over the terminal's bottom edge. Left of it: how many agents are working and how many need you (click to jump to the first). Right of it: the caption — your words under **You**, FastAF's under **FastAF** with its state (Listening, Thinking, Speaking, Muted, Asking), the newest two lines. Far right: mute, transcript (opens AI Chat), end. **Type** stays; the card opens above the stage
+- **Live captions** — Rust emits `voice-partial` about once a second while you speak (`voice/session.rs`), so the words appear before the turn ends. Local Whisper only: with a cloud speech provider every caption would upload the turn again, so there the words arrive with the finished turn. A caption is never made from a pause, or from speech over the agent's own playback that is not yet known to be you
+- **Action chips** — one chip above the orb for each tool call that changes a terminal (`send_input`, `drive_agent` with a command, `send_key`, `run_command`, `spawn_session`), naming the agent and the repository; reads make no chip. The terminal it acted in rings once (`talkFlash`). A chip stays 5 s, three at most; clicking one brings that terminal to the front
+- **Approvals by voice** — when FastAF's agent asks to run a command the stage shows it with **Approve** and **Deny**, and a spoken "approve", "yes", "deny", "no" (three words at most, `utils/spokenAnswer.ts`) answers it. Starting to answer does not cancel the waiting turn. Anything longer is a new instruction and replaces the request
+- **AI Chat panel** — lends the conversation the session, mode (Ask/Agent) and model picked in its header while it is open; with the panel closed the conversation uses the terminal in front, Ask mode and the configured model. Closing a docked panel does not end the conversation. A detached chat window, which has no dock, keeps its own voice strip and ends the conversation when it closes
+- **Setup** — pressing Talk on an install without voice asks in the stage ("a one-time download of about 660 MB") before anything downloads. Download switches dictation and AI Chat on, downloads the speech model (`large-v3-turbo-q5`, unless a model is already on disk) and the voice, then starts the conversation (`stores/voiceSetup.ts`). If AI Chat has no model connected the stage says so with **Connect a model**, which opens Settings › AI Providers
+- **Browser clients** have no voice engine: no orb, and `Cmd+Alt+V` keeps upstream's hands-free dictation (9.9)
+
+### 1.20d FastAF speaks first (desktop)
+
+At the moments a notification sound would play for an agent — it stopped on a question, or it finished — FastAF says so in a sentence ("Claude Code in ml-pipeline needs you. Do you want to run …?", "Codex in web-dashboard is done."). Code: `src/stores/speakUp.ts`, `src/stores/agentAsk.ts`; Rust `voice_announce`.
+
+- No AI model is involved: the sentence is a template and the question is the one the terminal parser already read. A question longer than 160 characters is left on the screen
+- Follows the notification rules: a silenced terminal stays silent, reminders are not repeated out loud, and nothing is said about the terminal you are looking at in a focused window
+- During a talk-mode conversation it speaks through the conversation, with a caption. Otherwise Rust opens the speaker for the one sentence (`voice_announce`) and frees the voice engine again if it had to load it
+- **Answering** — when the question is a yes-or-no (the dialog has an affirmative and a negative option), the orb's place in the bar shows who is asking with **Approve** and **Deny**; in talk mode a spoken yes or no answers it. Approve sends the first affirmative option, never a broader one further down the list. The answer is sent only if the dialog is still the one that was read out
+- Needs the voice downloaded. Setting: Settings › Voice › **Speak up when an agent needs you** (`speak_up` in `voice-config.json`, default on)
+
+### 1.20e First launch: "Talk to your agents" (desktop)
+
+A new desktop install opens on one orb, one sentence and **Turn on voice** (`components/Onboarding/VoiceWelcome.tsx`). The button greets the user out loud at once — a 4-second recording in FastAF's own voice, bundled as `src/assets/voice/hello.m4a`, so the first spoken sentence does not wait for a download — and runs the same setup as Talk, with a progress ring. When it is done the empty-state composer is next, listening for the first task if a repository is open. **Not now, I'll type** goes on to the terminals introduction. Existing installs do not see this screen; the Talk orb offers the setup instead.
 
 ### 1.21 Auto-Standby (Unix)
 
@@ -927,7 +955,7 @@ The status bar no longer has its own strip: it renders inside the title bar's ri
 - AI Chat (speech-bubble icon, when enabled) — `Cmd+Alt+A`
 - An open panel lights its toggle
 - Mobile session header: handset for two-way voice calls; composer dictation keeps its microphone.
-- Mic button: only in the bottom-strip placement (hold to record, release to transcribe); in the title bar the compose dock's **Speak** is the way to dictate
+- Mic button: only in the bottom-strip placement (hold to record, release to transcribe); in the title bar the compose dock's **Dictate** is the way to dictate
 
 ---
 
@@ -1522,7 +1550,7 @@ The `-q5` / `-q8` models are whisper.cpp's own quantized conversions of the same
 - Sources and licensing: the graphs come from a public Hugging Face export of Kyutai's Pocket TTS weights; the voices come from Kyutai's ungated repository without the voice-cloning weights. Both are CC-BY-4.0, attributed in `THIRD_PARTY_NOTICES.md`.
 
 ### 9.8 Spoken Replies
-- **Browser mode only.** On desktop the Dictation page does not show Hands-free conversation or Spoken replies, and `toggle-hands-free` (`Cmd+Alt+V`) passes through: FastAF's voice agent is the desktop's hands-free mode. Everything below describes upstream's browser-mode conversation.
+- **Browser mode only.** On desktop the Dictation page does not show Hands-free conversation or Spoken replies, and `toggle-hands-free` (`Cmd+Alt+V`) starts or ends talk mode (1.20c): FastAF's voice agent is the desktop's hands-free mode. Everything below describes upstream's browser-mode conversation.
 - **Hands-free listening and spoken replies are independent.** Settings → Dictation has a toggle for each (mobile Settings too): listening only, replies only (push-to-talk dictation, answers spoken), both, or none. Existing users keep listening on. The dictation toast carries a speaker button that turns spoken replies on and off for the next reply and stops one that is playing.
 - **Spoken replies** defaults on and can be disabled from Dictation settings or mobile Settings. Off keeps dictation armed, cancels the speech queue, and enforces text replies server-side.
 - Arming hands-free also opens a **reply queue** for that conversation, so the model can answer out loud. Arming without a working voice still works — that is ordinary dictation — and the reason is reported rather than discovered on the first reply.

@@ -8,13 +8,15 @@ import { createStore } from "solid-js/store";
  * are not discoverable from the chrome alone. The app teaches each one once,
  * at the moment it becomes useful, and remembers so it never nags:
  *
- *   - `dismissed` — hints the user has closed (or outgrown by doing the thing);
+ *   - `dismissed` — hints the user has closed (or outgrown by doing the thing).
+ *     `voice` is the first-launch "Talk to your agents" screen, shown before
+ *     `welcome` (the terminals introduction) on the desktop;
  *   - `done` — milestones reached, ticked off under Help › Getting started.
  *
  * Kept in localStorage rather than ui-prefs: losing it only means a hint
  * shows once more, which is not worth a Rust round-trip.
  */
-export type HintId = "welcome" | "chat" | "dictation";
+export type HintId = "welcome" | "voice" | "chat" | "dictation";
 export type Milestone = "multi" | "chat" | "dictation";
 
 interface OnboardingState {

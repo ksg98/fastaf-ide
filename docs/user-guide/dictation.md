@@ -41,8 +41,10 @@ transcription; the final pass processes the complete retained recording.
 
 This section describes upstream's hands-free conversation, which FastAF offers
 only in browser mode, where a browser holds the conversation through its own
-microphone and speaker. On desktop it is not shown and its shortcut does
-nothing; use FastAF's voice agent (**Settings → Voice**) instead.
+microphone and speaker. On desktop it is not shown; its shortcut starts
+FastAF's talk mode instead — press **Talk** in the bar under the terminal, or
+`Cmd+Alt+V`, and speak. FastAF answers out loud and works in your terminals;
+the voice it uses is set in **Settings → Voice**.
 
 Push-to-talk sends one dictation to whatever has focus. Hands-free is the other
 mode: it binds **one** terminal, keeps the microphone open, and sends each

@@ -882,7 +882,10 @@ Some frontend-only stores persist to localStorage:
 - [x] Streaming preserves speech before trailing silence; shared RMS and speech-confidence gates reject no-speech audio
 - [x] Floating toast for partial transcription results
 - [x] Prompt token carry-forward across windows
-- [x] Compose dock under the terminal area: speak or type to the active terminal, dictation lands in the field with an in-row meter, Option+Enter queues, per-terminal drafts
+- [x] Compose dock under the terminal area: dictate or type to the active terminal, dictation lands in the field with an in-row meter, Option+Enter queues, per-terminal drafts
+- [x] Talk mode in the dock (desktop): Talk orb at rest, the conversation in the bar while talking (live captions, action chips, agent count, mute/transcript/end), `Cmd+Alt+V`, approvals by voice
+- [x] FastAF speaks first: spoken "needs you" / "done" notices for agents in other terminals, yes-or-no questions answered from the dock or by voice (`speak_up`, default on)
+- [x] One-click voice setup from Talk, and a voice-first first-launch screen with a bundled spoken greeting
 - [x] Empty-state composer: "What should we build in ‹repo›?" starts Claude Code / Codex CLI with the text as its prompt (never runs it as a shell command)
 - [x] Hands-free conversation — one bound terminal, continuous VAD segmentation, optional activation phrase with a timed window, cancellable hold-back before sending. Disarms itself on target closure, owner disconnect or capture failure
 - [x] `Cmd+Alt+V` (`Ctrl+Alt+V` on Windows/Linux) toggles hands-free on the active terminal; user overrides win and disabled dictation is a silent no-op.

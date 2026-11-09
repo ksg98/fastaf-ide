@@ -2,18 +2,23 @@ import { type Component, createEffect, createSignal, For, on, onCleanup, Show, u
 import { AGENTS } from "../../agents";
 import { usePty } from "../../hooks/usePty";
 import { t } from "../../i18n";
+import { agentAsk } from "../../stores/agentAsk";
 import { appLogger } from "../../stores/appLogger";
 import { chatViewStore } from "../../stores/chatView";
 import { dictationStore } from "../../stores/dictation";
 import { repositoriesStore } from "../../stores/repositories";
+import { startTalk as beginTalk, talkStore } from "../../stores/talk";
 import { terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
+import { voiceSetup } from "../../stores/voiceSetup";
 import { cx } from "../../utils";
+import { keyFor } from "../../utils/hotkey";
 import s from "./ComposeDock.module.css";
 import type { StartTarget } from "./composeTargets";
 import { DotWave } from "./DotWave";
 import { composeDockBridge } from "./dockBridge";
 import { dockSendMode } from "./dockSend";
+import { AskStrip, TalkButton, TalkStage } from "./TalkStage";
 
 export interface ComposeDockProps {
 	/**
@@ -23,8 +28,14 @@ export interface ComposeDockProps {
 	variant: "dock" | "hero";
 	onDictationStart: () => void | Promise<void>;
 	onDictationStop: () => void | Promise<void>;
-	/** Voice chat lives in AI Chat. When set, the round button opens it while the field is empty. */
-	onOpenVoiceChat?: () => void;
+	/** Dock: offer talk mode — the hands-free conversation with FastAF's own agent. */
+	talk?: boolean;
+	/** Dock: open AI Chat, where the whole conversation is written down. */
+	onOpenTranscript?: () => void;
+	/** Dock: bring a terminal to the front (it may be in another repository). */
+	onFocusTerminal?: (terminalId: string) => void;
+	/** Dock: open Settings on a tab — where a model for the conversation is connected. */
+	onOpenSettings?: (tab?: string) => void;
 	/** Hero: the agents a new terminal can be started with (installed, enabled, prompt-taking). */
 	startTargets?: () => StartTarget[];
 	/** Hero: open a terminal in the active repo and start `target` on `text`. */
@@ -82,7 +93,7 @@ const IconCompose = () => (
 	</svg>
 );
 
-// Five bars — voice chat, distinct from dictation's bare mic.
+// Five bars — talk mode, distinct from dictation's bare mic.
 const IconWaveform = () => (
 	<svg
 		width="16"
@@ -124,13 +135,15 @@ const IconBranch = () => (
 /**
  * The voice-first composer (docs/frontend/STYLE_GUIDE.md › Composer).
  *
- * As the dock it sits under the terminal column. At rest it is one row — Speak,
- * Type, and which terminal they go to — because the agent in the terminal
- * already draws its own prompt. It opens into a card (field + row) when there
- * is text to look at: Speak opens it and starts dictation (the field takes
- * focus first, since useDictation inserts into the element focused at start,
- * and the live transcript shows as the field's placeholder), Type opens it for
- * the keyboard, a saved draft keeps it open. Enter sends through the same path
+ * As the dock it sits under the terminal column. At rest it is one row —
+ * Dictate and Type, the Talk orb in the middle, and which terminal typed text
+ * goes to — because the agent in the terminal already draws its own prompt.
+ * Talk starts the hands-free conversation; while it runs the row is the
+ * conversation itself (TalkStage). It opens into a card (field + row) when
+ * there is text to look at: Dictate opens it and starts dictation (the field
+ * takes focus first, since useDictation inserts into the element focused at
+ * start, and the live transcript shows as the field's placeholder), Type opens
+ * it for the keyboard, a saved draft keeps it open. Enter sends through the same path
  * as the Compose panel, ⌥Enter queues for the agent's next idle moment, Esc
  * hands focus back to the terminal. As the hero it fills the empty well and
  * starts a new terminal running an agent that takes the text as its starting
@@ -185,6 +198,14 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 
 	const disabled = () => (isHero() ? !repo() || !startTarget() : !terminal()?.sessionId);
 
+	/**
+	 * The conversation is on screen in place of the bar (the hero never hosts
+	 * it) — or its one-time setup is, which is asked and shown in the same place.
+	 */
+	const talking = () =>
+		!isHero() &&
+		(talkStore.engaged() || voiceSetup.state.offered || voiceSetup.state.running || voiceSetup.state.step === "failed");
+
 	const recording = () => dictationStore.state.recording;
 	/** Any dictation in flight — recording, transcribing or rewriting — whoever started it. */
 	const dictating = () =>
@@ -203,7 +224,8 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 			return t("composeDock.noAgent", "Install Claude Code or Codex CLI to start an agent from here");
 		// The live transcript shows where the text will land.
 		if (listening()) return heard();
-		const speak = dictationStore.state.enabled;
+		// The conversation holds the microphone, so dictation is not on offer.
+		const speak = dictationStore.state.enabled && !talking();
 		if (isHero()) {
 			return speak
 				? t("composeDock.heroSpeakOrType", "Speak or type what to build")
@@ -307,11 +329,20 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 		}
 	};
 
+	/** Begin the conversation; an empty card folds away so the stage has the row. */
+	const startTalk = async () => {
+		if (!props.talk || talkStore.engaged()) return;
+		if (!untrack(text).trim()) collapse();
+		await beginTalk();
+	};
+
 	const toggleDictation = async () => {
 		if (recording()) {
 			await props.onDictationStop();
 			return;
 		}
+		// The conversation owns the microphone while it runs.
+		if (talkStore.engaged()) return;
 		// Focus first: useDictation picks its target from the focused element at start.
 		expand(true);
 		setOwnsDictation(true);
@@ -321,6 +352,17 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 			if (!untrack(text).trim()) collapse();
 		}
 	};
+
+	// Voice was just turned on from the first-launch screen: the hero listens
+	// for the first task, once, so the first thing said is the first prompt.
+	if (isHero()) {
+		createEffect(() => {
+			if (!voiceSetup.state.firstPrompt) return;
+			voiceSetup.takeFirstPrompt();
+			if (untrack(disabled) || !dictationStore.state.enabled) return;
+			queueMicrotask(() => void toggleDictation());
+		});
+	}
 
 	const handleKeyDown = (e: KeyboardEvent) => {
 		if (e.isComposing) return;
@@ -473,42 +515,56 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 
 	// ── The bar: the dock at rest ──────────────────────────────────────────
 	const bar = () => (
-		<div class={s.bar} data-testid="compose-bar">
+		<div class={cx(s.bar, !dictating() && s.barRest)} data-testid="compose-bar">
 			<Show
 				when={dictating()}
 				fallback={
 					<>
-						<Show when={dictationStore.state.enabled}>
+						<span class={s.barSide}>
+							<Show when={dictationStore.state.enabled}>
+								<button
+									type="button"
+									class={props.talk ? s.typeBtn : s.speakBtn}
+									onClick={() => void toggleDictation()}
+									disabled={disabled()}
+									title={t("composeDock.dictateTitle", "Dictate to {who} ({hotkey})", {
+										who: recipient(),
+										hotkey: dictationStore.state.hotkey,
+									})}
+									data-testid="compose-speak"
+									data-coach="dictation"
+								>
+									<IconMic />
+									<span>{t("composeDock.dictateLabel", "Dictate")}</span>
+								</button>
+							</Show>
 							<button
 								type="button"
-								class={s.speakBtn}
-								onClick={() => void toggleDictation()}
+								class={s.typeBtn}
+								onClick={() => expand(true)}
 								disabled={disabled()}
-								title={t("composeDock.speakTitle", "Speak to {who} ({hotkey})", {
-									who: recipient(),
-									hotkey: dictationStore.state.hotkey,
-								})}
-								data-testid="compose-speak"
-								data-coach="dictation"
+								title={t("composeDock.typeTitle", "Type a prompt — Enter sends, ⌥Enter queues")}
+								data-testid="compose-type"
 							>
-								<IconMic />
-								<span>{t("composeDock.speak", "Speak")}</span>
+								<IconCompose />
+								<span>{t("composeDock.typeLabel", "Type")}</span>
 							</button>
-						</Show>
-						<button
-							type="button"
-							class={s.typeBtn}
-							onClick={() => expand(true)}
-							disabled={disabled()}
-							title={t("composeDock.typeTitle", "Type a prompt — Enter sends, ⌥Enter queues")}
-							data-testid="compose-type"
+						</span>
+						<Show
+							when={props.talk && !agentAsk.pending()}
+							fallback={
+								// Always one element here: the row is a three-zone grid.
+								<span>
+									<AskStrip onFocusTerminal={props.onFocusTerminal} />
+								</span>
+							}
 						>
-							<IconCompose />
-							<span>{t("composeDock.typeLabel", "Type")}</span>
-						</button>
-						<span class={s.spacer} />
-						{queuedChip()}
-						{targetChip()}
+							<TalkButton disabled={disabled()} hotkey={keyFor("toggle-hands-free")} onClick={() => void startTalk()} />
+						</Show>
+						<span class={cx(s.barSide, s.barSideEnd)}>
+							{queuedChip()}
+							{targetChip()}
+						</span>
 					</>
 				}
 			>
@@ -594,7 +650,7 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 										class={s.iconBtn}
 										onMouseDown={stopFocusSteal}
 										onClick={() => void toggleDictation()}
-										disabled={disabled()}
+										disabled={disabled() || talking()}
 										title={t("composeDock.dictate", "Dictate ({hotkey})", { hotkey: dictationStore.state.hotkey })}
 										aria-label={t("composeDock.dictateLabel", "Dictate")}
 										data-testid="compose-mic"
@@ -603,15 +659,18 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 									</button>
 								</Show>
 								<Show
-									when={text().trim() || !props.onOpenVoiceChat}
+									when={text().trim() || !props.talk || talking()}
 									fallback={
 										<button
 											type="button"
 											class={s.circleBtn}
 											onMouseDown={stopFocusSteal}
-											onClick={() => props.onOpenVoiceChat?.()}
-											title={t("composeDock.voiceChat", "Voice chat (opens AI Chat)")}
-											aria-label={t("composeDock.voiceChatLabel", "Voice chat")}
+											onClick={() => void startTalk()}
+											title={t(
+												"talk.startTitle",
+												"Talk to FastAF: it listens, answers out loud and works in your terminals",
+											)}
+											aria-label={t("talk.start", "Talk")}
 											data-testid="compose-voice"
 										>
 											<IconWaveform />
@@ -651,8 +710,16 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 					</Show>
 				</h1>
 			</Show>
-			<Show when={open()} fallback={bar()}>
-				{cardEl()}
+			<Show when={open()}>{cardEl()}</Show>
+			<Show when={talking()} fallback={<Show when={!open()}>{bar()}</Show>}>
+				<TalkStage
+					onType={open() ? undefined : () => expand(true)}
+					belowCard={open()}
+					typeDisabled={disabled()}
+					onOpenTranscript={props.onOpenTranscript}
+					onFocusTerminal={props.onFocusTerminal}
+					onOpenSettings={props.onOpenSettings}
+				/>
 			</Show>
 		</div>
 	);

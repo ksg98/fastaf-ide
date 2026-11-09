@@ -72,8 +72,9 @@ Stop typing prompts into five terminals. **Say what you want.** FastAF's voice a
   <img src="assets/screenshot-voice-chat.png" alt="The AI Chat in voice mode: it sent a prompt to Claude Code, then reports on three agents out loud, with Interrupt and Mute controls" width="380" />
 </p>
 
-- **Speak to the terminal in front of you.** A **Speak** / **Type** bar sits under the terminal column, aimed at the active terminal. Press Speak, say the task, watch the words appear, and Enter hands it to that terminal's agent with the agent's own Enter handling.
-- **Or talk it through.** Tap the voice orb in the AI Chat panel and hold a hands-free conversation. No push-to-talk, no typing, no copy-paste between windows.
+- **Speak to the terminal in front of you.** A **Dictate** / **Type** bar sits under the terminal column, aimed at the active terminal. Press Dictate, say the task, watch the words appear, and Enter hands it to that terminal's agent with the agent's own Enter handling.
+- **Or talk it through.** Press the **Talk** orb in the middle of that bar (or `Cmd+Alt+V`) and hold a hands-free conversation. The bar becomes the conversation: your words and FastAF's as live captions, a chip for each thing it does in a terminal, and how many agents are working or waiting on you. No push-to-talk, no typing, no copy-paste between windows.
+- **It speaks first.** When an agent in another terminal stops on a question or finishes, FastAF says so out loud. Answer a yes-or-no with one word, or one click, without leaving the terminal you are in.
 - **A local model runs the show.** Point the agent at Ollama and the whole loop runs on your machine: speech in, reasoning, speech out. Or plug in Anthropic, OpenAI, OpenRouter or any compatible endpoint.
 - **Many terminals, one conversation.** The agent sees every live session, spawns new ones, sends each one its prompt and reads back the result, across repos and branches.
 - **It writes the prompts.** Describe the goal in plain speech. The agent turns it into a precise prompt for Claude Code or Codex.

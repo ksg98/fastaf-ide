@@ -31,10 +31,9 @@ export const CONTEXTUAL_TIPS = {
 
 export const TIPS: Tip[] = [
 	{
-		feature: "Talk with AI Chat",
-		description:
-			"In Voice settings, choose an attached AI Chat as the hands-free Target. Docked and detached chats share the same prompt queue and spoken replies.",
-		shortcut: null,
+		feature: "Talk to FastAF",
+		description: `Press Talk in the bar under the terminal, or ${mod}+Alt+V, and just speak. FastAF answers out loud, works in your terminals and shows what it did. Say "approve" or "deny" when something is waiting on you.`,
+		shortcut: `${mod}+Alt+V`,
 	},
 	{
 		feature: "Send a pending Chat prompt now",
@@ -217,8 +216,14 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
-		feature: "Hands-free conversation shortcut",
-		description: `Press ${mod}+Alt+V to start or stop hands-free on the active terminal when dictation is enabled. Customize the chord in Keyboard Shortcuts.`,
+		feature: "FastAF speaks first",
+		description:
+			"When an agent in another terminal stops on a question or finishes, FastAF says so. A yes-or-no question also appears in the bar with Approve and Deny. Switch it off in Settings > Voice.",
+		shortcut: null,
+	},
+	{
+		feature: "Talk mode shortcut",
+		description: `Press ${mod}+Alt+V to start or end talk mode. In a browser client the same chord starts hands-free dictation on the active terminal. Customize the chord in Keyboard Shortcuts.`,
 		shortcut: `${mod}+Alt+V`,
 	},
 	{
@@ -602,9 +607,9 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
-		feature: "Speak or Type",
+		feature: "Dictate or Type",
 		description:
-			"The bar under the terminal talks to the agent in that tab. Speak opens a field, shows your words as you say them, and Enter sends them — Option+Enter queues them for when the agent is idle. Type opens the same field for the keyboard.",
+			"The bar under the terminal writes to the agent in that tab. Dictate opens a field, shows your words as you say them, and Enter sends them — Option+Enter queues them for when the agent is idle. Type opens the same field for the keyboard.",
 		shortcut: null,
 	},
 	{

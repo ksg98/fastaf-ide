@@ -540,6 +540,7 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 				const next = [...prev, entry];
 				return next.length > MAX_TOOL_CALLS ? next.slice(next.length - MAX_TOOL_CALLS) : next;
 			});
+			notifyToolCall(event.tool_name, entry.args);
 			break;
 		}
 
@@ -967,6 +968,7 @@ function processEvent(raw: unknown): void {
 				const next = [...prev, entry];
 				return next.length > MAX_TOOL_CALLS ? next.slice(next.length - MAX_TOOL_CALLS) : next;
 			});
+			notifyToolCall(event.tool_name, entry.args);
 			break;
 		}
 		case "tool_result":
@@ -1089,6 +1091,8 @@ function setError(e: string | null): void {
 type ReplyObserver = {
 	onDelta?: (text: string) => void;
 	onTurnEnd?: () => void;
+	/** The assistant called a tool. Talk mode turns the ones that act on a terminal into chips. */
+	onToolCall?: (toolName: string, args: Record<string, unknown>) => void;
 };
 
 const replyObservers = new Set<ReplyObserver>();
@@ -1114,6 +1118,16 @@ function notifyTurnEnd(): void {
 	for (const observer of replyObservers) {
 		try {
 			observer.onTurnEnd?.();
+		} catch (e) {
+			appLogger.warn("conversation", "reply observer failed", { error: String(e) });
+		}
+	}
+}
+
+function notifyToolCall(toolName: string, args: Record<string, unknown>): void {
+	for (const observer of replyObservers) {
+		try {
+			observer.onToolCall?.(toolName, args);
 		} catch (e) {
 			appLogger.warn("conversation", "reply observer failed", { error: String(e) });
 		}
