@@ -1749,5 +1749,6 @@
 	"voiceWelcome.title": "Talk to your agents.",
 	"voiceWelcome.turnOn": "Turn on voice",
 	"voiceSetup.offerSwitch": "Talking is a conversation with AI Chat, which is switched off. Turn it on?",
-	"voiceSetup.turnOn": "Turn on"
+	"voiceSetup.turnOn": "Turn on",
+	"voiceWelcome.footReady": "Speech runs on this Mac. Nothing you say leaves it."
 }

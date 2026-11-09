@@ -1,4 +1,4 @@
-import { type Component, createSignal, onCleanup, Show } from "solid-js";
+import { type Component, createSignal, onCleanup, onMount, Show } from "solid-js";
 import helloUrl from "../../assets/voice/hello.m4a";
 import { t } from "../../i18n";
 import { appLogger } from "../../stores/appLogger";
@@ -31,6 +31,9 @@ export const VoiceWelcome: Component = () => {
 	let audio: HTMLAudioElement | undefined;
 
 	onCleanup(() => audio?.pause());
+	// What is already on disk decides what the footnote may promise: a
+	// reinstall that kept its models has nothing to download.
+	onMount(() => void voiceSetup.refresh());
 
 	/** Say hello. Runs inside the click, which is what lets a webview play sound. */
 	const greet = () => {
@@ -128,9 +131,11 @@ export const VoiceWelcome: Component = () => {
 			</Show>
 
 			<p class={s.foot}>
-				{t("voiceWelcome.foot", "Speech runs on this Mac. Nothing you say leaves it. One download, about {mb} MB.", {
-					mb: String(voiceSetup.downloadMb() || 660),
-				})}
+				{voiceSetup.downloadMb() > 0
+					? t("voiceWelcome.foot", "Speech runs on this Mac. Nothing you say leaves it. One download, about {mb} MB.", {
+							mb: String(voiceSetup.downloadMb()),
+						})
+					: t("voiceWelcome.footReady", "Speech runs on this Mac. Nothing you say leaves it.")}
 			</p>
 		</div>
 	);

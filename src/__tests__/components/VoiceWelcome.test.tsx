@@ -9,6 +9,7 @@ const world = vi.hoisted(() => ({
 		requestFirstPrompt: ReturnType<typeof vi.fn>;
 	},
 	played: [] as string[],
+	mb: 660,
 }));
 
 vi.mock("../../stores/voiceSetup", async () => {
@@ -19,7 +20,15 @@ vi.mock("../../stores/voiceSetup", async () => {
 	const requestFirstPrompt = vi.fn();
 	world.setup = { set: (patch) => setState(patch), run, dismiss, requestFirstPrompt };
 	return {
-		voiceSetup: { state, run, dismiss, requestFirstPrompt, percent: () => 37, downloadMb: () => 660 },
+		voiceSetup: {
+			state,
+			run,
+			dismiss,
+			requestFirstPrompt,
+			refresh: vi.fn().mockResolvedValue(undefined),
+			percent: () => 37,
+			downloadMb: () => world.mb,
+		},
 	};
 });
 
@@ -41,6 +50,7 @@ class FakeAudio {
 beforeEach(() => {
 	onboardingStore.reset();
 	world.played.length = 0;
+	world.mb = 660;
 	world.setup.set({ running: false, step: "idle", error: null });
 	world.setup.run.mockClear().mockResolvedValue(true);
 	world.setup.dismiss.mockClear();
@@ -64,6 +74,15 @@ describe("VoiceWelcome", () => {
 		// The size of what the button starts is said before it is pressed.
 		expect(container.textContent).toContain("One download, about 660 MB.");
 		expect(world.setup.run).not.toHaveBeenCalled();
+	});
+
+	// Catches: promising "one download, about 660 MB" to a reinstall that
+	// still has its models, where the button finishes at once.
+	it("does not promise a download when everything is already on disk", () => {
+		world.mb = 0;
+		const { container } = render(() => <VoiceWelcome />);
+		expect(container.textContent).toContain("Nothing you say leaves it.");
+		expect(container.textContent).not.toContain("download");
 	});
 
 	// Catches: the first spoken sentence waiting for a 660 MB download, which
