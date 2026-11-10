@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-10
+
 ### Added
 - Talk mode in the dock. A Talk orb sits in the middle of the bar under the terminal. Press it, or
   `Cmd+Alt+V`, and speak: the bar becomes the conversation, with your words and FastAF's as captions, a chip
