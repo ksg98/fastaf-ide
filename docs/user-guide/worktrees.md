@@ -89,12 +89,22 @@ followed, and the source permissions and contents stay unchanged.
 Click `+` next to a repository name. A dialog opens where you can:
 - Type a new branch name (creates branch + worktree)
 - Select an existing branch from the list
-- Choose a "Start from" base ref (default branch, or any local branch)
+- Choose a "Start from" base ref: the project's default, or any local or remote branch. The list has a
+  search field; type part of a name, move with the arrow keys and press Enter
+- Make the chosen base the project's default with "Always start from <branch> in this project", shown when
+  it is not the default already
 - Generate a random sci-fi name
 
 ### From the `+` Button (instant mode)
 
 When "Prompt on create" is off (Settings → Git & GitHub → Worktree Defaults), clicking `+` instantly creates a linked worktree with an auto-generated name based on the default branch.
+
+### The base new worktrees start from
+
+Both flows start from the project's base branch: Settings → Repository → Worktree → **Branch From**, or the
+branch you made the default in the dialog. A bare name such as `develop` also stands for that branch on a
+remote when there is no local one. When it is "Automatic", or names a branch that no longer exists, the
+default branch below is used.
 
 The default branch is the main checkout's explicitly configured base when it
 resolves to a commit. Otherwise, FastAF uses local `main`, then local

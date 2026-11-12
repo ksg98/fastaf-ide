@@ -1259,7 +1259,8 @@ FastAF-only; upstream 2.0 removed its scheduler with its embedded engine. Source
 - Configurable storage strategies: sibling (`__wt`), app directory, inside-repo (`.worktrees/`), or Claude Code default (`.claude/worktrees/`)
 - Sci-fi themed auto-generated names
 - Three creation flows: dialog (with base ref dropdown), instant (auto-name), right-click branch (quick-clone with hybrid `{branch}--{random}` name)
-- Base ref selection: choose which branch to start from when creating new worktrees
+- Base ref selection: choose which branch to start from when creating new worktrees, from a searchable list of local and remote branches (type to filter, arrow keys, Enter)
+- Per-project base: "Always start from <branch> in this project" in the dialog saves the chosen base as the repository's Branch From setting; the dialog opens on it and instant creation starts from it
 - Orphan cleanup ignores detached checkouts under OS/environment temporary roots and `~/Gits/.tmp`, including symlink aliases and missing checkout registrations. Detached sidebar rows remain visible; stale removal requests are refused.
 - Per-repo settings: storage strategy, prompt on create, delete branch on remove, auto-archive, orphan cleanup (safe orphan countdown defaults to 10 seconds), PR merge strategy, after-merge behavior, PR visibility filters (hide drafts/conflicting/CI-failing)
 - Setup script: runs once after creation (e.g., `npm install`)

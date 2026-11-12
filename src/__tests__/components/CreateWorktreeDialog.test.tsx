@@ -1,4 +1,5 @@
 import { fireEvent, render, within } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import { CreateWorktreeDialog } from "../../components/CreateWorktreeDialog/CreateWorktreeDialog";
 
@@ -249,6 +250,166 @@ describe("CreateWorktreeDialog", () => {
 			await vi.waitFor(() => {
 				expect(container.querySelector(".error")).toBeNull();
 			});
+		});
+	});
+
+	describe("Start from", () => {
+		const baseRefs = [
+			{ name: "main", kind: "local", is_default: true },
+			{ name: "develop", kind: "local", is_default: false },
+			{ name: "feature/auth", kind: "local", is_default: false },
+			{ name: "origin/release", kind: "remote", is_default: false },
+			{ name: "origin/staging", kind: "remote", is_default: false },
+		];
+		const list = () => document.querySelector<HTMLElement>("[data-testid='base-ref-list']");
+		const rows = () => Array.from(list()?.querySelectorAll("[role='option']") ?? []).map((el) => el.textContent);
+		const search = () => list()!.querySelector("input") as HTMLInputElement;
+		const trigger = (container: HTMLElement) => container.querySelector("[aria-haspopup='listbox']") as HTMLElement;
+
+		it("lists every branch, local first, and marks the default", () => {
+			const { container } = render(() => <CreateWorktreeDialog {...defaultProps} baseRefs={baseRefs} />);
+			expect(trigger(container).textContent).toBe("main (default)");
+			expect(list()).toBeNull();
+
+			fireEvent.click(trigger(container));
+
+			expect(rows()).toEqual(["main (default)", "develop", "feature/auth", "origin/release", "origin/staging"]);
+		});
+
+		// Issue #11: with many local branches a remote one sat at the very end of
+		// a short list and could only be reached by scrolling.
+		it("finds a remote branch by typing part of its name", () => {
+			const handleCreate = vi.fn();
+			const { container } = render(() => (
+				<CreateWorktreeDialog {...defaultProps} baseRefs={baseRefs} onCreate={handleCreate} />
+			));
+			fireEvent.click(trigger(container));
+
+			fireEvent.input(search(), { target: { value: "STAG" } });
+			expect(rows()).toEqual(["origin/staging"]);
+
+			fireEvent.click(list()!.querySelector("[role='option']")!);
+			expect(list()).toBeNull();
+			expect(trigger(container).textContent).toBe("origin/staging");
+
+			fireEvent.input(container.querySelector("input[type='text']")!, { target: { value: "feature/new" } });
+			fireEvent.click(within(container).getByRole("button", { name: "Create" }));
+			expect(handleCreate).toHaveBeenCalledWith({
+				branchName: "feature/new",
+				createBranch: true,
+				baseRef: "origin/staging",
+			});
+		});
+
+		it("says so when nothing matches", () => {
+			const { container } = render(() => <CreateWorktreeDialog {...defaultProps} baseRefs={baseRefs} />);
+			fireEvent.click(trigger(container));
+			fireEvent.input(search(), { target: { value: "nope" } });
+			expect(rows()).toEqual([]);
+			expect(list()!.textContent).toContain("No matching branches");
+		});
+
+		// Enter in the dialog creates the worktree. In the search field it must
+		// only pick the branch, or choosing a base would create a worktree.
+		it("picks with the arrow keys and Enter without creating the worktree", () => {
+			const handleCreate = vi.fn();
+			const { container } = render(() => (
+				<CreateWorktreeDialog {...defaultProps} baseRefs={baseRefs} onCreate={handleCreate} />
+			));
+			fireEvent.input(container.querySelector("input[type='text']")!, { target: { value: "feature/new" } });
+			fireEvent.click(trigger(container));
+
+			fireEvent.keyDown(search(), { key: "ArrowDown" });
+			fireEvent.keyDown(search(), { key: "ArrowDown" });
+			fireEvent.keyDown(search(), { key: "ArrowUp" });
+			fireEvent.keyDown(search(), { key: "Enter" });
+
+			expect(handleCreate).not.toHaveBeenCalled();
+			expect(list()).toBeNull();
+			expect(trigger(container).textContent).toBe("develop");
+		});
+
+		it("closes the list on Escape and leaves the dialog open", () => {
+			const handleClose = vi.fn();
+			const { container } = render(() => (
+				<CreateWorktreeDialog {...defaultProps} baseRefs={baseRefs} onClose={handleClose} />
+			));
+			fireEvent.click(trigger(container));
+			expect(list()).not.toBeNull();
+
+			fireEvent.keyDown(document, { key: "Escape" });
+			expect(list()).toBeNull();
+			expect(handleClose).not.toHaveBeenCalled();
+
+			fireEvent.keyDown(document, { key: "Escape" });
+			expect(handleClose).toHaveBeenCalledOnce();
+		});
+
+		it("starts from the project's default base when one is given", () => {
+			const handleCreate = vi.fn();
+			const { container } = render(() => (
+				<CreateWorktreeDialog
+					{...defaultProps}
+					baseRefs={baseRefs}
+					defaultBaseRef="origin/staging"
+					onCreate={handleCreate}
+				/>
+			));
+			expect(trigger(container).textContent).toBe("origin/staging (default)");
+
+			fireEvent.click(trigger(container));
+			expect(rows()).toContain("origin/staging (default)");
+			expect(rows()).toContain("main");
+			fireEvent.keyDown(document, { key: "Escape" });
+
+			fireEvent.input(container.querySelector("input[type='text']")!, { target: { value: "feature/new" } });
+			fireEvent.click(within(container).getByRole("button", { name: "Create" }));
+			expect(handleCreate).toHaveBeenCalledWith({
+				branchName: "feature/new",
+				createBranch: true,
+				baseRef: "origin/staging",
+			});
+		});
+
+		it("offers to make another base the project's default, and keeps the typed name when it is", () => {
+			// Wired the way the app wires it: one state object, from which the
+			// caller computes `visible` as well. Changing the default replaces
+			// that object, which must not count as the dialog opening again.
+			const [state, setState] = createSignal<{ defaultBaseRef: string } | null>({ defaultBaseRef: "main" });
+			const { container } = render(() => (
+				<CreateWorktreeDialog
+					{...defaultProps}
+					visible={state() !== null}
+					baseRefs={baseRefs}
+					defaultBaseRef={state()?.defaultBaseRef}
+					onSetDefaultBaseRef={(defaultBaseRef) => setState({ defaultBaseRef })}
+				/>
+			));
+			const makeDefault = () => container.querySelector("[data-testid='base-ref-make-default']");
+			// The chosen base is already the default: nothing to offer.
+			expect(makeDefault()).toBeNull();
+
+			const name = container.querySelector("input[type='text']") as HTMLInputElement;
+			fireEvent.input(name, { target: { value: "feature/new" } });
+			fireEvent.click(trigger(container));
+			fireEvent.input(search(), { target: { value: "staging" } });
+			fireEvent.keyDown(search(), { key: "Enter" });
+
+			expect(makeDefault()!.textContent).toBe("Always start from origin/staging in this project");
+			fireEvent.click(makeDefault()!);
+
+			expect(state()?.defaultBaseRef).toBe("origin/staging");
+			expect(makeDefault()).toBeNull();
+			expect(trigger(container).textContent).toBe("origin/staging (default)");
+			expect(name.value).toBe("feature/new");
+		});
+
+		it("offers no default action without a handler", () => {
+			const { container } = render(() => <CreateWorktreeDialog {...defaultProps} baseRefs={baseRefs} />);
+			fireEvent.click(trigger(container));
+			fireEvent.click(Array.from(list()!.querySelectorAll("[role='option']")).at(-1)!);
+			expect(trigger(container).textContent).toBe("origin/staging");
+			expect(container.querySelector("[data-testid='base-ref-make-default']")).toBeNull();
 		});
 	});
 });

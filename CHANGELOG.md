@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- New Worktree: the Start from list has a search field. Type part of a branch name, local or remote, move
+  with the arrow keys and press Enter. The list is also taller (#11).
+- New Worktree: "Always start from <branch> in this project" appears when you pick a base other than the
+  project's default. It saves that branch, so the dialog opens on it next time and instant creation starts
+  from it too (#11).
+
+### Fixed
+- Settings › Repository › Worktree › Branch From now takes effect. It was saved and never read, so new
+  worktrees always started from the repository's default branch. It also shows a branch saved from the
+  dialog, such as `origin/staging`.
+
 ## [2.2.0] - 2026-11-10
 
 ### Added

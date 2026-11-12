@@ -19,7 +19,7 @@ import { findOrphanTerminals } from "../utils/terminalOrphans";
 import { createBranchSelectionCoordinator } from "./git/createBranchSelectionCoordinator";
 import { createRepositoryRefreshCoordinator, type OrphanAssessment } from "./git/createRepositoryRefreshCoordinator";
 import { createTerminalWorktreeCoordinator } from "./git/createTerminalWorktreeCoordinator";
-import { createWorktreeCreationCoordinator } from "./git/createWorktreeCreationCoordinator";
+import { createWorktreeCreationCoordinator, type WorktreeDialogState } from "./git/createWorktreeCreationCoordinator";
 import { createWorktreeRemovalCoordinator } from "./git/createWorktreeRemovalCoordinator";
 import { createWorktreeWorkflowCoordinator } from "./git/createWorktreeWorkflowCoordinator";
 import type { RemoveWorktreeResult } from "./useRepository";
@@ -216,14 +216,7 @@ export function useGitOperations(deps: GitOperationsDeps) {
 	// Key: `${repoPath}::${branchName}` — prevents concurrent remove calls for same branch
 	const [removingBranches, setRemovingBranches] = createSignal<Set<string>>(new Set());
 
-	const [worktreeDialogState, setWorktreeDialogState] = createSignal<{
-		repoPath: string;
-		suggestedName: string;
-		existingBranches: string[];
-		worktreeBranches: string[];
-		worktreesDir: string;
-		baseRefs: import("./useRepository").BaseRefOption[];
-	} | null>(null);
+	const [worktreeDialogState, setWorktreeDialogState] = createSignal<WorktreeDialogState | null>(null);
 
 	/** Pending merge context — set when afterMerge=ask; cleared once the user picks or skips cleanup */
 	const [mergePendingCtx, setMergePendingCtx] = createSignal<{
@@ -715,6 +708,20 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		return deps.repo.generateWorktreeName(worktreeBranches);
 	};
 
+	/**
+	 * Make `baseRef` the branch this project's new worktrees start from. Saved
+	 * as the repository's own Branch From setting, so Settings shows it and can
+	 * put it back to automatic.
+	 */
+	const setWorktreeDefaultBase = (baseRef: string) => {
+		const state = worktreeDialogState();
+		if (!state) return;
+		const repo = repositoriesStore.get(state.repoPath);
+		repoSettingsStore.getOrCreate(state.repoPath, repo?.displayName ?? state.repoPath.split("/").pop() ?? "");
+		repoSettingsStore.update(state.repoPath, { baseBranch: baseRef });
+		setWorktreeDialogState({ ...state, defaultBaseRef: baseRef });
+	};
+
 	const handleRepoSettings = (
 		repoPath: string,
 		openSettingsPanel: (context: { kind: "repo"; repoPath: string }) => void,
@@ -909,6 +916,7 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		closeTerminalsForBranch,
 		worktreeDialogState,
 		setWorktreeDialogState,
+		setWorktreeDefaultBase,
 		creatingWorktreeRepos,
 		removingBranches,
 		handleNewTab,

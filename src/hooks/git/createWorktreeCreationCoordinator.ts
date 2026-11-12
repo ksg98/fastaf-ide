@@ -5,6 +5,7 @@ import { appLogger } from "../../stores/appLogger";
 import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
+import { resolveDefaultBaseRef } from "../../utils/defaultBaseRef";
 import { reportActionError } from "../../utils/reportActionError";
 import type { BaseRefOption } from "../useRepository";
 import type { AgentSeed } from "./agentSeed";
@@ -17,6 +18,8 @@ export interface WorktreeDialogState {
 	worktreeBranches: string[];
 	worktreesDir: string;
 	baseRefs: BaseRefOption[];
+	/** The base this project's new worktrees start from: its saved one, else the first of `baseRefs`. */
+	defaultBaseRef?: string;
 }
 
 interface WorktreeCreationCoordinatorDeps {
@@ -74,33 +77,28 @@ export function createWorktreeCreationCoordinator(deps: WorktreeCreationCoordina
 		]);
 
 		const promptOnCreate = deps.getPromptOnCreate?.(repoPath) ?? true;
-
-		if (!promptOnCreate) {
-			// Skip dialog: create worktree instantly with auto-generated name
-			setWorktreeDialogState({
-				repoPath,
-				suggestedName,
-				existingBranches: localBranches,
-				worktreeBranches,
-				worktreesDir,
-				baseRefs,
-			});
-			await confirmCreateWorktree({
-				branchName: suggestedName,
-				createBranch: true,
-				baseRef: baseRefs[0]?.name ?? "HEAD",
-			});
-			return;
-		}
-
-		setWorktreeDialogState({
+		// Settings › Repository › Worktree › Branch From, or the branch made the
+		// default in the dialog. Both creation paths start from it.
+		const defaultBaseRef = resolveDefaultBaseRef(baseRefs, repoSettingsStore.getEffectiveField(repoPath, "baseBranch"));
+		const dialogState: WorktreeDialogState = {
 			repoPath,
 			suggestedName,
 			existingBranches: localBranches,
 			worktreeBranches,
 			worktreesDir,
 			baseRefs,
-		});
+			defaultBaseRef,
+		};
+
+		setWorktreeDialogState(dialogState);
+		if (!promptOnCreate) {
+			// Skip dialog: create worktree instantly with auto-generated name
+			await confirmCreateWorktree({
+				branchName: suggestedName,
+				createBranch: true,
+				baseRef: defaultBaseRef ?? "HEAD",
+			});
+		}
 	};
 
 	/** Shared post-creation setup: run scripts, open terminal, fetch stats */

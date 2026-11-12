@@ -68,6 +68,14 @@ export const RepoWorktreeTab: Component<RepoTabProps> = (props) => {
 	];
 
 	const baseBranchValue = () => props.settings.baseBranch ?? INHERIT;
+	/**
+	 * A branch saved from the New Worktree dialog ("origin/staging") that is not
+	 * one of the names offered here. Listed so the select shows what is saved.
+	 */
+	const savedOtherBranch = () => {
+		const saved = props.settings.baseBranch;
+		return saved && !branchOptions.some((option) => option.value === saved) ? saved : null;
+	};
 
 	const handleBaseBranchChange = (value: string) => {
 		props.onUpdate("baseBranch", value === INHERIT ? null : value);
@@ -164,8 +172,14 @@ export const RepoWorktreeTab: Component<RepoTabProps> = (props) => {
 							})}
 						</option>
 						<For each={branchOptions}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
+						<Show when={savedOtherBranch()}>{(branch) => <option value={branch()}>{branch()}</option>}</Show>
 					</Select>
-					<p class={s.hint}>{t("repoWorktree.hint.branchFrom", "Base branch for new worktrees")}</p>
+					<p class={s.hint}>
+						{t(
+							"repoWorktree.hint.branchFrom",
+							"The branch new worktrees start from. To use any other branch, pick it under Start from in the New Worktree dialog and choose Always start from.",
+						)}
+					</p>
 				</div>
 
 				<div class={r.group}>

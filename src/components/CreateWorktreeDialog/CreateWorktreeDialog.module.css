@@ -78,20 +78,19 @@
   opacity: 0.5;
 }
 
+/* Drawn in a portal and placed under the button (left, top and width are set
+   inline), because the dialog clips its own body. Sits above the dialog. */
 .dropdownList {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  max-height: 160px;
-  overflow-y: auto;
+  position: fixed;
+  display: flex;
+  flex-direction: column;
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--highlight-inset), var(--shadow-dropdown);
-  z-index: 10;
+  z-index: calc(var(--z-modal) + 1);
   animation: dropdownIn var(--duration-base) var(--ease-out);
 }
 
@@ -106,6 +105,17 @@
   }
 }
 
+.dropdownSearch {
+  flex: none;
+  margin: 4px 4px 2px;
+}
+
+/* Only the rows scroll; the search field stays put above them. */
+.dropdownScroll {
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+
 .dropdownItem {
   padding: 6px 10px;
   margin: 0 4px;
@@ -113,11 +123,13 @@
   font-size: var(--font-md);
   font-family: var(--font-ui);
   color: var(--fg-primary);
+  overflow-wrap: anywhere;
   cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out);
 }
 
-.dropdownItem:hover {
+/* One highlight for the mouse and the arrow keys: the pointer moves the same
+   cursor the keys do, so two rows are never lit at once. */
+.dropdownItemCursor {
   background: var(--surface-hover);
 }
 
@@ -126,8 +138,40 @@
   color: var(--text-on-accent);
 }
 
-.dropdownItemActive:hover {
+.dropdownItemActive.dropdownItemCursor {
   background: var(--accent-hover);
+}
+
+.defaultTag {
+  color: var(--fg-muted);
+}
+
+.dropdownItemActive .defaultTag {
+  color: inherit;
+  opacity: 0.75;
+}
+
+.dropdownEmpty {
+  padding: 10px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+/* "Always start from <branch> in this project": shown only while the chosen
+   base is not the project's default. Quiet, under the picker's right edge. */
+.makeDefault {
+  composes: btnGhost from "../shared/controls.module.css";
+  display: block;
+  max-width: 100%;
+  min-height: 0;
+  height: 22px;
+  margin: 4px 0 0 auto;
+  padding: 0 6px;
+  font-size: var(--font-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dropdownSectionHeader {

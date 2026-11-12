@@ -887,7 +887,7 @@ Per-repository fields:
 |-------|------|---------|-------------|
 | `path` | `String` | -- | Repository path |
 | `display_name` | `String` | -- | Display name |
-| `base_branch` | `String` | `"main"` | Base branch for worktrees |
+| `base_branch` | `String` | `"main"` | The base new worktrees start from: `automatic` (the default branch) or any local or remote branch, for example `origin/staging`. Read by the New Worktree dialog and instant creation |
 | `copy_ignored_files` | `bool` | `false` | Copy .gitignored files to worktree |
 | `copy_untracked_files` | `bool` | `false` | Copy untracked files to worktree |
 | `setup_script` | `String` | `""` | Script to run after worktree creation |

@@ -62,6 +62,7 @@ interface GitOverlaysContract {
 	onCreate: GitOperations["handleCreateBranch"];
 	worktreeState: GitOperations["worktreeDialogState"];
 	closeWorktree: () => void;
+	onSetWorktreeDefaultBase: GitOperations["setWorktreeDefaultBase"];
 	onGenerateWorktreeName: GitOperations["generateWorktreeName"];
 	onCreateWorktree: GitOperations["confirmCreateWorktree"];
 	runVisible: Accessor<boolean>;
@@ -163,6 +164,8 @@ function GitDialogOverlays(props: { contract: GitOverlaysContract }) {
 				worktreeBranches={git.worktreeState()?.worktreeBranches ?? []}
 				worktreesDir={git.worktreeState()?.worktreesDir ?? ""}
 				baseRefs={git.worktreeState()?.baseRefs}
+				defaultBaseRef={git.worktreeState()?.defaultBaseRef}
+				onSetDefaultBaseRef={git.onSetWorktreeDefaultBase}
 				onGenerateName={git.onGenerateWorktreeName}
 				onClose={git.closeWorktree}
 				onCreate={git.onCreateWorktree}

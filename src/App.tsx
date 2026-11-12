@@ -1170,6 +1170,7 @@ const App: Component = () => {
 					onCreate: gitOps.handleCreateBranch,
 					worktreeState: gitOps.worktreeDialogState,
 					closeWorktree: () => gitOps.setWorktreeDialogState(null),
+					onSetWorktreeDefaultBase: gitOps.setWorktreeDefaultBase,
 					onGenerateWorktreeName: gitOps.generateWorktreeName,
 					onCreateWorktree: gitOps.confirmCreateWorktree,
 					runVisible: runCommandDialogVisible,

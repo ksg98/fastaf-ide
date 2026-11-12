@@ -36,6 +36,15 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## New Worktree: searchable Start from, per-project base (2026-11-11, issue #11, frontend only)
+
+- [x] The Start from list filters as you type and finds a remote branch among many local ones. _(verified: harness screenshots in both themes, `CreateWorktreeDialog.test.tsx` "finds a remote branch by typing part of its name")_
+- [x] Arrow keys move, Enter picks without creating the worktree, Escape closes only the list. _(verified: same test file, three cases; harness run reports the dialog still open and the list gone after Escape)_
+- [x] "Always start from <branch> in this project" saves the base and keeps the name already typed. _(verified: `useGitOperations.test.ts` "saves a base made the default…"; harness run saw `base_branch` go from null to `"origin/staging"` and the name kept)_
+- [x] Instant creation (Prompt on create off) starts from the saved base. _(verified: `useGitOperations.test.ts` "starts an instant worktree from the project's saved base branch")_
+- [HUMAN] In the installed app on Cursor Dark, open the Start from list over the dialog: the text behind the list is blurred, not readable through it. The harness does not draw the blur for any surface, so this cannot be judged there.
+- [HUMAN] In a real repository with many branches, set a remote branch as the default, create a worktree, and check with `git log` in the new worktree that it starts from that branch's tip.
+
 ## Talk mode, live captions, FastAF speaks first, voice setup (2026-11-09, **Rust change — needs a rebuild**)
 
 Built and checked without sound: 12k frontend tests, the Rust voice tests (`cargo test --lib --features

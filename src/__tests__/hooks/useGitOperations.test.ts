@@ -3251,6 +3251,91 @@ describe("useGitOperations", () => {
 			// Should use first baseRef option as the base
 			expect(mockRepo.createWorktree).toHaveBeenCalledWith("/repo", "cool-ripley-007", true, "develop");
 		});
+
+		// Issue #11: Settings › Repository › Worktree › Branch From was saved and
+		// then never read, so every worktree started from the default branch.
+		it("starts an instant worktree from the project's saved base branch", async () => {
+			const noPromptGitOps = useGitOperations({
+				repo: mockRepo,
+				pty: mockPty,
+				dialogs: mockDialogs,
+				closeTerminal: mockCloseTerminal,
+				createNewTerminal: mockCreateNewTerminal,
+				setStatusInfo: mockSetStatusInfo,
+				getDefaultFontSize: () => 14,
+				getMaxTabNameLength: () => 25,
+				getPromptOnCreate: () => false,
+			});
+
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+			repoSettingsStore.getOrCreate("/repo", "Repo");
+			repoSettingsStore.update("/repo", { baseBranch: "origin/staging" });
+			mockRepo.generateWorktreeName.mockResolvedValue("cool-ripley-007");
+			mockRepo.listLocalBranches.mockResolvedValue(["main"]);
+			mockRepo.listBaseRefOptions.mockResolvedValue([
+				{ name: "main", kind: "local", is_default: true },
+				{ name: "origin/staging", kind: "remote", is_default: false },
+			]);
+			mockRepo.createWorktree.mockResolvedValue({
+				name: "cool-ripley-007",
+				path: "/repo/.worktrees/cool-ripley-007",
+				workspace_id: "cool-ripley-007",
+				branch: "cool-ripley-007",
+				base_repo: "/repo",
+			});
+			mockRepo.getDiffStats.mockResolvedValue({ additions: 0, deletions: 0 });
+
+			await noPromptGitOps.handleAddWorktree("/repo");
+
+			expect(mockRepo.createWorktree).toHaveBeenCalledWith("/repo", "cool-ripley-007", true, "origin/staging");
+		});
+
+		it("opens the dialog on the project's saved base branch, and on the default branch without one", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+			mockRepo.generateWorktreeName.mockResolvedValue("bold-nexus-042");
+			mockRepo.listLocalBranches.mockResolvedValue(["main"]);
+			mockRepo.listBaseRefOptions.mockResolvedValue([
+				{ name: "main", kind: "local", is_default: true },
+				{ name: "origin/staging", kind: "remote", is_default: false },
+			]);
+
+			await gitOps.handleAddWorktree("/repo");
+			expect(gitOps.worktreeDialogState()?.defaultBaseRef).toBe("main");
+
+			repoSettingsStore.getOrCreate("/repo", "Repo");
+			repoSettingsStore.update("/repo", { baseBranch: "staging" });
+			await gitOps.handleAddWorktree("/repo");
+			expect(gitOps.worktreeDialogState()?.defaultBaseRef).toBe("origin/staging");
+		});
+
+		it("saves a base made the default in the dialog as the project's Branch From", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setWorkspace("/repo", "main", { worktreePath: "/repo" });
+			mockRepo.generateWorktreeName.mockResolvedValue("bold-nexus-042");
+			mockRepo.listLocalBranches.mockResolvedValue(["main"]);
+			mockRepo.listBaseRefOptions.mockResolvedValue([
+				{ name: "main", kind: "local", is_default: true },
+				{ name: "origin/staging", kind: "remote", is_default: false },
+			]);
+			await gitOps.handleAddWorktree("/repo");
+			// This project has no settings of its own yet.
+			expect(repoSettingsStore.get("/repo")).toBeUndefined();
+
+			gitOps.setWorktreeDefaultBase("origin/staging");
+
+			expect(repoSettingsStore.get("/repo")?.baseBranch).toBe("origin/staging");
+			expect(repoSettingsStore.get("/repo")?.displayName).toBe("Repo");
+			expect(gitOps.worktreeDialogState()?.defaultBaseRef).toBe("origin/staging");
+			// The rest of the open dialog is untouched.
+			expect(gitOps.worktreeDialogState()?.suggestedName).toBe("bold-nexus-042");
+		});
+
+		it("ignores a default base when no dialog is open", () => {
+			gitOps.setWorktreeDefaultBase("origin/staging");
+			expect(repoSettingsStore.get("/repo")).toBeUndefined();
+		});
 	});
 
 	describe("confirmCreateWorktree", () => {

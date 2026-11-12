@@ -1,9 +1,12 @@
-import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
+import { Portal } from "solid-js/web";
 import type { BaseRefOption } from "../../hooks/useRepository";
 import { t } from "../../i18n";
 import { registerModal } from "../../stores/modalStack";
+import { cx } from "../../utils";
 import { validateBranchName } from "../RenameBranchDialog/RenameBranchDialog";
 import d from "../shared/dialog.module.css";
+import { SearchField } from "../shared/SearchField";
 import s from "./CreateWorktreeDialog.module.css";
 
 /** Options returned when the user confirms worktree creation */
@@ -22,8 +25,12 @@ export interface CreateWorktreeDialogProps {
 	worktreeBranches: string[];
 	/** Base directory where worktrees are created */
 	worktreesDir: string;
-	/** Available base refs for the "Start from" dropdown (first is default) */
+	/** Available base refs for the "Start from" dropdown (first is the repository's default branch) */
 	baseRefs?: BaseRefOption[];
+	/** The base this project's worktrees start from; the first of `baseRefs` when not given. */
+	defaultBaseRef?: string;
+	/** Make a base the project's default. Without it the dialog offers no such action. */
+	onSetDefaultBaseRef?: (baseRef: string) => void;
 	/** Generate a random branch name */
 	onGenerateName?: () => Promise<string>;
 	onClose: () => void;
@@ -35,42 +42,137 @@ function sanitizeForPath(name: string): string {
 	return name.replaceAll("/", "-");
 }
 
-/** Custom styled dropdown replacing native select, with local/remote grouping */
+/** Rows of the list at most, before it scrolls; fewer when the window is short. */
+const LIST_MAX_PX = 240;
+const LIST_MIN_PX = 112;
+/** The search field, its padding and the gap to the window's edge. */
+const PANEL_CHROME_PX = 56;
+
+/**
+ * The "Start from" picker: a button that opens a searchable list of branches,
+ * local first, then remote. A repository can have hundreds of branches and the
+ * one wanted is often a remote one at the very end, so the list is filtered by
+ * typing and walked with the arrow keys.
+ *
+ * The list is drawn in a portal: the dialog clips and scrolls its own body, so
+ * a list inside it is cut off wherever the dialog happens to end.
+ */
 const BaseRefDropdown: Component<{
 	value: string;
 	options: BaseRefOption[];
+	/** The project's default base, marked "(default)". */
+	defaultName: string;
 	onChange: (value: string) => void;
 }> = (props) => {
 	const [open, setOpen] = createSignal(false);
+	const [query, setQuery] = createSignal("");
+	/** The row the arrow keys are on, as an index into `ordered()`. */
+	const [cursor, setCursor] = createSignal(0);
+	const [place, setPlace] = createSignal({ left: 0, top: 0, width: 0, listMax: LIST_MAX_PX });
 	let triggerRef: HTMLButtonElement | undefined;
-	let listRef: HTMLDivElement | undefined;
+	let panelRef: HTMLDivElement | undefined;
+	let searchRef: HTMLInputElement | undefined;
 
-	const localRefs = () => props.options.filter((r) => r.kind === "local");
-	const remoteRefs = () => props.options.filter((r) => r.kind === "remote");
+	const matches = createMemo(() => {
+		const words = query().trim().toLowerCase();
+		return words ? props.options.filter((r) => r.name.toLowerCase().includes(words)) : props.options;
+	});
+	const localRefs = createMemo(() => matches().filter((r) => r.kind === "local"));
+	const remoteRefs = createMemo(() => matches().filter((r) => r.kind === "remote"));
+	/** The rows in the order they are drawn, which is the order the arrow keys walk. */
+	const ordered = createMemo(() => [...localRefs(), ...remoteRefs()]);
 
-	// Close on outside click
-	const handleDocClick = (e: MouseEvent) => {
-		if (!triggerRef?.contains(e.target as Node) && !listRef?.contains(e.target as Node)) {
-			setOpen(false);
-		}
+	const close = () => {
+		setOpen(false);
+		triggerRef?.focus();
 	};
+
+	const show = () => {
+		if (!triggerRef) return;
+		const rect = triggerRef.getBoundingClientRect();
+		const room = window.innerHeight - rect.bottom - PANEL_CHROME_PX;
+		setPlace({
+			left: rect.left,
+			top: rect.bottom + 4,
+			width: rect.width,
+			listMax: Math.max(LIST_MIN_PX, Math.min(LIST_MAX_PX, room)),
+		});
+		setQuery("");
+		setCursor(
+			Math.max(
+				0,
+				ordered().findIndex((r) => r.name === props.value),
+			),
+		);
+		setOpen(true);
+	};
+
+	const pick = (name: string) => {
+		props.onChange(name);
+		close();
+	};
+
+	const revealCursor = () =>
+		panelRef?.querySelector<HTMLElement>("[data-cursor]")?.scrollIntoView?.({ block: "nearest" });
 
 	createEffect(() => {
 		if (!open()) return;
-		document.addEventListener("mousedown", handleDocClick);
-		onCleanup(() => document.removeEventListener("mousedown", handleDocClick));
+		// Escape closes the list and stops there; the dialog stays open.
+		registerModal(close);
+		const onOutside = (e: MouseEvent) => {
+			const target = e.target as Node;
+			if (!triggerRef?.contains(target) && !panelRef?.contains(target)) setOpen(false);
+		};
+		// The list is placed once, from where the button was.
+		const onResize = () => setOpen(false);
+		document.addEventListener("mousedown", onOutside);
+		window.addEventListener("resize", onResize);
+		onCleanup(() => {
+			document.removeEventListener("mousedown", onOutside);
+			window.removeEventListener("resize", onResize);
+		});
+		queueMicrotask(() => {
+			searchRef?.focus();
+			revealCursor();
+		});
 	});
 
-	const renderItem = (option: BaseRefOption) => (
+	const onSearchKey = (e: KeyboardEvent) => {
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			e.preventDefault();
+			const last = ordered().length - 1;
+			if (last < 0) return;
+			setCursor((at) => Math.max(0, Math.min(last, at + (e.key === "ArrowDown" ? 1 : -1))));
+			queueMicrotask(revealCursor);
+		} else if (e.key === "Enter") {
+			// Enter picks a branch here. The dialog's own Enter creates the
+			// worktree, and must not also fire.
+			e.preventDefault();
+			e.stopPropagation();
+			const choice = ordered()[cursor()];
+			if (choice) pick(choice.name);
+		}
+	};
+
+	const defaultTag = () => ` (${t("createWorktree.default", "default")})`;
+
+	const renderItem = (option: BaseRefOption, index: number) => (
 		<div
-			class={`${s.dropdownItem} ${option.name === props.value ? s.dropdownItemActive : ""}`}
-			onClick={() => {
-				props.onChange(option.name);
-				setOpen(false);
-			}}
+			role="option"
+			aria-selected={option.name === props.value}
+			class={cx(
+				s.dropdownItem,
+				option.name === props.value && s.dropdownItemActive,
+				index === cursor() && s.dropdownItemCursor,
+			)}
+			data-cursor={index === cursor() ? "" : undefined}
+			onMouseMove={() => setCursor(index)}
+			onClick={() => pick(option.name)}
 		>
 			{option.name}
-			{option.is_default ? ` (${t("createWorktree.default", "default")})` : ""}
+			<Show when={option.name === props.defaultName}>
+				<span class={s.defaultTag}>{defaultTag()}</span>
+			</Show>
 		</div>
 	);
 
@@ -78,23 +180,60 @@ const BaseRefDropdown: Component<{
 		<div class={s.baseRefRow}>
 			<label>{t("createWorktree.startFrom", "Start from")}</label>
 			<div class={s.dropdownWrapper}>
-				<button ref={triggerRef} type="button" class={s.dropdownTrigger} onClick={() => setOpen(!open())}>
-					<span class={s.dropdownValue}>{props.value}</span>
+				<button
+					ref={triggerRef}
+					type="button"
+					class={s.dropdownTrigger}
+					aria-haspopup="listbox"
+					aria-expanded={open()}
+					onClick={() => (open() ? close() : show())}
+				>
+					<span class={s.dropdownValue}>
+						{props.value}
+						<Show when={props.value === props.defaultName}>
+							<span class={s.defaultTag}>{defaultTag()}</span>
+						</Show>
+					</span>
 					<svg class={s.dropdownChevron} width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
 						<path d="M4 6l4 4 4-4" />
 					</svg>
 				</button>
 				<Show when={open()}>
-					<div ref={listRef} class={s.dropdownList}>
-						<Show when={localRefs().length > 0}>
-							<div class={s.dropdownSectionHeader}>{t("createWorktree.localBranches", "Local")}</div>
-							<For each={localRefs()}>{renderItem}</For>
-						</Show>
-						<Show when={remoteRefs().length > 0}>
-							<div class={s.dropdownSectionHeader}>{t("createWorktree.remoteBranches", "Remote")}</div>
-							<For each={remoteRefs()}>{renderItem}</For>
-						</Show>
-					</div>
+					<Portal>
+						<div
+							ref={panelRef}
+							class={s.dropdownList}
+							style={{ left: `${place().left}px`, top: `${place().top}px`, width: `${place().width}px` }}
+							data-testid="base-ref-list"
+						>
+							<SearchField
+								ref={(el) => {
+									searchRef = el;
+								}}
+								class={s.dropdownSearch}
+								value={query()}
+								onInput={(value) => {
+									setQuery(value);
+									setCursor(0);
+								}}
+								onKeyDown={onSearchKey}
+								placeholder={t("createWorktree.searchBranches", "Search branches")}
+							/>
+							<div class={s.dropdownScroll} role="listbox" style={{ "max-height": `${place().listMax}px` }}>
+								<Show when={localRefs().length > 0}>
+									<div class={s.dropdownSectionHeader}>{t("createWorktree.localBranches", "Local")}</div>
+									<For each={localRefs()}>{(option, i) => renderItem(option, i())}</For>
+								</Show>
+								<Show when={remoteRefs().length > 0}>
+									<div class={s.dropdownSectionHeader}>{t("createWorktree.remoteBranches", "Remote")}</div>
+									<For each={remoteRefs()}>{(option, i) => renderItem(option, localRefs().length + i())}</For>
+								</Show>
+								<Show when={ordered().length === 0}>
+									<div class={s.dropdownEmpty}>{t("createWorktree.noMatch", "No matching branches")}</div>
+								</Show>
+							</div>
+						</div>
+					</Portal>
 				</Show>
 			</div>
 		</div>
@@ -108,8 +247,10 @@ export const CreateWorktreeDialog: Component<CreateWorktreeDialogProps> = (props
 	const [isCreating, setIsCreating] = createSignal(false);
 	let inputRef: HTMLInputElement | undefined;
 
-	/** Available base refs — first entry is the default */
+	/** Available base refs — first entry is the repository's default branch */
 	const availableBaseRefs = () => props.baseRefs ?? [];
+	/** The base this project's worktrees start from unless another is picked. */
+	const defaultBase = () => props.defaultBaseRef || availableBaseRefs()[0]?.name || "";
 
 	const trimmedName = () => branchName().trim();
 
@@ -134,11 +275,18 @@ export const CreateWorktreeDialog: Component<CreateWorktreeDialogProps> = (props
 		return `${dir}/${sanitizeForPath(name)}/`;
 	});
 
-	// Reset state when dialog opens
+	// `props.visible` is computed by the caller from the whole dialog state, so
+	// reading it directly re-runs an effect on every change to that state, not
+	// only when the dialog opens or closes. The memo passes on real changes only.
+	const visible = createMemo(() => props.visible);
+
+	// Reset state when dialog opens. Only opening resets it: the default base
+	// can change while the dialog is up ("Always start from…"), and that must
+	// not wipe the name being typed.
 	createEffect(() => {
-		if (props.visible) {
+		if (visible()) {
 			setBranchName("");
-			setBaseRef(availableBaseRefs()[0]?.name ?? "");
+			setBaseRef(untrack(defaultBase));
 			setError(null);
 			setTimeout(() => {
 				if (inputRef) {
@@ -150,7 +298,7 @@ export const CreateWorktreeDialog: Component<CreateWorktreeDialogProps> = (props
 
 	// Keyboard handling
 	createEffect(() => {
-		if (!props.visible) return;
+		if (!visible()) return;
 
 		// Escape-to-close is handled centrally (stores/modalStack): registering routes
 		// Escape to props.onClose AND stops it reaching the terminal underneath.
@@ -254,7 +402,24 @@ export const CreateWorktreeDialog: Component<CreateWorktreeDialogProps> = (props
 						</div>
 
 						<Show when={availableBaseRefs().length > 1 && !isExistingBranch()}>
-							<BaseRefDropdown value={baseRef()} options={availableBaseRefs()} onChange={setBaseRef} />
+							<BaseRefDropdown
+								value={baseRef()}
+								options={availableBaseRefs()}
+								defaultName={defaultBase()}
+								onChange={setBaseRef}
+							/>
+							<Show when={props.onSetDefaultBaseRef && baseRef() && baseRef() !== defaultBase()}>
+								<button
+									type="button"
+									class={s.makeDefault}
+									onClick={() => props.onSetDefaultBaseRef?.(baseRef())}
+									data-testid="base-ref-make-default"
+								>
+									{t("createWorktree.makeDefault", "Always start from {branch} in this project", {
+										branch: baseRef(),
+									})}
+								</button>
+							</Show>
 						</Show>
 
 						<div class={s.branchList}>
