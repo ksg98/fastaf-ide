@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-11
+
 ### Added
 - New Worktree: the Start from list has a search field. Type part of a branch name, local or remote, move
   with the arrow keys and press Enter. The list is also taller (#11).

@@ -1,7 +1,7 @@
 # FastAF Specification
 
-**Version:** 2.2.0
-**Last Updated:** 2026-11-10
+**Version:** 2.2.1
+**Last Updated:** 2026-11-11
 
 Codex global hook setup (#2625-c4b5): installed status requires native current-definition trust. Explicit installs use CLI-returned keys/hashes and versioned config writes; failed verification requires `/hooks` review. Base-config verification does not claim profile-specific hook trust.
 
