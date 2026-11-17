@@ -1756,3 +1756,18 @@ runs in the backend, so nothing changes until the Rust process is rebuilt.
   fires): detection still happens — the pattern anchors on `API Error: 5xx`.
 - [ ] A 429/overload (`API Error: 529` or "temporarily limiting requests") is
   still logged as a rate limit, not as a server error, and injects nothing.
+
+## Suggestion chips hold still at a zoomed window
+
+`SuggestOverlay` used to resize its own font from a `scrollWidth > clientWidth`
+reading. At any app zoom other than 100% WebKit reports `scrollWidth` one past
+`clientWidth` with nothing overflowing, so the font hunted between 13px and
+14px on every frame (reported by Kunal at 125%). The font is now fixed in the
+stylesheet. Measured in headless WebKit with `.tmp/suggest-harness/run.cjs`
+(root CSS zoom standing in for the webview's page zoom): before, 6 of 17 window
+widths never settled at 125%; after, 0 of 298 across 80–200%.
+
+- [ ] In the installed app at 125% zoom (Cmd+=), let an agent finish with a
+  `suggest:` line. The chip bar fades in once and then does not move, at
+  several window widths. The headless run emulates page zoom; this is the same
+  check through the real WKWebView `pageZoom`.

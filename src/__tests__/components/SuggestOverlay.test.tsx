@@ -90,6 +90,20 @@ describe("SuggestOverlay", () => {
 		const buttons = container.querySelectorAll("button");
 		expect(buttons.length).toBe(1);
 	});
+
+	it("leaves its size to the stylesheet, even when the row measures one pixel too wide", async () => {
+		// A zoomed webview reports scrollWidth one past clientWidth with nothing
+		// overflowing. Resizing the font from that reading never settles: the bar
+		// grew and shrank on every frame.
+		const { container } = render(() => (
+			<SuggestOverlay items={["Run tests", "Review diff", "Deploy"]} onSelect={() => {}} onDismiss={() => {}} />
+		));
+		const overlay = container.firstElementChild as HTMLElement;
+		Object.defineProperty(overlay, "clientWidth", { configurable: true, get: () => 839 });
+		Object.defineProperty(overlay, "scrollWidth", { configurable: true, get: () => 840 });
+		await Promise.resolve();
+		expect(overlay.getAttribute("style")).toBeNull();
+	});
 });
 
 describe("terminalsStore suggest methods", () => {

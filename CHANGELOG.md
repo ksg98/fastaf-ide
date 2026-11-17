@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Suggested follow-up chips no longer flicker when the app is zoomed. At any zoom other than 100% the bar
+  under the terminal kept growing and shrinking, because it resized its own text from a width reading that
+  is one pixel off in a zoomed window. The text size is now fixed, and a crowded row shortens labels instead.
+
 ## [2.2.1] - 2026-11-11
 
 ### Added

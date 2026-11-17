@@ -1,8 +1,4 @@
 .overlay {
-  /* --chip-font-size is set at runtime by SuggestOverlay.tsx. It starts at
-   * the preferred size (var(--font-sm)) and is scaled down when the longest
-   * chip would overflow the available width. Floor: 11px. */
-  --chip-font-size: var(--font-sm);
   position: absolute;
   bottom: 28px;
   left: 50%;
@@ -53,7 +49,11 @@ button.chip {
   height: auto;
   flex-shrink: 1;
   font-family: var(--font-ui);
-  font-size: var(--chip-font-size);
+  /* One size, set here. A crowded row shortens labels (the chips shrink and
+   * the label ends in an ellipsis); nothing measures the row to resize it.
+   * A script used to, and at a zoomed webview its width reading is a pixel
+   * off, so the bar grew and shrank on every frame. */
+  font-size: var(--font-base);
   padding: 8px 16px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
@@ -62,8 +62,7 @@ button.chip {
   cursor: pointer;
   white-space: nowrap;
   transition: background var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out),
-    font-size 0.08s ease;
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .chipLabel {
