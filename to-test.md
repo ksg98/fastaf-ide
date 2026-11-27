@@ -1771,3 +1771,234 @@ widths never settled at 125%; after, 0 of 298 across 80–200%.
   `suggest:` line. The chip bar fades in once and then does not move, at
   several window widths. The headless run emulates page zoom; this is the same
   check through the real WKWebView `pageZoom`.
+
+## Upstream 2.1.2 sync
+
+Branch `sync/upstream-2.1.2` (2026-11-27). The merge agents ran tsc (clean), biome on their files, the vitest
+files that cover their areas, `cargo check` and `cargo clippy` with and without `dictation`, and the Rust unit
+tests of the modules they resolved. A design pass then rendered the new and changed screens in a headless
+WebKit harness over a fake backend, in Codex Dark and Cursor Dark, and fixed what it found. Nobody started the
+app, and no workflow has run on GitHub. Build with Rust 1.99.1 (`rustup default 1.99.1`): the 1.96 default on
+this machine cannot compile 2.1.2.
+
+**Release and CI.** `release.yml`, `nightly.yml` and `ci.yml` gained build steps that have never run on
+GitHub: Linux and Windows now build with `--features vulkan`. A nightly must pass before any tag.
+
+- [ ] Run the Nightly workflow on this branch (Actions › Nightly › Run workflow; it publishes that build as
+  the rolling nightly). The macOS, Linux and Windows legs all finish green.
+- [ ] Linux leg of that run: "Install Vulkan SDK" works on `ubuntu-24.04`, and the three checks after the
+  build pass: `check-ggml-x86-baseline.sh`, `check-appimage-vulkan-loader.sh` and
+  `check-linux-desktop-packages.sh`. The last one must find `FastAF`, `fastaf-cli` and `tuic-bridge` in the
+  deb, the rpm and the AppImage; those names were read from the config, not from a build.
+- [ ] Windows leg of that run: "Install LLVM 22 for bindgen" and "Fetch Vulkan loader for the installer" pass,
+  and the installer build does not stop on `TUIC_REQUIRE_VULKAN_LOADER`.
+- [ ] `update-notes` job of that run: "Verify complete desktop updater target selection" passes, so
+  `latest.json` holds all eight entries (macOS ARM64, Windows x64 and Linux x64, each with its format-specific
+  keys).
+- [ ] CI on the sync commit: "Frontend checks" passes the workflow contract tests
+  (`test-linux-desktop-release.py`, `test-supply-chain.py`), and the Windows leg gets through "Install LLVM 22
+  for bindgen".
+- [ ] First tagged release after the sync: the macOS leg finishes inside its new 120-minute limit,
+  `finalize-release` publishes, and the release holds `FastAF_aarch64.dmg` and `SHA256SUMS-Linux-x64.txt`.
+- [ ] After the merge is staged, `node scripts/check-no-hardcoded-tmp.mjs` and `node
+  scripts/check-no-home-gits.mjs` pass. Both are part of `make check`; while the index was unmerged the first
+  one counted every conflicted file three times.
+- [HUMAN] Linux build on a machine with a Vulkan GPU: dictation transcribes on the GPU. On a machine or VM
+  with no Vulkan device the app still starts and dictation runs on the CPU. Needs real hardware.
+- [HUMAN] Windows installer on a machine with no `vulkan-1.dll` in System32 (a VM without a GPU driver): the
+  installer puts the loader next to the app and the app starts. Needs a Windows machine.
+
+**First start: legacy workflow data.** The first start of any build from this branch removes the legacy
+workflow engine's data, after a backup. Debug and release builds share one config directory, so `make dev`
+does it to the real config too. Copy `workflows.sqlite3`, `workflow_runs.sqlite3`, `automation_runs.sqlite3`
+and `automations.json` somewhere safe before that first start.
+
+- [ ] After the first start, each of those four files that held legacy data has a
+  `<name>.legacy-workflows.bak` beside it, and `automations.json` has no `pull_request_reviews` or
+  `event_intake` block left.
+- [ ] Automations still lists every prompt schedule with its next run, and one of them runs on time.
+- [ ] Start the app a second time: the `.legacy-workflows.bak` files keep their first modification time.
+- [ ] An MCP client that calls `workflow action=story` is refused, and `story action=list_plans` answers.
+
+**MCP, agents and the CLI.** Compiled and unit-tested; none of it was exercised against a running app.
+
+- [ ] Settings › MCP shows no `settings` among the denied capabilities, and the Settings opt-in for MCP is off
+  on a config that had none saved.
+- [ ] Codex `/hooks` lists FastAF's entries as "FastAF session" after native status signals are switched off
+  and on again.
+- [ ] `fastaf notify <session> -` from a shell, with the text on stdin, reaches that agent's inbox and wakes
+  it when it is idle.
+- [ ] Resume a Claude tab after a restart: the command carries `--dangerously-skip-permissions` once, and the
+  `--settings` hook file.
+- [ ] Settings › General › Code Intelligence still has no Install button for mdkb, and FastAF downloads
+  nothing.
+- [ ] Log output survives resizes: in a throwaway session print 150 numbered rows slowly, make the terminal
+  narrower and shorter and wide again while it prints, then read `GET /sessions/<id>/output?format=log`. Every
+  row appears once. Upstream saw rows 102 to 122 twice before its fix.
+- [HUMAN] Windows build: agent hooks find `fastaf-cli.exe` beside the app and native status signals arrive.
+  This path was not compiled or run on macOS. Needs a Windows machine.
+
+**Files.** Upstream's stricter path rule now also covers FastAF's New File and Save.
+
+- [ ] Files panel: New File and Save into a nested folder that does not exist yet still work, and a path that
+  starts with `/` or `C:\` is refused.
+- [ ] A write through a symlinked folder that points outside the repository now succeeds, because the owner's
+  links are followed. Decide whether FastAF should keep refusing it.
+- [ ] A Markdown link to `smb://host/share` or `editor://…` asks for confirmation with the exact target, and
+  nothing opens before you confirm.
+
+**Title bar, tabs and sidebar.** The design pass rendered these screens in a headless harness in Codex Dark
+and Cursor Dark (shots in `.tmp/sync/shots/design-shell/`, `<theme>/<scene>.png`). Ticked items were judged
+there; the open ones need the running app.
+
+- [x] Title bar with an agent tab and two tickers, at 1600, 1200 and 1100 wide with 1, 3 and 5 tabs: the order
+  is status text, agent badge, tickers, PR, bell, IDE launcher, toggles. Tickers are whole when they fit and
+  step aside for the tabs when they do not; no stray gap with no status text. _(verified: design-shell
+  harness, `shell.titlebar.png`, `titlebar-1200.titlebar.png`, `titlebar-tabs3-1200.titlebar.png`,
+  `titlebar-tabs5.titlebar.png`; the fake backend had no PR, usage or offline data, see the last list)_
+- [x] `+` menu: 28px rows, 16px agent icons, the run configuration in muted type after the name, a tick on the
+  default only where an agent has several. _(verified: design-shell harness, `plus-menu.menu.png`,
+  `plus-menu-configs.menu.png`)_
+- [ ] `+` in the real window: a click opens the agent menu and the agent you pick starts in the active branch;
+  next time it is listed first. Alt/Option-click and Cmd+T open a plain terminal. Right click and long press
+  open the same menu.
+- [x] Sidebar footer, layers menu: the three Layout entries in one tick column; Live agents shows the pill
+  "Live agents only · n/m · Show all". _(verified: design-shell harness, `footer-menu.menu.png`,
+  `live-agents.sidebar.png`; Show all returning to the earlier layout and the Compact start after a restart
+  are unit-tested in `ui.test.ts` and `ui.sidebarDensityReset.test.ts`)_
+- [x] Branch rows: `+` appears on hover and on keyboard focus (an inset ring), without the row moving or the
+  list scrolling sideways. The `⋯` stays out of the hover cluster; right click opens the same menu.
+  _(verified: design-shell harness, `branch-hover.rows.png`, `branch-focus.rows.png`)_
+- [x] Worktree diagnostic row: a warning icon in the state slot so the name lines up with branch names, the
+  reason in muted type, Prune or Repair as quiet row buttons, "Confirm?" in red. _(verified: design-shell
+  harness, `diagnostic.rows.png`, `diagnostic-confirm.rows.png`)_
+- [ ] In a repository with a worktree whose folder you deleted: Prune asks for a second click, then `git
+  worktree list` no longer shows it and no file was deleted. On a worktree with a broken `.git` link, Repair
+  makes the row go away.
+- [x] A toast while a modal dialog is open sits at the bottom left, 8px off the edge, clear of the dialog's
+  buttons. A small prompt dialog is not modal, so toasts stay top right there. _(verified: design-shell
+  harness, `toast-dialog-big.png`, `toast-dialog.png`)_
+- [ ] With a toast on screen, click a control right beside it: the click reaches the control.
+- [x] A stalled agent shows a steady 6px amber dot on its tab, and on its own row under the branch when Nested
+  Terminal Tabs is on. The branch row's dot stays busy. _(verified: design-shell harness,
+  `stalled.titlebar.png`, `stalled-tree.rows.png`)_
+- [x] "Reset Keep" on a kept branch: the undo icon in Compact, text in Rich. _(verified: design-shell harness,
+  `kept-compact.rows.png`, `rich.sidebar.png`)_
+- [ ] Drag a tab onto each edge of a pane and of the unsplit terminal area in the real window: a highlight
+  covers the half the tab will take, and dropping splits there. The highlight had no height before the design
+  pass fixed it; the harness showed it for one drag over the right edge (`edge-drop-drag.png`).
+- [ ] Switch away from a terminal tab and back: its last rows are there at once, not a blank until the next
+  output.
+- [ ] Open in › FastAF shell opens a plain terminal tab in the current worktree.
+- [ ] Clicking the Agents ticker's label opens the Activity Dashboard; its cycle badge only advances the
+  tickers.
+
+**Panels and dialogs.** Rendered by the design pass in the same harness (shots in
+`.tmp/sync/shots/design-panels/`). Ticked items were judged there; the open ones need the running app.
+
+- [x] Plans and Stories header: one 40px row at 1120px and at 760px. The backend is a state dot and its name;
+  the popover lists Chosen, Connector, Installed at and Fingerprint and holds the two override buttons.
+  _(verified: design-panels harness, `stories`, `stories-760`, `stories-backend-popover`)_
+- [x] A connector that waits for approval is a question in the dialog body (a shield, "This project keeps its
+  plans and stories in …", the path and fingerprint, one primary button), not a band under the header.
+  _(verified: design-panels harness, `stories-approval`, `stories-approval-760`)_
+- [x] Story list: the phase picker is a 6px state dot before a quiet menu; Waiting on you has one row per
+  item, and an outside request ends with its two answers. _(verified: design-panels harness, `stories`,
+  `stories-waiting-notices`, `stories-waiting-answer`)_
+- [x] Git › Stashes: Check all sits in the Git panel header; a kept stash says "Kept, still useful." under its
+  row; a dropped one leaves a block above the rows with the restore command and a copy button. _(verified:
+  design-panels harness, `stashes-check-all`, `stashes-check-blocked`, `stashes-narrow`)_
+- [ ] Git › Stashes at 300px in the real panel: a row's actions appear on hover and on keyboard focus (arrow
+  keys), and the tab strip scrolls to Branches.
+- [x] Workflows dialog: one 44px bar with the four views (Designer, Triggers, Preview, Definition), the
+  draft's state, refresh, Validate, Save draft and Publish; Designer in three columns. _(verified:
+  design-panels harness, `workflows`, `workflows-activity`, `workflows-triggers`, `workflows-preview`,
+  `workflows-definition` and their `-760` variants)_
+- [ ] Workflows: edit a step, edit a trigger binding, then switch between the four views. Nothing is lost, and
+  Publish stays disabled until the draft is saved.
+- [ ] Workflows › Designer in a narrow window: the open step sits under the steps and both scroll.
+- [x] Automations: the bar has no "Select first automation on open" switch; the timezone field is drawn like
+  the form's selects, and its menu opens above the dialog and filters as you type. _(verified: design-panels
+  and design-shell harness, `automations`, `automations-timezone`, `automations-timezone-search`,
+  `timezone-search.menu.png`)_
+- [x] All Changes: one 40px row holds the scope pills, the base picker, Include uncommitted and the file
+  totals; commits are rows and a selected range is visible in both themes. _(verified: design-panels harness,
+  `allchanges-branch`, `allchanges-commits`, `allchanges-commit-range`)_
+- [ ] All Changes on a feature branch opens on Branch vs base, and Include uncommitted adds the working tree.
+  Scroll a long diff: the scope row stays pinned and each file header parks under it, in split and in inline
+  mode.
+- [x] Compose queue: 28px rows with Steer and Cancel as labelled ghost buttons. _(verified: design-panels
+  harness, `compose-queue`)_
+- [ ] Compose: Steer on a queued prompt interrupts a working agent and sends it; Cmd+S parks the draft and
+  brings it back.
+- [x] AI Chat panel: the thread, the ⋯ menu on an answer and on a user message, raw Markdown, a quote in the
+  composer, the slash list, a fork and its History row, Sending…, Not sent and No reply, an open notice, at
+  the default width and at 300px. _(verified: chat-port harness, shots in `.tmp/sync/shots/chat-port/`:
+  `thread`, `menu-assistant`, `menu-user`, `raw`, `quote`, `slash`, `fork`, `fork-history`, `sending`,
+  `provider-error`, `notice-open`)_
+- [ ] Chat view of an agent terminal: the ⋯ menu on a message offers Copy message, Show raw Markdown and Quote
+  reply. Quote reply puts the text in the dock without sending it.
+
+**Phone and remote access.**
+
+- [ ] Remote sign-in on a throwaway instance: five wrong passwords from one address, then the login page shows
+  how long to wait and the QR hint.
+- [ ] Browser mode: the code editor offers Load in pages for a text file above 10 MB, and saving a file larger
+  than 2 MB works.
+- [ ] `/mobile`: a session card shows Current tool while its agent runs a tool.
+- [HUMAN] Phone, Chat tab (it needs an ego executable on the host): the ⋯ button is always visible; the
+  restyled menu, a sent reaction's mark and the comment form are readable (the phone stylesheet has no desktop
+  wash tokens, so they use fallbacks); tapping a mark removes it; a send while the host is unreachable shows
+  Send failed with Retry. Needs a real touch screen.
+
+### Screens the harness could not show
+
+Collected from the three design reports (`chat-port`, `design-panels`, `design-shell`). The harness has no
+blur, no native tooltips or menus, no window, and a fake backend.
+
+- [ ] Frosted menus in Cursor Dark. Headless WebKit draws no blur, so every menu looked see-through in the
+  shots. Open the `+` agent menu, the sidebar footer menu, the Plans and Stories backend popover, the
+  Workflows dialog, the Automations timezone menu and the ⋯ menu on an AI Chat message: each is frosted, and
+  the text behind it cannot be read.
+- [ ] Automations › timezone menu in Cursor Dark: the pinned search row is opaque and the list under it is
+  frosted. Look at the two tones side by side; the search row must read as part of the menu, not as a band of
+  another colour.
+- [ ] Native tooltips. Hover a ticker, the IDE launcher button, a tab whose agent failed (its title carries
+  the last error), an activity row in Workflows › Designer (its purpose), the disabled Publish button ("Save
+  the draft before publishing") and, after Check all dropped a stash, the copy button and the restore command
+  (the archive ref): each shows its tooltip.
+- [ ] Native select menus: Add step in Workflows › Designer, the phase picker on a story row and the base
+  picker in All Changes each open the system menu, and the choice is applied.
+- [ ] Drag the window by the empty part of the title bar right of the tabs (the drag region moved from the tab
+  strip to the status cluster). A click on a ticker, the agent badge or a toggle there does not start a drag.
+- [ ] Title bar with real data: on a branch with an open pull request, with an agent that has subscription
+  usage and with one remote machine offline. The cluster reads status text, agent badge with its usage,
+  tickers, the Offline pill, the PR and CI badge, bell, IDE launcher, toggles, and nothing overlaps at 1200px
+  wide.
+- [ ] Title bar with an active plan: the Plans and Stories pill's 3px progress track is visible against the
+  bar (upstream changed it from `--bg-tertiary` to `--fg-muted`; it was never rendered).
+- [ ] Reduce Motion on (System Settings › Accessibility › Display), two or more tickers showing: resize the
+  window slowly. Tickers are neither cut nor flickering, and the Error Log toggle shows no new count.
+- [HUMAN] Windows and Linux title bars (32px) were not rendered: tabs, tickers and toggles fit the bar and
+  nothing is cut. Needs those machines.
+- [ ] Cmd/Ctrl+K in the real app, from the keyboard and from the menu bar item: with the cursor in AI Chat it
+  hides the chat's messages and leaves the terminal's scrollback; with the cursor in the terminal it clears
+  the scrollback as before.
+- [ ] After a click on the AI Chat thread or on one of its buttons, type: the characters go to the chat, not
+  to the terminal beside it.
+- [ ] AI Chat: move the pointer over an answer and over one of your messages. The ⋯ button appears without the
+  text moving, and stays while its menu is open.
+- [ ] AI Chat with the provider unreachable (or no model set): the message stays as Not sent with its reason,
+  Retry and Discard. With a provider that answers an error: No reply with the provider's reason. Retry resends
+  the same text; the harness faked both.
+- [ ] Plans and Stories detached into its own window: the backend line, Waiting on you and the lists look as
+  they do in the dialog.
+- [ ] Open Workflows from Plans and Stories, press Escape: Workflows closes and Plans and Stories is still
+  open. Escape again closes it.
+- [ ] Git › Stashes with a headless model configured: Check all on a stash whose changes are already in HEAD
+  drops it and shows the restore command. The copy button puts that command on the clipboard, and running it
+  brings the stash back.
+- [ ] Workflows against the real backend catalog (about 30 activities; the harness had 17): the Activities
+  list scrolls inside its column, and a step can be added from it.
+- [HUMAN] A project that keeps its plans and stories in an external connector (Wiz): the dialog body asks,
+  Approve loads the plans, and an update of the connector asks again. Needs an installed Wiz connector.

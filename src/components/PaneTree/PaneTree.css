@@ -288,3 +288,18 @@
   color: var(--fg-muted);
   font-size: var(--font-md);
 }
+
+/* Where a dragged tab lands: half a pane for an edge, the whole pane for the
+   center. The app's selection wash with a thin accent line (the Multiview
+   tile's 60 %), square like the panes it covers, and layered as an overlay:
+   over the panes and the title bar, under menus and dialogs. */
+.pane-edge-drop-preview {
+  position: fixed;
+  z-index: var(--z-overlay);
+  pointer-events: none;
+  box-sizing: border-box;
+  background: rgba(var(--accent-rgb), 0.14);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+  transition: left var(--duration-fast) var(--ease-out), top var(--duration-fast) var(--ease-out),
+    width var(--duration-fast) var(--ease-out), height var(--duration-fast) var(--ease-out);
+}

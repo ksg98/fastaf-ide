@@ -22,7 +22,7 @@ pub(crate) struct DcrResponse {
 }
 
 impl DcrRequest {
-    pub(crate) fn for_tuicommander(redirect_uri: &str, scope: Option<String>) -> Self {
+    pub(crate) fn for_fastaf(redirect_uri: &str, scope: Option<String>) -> Self {
         Self {
             client_name: "FastAF".to_string(),
             redirect_uris: vec![redirect_uri.to_string()],
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
 
     fn test_request() -> DcrRequest {
-        DcrRequest::for_tuicommander("http://127.0.0.1:9999/oauth/callback", None)
+        DcrRequest::for_fastaf("http://127.0.0.1:9999/oauth/callback", None)
     }
 
     #[tokio::test]

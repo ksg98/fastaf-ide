@@ -237,7 +237,12 @@ export const ComposeDock: Component<ComposeDockProps> = (props) => {
 	const autoResize = () => {
 		if (!field) return;
 		field.style.height = "auto";
-		field.style.height = `${Math.min(field.scrollHeight, MAX_FIELD_PX)}px`;
+		const wanted = field.scrollHeight;
+		field.style.height = `${Math.min(wanted, MAX_FIELD_PX)}px`;
+		// Scroll only once the field has reached its cap. A zoomed webview reports
+		// scrollHeight one pixel past the box, which would otherwise put a
+		// scrollbar in a one-line field.
+		field.style.overflowY = wanted > MAX_FIELD_PX ? "auto" : "hidden";
 	};
 
 	const focusTerminal = () => terminal()?.ref?.focus();

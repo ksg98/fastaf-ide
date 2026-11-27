@@ -129,17 +129,17 @@
       "Codex terminals no longer adopt another project's session, and heavy Codex streaming no longer stalls behind an unterminated synchronized update.",
       "Grok can now call MCP tools proxied through FastAF, which it previously discarded silently.",
       "Saving part of the configuration no longer silently disables remote access, and a failed save no longer rotates vault-backed credentials.",
-      "F13–F20 can now be bound to shortcuts and the Global Hotkey on macOS, and the `tuic` CLI's session and agent commands now show real ids, names and status.",
+      "F13–F20 can now be bound to shortcuts and the Global Hotkey on macOS, and the `fastaf` CLI's session and agent commands now show real ids, names and status.",
       "Fixed stuck SSH tunnels, ghost worktree branches in the sidebar, stacked Markdown viewer/editor panes, and directory traversal on absolute-path file endpoints."
     ],
     "date": "2026-07-31"
   },
   "1.7.1": {
     "highlights": [
-      "tuic run starts a command in a fresh session, and tuic ls now prints short IDs plus --json for scripting.",
-      "tuic capture -n tails recent output, tuic status names sessions waiting on you, and targets match name prefixes case-insensitively.",
-      "tuic . opens a directory as a repository again, activating known repos silently and confirming new ones once.",
-      "tuic send only treats whole-token key names as keys, so text like \"Enter the room\" types correctly; arrows, Home/End, PageUp/PageDown and C-<letter> are covered.",
+      "fastaf run starts a command in a fresh session, and fastaf ls now prints short IDs plus --json for scripting.",
+      "fastaf capture -n tails recent output, fastaf status names sessions waiting on you, and targets match name prefixes case-insensitively.",
+      "fastaf . opens a directory as a repository again, activating known repos silently and confirming new ones once.",
+      "fastaf send only treats whole-token key names as keys, so text like \"Enter the room\" types correctly; arrows, Home/End, PageUp/PageDown and C-<letter> are covered.",
       "Fullscreen apps that print past the bottom of the window — gh run watch, long build monitors — now keep a scrollback you can actually scroll, isolated from your shell history.",
       "Updating mdkb now reconnects to the new daemon instead of silently talking to the stale one.",
       "Quiet dictation no longer types phantom subtitle credits like \"Grazie.\" in any of the eleven supported languages.",
@@ -185,9 +185,9 @@
     "highlights": [
       "Queued Compose commands are now listed in delivery order, and you can delete a single one without clearing the rest.",
       "The toolbar bell now shows the newest notification first instead of burying it under older history.",
-      "`tuic agent send` now reaches registered peers that have no terminal of their own, matching the MCP send tool.",
+      "`fastaf agent send` now reaches registered peers that have no terminal of their own, matching the MCP send tool.",
       "A message that nothing will surface now reports \"Buffered for <peer> (inbox_only)\" instead of falsely claiming delivery.",
-      "`tuic agent type` splits text and Enter as separate writes, so raw-mode TUIs receive the input instead of leaving it as prefill.",
+      "`fastaf agent type` splits text and Enter as separate writes, so raw-mode TUIs receive the input instead of leaving it as prefill.",
       "Vague OSC 777 notifications no longer latch a permanent awaiting-input badge; only explicit permission prompts stay confident."
     ],
     "date": "2026-08-12"

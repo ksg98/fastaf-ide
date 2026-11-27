@@ -59,8 +59,7 @@ const ModelRow: Component<{ model: ModelInfo }> = (props) => {
 	// always ask first.
 	const [confirmDelete, setConfirmDelete] = createSignal(false);
 	const isSelected = () => dictationStore.state.selectedModel === props.model.name;
-	const isDownloading = () =>
-		dictationStore.state.downloading && dictationStore.state.selectedModel === props.model.name;
+	const isDownloading = () => dictationStore.state.downloadingModel === props.model.name;
 
 	const sizeLabel = () =>
 		props.model.downloaded && props.model.actual_size_mb > 0
@@ -136,6 +135,13 @@ const ModelRow: Component<{ model: ModelInfo }> = (props) => {
 
 /** Dictation settings tab for the Settings panel */
 export const DictationSettings: Component = () => {
+	if (dictationStore.state.unavailable)
+		return (
+			<EmptyState
+				title="Dictation is not available in this build"
+				description="This copy of FastAF was built without speech recognition."
+			/>
+		);
 	const [newFrom, setNewFrom] = createSignal("");
 	const [newTo, setNewTo] = createSignal("");
 	const [rewriteTestInput, setRewriteTestInput] = createSignal(

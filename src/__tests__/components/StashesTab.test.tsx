@@ -1,10 +1,15 @@
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ invoke: vi.fn() }));
+const h = vi.hoisted(() => ({ invoke: vi.fn(), runPrompt: vi.fn(), canExecute: vi.fn() }));
 vi.mock("../../invoke", () => ({ invoke: h.invoke }));
+// The stash check hands the smart prompt to this hook; the prompt run is not the subject here.
+vi.mock("../../hooks/useSmartPrompts", () => ({
+	useSmartPrompts: () => ({ executeSmartPrompt: h.runPrompt, canExecute: h.canExecute }),
+}));
 
 import { parseStashDiff, parseStashMessage, StashesTab } from "../../components/GitPanel/StashesTab";
+import { promptLibraryStore, type SavedPrompt } from "../../stores/promptLibrary";
 
 const DIFF = [
 	"diff --git a/src/components/Terminal/CanvasTerminal.tsx b/src/components/Terminal/CanvasTerminal.tsx",
@@ -162,5 +167,83 @@ describe("StashesTab", () => {
 		const { findByText } = render(() => <StashesTab repoPath="/repo" />);
 		expect(await findByText("No stashes")).toBeTruthy();
 		expect(await findByText("Stash work in progress to set it aside without committing.")).toBeTruthy();
+	});
+});
+
+/** The Git panel header's action slot, where the tab portals "Check all". */
+function headerSlot(): HTMLElement {
+	const slot = document.createElement("div");
+	document.body.append(slot);
+	return slot;
+}
+
+describe("StashesTab stash check", () => {
+	const verdict = (value: string) => ({ ok: true, output: `{"verdict":"${value}","reason":"still unmerged work"}` });
+	let listed = STASHES;
+
+	beforeEach(() => {
+		listed = STASHES;
+		vi.spyOn(promptLibraryStore, "getSmartById").mockReturnValue({ id: "smart-stash-check" } as SavedPrompt);
+		h.canExecute.mockReset().mockReturnValue({ ok: true });
+		h.runPrompt.mockReset().mockResolvedValue(verdict("useful"));
+		h.invoke.mockReset();
+		h.invoke.mockImplementation(async (cmd: string, args?: { stashRef?: string }) => {
+			if (cmd === "get_stash_list") return listed;
+			if (cmd === "git_stash_facts") return { stash_ref: args?.stashRef, hash: "h", message: "m", all_in_head: false };
+			return null;
+		});
+	});
+
+	// Catches: the check missing from FastAF's row, or its verdict shown nowhere.
+	it("checks one stash from its row and says under it why it was kept", async () => {
+		const { findByText, container } = render(() => <StashesTab repoPath="/repo" />);
+		await findByText("link hover");
+		fireEvent.click(container.querySelector("button[aria-label='Check stash@{1}']") as HTMLElement);
+		const note = await findByText("Kept, still useful. still unmerged work");
+		// Under its own stash, not the first row.
+		expect(note.parentElement?.textContent).toContain("link hover");
+		expect(h.invoke).toHaveBeenCalledWith("git_stash_facts", { path: "/repo", stashRef: "stash@{1}" });
+		expect(h.invoke.mock.calls.some(([cmd]) => cmd === "git_stash_check_drop" || cmd === "git_stash_drop")).toBe(false);
+	});
+
+	// Catches: Check all running newest first (a drop would renumber the stashes still
+	// to check), or a dropped stash's archive and restore line vanishing with its row.
+	it("checks every stash oldest first and keeps a dropped stash's outcome above the rows", async () => {
+		h.runPrompt.mockResolvedValueOnce(verdict("redundant")).mockResolvedValue(verdict("useful"));
+		h.invoke.mockImplementation(async (cmd: string, args?: { stashRef?: string }) => {
+			if (cmd === "get_stash_list") return listed;
+			if (cmd === "git_stash_facts") return { stash_ref: args?.stashRef, hash: "h", message: "m", all_in_head: true };
+			if (cmd === "git_stash_check_drop") {
+				listed = [STASHES[0]];
+				return { dropped: true, reason: "", archive_ref: "refs/archive/stash-b", restore: "git stash store b" };
+			}
+			return null;
+		});
+		const slot = headerSlot();
+		const { findByText, container } = render(() => <StashesTab repoPath="/repo" headerSlot={slot} />);
+		await findByText("link hover");
+		fireEvent.click(await within(slot).findByTitle(/^Check all stashes/));
+		// The dropped stash's row is gone: its title, why, and the restore command stay above the rows.
+		expect(await findByText("Dropped. HEAD already has its changes.")).toBeTruthy();
+		expect(await findByText("git stash store b")).toBeTruthy();
+		expect((await findByText("link hover")).getAttribute("title")).toBe("refs/archive/stash-b");
+		await findByText("Kept, still useful. still unmerged work");
+		expect(h.invoke.mock.calls.filter(([cmd]) => cmd === "git_stash_facts").map(([, args]) => args.stashRef)).toEqual([
+			"stash@{1}",
+			"stash@{0}",
+		]);
+		expect(container.querySelector("button[aria-label='Check stash@{1}']")).toBeNull();
+		expect(container.querySelectorAll("button[aria-label^='Check stash@']")).toHaveLength(1);
+	});
+
+	// Catches: a check that cannot run failing silently.
+	it("says why the check cannot run and reads no stash", async () => {
+		h.canExecute.mockReturnValue({ ok: false, reason: "No headless agent configured" });
+		const slot = headerSlot();
+		const { findByText } = render(() => <StashesTab repoPath="/repo" headerSlot={slot} />);
+		await findByText("link hover");
+		fireEvent.click(await within(slot).findByTitle(/^Check all stashes/));
+		expect(await findByText("No headless agent configured")).toBeTruthy();
+		expect(h.invoke.mock.calls.some(([cmd]) => cmd === "git_stash_facts")).toBe(false);
 	});
 });

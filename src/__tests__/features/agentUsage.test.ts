@@ -1,34 +1,25 @@
 import { createStore } from "solid-js/store";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { providerQuotaStore, type QuotaView } from "../../stores/providerQuota";
 import { statusBarTicker } from "../../stores/statusBarTicker";
-import { HttpRpcError } from "../../transport/http";
 
-/**
- * The ticker must not name a vendor it has not seen. A Codex-only install polling
- * `get_claude_usage_api` at startup shows "Claude — no token", which is the
- * wrong-vendor reading the feature exists to prevent.
- */
-
+const handlers = new Map<string, (event: { payload: unknown }) => void>();
 const invoke = vi.fn();
-vi.mock("../../invoke", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
-
-const addMessage = vi.spyOn(statusBarTicker, "addMessage");
-const removeMessage = vi.spyOn(statusBarTicker, "removeMessage");
-
+vi.mock("../../invoke", () => ({
+	invoke: (...args: unknown[]) => invoke(...args),
+	listen: async (name: string, handler: (event: { payload: unknown }) => void) => {
+		handlers.set(name, handler);
+		return () => handlers.delete(name);
+	},
+}));
 vi.mock("../../stores/mdTabs", () => ({
 	mdTabsStore: { addClaudeUsage: vi.fn(), addCodexUsage: vi.fn(), addGrokUsage: vi.fn() },
 }));
 vi.mock("../../stores/appLogger", () => ({ appLogger: { warn: vi.fn() } }));
-
-interface FakeTerminal {
-	agentType: string | null;
-	sessionId?: string | null;
-}
 const [terminals, setTerminals] = createStore<{
 	activeId: string | null;
-	terminals: Record<string, FakeTerminal>;
+	terminals: Record<string, { agentType: string | null; sessionId?: string | null }>;
 }>({ activeId: null, terminals: {} });
-
 vi.mock("../../stores/terminals", () => ({
 	terminalsStore: {
 		get state() {
@@ -36,241 +27,393 @@ vi.mock("../../stores/terminals", () => ({
 		},
 	},
 }));
-
-const { destroyAgentUsage, initAgentUsage } = await import("../../features/agentUsage");
-
-/** Let the Solid effect and the async poll settle. */
+const { initAgentUsage, destroyAgentUsage, usagePlacement, formatAgentUsage } = await import(
+	"../../features/agentUsage"
+);
+const key = { owner: "claude-code", provider: "anthropic", credential: "/one" };
+const view = (session: string, percent: number): QuotaView => ({
+	key: { ...key, credential: `/${session}` },
+	session_ids: [session],
+	state: "fresh",
+	snapshot: {
+		windows: [
+			{ kind: "weekly", label: "7d", used_percent: percent, resets_at: null, window_seconds: 604800, model: null },
+		],
+		plan: "pro",
+		credits: null,
+		account: null,
+		observed_at_ms: 1,
+		source: "passive",
+	},
+});
 const settle = async () => {
-	await Promise.resolve();
+	await providerQuotaStore.start();
 	await Promise.resolve();
 };
+beforeEach(() => {
+	destroyAgentUsage();
+	providerQuotaStore.stop();
+	handlers.clear();
+	invoke.mockReset();
+	invoke.mockResolvedValue([]);
+	setTerminals({ activeId: null, terminals: {} });
+	statusBarTicker.clear();
+});
+afterEach(() => {
+	destroyAgentUsage();
+	providerQuotaStore.stop();
+	statusBarTicker.clear();
+	vi.useRealTimers();
+	vi.restoreAllMocks();
+});
 
-describe("agent usage ticker — no vendor default", () => {
-	beforeEach(() => {
-		destroyAgentUsage();
-		invoke.mockReset();
-		invoke.mockResolvedValue({});
-		statusBarTicker.clear();
-		addMessage.mockClear();
-		removeMessage.mockClear();
-		setTerminals({ activeId: null, terminals: {} });
+// Catches the original provider read on every switch, and the wrong cached account winning.
+it("tab_switch_between_bound_sessions_does_not_fetch", async () => {
+	invoke.mockResolvedValue([view("first", 21), view("second", 42)]);
+	setTerminals({
+		activeId: "a",
+		terminals: { a: { agentType: "claude", sessionId: "first" }, b: { agentType: "claude", sessionId: "second" } },
 	});
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 21%");
+	invoke.mockClear();
+	setTerminals("activeId", "b");
+	await Promise.resolve();
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 42%");
+	expect(invoke).not.toHaveBeenCalled();
+	const { mdTabsStore } = await import("../../stores/mdTabs");
+	statusBarTicker.getAll()[0]?.onClick?.();
+	expect(mdTabsStore.addClaudeUsage).toHaveBeenCalledWith("second");
+});
 
-	// The poll interval outlives the test otherwise.
-	afterEach(() => {
-		destroyAgentUsage();
-		statusBarTicker.clear();
+// Catches retaining one account's headroom on an unbound agent session.
+it.each(["ego", "claude"])("unbound_%s_does_not_borrow_a_cli_account", async (agent) => {
+	invoke.mockResolvedValue([view("claude", 21)]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: agent, sessionId: "ego" } } });
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()).toEqual([]);
+	expect(invoke.mock.calls).toEqual([["get_provider_quotas"]]);
+});
+
+// Catches restoring the deleted periodic provider polling path.
+it("clock_ticks_do_not_read_the_network", async () => {
+	vi.useFakeTimers();
+	invoke.mockResolvedValue([view("first", 21)]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "claude", sessionId: "first" } } });
+	initAgentUsage();
+	await settle();
+	invoke.mockClear();
+	await vi.advanceTimersByTimeAsync(600000);
+	expect(invoke).not.toHaveBeenCalled();
+});
+
+// Catches a push for an inactive account replacing the active account's ticker.
+it("inactive_quota_push_does_not_replace_the_active_account", async () => {
+	invoke.mockResolvedValue([view("first", 21), view("second", 42)]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "claude", sessionId: "first" } } });
+	initAgentUsage();
+	await settle();
+	handlers.get("provider-quota-changed")?.({ payload: view("second", 99) });
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 21%");
+	handlers.get("provider-quota-changed")?.({ payload: view("first", 55) });
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 55%");
+});
+
+// Catches showing an authentication failure as zero usage.
+it("auth_failure_is_not_zero_usage", async () => {
+	invoke.mockResolvedValue([{ ...view("first", 21), state: "auth_invalid", snapshot: null }]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "claude", sessionId: "first" } } });
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()[0]?.text).toBe("auth invalid");
+});
+
+// Catches a quota-clear effect subscribing to ticker writes and cycling with the activity ticker.
+it("unbound_session_does_not_subscribe_to_other_ticker_messages", async () => {
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "ego", sessionId: "unbound" } } });
+	const remove = vi.spyOn(statusBarTicker, "removeMessage");
+	initAgentUsage();
+	await settle();
+	const before = remove.mock.calls.length;
+	statusBarTicker.addMessage({ id: "activity", pluginId: "agent-activity", text: "idle", priority: 10, ttlMs: 0 });
+	await Promise.resolve();
+	expect(remove.mock.calls.length).toBe(before);
+	remove.mockRestore();
+});
+
+// Catches the badge blinking for a window it does not show, or not blinking for the one it shows.
+it("quota_priority_follows_the_shown_weekly_window", async () => {
+	const quota = view("first", 97);
+	quota.snapshot!.windows.push({
+		kind: "weekly",
+		label: "7d",
+		used_percent: 99,
+		resets_at: null,
+		window_seconds: 604800,
+		model: "opus",
 	});
-
-	it("polls nothing and writes no ticker when no terminal is active", async () => {
-		initAgentUsage();
-		await settle();
-
-		expect(invoke).not.toHaveBeenCalled();
-		expect(addMessage).not.toHaveBeenCalled();
-	});
-
-	it("polls nothing when the active tab is a shell with no agent", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: null } } });
-
-		initAgentUsage();
-		await settle();
-
-		expect(invoke).not.toHaveBeenCalled();
-		expect(addMessage).not.toHaveBeenCalled();
-	});
-
-	it("polls nothing when the active tab is an agent with no usage API", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "opencode" } } });
-
-		initAgentUsage();
-		await settle();
-
-		expect(invoke).not.toHaveBeenCalled();
-		expect(addMessage).not.toHaveBeenCalled();
-	});
-
-	it("reads the ego terminal only — catches accidental Claude/Codex account fallback", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "ego", sessionId: "ego-one" } } });
-		invoke.mockResolvedValue({
-			text: "ctx: 14/128000 · openrouter key: USD 195.970819484 left",
-			tooltip: "openrouter key: observed 2026-10-27T17:53:47.635+00:00; source: openrouter_key:data.limit_remaining",
-		});
-		initAgentUsage();
-		await settle();
-		expect(invoke).toHaveBeenCalledExactlyOnceWith("get_ego_usage", { sessionId: "ego-one" });
-		expect(statusBarTicker.getAll()).toEqual([
-			expect.objectContaining({
-				label: "ego",
-				sessionId: "ego-one",
-				text: "ctx: 14/128000 · openrouter key: USD 195.970819484 left",
-				tooltip: "openrouter key: observed 2026-10-27T17:53:47.635+00:00; source: openrouter_key:data.limit_remaining",
-				onClick: undefined,
-			}),
-		]);
-	});
-
-	it("clears missing ego data — catches unknown usage rendered as zero or stale provider data", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "ego", sessionId: "ego-one" } } });
-		statusBarTicker.addMessage({
-			id: "claude-usage:rate",
-			pluginId: "claude-usage",
-			label: "ego",
-			sessionId: "ego-one",
-			text: "old usage",
-			priority: 0,
-			ttlMs: 0,
-		});
-		invoke.mockResolvedValue({ text: null });
-		initAgentUsage();
-		await settle();
-		expect(statusBarTicker.getAll()).toEqual([]);
-	});
-
-	it("never polls Claude on a Codex-only install", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "codex" } } });
-
-		initAgentUsage();
-		await settle();
-
-		expect(invoke).toHaveBeenCalledTimes(1);
-		expect(invoke).toHaveBeenCalledWith("get_codex_usage_api");
-		expect(addMessage).toHaveBeenCalledWith(expect.objectContaining({ label: "Codex" }));
-	});
-
-	it("uses Grok's provider billing surface for a Grok tab", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "grok" } } });
-
-		initAgentUsage();
-		await settle();
-
-		expect(invoke).toHaveBeenCalledExactlyOnceWith("get_grok_usage_api");
-		expect(addMessage).toHaveBeenCalledWith(expect.objectContaining({ label: "Grok" }));
-	});
-
-	it("starts polling when an agent tab becomes active after an empty start", async () => {
-		initAgentUsage();
-		await settle();
-		expect(invoke).not.toHaveBeenCalled();
-
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "claude", sessionId: "claude-one" } } });
-		await settle();
-
-		expect(invoke).toHaveBeenCalledExactlyOnceWith("get_claude_usage_api", { sessionId: "claude-one" });
-	});
-
-	it("repolls when focus moves between Claude sessions and opens the matching dashboard", async () => {
-		setTerminals({
-			activeId: "t1",
-			terminals: {
-				t1: { agentType: "claude", sessionId: "private-session" },
-				t2: { agentType: "claude", sessionId: "default-session" },
+	invoke.mockResolvedValue([quota]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "claude", sessionId: "first" } } });
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()[0]).toMatchObject({ text: "7d: 97%", priority: 96 });
+	handlers.get("provider-quota-changed")?.({
+		payload: {
+			...quota,
+			snapshot: {
+				...quota.snapshot!,
+				windows: [{ ...quota.snapshot!.windows[0], used_percent: 20 }, quota.snapshot!.windows[1]],
 			},
-		});
-		initAgentUsage();
-		await settle();
-		expect(invoke).toHaveBeenCalledWith("get_claude_usage_api", { sessionId: "private-session" });
-
-		setTerminals("activeId", "t2");
-		await settle();
-		expect(invoke).toHaveBeenLastCalledWith("get_claude_usage_api", { sessionId: "default-session" });
-		expect(addMessage).toHaveBeenLastCalledWith(expect.objectContaining({ label: "Claude" }));
-		const { mdTabsStore } = await import("../../stores/mdTabs");
-		statusBarTicker.getAll()[0]?.onClick?.();
-		expect(mdTabsStore.addClaudeUsage).toHaveBeenCalledWith("default-session");
-	});
-
-	it("shows neutral API key without a warning — catches API-key auth rendered as an expired token", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "claude", sessionId: "api-session" } } });
-		invoke.mockRejectedValueOnce(new Error("Claude API-key authentication"));
-		const { appLogger } = await import("../../stores/appLogger");
-		vi.mocked(appLogger.warn).mockClear();
-		initAgentUsage();
-		await settle();
-		expect(invoke).toHaveBeenCalledExactlyOnceWith("get_claude_usage_api", { sessionId: "api-session" });
-		expect(addMessage).toHaveBeenCalledWith(expect.objectContaining({ label: "Claude", text: "API key", priority: 0 }));
-		expect(appLogger.warn).not.toHaveBeenCalled();
-	});
-
-	it.each([JSON.stringify({ error: "Claude API-key authentication" }), "Claude API-key authentication"])(
-		"shows neutral API key over HTTP — catches browser and remote sessions rendered offline (%s)",
-		async (body) => {
-			setTerminals({ activeId: "t1", terminals: { t1: { agentType: "claude", sessionId: "api-session" } } });
-			invoke.mockRejectedValueOnce(new HttpRpcError("get_claude_usage_api", 500, body));
-			const { appLogger } = await import("../../stores/appLogger");
-			vi.mocked(appLogger.warn).mockClear();
-			initAgentUsage();
-			await settle();
-			expect(statusBarTicker.getAll()[0]).toEqual(expect.objectContaining({ text: "API key", priority: 0 }));
-			expect(appLogger.warn).not.toHaveBeenCalled();
 		},
-	);
-
-	it("restores profile usage after an API-key tab — catches a sticky API-key label across focus changes", async () => {
-		setTerminals({
-			activeId: "t1",
-			terminals: {
-				t1: { agentType: "claude", sessionId: "api-session" },
-				t2: { agentType: "claude", sessionId: "oauth-session" },
-			},
-		});
-		invoke.mockRejectedValueOnce("Claude API-key authentication");
-		invoke.mockResolvedValueOnce({
-			five_hour: { utilization: 23, resets_at: null },
-			seven_day: null,
-			seven_day_oauth_apps: null,
-			seven_day_opus: null,
-			seven_day_sonnet: null,
-			seven_day_cowork: null,
-			extra_usage: null,
-		});
-		initAgentUsage();
-		await settle();
-		expect(statusBarTicker.getAll()[0]?.text).toBe("API key");
-		setTerminals("activeId", "t2");
-		await settle();
-		expect(invoke).toHaveBeenLastCalledWith("get_claude_usage_api", { sessionId: "oauth-session" });
-		expect(statusBarTicker.getAll()[0]?.text).toBe("5h: 23%");
 	});
+	expect(statusBarTicker.getAll()[0]).toMatchObject({ text: "7d: 20%", priority: 10 });
+});
 
-	it.each(["401 Invalid bearer token", new HttpRpcError("get_claude_usage_api", 401, "Unauthorized")])(
-		"keeps OAuth failures distinct — catches API-key handling hiding expired subscription tokens (%s)",
-		async (error) => {
-			setTerminals({ activeId: "t1", terminals: { t1: { agentType: "claude", sessionId: "oauth-session" } } });
-			invoke.mockRejectedValueOnce(error);
-			initAgentUsage();
-			await settle();
-			expect(statusBarTicker.getAll()[0]?.text).toBe("token expired");
-		},
-	);
-
-	it("shows unknown when the focused Claude profile cannot be read", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "claude", sessionId: "missing-profile" } } });
-		invoke.mockRejectedValueOnce(new Error("Cannot read Claude session profile"));
-		initAgentUsage();
-		await settle();
-		expect(addMessage).toHaveBeenCalledWith(expect.objectContaining({ label: "Claude", text: "unknown" }));
+// Catches a shell tab retaining the previous agent account's quota.
+it("switching_to_a_shell_retracts_the_previous_quota", async () => {
+	invoke.mockResolvedValue([view("first", 21)]);
+	setTerminals({
+		activeId: "a",
+		terminals: { a: { agentType: "claude", sessionId: "first" }, shell: { agentType: null } },
 	});
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 21%");
+	setTerminals("activeId", "shell");
+	expect(statusBarTicker.getAll()).toEqual([]);
+});
 
-	it("does not open default-account usage for a Claude tab without a backend session", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "claude", sessionId: null } } });
-		initAgentUsage();
-		await settle();
-		expect(invoke).not.toHaveBeenCalled();
-		expect(addMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "unknown", onClick: undefined }));
+// Catches the ego label "ego" never matching the badge, and a producer message the badge rule rejects.
+it.each([
+	["ego", "openai-codex", "Codex"],
+	["ego", "anthropic", "Claude"],
+	["claude", "anthropic", "Claude"],
+	["codex", "openai-codex", "Codex"],
+])("%s_session_bound_to_%s_reaches_the_agent_badge_as_%s", async (agentType, provider, label) => {
+	const bound = view("pty", 33);
+	bound.key = {
+		owner: agentType === "ego" ? "ego" : agentType === "claude" ? "claude-code" : "codex-cli",
+		provider,
+		credential: "/home",
+	};
+	invoke.mockResolvedValue([bound]);
+	const active = { agentType, sessionId: "pty" };
+	setTerminals({ activeId: "a", terminals: { a: active } });
+	initAgentUsage();
+	await settle();
+	const [message] = statusBarTicker.getAll();
+	expect(message).toMatchObject({ label, text: "7d: 33%" });
+	expect(usagePlacement(message, active)).toBe("badge");
+	expect(usagePlacement(message, { agentType, sessionId: "other" })).toBe("nowhere");
+});
+
+// Snapshot shapes recorded from GET /provider-quotas on 2026-11-15 (credentials removed).
+const NOW = Date.parse("2026-11-15T12:00:00Z");
+const weekly = (used: number, resets_at: string | null) => ({
+	kind: "weekly",
+	label: "7d",
+	used_percent: used,
+	resets_at,
+	window_seconds: 604800,
+	model: null,
+});
+const snap = (over: Partial<NonNullable<QuotaView["snapshot"]>>): QuotaView["snapshot"] => ({
+	windows: [],
+	plan: null,
+	credits: null,
+	account: null,
+	observed_at_ms: 1,
+	source: "active",
+	...over,
+});
+
+const claudeExtraUsage = {
+	provider: "claude" as const,
+	observed_at_ms: 1,
+	response: { extra_usage: { is_enabled: false, monthly_limit: 10000, used_credits: 133, resets_at: null } },
+};
+
+// Catches: the Claude pay-as-you-go overage budget (extra_usage) shown as a monthly limit.
+it("claude_extra_usage_is_not_a_monthly_limit", () => {
+	const withWeekly = snap({ windows: [weekly(79, "2026-11-19T17:00:00Z")], detail: claudeExtraUsage });
+	expect(formatAgentUsage(withWeekly, NOW)?.text).toBe("7d: 79% -4d");
+	expect(formatAgentUsage(snap({ detail: claudeExtraUsage }), NOW)).toBeNull();
+});
+
+// Catches: an unknown account-wide billing period disappears, while model-only
+// limits must not masquerade as account usage and missing quota stays unknown.
+it("unknown_account_period_is_visible_without_invented_duration", () => {
+	const other = { kind: "other", label: "usage", used_percent: 26, resets_at: null, window_seconds: null, model: null };
+	expect(formatAgentUsage(snap({ windows: [other] }), NOW)).toEqual({ text: "usage: 26%", priority: 10 });
+	expect(formatAgentUsage(snap({ windows: [{ ...other, model: "model-only" }] }), NOW)).toBeNull();
+	expect(formatAgentUsage(snap({ windows: [] }), NOW)).toBeNull();
+});
+
+// Catches: reset time dropped from the text (regression of d4529cc706), weekly shown when absent,
+// monthly remaining not shown, and segments other than weekly/monthly leaking into the badge.
+it.each([
+	[
+		"codex credits",
+		snap({ windows: [weekly(32, "2026-11-18T09:01:43Z")], credits: "8418.4673090000" }),
+		"7d: 32% -2d · credits: 8418 left",
+	],
+	["weekly only (ego anthropic)", snap({ windows: [weekly(78, "2026-11-19T17:00:00Z")] }), "7d: 78% -4d"],
+	[
+		"no weekly, monthly window",
+		snap({
+			windows: [
+				{ kind: "five_hour", label: "5h", used_percent: 50, resets_at: null, window_seconds: 18000, model: null },
+				{
+					kind: "monthly",
+					label: "30d",
+					used_percent: 40,
+					resets_at: "2026-11-15T17:30:00Z",
+					window_seconds: 2592000,
+					model: null,
+				},
+			],
+		}),
+		"30d: 60% left -5h",
+	],
+	["past and missing resets", snap({ windows: [weekly(10, "2026-11-15T11:00:00Z")], credits: null }), "7d: 10%"],
+	["minutes", snap({ windows: [weekly(10, "2026-11-15T12:12:00Z")] }), "7d: 10% -12m"],
+])("badge_text_%s", (_name, snapshot, text) => {
+	expect(formatAgentUsage(snapshot, NOW)?.text).toBe(text);
+});
+
+it("badge_tooltip_keeps_the_full_reset_date", () => {
+	const formatted = formatAgentUsage(snap({ windows: [weekly(78, "2026-11-19T17:00:00Z")] }), NOW);
+	expect(formatted?.tooltip).toMatch(/^7d: 78%, resets .*Nov/);
+});
+
+// Catches: ego display depending on a native Codex binding (codex-cli key, Codex CLI dashboard).
+it("ego_codex_usage_needs_no_codex_cli_binding", async () => {
+	const egoCodex: QuotaView = {
+		key: { owner: "ego", provider: "openai-codex", credential: "/ego-home" },
+		session_ids: ["ego-pty"],
+		state: "fresh",
+		snapshot: snap({ windows: [weekly(32, null)], credits: "8418.4673090000" }),
+	};
+	invoke.mockResolvedValue([egoCodex]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "ego", sessionId: "ego-pty" } } });
+	initAgentUsage();
+	await settle();
+	const [message] = statusBarTicker.getAll();
+	expect(message).toMatchObject({ label: "Codex", text: "7d: 32% · credits: 8418 left" });
+	expect(message.onClick).toBeUndefined();
+	expect(invoke.mock.calls.map(([command]) => command)).toEqual(["get_provider_quotas"]);
+});
+
+// Catches: remove/add churn on every effect run (a same-value republish or another account's
+// push rewrote the ticker store, repainting the badge).
+it("same_value_refreshes_do_not_write_the_ticker_store", async () => {
+	invoke.mockResolvedValue([view("first", 21), view("second", 42)]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "claude", sessionId: "first" } } });
+	initAgentUsage();
+	await settle();
+	const add = vi.spyOn(statusBarTicker, "addMessage");
+	const remove = vi.spyOn(statusBarTicker, "removeMessage");
+	for (let i = 0; i < 10; i++) {
+		handlers.get("provider-quota-changed")?.({ payload: view("first", 21) });
+		handlers.get("provider-quota-changed")?.({ payload: view("second", 40 + i) });
+	}
+	expect(add).not.toHaveBeenCalled();
+	expect(remove).not.toHaveBeenCalled();
+	handlers.get("provider-quota-changed")?.({ payload: view("first", 22) });
+	expect(add).toHaveBeenCalledOnce();
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 22%");
+});
+
+// Catches: an empty flash (remove then add) when switching to a session that already has a view.
+it("switching_between_bound_sessions_never_removes_the_message", async () => {
+	const codex = view("second", 42);
+	codex.key = { owner: "codex-cli", provider: "openai-codex", credential: "/second" };
+	invoke.mockResolvedValue([view("first", 21), codex]);
+	setTerminals({
+		activeId: "a",
+		terminals: { a: { agentType: "claude", sessionId: "first" }, b: { agentType: "codex", sessionId: "second" } },
 	});
+	initAgentUsage();
+	await settle();
+	const remove = vi.spyOn(statusBarTicker, "removeMessage");
+	setTerminals("activeId", "b");
+	setTerminals("activeId", "a");
+	expect(remove).not.toHaveBeenCalled();
+	expect(statusBarTicker.getAll()).toHaveLength(1);
+});
 
-	it("keeps the detected agent when the active tab moves to a shell", async () => {
-		setTerminals({ activeId: "t1", terminals: { t1: { agentType: "codex" } } });
-		initAgentUsage();
-		await settle();
-		invoke.mockClear();
-
-		setTerminals("activeId", null);
-		await settle();
-
-		// Sticky: no repoll, and nothing retracts the Codex number already shown.
-		expect(invoke).not.toHaveBeenCalled();
-		expect(removeMessage).not.toHaveBeenCalled();
+// Catches: the badge width jumping to a state word while a backoff has momentarily no snapshot.
+it("backoff_without_snapshot_keeps_the_last_good_text", async () => {
+	invoke.mockResolvedValue([view("first", 21)]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "claude", sessionId: "first" } } });
+	initAgentUsage();
+	await settle();
+	handlers.get("provider-quota-changed")?.({ payload: { ...view("first", 21), state: "backoff", snapshot: null } });
+	expect(statusBarTicker.getAll()[0]?.text).toBe("7d: 21%");
+	handlers.get("provider-quota-changed")?.({
+		payload: { ...view("first", 21), state: "auth_invalid", snapshot: null },
 	});
+	expect(statusBarTicker.getAll()[0]?.text).toBe("auth invalid");
+});
+
+// Catches: a session still bound to the previous agent's account combining Codex text
+// with a Claude icon and dashboard action (the registry reconciles independently).
+it.each([
+	["claude", "ego", "openai-codex"],
+	["claude", "claude-code", "openai-codex"],
+	["codex", "claude-code", "anthropic"],
+	["ego", "codex-cli", "openai-codex"],
+])("%s_rejects_mismatched_binding_%s_%s", async (agentType, owner, provider) => {
+	const mismatched = view("pty", 33);
+	mismatched.key = { owner, provider, credential: "/wrong-account" };
+	mismatched.snapshot!.credits = "8418.4673090000";
+	invoke.mockResolvedValue([mismatched]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType, sessionId: "pty" } } });
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()).toEqual([]);
+});
+
+// Catches: an agent transition on the same PTY retaining the previous account until
+// the asynchronous binding event arrives, including last-good backoff text.
+it("agent_transition_retracts_previous_account_until_matching_binding_arrives", async () => {
+	const previous = view("pty", 33);
+	previous.key = { owner: "ego", provider: "openai-codex", credential: "/ego" };
+	previous.snapshot!.credits = "8418.4673090000";
+	invoke.mockResolvedValue([previous]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType: "ego", sessionId: "pty" } } });
+	initAgentUsage();
+	await settle();
+	expect(statusBarTicker.getAll()[0]?.text).toContain("8418 left");
+	setTerminals("terminals", "a", "agentType", "claude");
+	expect(statusBarTicker.getAll()).toEqual([]);
+	handlers.get("provider-quota-changed")?.({ payload: { ...previous, state: "backoff", snapshot: null } });
+	expect(statusBarTicker.getAll()).toEqual([]);
+	const current = view("pty", 79);
+	handlers.get("provider-quota-changed")?.({ payload: current });
+	handlers.get("provider-quota-binding-changed")?.({ payload: { session_id: "pty", key: current.key } });
+	expect(statusBarTicker.getAll()[0]).toMatchObject({ label: "Claude", sessionId: "pty", text: "7d: 79%" });
+	const { mdTabsStore } = await import("../../stores/mdTabs");
+	statusBarTicker.getAll()[0]?.onClick?.();
+	expect(mdTabsStore.addClaudeUsage).toHaveBeenCalledWith("pty");
+});
+
+// Catches: native dashboard clicks dropping the session that supplied the badge.
+it.each([
+	["claude", "claude-code", "anthropic", "addClaudeUsage"],
+	["codex", "codex-cli", "openai-codex", "addCodexUsage"],
+	["grok", "grok-cli", "xai", "addGrokUsage"],
+] as const)("%s_dashboard_click_keeps_the_bound_session", async (agentType, owner, provider, action) => {
+	const bound = view("private-session", 42);
+	bound.key = { owner, provider, credential: "/private" };
+	invoke.mockResolvedValue([bound]);
+	setTerminals({ activeId: "a", terminals: { a: { agentType, sessionId: "private-session" } } });
+	initAgentUsage();
+	await settle();
+	const { mdTabsStore } = await import("../../stores/mdTabs");
+	vi.mocked(mdTabsStore[action]).mockClear();
+	statusBarTicker.getAll()[0]?.onClick?.();
+	expect(mdTabsStore[action]).toHaveBeenCalledWith("private-session");
 });

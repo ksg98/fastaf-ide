@@ -127,6 +127,7 @@ describe("SettingsPanel search", () => {
 				"Failed to load native tool config, using defaults",
 				"Failed to get home directory",
 				"Failed to load config defaults; expert settings stay visible",
+				"Failed to load MCP usage",
 			]).toContain(message);
 		}
 		vi.mocked(appLogger.warn).mockRestore();

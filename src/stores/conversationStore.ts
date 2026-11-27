@@ -21,11 +21,41 @@ import { appLogger } from "./appLogger";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Where a user turn stands with the backend. Absent once the turn was taken.
+ * - "sending": submitted, not confirmed yet.
+ * - "not_sent": the backend refused the submission; nothing ran.
+ * - "no_reply": the turn started and failed before it produced an answer.
+ * The last two keep the payload on screen for a retry. None of them is saved.
+ */
+export type MessageDelivery = "sending" | "not_sent" | "no_reply";
+
 export interface ConversationMessage {
 	role: "user" | "assistant" | "system";
 	content: string;
 	timestamp: number;
+	/** Identity inside this window, so the panel can address one message. Never saved. */
+	localId?: number;
+	delivery?: MessageDelivery;
+	/** Why a failed turn got no answer. */
+	failure?: string;
+	/** What the turn was sent with, so a retry sends the same payload. */
+	turn?: TurnOptions;
 }
+
+/** True for a turn that failed and still holds its payload for a retry. */
+export function isFailedDelivery(message: ConversationMessage): boolean {
+	return message.delivery === "not_sent" || message.delivery === "no_reply";
+}
+
+/** What a chat is doing, for the dot that says so. */
+export type ChatActivity = "working" | "waiting" | "idle";
+
+/** Outcome of `forkConversation`. "saved": the branch went to History because a turn is still running here. */
+export type ForkOutcome = "forked" | "saved" | "nothing" | "failed";
+
+/** Outcome of `newConversation`. */
+export type NewConversationOutcome = "started" | "busy" | "empty";
 
 /** Re-exported as AiChatMessage for backward compat */
 export type AiChatMessage = ConversationMessage;
@@ -51,6 +81,13 @@ export type ToolCallEntry =
 			result: { success: boolean; output: string };
 			duration: number;
 	  };
+
+/** An agent task as it was submitted. */
+export interface AgentGoal {
+	goal: string;
+	unrestricted: boolean;
+	turn?: TurnOptions;
+}
 
 export interface PendingApproval {
 	sessionId: string;
@@ -161,9 +198,19 @@ export interface PerTerminalConversationState {
 	setUnrestricted: Setter<boolean>;
 	isThinking: Accessor<boolean>;
 	setIsThinking: Setter<boolean>;
+	/** Messages up to this `localId` are hidden from the view (Cmd/Ctrl+K). They stay saved. */
+	clearedThrough: Accessor<number>;
+	setClearedThrough: Setter<number>;
+	/** The task of the last agent run, kept so a failed run can be started again. */
+	agentGoal: Accessor<AgentGoal | null>;
+	setAgentGoal: Setter<AgentGoal | null>;
 	// Bookkeeping
 	currentMode: ConversationMode | null;
 	activeSessionId: string | null;
+	/** `localId` of the user message the running assisted turn answers. */
+	turnMessageId: number | null;
+	/** Saved title to keep (a loaded conversation, a fork); null derives it from the first user turn. */
+	title: string | null;
 	persistTimer: ReturnType<typeof setTimeout> | null;
 	initialized: boolean;
 	// Browser/PWA only: disposer for the active conversation token-stream WS.
@@ -187,6 +234,12 @@ const DEFAULT_KEY = "__default__";
 const stateMap = new Map<string, PerTerminalConversationState>();
 const [activeKey, setActiveKey] = createSignal<string>(DEFAULT_KEY);
 
+/** Source of `ConversationMessage.localId`: increasing, so "everything up to here" is one number. */
+let nextLocalId = 1;
+
+/** Title prefix of a conversation branched from another one. */
+const FORK_PREFIX = "Fork: ";
+
 function generateChatId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -208,6 +261,8 @@ function createState(): PerTerminalConversationState {
 	const [completionReason, setCompletionReason] = createSignal<string | null>(null);
 	const [unrestricted, setUnrestricted] = createSignal(false);
 	const [isThinking, setIsThinking] = createSignal(false);
+	const [clearedThrough, setClearedThrough] = createSignal(0);
+	const [agentGoal, setAgentGoal] = createSignal<AgentGoal | null>(null);
 	return {
 		messages,
 		setMessages,
@@ -241,8 +296,14 @@ function createState(): PerTerminalConversationState {
 		setUnrestricted,
 		isThinking,
 		setIsThinking,
+		clearedThrough,
+		setClearedThrough,
+		agentGoal,
+		setAgentGoal,
 		currentMode: null,
 		activeSessionId: null,
+		turnMessageId: null,
+		title: null,
 		persistTimer: null,
 		initialized: false,
 		conversationStreamDispose: null,
@@ -330,19 +391,80 @@ function setUnrestricted(value: boolean): void {
 function isThinking(): boolean {
 	return activeConversation().isThinking();
 }
+function agentGoal(): AgentGoal | null {
+	return activeConversation().agentGoal();
+}
+
+/** The messages on screen: everything after the last "clear view". */
+function visibleMessages(): ConversationMessage[] {
+	const s = activeConversation();
+	const cleared = s.clearedThrough();
+	const all = s.messages();
+	return cleared > 0 ? all.filter((message) => (message.localId ?? 0) > cleared) : all;
+}
+
+function isBusy(s: PerTerminalConversationState): boolean {
+	return s.isStreaming() || s.agentState() === "running" || s.agentState() === "paused";
+}
+
+function activityOf(s: PerTerminalConversationState): ChatActivity {
+	// An open approval or a paused run is waiting on the user, whatever else is in flight.
+	if (s.pendingApproval() || s.agentState() === "paused") return "waiting";
+	if (s.isStreaming() || s.agentState() === "running") return "working";
+	return "idle";
+}
+
+/** What the active terminal's chat is doing. */
+function chatActivity(): ChatActivity {
+	return activityOf(activeConversation());
+}
+
+/** What the chat holding conversation `id` is doing, in whichever terminal has it open. */
+function chatActivityOf(id: string): ChatActivity {
+	for (const s of stateMap.values()) {
+		if (s.chatId() === id) return activityOf(s);
+	}
+	return "idle";
+}
 
 // ---------------------------------------------------------------------------
 // Message management
 // ---------------------------------------------------------------------------
 
-function addMessage(role: ConversationMessage["role"], content: string): void {
-	const key = activeKey();
-	const s = getOrCreate(key);
+/** Append one message to a conversation and return its `localId`. */
+function appendMessage(
+	s: PerTerminalConversationState,
+	message: Omit<ConversationMessage, "timestamp" | "localId">,
+): number {
+	const localId = nextLocalId++;
 	s.setMessages((prev) => {
-		const msg: ConversationMessage = { role, content, timestamp: Date.now() };
-		const next = [...prev, msg];
+		const next = [...prev, { ...message, timestamp: Date.now(), localId }];
 		return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
 	});
+	return localId;
+}
+
+/** Replace the fields of one message, leaving every other message object untouched. */
+function patchMessage(s: PerTerminalConversationState, localId: number, patch: Partial<ConversationMessage>): void {
+	s.setMessages((prev) => prev.map((message) => (message.localId === localId ? { ...message, ...patch } : message)));
+}
+
+/** Messages read from disk get identities of their own in this window. */
+function adoptMessages(messages: BackendChatMessage[]): ConversationMessage[] {
+	return messages
+		.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
+		.map((m) => ({
+			role: m.role as ConversationMessage["role"],
+			content: m.content ?? "",
+			timestamp: m.timestamp,
+			localId: nextLocalId++,
+		}))
+		.slice(-MAX_MESSAGES);
+}
+
+function addMessage(role: ConversationMessage["role"], content: string): void {
+	const key = activeKey();
+	appendMessage(getOrCreate(key), { role, content });
 	schedulePersist(key);
 }
 
@@ -380,7 +502,9 @@ function clearHistory(): void {
 		s.setIsStreaming(false);
 		s.setError(null);
 		s.setSessionUsage(null);
+		s.setClearedThrough(0);
 	});
+	s.title = null;
 	const oldId = s.chatId();
 	void (async () => {
 		try {
@@ -407,42 +531,64 @@ function schedulePersist(key?: string): void {
 	}, PERSIST_DEBOUNCE_MS);
 }
 
+/** The turns the backend took. A turn still being sent, or one that failed, is not history yet. */
+function deliveredMessages(s: PerTerminalConversationState): ConversationMessage[] {
+	return s.messages().filter((message) => !message.delivery);
+}
+
+/** A fork keeps the title it was given; any other conversation is titled from its first user turn. */
+function keptTitle(saved: string | undefined): string | null {
+	return saved?.startsWith(FORK_PREFIX) ? saved : null;
+}
+
+/** The title a conversation is saved under when nothing fixed one: its first user turn. */
+function derivedTitle(msgs: ConversationMessage[]): string {
+	const firstUser = msgs.find((m) => m.role === "user");
+	const content = firstUser?.content ?? "";
+	// An attached image is a path marker in the text; a title is the words around it.
+	const words = content.replace(/\[image:\s*[^\]\r\n]+\]/g, " ");
+	const title = words.slice(0, 60).replace(/\s+/g, " ").trim();
+	return title || (words.length < content.length ? "Image" : "New chat");
+}
+
+/** Write `msgs` as conversation `id`. Throws when the backend refuses, so each caller decides what that means. */
+async function saveConversation(key: string, id: string, title: string, msgs: ConversationMessage[]): Promise<void> {
+	const now = Date.now();
+	let provider: string | undefined;
+	let model: string | undefined;
+	try {
+		const cfg = await invoke<{ provider: string; model: string }>("load_ai_chat_config");
+		provider = cfg.provider || undefined;
+		model = cfg.model || undefined;
+	} catch (e) {
+		appLogger.debug("conversation", "load_ai_chat_config unavailable, omitting provider metadata", {
+			error: String(e),
+		});
+	}
+	const conv: BackendConversation = {
+		meta: {
+			id,
+			title,
+			session_id: key === DEFAULT_KEY ? null : key,
+			created: msgs[0]?.timestamp ?? now,
+			updated: now,
+			message_count: msgs.length,
+			provider,
+			model,
+		},
+		messages: msgs.map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
+		schema_version: 1,
+	};
+	await invoke("save_conversation", { conversation: conv });
+}
+
 async function persistNow(key?: string): Promise<void> {
 	const resolvedKey = key ?? activeKey();
 	const s = getOrCreate(resolvedKey);
-	const msgs = s.messages();
+	const msgs = deliveredMessages(s);
 	if (msgs.length === 0) return;
 	try {
-		const id = s.chatId();
-		const now = Date.now();
-		const firstUser = msgs.find((m) => m.role === "user");
-		const title = firstUser ? firstUser.content.slice(0, 60).replace(/\s+/g, " ").trim() : "New chat";
-		let provider: string | undefined;
-		let model: string | undefined;
-		try {
-			const cfg = await invoke<{ provider: string; model: string }>("load_ai_chat_config");
-			provider = cfg.provider || undefined;
-			model = cfg.model || undefined;
-		} catch (e) {
-			appLogger.debug("conversation", "load_ai_chat_config unavailable, omitting provider metadata", {
-				error: String(e),
-			});
-		}
-		const conv: BackendConversation = {
-			meta: {
-				id,
-				title: title || "New chat",
-				session_id: resolvedKey === DEFAULT_KEY ? null : resolvedKey,
-				created: msgs[0]?.timestamp ?? now,
-				updated: now,
-				message_count: msgs.length,
-				provider,
-				model,
-			},
-			messages: msgs.map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
-			schema_version: 1,
-		};
-		await invoke("save_conversation", { conversation: conv });
+		await saveConversation(resolvedKey, s.chatId(), s.title ?? derivedTitle(msgs), msgs);
 	} catch (e) {
 		appLogger.warn("conversation", "persistNow failed", { error: String(e) });
 	}
@@ -466,20 +612,13 @@ async function initFromDisk(tuicSession?: string): Promise<void> {
 					const conv = await invoke<BackendConversation>("load_conversation", { id: match.id });
 					batch(() => {
 						s.setChatId(conv.meta.id);
-						s.setMessages(
-							conv.messages
-								.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
-								.map((m) => ({
-									role: m.role as ConversationMessage["role"],
-									content: m.content ?? "",
-									timestamp: m.timestamp,
-								}))
-								.slice(-MAX_MESSAGES),
-						);
+						s.setMessages(adoptMessages(conv.messages));
 						s.setStreamingText("");
 						s.setIsStreaming(false);
 						s.setError(null);
+						s.setClearedThrough(0);
 					});
+					s.title = keptTitle(conv.meta.title);
 					return;
 				}
 			} catch (e) {
@@ -508,7 +647,11 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 	switch (event.type) {
 		case "thinking":
 			s.setCurrentIteration(event.iteration);
-			s.setAgentState("running");
+			// Only an agent run is an agent state. An Ask turn used to be marked
+			// "running" here and nothing ever took it back, so after one question
+			// the thread showed "Agent running" for good and Agent mode refused to
+			// start. An Ask turn is busy through `isStreaming` alone.
+			if (mode === "autonomous") s.setAgentState("running");
 			s.setIsThinking(true);
 			break;
 
@@ -620,8 +763,12 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 					s.setIsStreaming(false);
 					s.setStreamingText("");
 					s.setError(event.message);
+					// The question got no answer: it stays in the thread with its
+					// payload, marked, so it can be sent again as it was.
+					failTurn(s, "no_reply", event.message);
 				}
 			});
+			if (mode !== "autonomous") schedulePersist(ownerKey ?? activeKey());
 			break;
 
 		case "completed": {
@@ -643,13 +790,8 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 				batch(() => {
 					s.setIsStreaming(false);
 					s.setStreamingText("");
-					if (full) {
-						s.setMessages((prev) => {
-							const msg: ConversationMessage = { role: "assistant", content: full, timestamp: Date.now() };
-							const next = [...prev, msg];
-							return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
-						});
-					}
+					s.turnMessageId = null;
+					if (full) appendMessage(s, { role: "assistant", content: full });
 					// Assisted mode used to drop `reason` on the floor, so a turn
 					// the backend cut off mid-thought was indistinguishable from
 					// one that finished — the chat just stopped after the last
@@ -733,7 +875,37 @@ async function sendMessage(text: string, sessionId: string | null, opts?: TurnOp
 	}
 
 	const capturedKey = activeKey();
-	addUserMessage(text);
+	// On screen at once, marked as still on its way: it becomes part of the
+	// conversation, and of the saved history, when the backend takes the turn.
+	const localId = appendMessage(s, { role: "user", content: text, delivery: "sending", turn: opts });
+	await runAssistedTurn(s, capturedKey, localId, text, sessionId, opts);
+}
+
+/** Mark the user turn `localId` as taken by the backend. Safe to call more than once. */
+function confirmDelivery(s: PerTerminalConversationState, key: string, localId: number): void {
+	const message = s.messages().find((candidate) => candidate.localId === localId);
+	if (message?.delivery !== "sending") return;
+	patchMessage(s, localId, { delivery: undefined });
+	schedulePersist(key);
+}
+
+/** The running assisted turn ended without an answer: keep its question, marked, for a retry. */
+function failTurn(s: PerTerminalConversationState, delivery: "not_sent" | "no_reply", failure: string): void {
+	const localId = s.turnMessageId;
+	s.turnMessageId = null;
+	if (localId == null) return;
+	patchMessage(s, localId, { delivery, failure });
+}
+
+/** Run one Ask turn for the user message `localId`, which is already in the thread as "sending". */
+async function runAssistedTurn(
+	s: PerTerminalConversationState,
+	capturedKey: string,
+	localId: number,
+	text: string,
+	sessionId: string,
+	opts?: TurnOptions,
+): Promise<void> {
 	batch(() => {
 		s.setError(null);
 		s.setIsStreaming(true);
@@ -742,26 +914,34 @@ async function sendMessage(text: string, sessionId: string | null, opts?: TurnOp
 	});
 	s.currentMode = "assisted";
 	s.activeSessionId = sessionId;
+	s.turnMessageId = localId;
+	// The first event proves the turn was taken as surely as the command's own
+	// answer does, and over a WebSocket it is the only proof there is.
+	const onEvent = (event: ConversationEvent) => {
+		confirmDelivery(s, capturedKey, localId);
+		applyConversationEvent(s, event, capturedKey);
+	};
 
 	try {
 		if (isTauri()) {
 			const { invoke: coreInvoke, Channel } = await import("@tauri-apps/api/core");
-			const onEvent = new Channel<ConversationEvent>();
-			onEvent.onmessage = (event) => applyConversationEvent(s, event, capturedKey);
+			const channel = new Channel<ConversationEvent>();
+			channel.onmessage = onEvent;
 			await coreInvoke("start_conversation", {
 				sessionId,
 				message: text,
 				autonomy: "assisted",
 				...turnParams(opts),
-				onEvent,
+				onEvent: channel,
 			});
+			confirmDelivery(s, capturedKey, localId);
 		} else {
 			// Browser/PWA: dedicated WS carries the token stream (event-bridge plan Step 5).
 			closeConversationStream(s); // drop any orphaned prior stream first
 			s.conversationStreamDispose = openConversationStream<ConversationEvent>(
 				sessionId,
 				{ message: text, autonomy: "assisted", ...turnParams(opts) },
-				(event) => applyConversationEvent(s, event, capturedKey),
+				onEvent,
 				() => onConversationStreamClosed(s, capturedKey),
 			);
 		}
@@ -770,9 +950,49 @@ async function sendMessage(text: string, sessionId: string | null, opts?: TurnOp
 			s.setIsStreaming(false);
 			s.setStreamingText("");
 			s.setError(String(e));
+			failTurn(s, "not_sent", String(e));
 		});
 		appLogger.warn("conversation", "start_conversation (assisted) failed", { error: String(e) });
 	}
+}
+
+/**
+ * Send a failed turn again, as it was: same text, same model and effort. It
+ * leaves its old place and goes to the end of the thread, where its answer
+ * will land. The composer and whatever is typed in it are not touched.
+ */
+async function retryMessage(localId: number, sessionId: string | null): Promise<void> {
+	const key = activeKey();
+	const s = getOrCreate(key);
+	if (s.isStreaming()) return;
+	const failed = s.messages().find((message) => message.localId === localId && isFailedDelivery(message));
+	if (!failed) return;
+	if (!sessionId) {
+		s.setError("No terminal attached — focus a terminal first");
+		return;
+	}
+	const retriedId = nextLocalId++;
+	const retried: ConversationMessage = {
+		role: "user",
+		content: failed.content,
+		timestamp: Date.now(),
+		localId: retriedId,
+		delivery: "sending",
+		turn: failed.turn,
+	};
+	s.setMessages((prev) => [...prev.filter((message) => message.localId !== localId), retried]);
+	await runAssistedTurn(s, key, retriedId, failed.content, sessionId, failed.turn);
+}
+
+/** Drop a failed turn the user does not want to send again. */
+function discardMessage(localId: number): void {
+	const s = activeConversation();
+	const failed = s.messages().find((message) => message.localId === localId && isFailedDelivery(message));
+	if (!failed) return;
+	batch(() => {
+		s.setMessages((prev) => prev.filter((message) => message.localId !== localId));
+		if (s.error() === failed.failure) s.setError(null);
+	});
 }
 
 async function cancelStream(): Promise<void> {
@@ -808,6 +1028,8 @@ async function startAgent(
 		s.setCurrentIteration(0);
 		s.setPendingApproval(null);
 		s.setIsThinking(false);
+		// The task as submitted: a run that fails can be started again from it.
+		s.setAgentGoal({ goal, unrestricted: !!isUnrestricted, turn: opts });
 	});
 	s.currentMode = "autonomous";
 	s.activeSessionId = sessionId;
@@ -917,9 +1139,18 @@ async function approveAction(sessionId: string, approved: boolean): Promise<void
 	}
 }
 
+/** Start the last agent task again after a failed run, with the options it was submitted with. */
+async function retryAgent(sessionId: string | null): Promise<void> {
+	const s = activeConversation();
+	const last = s.agentGoal();
+	if (!last || !sessionId || s.agentState() !== "error") return;
+	await startAgent(sessionId, last.goal, last.unrestricted, last.turn);
+}
+
 function resetAgent(): void {
 	const s = activeConversation();
 	batch(() => {
+		s.setAgentGoal(null);
 		s.setAgentState("idle");
 		s.setToolCalls([]);
 		s.setTextChunks("");
@@ -1163,23 +1394,137 @@ async function loadConversation(id: string): Promise<void> {
 		}
 		batch(() => {
 			s.setChatId(conv.meta.id);
-			s.setMessages(
-				conv.messages
-					.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
-					.map((m) => ({
-						role: m.role as ConversationMessage["role"],
-						content: m.content ?? "",
-						timestamp: m.timestamp,
-					}))
-					.slice(-MAX_MESSAGES),
-			);
+			s.setMessages(adoptMessages(conv.messages));
 			s.setStreamingText("");
 			s.setIsStreaming(false);
 			s.setError(null);
+			s.setClearedThrough(0);
 		});
+		s.title = keptTitle(conv.meta.title);
 	} catch (e) {
 		appLogger.warn("conversation", "loadConversation failed", { id, error: String(e) });
 	}
+}
+
+/** A fresh conversation id; a local one when the backend cannot be asked, never the id in use. */
+async function freshConversationId(): Promise<string> {
+	try {
+		const id = await invoke<string>("new_conversation_id");
+		if (typeof id === "string" && id) return id;
+	} catch (e) {
+		appLogger.warn("conversation", "new_conversation_id failed, using a local id", { error: String(e) });
+	}
+	return generateChatId();
+}
+
+/** Put a conversation on screen in place of the current one, with nothing in flight. */
+function showConversation(s: PerTerminalConversationState, id: string, messages: ConversationMessage[]): void {
+	batch(() => {
+		s.setChatId(id);
+		s.setMessages(messages);
+		s.setStreamingText("");
+		s.setIsStreaming(false);
+		s.setError(null);
+		s.setSessionUsage(null);
+		s.setClearedThrough(0);
+		s.setAgentGoal(null);
+		s.setAgentState("idle");
+		s.setToolCalls([]);
+		s.setTextChunks("");
+		s.setReasoningChunks("");
+		s.setAgentError(null);
+		s.setCompletionReason(null);
+		s.setCurrentIteration(0);
+		s.setPendingApproval(null);
+		s.setIsThinking(false);
+	});
+	s.turnMessageId = null;
+}
+
+/**
+ * Start a new conversation in the active terminal. The one on screen is saved
+ * first and stays in History; nothing is deleted. Refused while a turn runs.
+ */
+async function newConversation(): Promise<NewConversationOutcome> {
+	const key = activeKey();
+	const s = getOrCreate(key);
+	if (isBusy(s)) return "busy";
+	if (s.messages().length === 0 && s.toolCalls().length === 0 && !s.textChunks()) return "empty";
+	if (s.persistTimer) {
+		clearTimeout(s.persistTimer);
+		s.persistTimer = null;
+	}
+	await persistNow(key);
+	const id = await freshConversationId();
+	// A send can start while the save is in the air; that turn keeps its conversation.
+	if (isBusy(s)) return "busy";
+	showConversation(s, id, []);
+	s.title = null;
+	return "started";
+}
+
+/**
+ * Hide what is on screen without touching what is saved: the messages stay in
+ * the conversation and in History, and opening it from there shows them again.
+ * A turn that is running keeps running. Returns false when nothing was hidden.
+ */
+function clearView(): boolean {
+	const s = activeConversation();
+	const last = s.messages().reduce((max, message) => Math.max(max, message.localId ?? 0), 0);
+	const finishedRun = ["completed", "cancelled", "error"].includes(s.agentState());
+	if (last <= s.clearedThrough() && !finishedRun) return false;
+	s.setClearedThrough(last);
+	// A finished agent run is view state only (its output is never saved): it goes with the view.
+	if (finishedRun) resetAgent();
+	return true;
+}
+
+/**
+ * Branch the conversation after a completed answer: the turns up to it become
+ * a new conversation, the original stays in History. With `atLocalId` the cut
+ * is that answer; without it, the last answer that completed. A turn that is
+ * still being sent, failed, or is streaming is never part of a branch.
+ *
+ * One conversation runs per terminal, so while a turn is running here the
+ * branch is saved to History ("saved") instead of being opened ("forked").
+ */
+async function forkConversation(atLocalId?: number): Promise<ForkOutcome> {
+	const key = activeKey();
+	const s = getOrCreate(key);
+	const delivered = deliveredMessages(s);
+	const cut =
+		atLocalId == null
+			? delivered.findLastIndex((message) => message.role === "assistant")
+			: delivered.findIndex((message) => message.localId === atLocalId && message.role === "assistant");
+	if (cut < 0) return "nothing";
+	const prefix = delivered.slice(0, cut + 1);
+	const base = s.title ?? derivedTitle(prefix);
+	const title = base.startsWith(FORK_PREFIX) ? base : `${FORK_PREFIX}${base}`;
+	const id = await freshConversationId();
+	try {
+		if (isBusy(s)) {
+			await saveConversation(key, id, title, prefix);
+			return "saved";
+		}
+		if (s.persistTimer) {
+			clearTimeout(s.persistTimer);
+			s.persistTimer = null;
+		}
+		await persistNow(key);
+		await saveConversation(key, id, title, prefix);
+	} catch (e) {
+		appLogger.warn("conversation", "forkConversation: saving the branch failed", { error: String(e) });
+		return "failed";
+	}
+	// A send can start while the saves are in the air; that turn keeps its conversation.
+	if (isBusy(s)) return "saved";
+	showConversation(
+		s,
+		id,
+		prefix.map((message) => ({ ...message, localId: nextLocalId++ })),
+	);
+	s.title = title;
+	return "forked";
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,6 +1576,10 @@ export const conversationStore = {
 	unrestricted,
 	setUnrestricted,
 	isThinking,
+	agentGoal,
+	visibleMessages,
+	chatActivity,
+	chatActivityOf,
 
 	// Chat actions
 	addUserMessage,
@@ -1242,8 +1591,13 @@ export const conversationStore = {
 	appendStreamChunk,
 	finalizeStream,
 	sendMessage,
+	retryMessage,
+	discardMessage,
 	cancelStream,
 	setError,
+	newConversation,
+	clearView,
+	forkConversation,
 	resetChatId,
 	setChatId,
 
@@ -1253,6 +1607,7 @@ export const conversationStore = {
 	pauseAgent,
 	resumeAgent,
 	approveAction,
+	retryAgent,
 	reset: resetAgent,
 
 	// Legacy event processing (removed in 1617)

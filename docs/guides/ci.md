@@ -4,10 +4,10 @@ Five GitHub Actions workflows compile Rust:
 
 | Workflow | Trigger | What it compiles |
 |---|---|---|
-| [`ci.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/ci.yml) | pull request, push to `main` | clippy + `cargo nextest` + doctests on Linux, `tuic-remote` without the desktop feature, macOS and Windows builds on push |
+| [`ci.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/ci.yml) | pull request, push to `main` (also `release/**` and `fix/release-*-public`, branch names upstream uses and FastAF does not) | clippy + `cargo nextest` + doctests on Linux, `tuic-remote` without the desktop feature, macOS and Windows builds on push |
 | [`release.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/release.yml) | version tag | the signed artifacts users install |
 | [`remote-daemon.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/remote-daemon.yml) | called by `release.yml` and `nightly.yml` | `tuic-remote` and `tuic-bridge` for Linux x64/ARM64, Windows x64 and macOS ARM64, uploaded to the `v*` release or to the rolling `nightly` release |
-| [`nightly.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/nightly.yml) | push to `main` | the rolling `nightly` release |
+| [`nightly.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/nightly.yml) | push to `main`, manual dispatch | the rolling `nightly` release |
 | [`audit.yml`](https://github.com/ksg98/fastaf-ide/blob/main/.github/workflows/audit.yml) | Monday 09:00 UTC | nothing — a prebuilt `cargo-audit` runs the advisory scan; accepted advisories live in `src-tauri/.cargo/audit.toml` |
 
 ## Frontend test shards
@@ -102,6 +102,13 @@ shell command against all 16 pairs of success, failure, cancellation and skip.
 
 ## Nightly release ordering
 
+The nightly workflow builds `main`. Its cleanup job records the commit it checked
+out, and every build job, the notes job and the reusable daemon workflow check
+out that same commit, so a push that lands while the nightly runs cannot split
+the release across two commits. A manual dispatch builds the ref it was started
+from, and publishes that build as the rolling nightly.
+`make nightly` pushes `main`, which is what starts the workflow. (Upstream builds
+a separate public `nightly` snapshot branch; FastAF has none.)
 The cleanup job moves the `nightly` tag, deletes the old release and recreates an
 empty prerelease before the desktop and daemon matrices start. Successful daemon
 builds can publish even if every desktop build fails. `tauri-action` reuses the
@@ -112,7 +119,11 @@ release with that tag and alone writes `latest.json`; daemon uploads contain onl
 
 The nightly macOS Tauri step has a 90-minute limit inside a 105-minute job.
 Linux and Windows retain their 60-minute step and 90-minute job limits.
-The version-tag release workflow is unchanged.
+
+The version-tag release workflow has no step limit. Its `build` job allows 120
+minutes on the macOS leg and 90 on Linux and Windows: FastAF's macOS desktop
+build needs about 75 minutes on a cold cache and reached the former flat
+90-minute limit several times.
 
 ### Duration evidence (story 2449-758d)
 
@@ -211,12 +222,24 @@ compiler that `release.yml` does not use.
 > The local `rustc` is not pinned by a `rust-toolchain.toml`, on purpose —
 > contributors keep their own rustup default. `cargo fmt --check` and clippy are
 > the contract; the CI pin is what makes that contract stable over time.
+> The code can still need the pinned version to compile at all: since the 2.1.2
+> sync, 1.96.0 fails on `uint_bit_width`. Build locally with
+> `RUSTUP_TOOLCHAIN=1.99.1` (see [Development Setup](development-setup.md#prerequisites)).
 
 ## Note on clippy scope
 
 CI runs `cargo clippy --workspace --exclude bm25 --all-targets -- -D warnings`.
 It includes test and bench code. The vendored `bm25` patch is excluded from
 Clippy, but remains in workspace tests.
+
+## Windows library compile check
+
+The CI, release and nightly Windows legs use `windows-latest` with LLVM 22.1.8.
+They use the same script (`.github/scripts/install-ci-llvm.ps1`) to download the official installer with `curl.exe`, verify its
+SHA-256, and set `LIBCLANG_PATH` for WebRTC’s bindgen,
+so generation can use the Visual Studio 2026 STL without replacing MSVC.
+
+The Windows CI leg runs `cargo check --locked --manifest-path src-tauri/Cargo.toml --lib --target x86_64-pc-windows-msvc` before Clippy and tests. This check rejects Windows-only source errors, such as unguarded Unix signal constants, without linking a desktop application or test binary.
 
 ## Windows CMake debug flags
 
@@ -227,6 +250,42 @@ in environment variables into a Windows path before launching native Cargo.
 That path reaches the CMake compiler probe as a source filename and fails the
 `whisper-rs-sys` build. The Tests step uses Git Bash through
 `scripts/with-test-tmp.sh`, so these flags must be safe in both shell paths.
+
+## Windows rustc command length
+
+Release and nightly set `CMAKE_CONFIGURATION_TYPES=Release` on Windows.
+`whisper-rs-sys` adds every directory below its CMake build tree as a rustc
+`-L` path, and every crate that depends on it gets these paths. The Visual
+Studio generator of CMake 4.5 makes `Debug`, `MinSizeRel`, `RelWithDebInfo`
+and `Release` folders for each target, also in the `vulkan-shaders-gen`
+sub-build (CMake 3.29 does not). With `--features vulkan`, the rustc command
+for `tuicommander_lib` in release run 43660914077 was 35,835 characters.
+Cargo passes a command that is too long through a response file, but sccache
+0.19 expands that file and starts rustc with the full command. Windows accepts
+at most 32,767 characters, so the build failed with os error 206 (sccache 0.16
+passed the response file through without caching). With only the `Release`
+configuration, CMake makes 60 fewer folders and the same command is 28,772
+characters. CMake also reads the variable from the environment, so the
+`vulkan-shaders-gen` sub-build gets it. A local build without sccache does not
+need it.
+
+## Portable whisper.cpp CPU baseline
+
+Release and nightly set `GGML_NATIVE=OFF` on every desktop leg.
+`whisper-rs-sys` passes every `GGML_*` environment variable to CMake. With
+the ggml default (native on), the x64 builds used the CPU of the GitHub runner
+and emitted AVX-512, and dictation crashed on AVX2-only CPUs (issue #151).
+With native off, x64 gets SSE4.2, AVX, AVX2, FMA, F16C and BMI2, and no AVX-512.
+On macOS only `-march=armv8.4-a` from `CMAKE_C_FLAGS` applies, and every M1
+supports it. A native build there takes the features of the runner chip.
+
+`whisper-rs-sys` does not declare `GGML_*` with `rerun-if-env-changed`, so
+cargo reuses a restored ggml build that was configured with other flags. The
+"Drop cached whisper-rs-sys build" step removes its build-script output and
+fingerprints before each build. After the build, the x64 legs run
+`scripts/check-ggml-x86-baseline.sh`, which fails when a ggml static library
+contains `zmm` registers or when `ggml-cpu` has no `ymm` code (an empty
+disassembly).
 
 ## Headless workspace scope
 
@@ -269,8 +328,11 @@ Dev includes debug information that the test profile disables. This second
 profile and feature graph prevent reuse of many artifacts from the test build.
 
 Local lib-only fixture setup uses `cargo build --profile test
---no-default-features`. Desktop CI sets `TUIC_FIXTURE_FEATURES=dictation`, which
-selects `cargo test --workspace --no-run --features dictation` instead. This
+--no-default-features --features test-fixtures`. Desktop CI runs nextest with
+`--features dictation,test-fixtures` and sets
+`TUIC_FIXTURE_FEATURES=dictation,test-fixtures`, which selects
+`cargo test --workspace --no-run --features dictation,test-fixtures` instead.
+The setup script passes that value unchanged. This
 matches nextest's workspace test selection, including dev-dependency feature
 unification. A binary-only build with `--profile test` does not activate dev
 dependencies: under resolver 2 it omits features such as `tokio/test-util` and
@@ -304,3 +366,46 @@ Short notes keep their original contents.
 
 The version-tag workflow uses the matching `CHANGELOG.md` section and a download
 legend. It does not use the nightly commit-history notes step.
+
+
+## Linux desktop packages
+
+Release and nightly build the Linux desktop app on `ubuntu-24.04` (x64), with
+`--features vulkan`. 24.04, not 22.04, because the ONNX Runtime prebuilt that
+`ort` links for the voice agent needs glibc 2.38+ and libstdc++ 13+. The
+published `.deb`, `.rpm` and AppImage therefore need glibc 2.39 or newer.
+The Windows leg also builds with `--features vulkan`; macOS uses Metal.
+
+The Linux leg installs `libvulkan-dev` and takes the Vulkan headers and `glslc`
+from the Vulkan SDK action (the stripped-down SDK has no Linux `libvulkan.so`).
+Vulkan acceleration needs a compatible device and driver; without a usable
+device, whisper uses the CPU. The Vulkan loader is still required to start the
+app: the deb/rpm require the distribution loader, and the AppImage must carry
+`libvulkan.so.1` (`scripts/check-appimage-vulkan-loader.sh`). On Windows the
+NSIS hook installs `vulkan-1.dll` next to the app only when System32 has none;
+`scripts/fetch-vulkan-loader.py` downloads the pinned loader, and
+`TUIC_REQUIRE_VULKAN_LOADER=1` fails the build when it is missing.
+
+`scripts/check-linux-desktop-packages.sh` checks the native host/toolchain, the
+ELF machine type of the app (`FastAF`) and both sidecars (`fastaf-cli`,
+`tuic-bridge`), deb/rpm architecture and Vulkan dependencies, and the extracted
+payloads of all three package formats. It requires a nonempty AppImage updater
+signature and uploads `SHA256SUMS-Linux-x64.txt` to the release.
+Finalization requires all eight supported default/format-specific updater
+entries in `latest.json` (`scripts/check-linux-updater.py`): macOS ARM64 app,
+Windows x64 NSIS, and Linux x64 AppImage/deb/rpm. Each entry needs a nonblank
+signature and its native package URL suffix. Parallel Tauri updater writers can
+lose other platform entries; a missing macOS or Windows entry blocks publication
+just as a missing Linux entry does. This validates completeness, not
+cryptographic signatures.
+
+**No Linux ARM64 desktop build.** Upstream adds a native `ubuntu-22.04-arm`
+desktop leg in 2.1.2. FastAF does not: that runner cannot link `ort` (see above),
+and no FastAF ARM64 desktop package has been built or run. `finalize-release`
+waits for every desktop leg, so an untested leg would hold back a whole release.
+The remote daemon (`tuic-remote`, `tuic-bridge`) still ships for Linux ARM64.
+Upstream's helpers for that leg (`scripts/build-linux-arm64-glslc.sh`,
+`scripts/stage-linux-arm64-mbx.sh`) are in the tree and unused. To add the leg:
+a 24.04 ARM64 runner, the `Linux-ARM64` label in both matrices, the `aarch64`
+tuple in `scripts/check-linux-updater.py`, and the contracts in
+`.github/workflows/tests/test-linux-desktop-release.py`.

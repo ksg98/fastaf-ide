@@ -79,7 +79,7 @@ impl From<&str> for UpstreamError {
 // ---------------------------------------------------------------------------
 
 /// A tool definition returned by an upstream server.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct UpstreamToolDef {
     /// Original tool name from the upstream server.
     pub(crate) original_name: String,
@@ -138,10 +138,7 @@ impl HttpMcpClient {
                     attempt.follow()
                 }
             }))
-            .user_agent(concat!(
-                "tuicommander-mcp-proxy/",
-                env!("CARGO_PKG_VERSION")
-            ));
+            .user_agent(concat!("fastaf-mcp-proxy/", env!("CARGO_PKG_VERSION")));
 
         if let Some(t) = timeout {
             builder = builder.timeout(t);
@@ -366,7 +363,7 @@ impl HttpMcpClient {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "tuicommander",
+                    "name": tuic_ipc::MCP_SERVER_NAME,
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }

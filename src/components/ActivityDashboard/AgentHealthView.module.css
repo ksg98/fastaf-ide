@@ -1,0 +1,127 @@
+/* Agent health — the block that heads the Activity Dashboard's list.
+   A section header in the side panels' vocabulary (32px, 12px/600 label, a
+   28px icon button), then one two-line row per failed or stalled agent. With
+   nothing to report it is a single row, so the terminals below keep the room.
+   One hairline closes it off from the terminal rows. */
+.health {
+  padding: 0 16px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.heading h4 {
+  margin: 0;
+  flex-shrink: 0;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+/* The all-clear, or the number of agents listed below. */
+.summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.refresh,
+.inspect {
+  composes: iconBtn from "../shared/controls.module.css";
+  flex-shrink: 0;
+  /* Centres the 28px button on the column of the rows' 36px globe button below. */
+  margin-right: 4px;
+}
+
+.refresh {
+  margin-left: auto;
+}
+
+/* A failed read: the app's error line, an icon and selectable text on a 12 % tint. */
+.alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+  font-size: var(--font-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.alert > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* One agent: the state dot centred on the first line, name over reason, and
+   the way into its terminal at the end. */
+.item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: start;
+  padding: 6px 0;
+}
+
+.dot {
+  justify-self: center;
+  width: 6px;
+  height: 6px;
+  /* Centre on the 18px title line. */
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.dotFailed {
+  background: var(--error);
+}
+
+.dotStalled {
+  background: var(--warning);
+}
+
+.body {
+  min-width: 0;
+}
+
+.title {
+  display: block;
+  font-size: var(--font-md);
+  font-weight: 500;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reason,
+.remote {
+  margin: 2px 0 0;
+  font-size: var(--font-sm);
+  line-height: 1.4;
+  color: var(--fg-secondary);
+  overflow-wrap: anywhere;
+}
+
+.remote {
+  color: var(--fg-muted);
+}

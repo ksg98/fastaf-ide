@@ -147,10 +147,13 @@ describe("Toolbar", () => {
 	});
 
 	// FastAF's Codex title bar carries no sidebar layout toggle or repo filter: the
-	// filter lives in the sidebar's Projects header and the layout in Settings.
+	// filter lives in the sidebar's Projects header and the layout (rich, compact,
+	// live harness) in the sidebar footer's "Workspaces, sorting & layout" menu.
 	it("keeps the sidebar layout and filter toggles out of the title bar", () => {
 		const { container } = render(() => <Toolbar />);
 		expect(container.querySelector("[data-testid='sidebar-density-toggle']")).toBeNull();
+		expect(container.querySelector("[data-testid='sidebar-density-label']")).toBeNull();
+		expect(container.querySelector("[data-testid='toolbar-filter-harness']")).toBeNull();
 		expect(container.querySelector(".filterToggle")).toBeNull();
 	});
 

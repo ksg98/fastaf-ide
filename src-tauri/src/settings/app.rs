@@ -108,6 +108,17 @@ impl Store for AppSettingsStore {
         {
             return Err(Error::new("app", "out_of_range"));
         }
+        if latest.pointer("/services/push/added_providers")
+            != value.pointer("/services/push/added_providers")
+            && next
+                .services
+                .push
+                .added_providers
+                .iter()
+                .any(|entry| crate::push::provider_host(entry).is_none())
+        {
+            return Err(Error::new("app", "out_of_range"));
+        }
         Ok(())
     }
 
@@ -125,6 +136,8 @@ impl Store for AppSettingsStore {
         let Prepared { value, mut reply } = prepare(&json)?;
         let mut next: AppConfig =
             serde_json::from_value(value).map_err(|_| Error::new("app", "invalid_type"))?;
+        // A written `settings` denial switches the one opt-in off; it never persists as a second gate.
+        crate::config::migrate_settings_mcp_opt_in(&mut next, false);
         // Before the revision is taken, so it describes what is stored.
         let rotated_session_token = rotate_session_token_if_switched_on(&latest, &mut next);
         let canonical =

@@ -106,7 +106,7 @@ Alpine.data("myApp", () => ({
 
 #### `tuic.open(path, opts?)`
 
-Open a file in a TUIC tab.
+Open a file in a FastAF tab. Images, PDF, HTML, video and audio files open in the preview tab; other files open in the Markdown reader.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -153,15 +153,16 @@ The host wraps it as `{ type: "tuic:host-message", payload: data }`; transfer li
 
 All file methods (`open`, `edit`, `getFile`) accept both relative and absolute paths:
 
-- **Relative paths** (e.g., `"README.md"`, `"src/App.tsx"`) are resolved against the active repository root.
-- **Absolute paths** (e.g., `"/Users/me/code/repo/file.ts"`) are matched against known repositories (longest prefix wins).
-- **Path traversal** (`../`) that escapes the repo root is blocked and returns an error.
+- **Relative paths** (e.g., `"README.md"`, `"src/App.tsx"`) resolve against the asking panel's repository, not the focused one.
+- **Absolute paths** (e.g., `"/Users/me/code/repo/file.ts"`) are matched against known repositories (longest prefix wins). `open` and `edit` also open an absolute path outside every registered repository as an external file, owned by the asking panel's repository; external files edit unlocked. `getFile` still reads only inside a registered repository.
+- **Path traversal** (`../`) in a relative path that escapes the repo root is blocked and returns an error. `..` segments in an absolute path are resolved before it is classified.
 - **`./` prefixes** are supported and normalized.
 
 ```js
-tuic.open("README.md");                    // → /active/repo/README.md
-tuic.open("src/../README.md");             // → /active/repo/README.md
+tuic.open("README.md");                    // → <panel repo>/README.md
+tuic.open("src/../README.md");             // → <panel repo>/README.md
 tuic.open("/Users/me/repo/file.ts");       // → absolute, matched to repo
+tuic.open("/Users/me/Reference/a.md");     // → absolute, outside every repo: external file
 tuic.getFile("../../../etc/passwd");       // → rejected (traversal)
 ```
 
@@ -296,7 +297,7 @@ An interactive test page is included at `docs/examples/sdk-test.html`. It runs a
 Use the TUIC MCP `ui` tool to open it as an inline HTML tab:
 
 ```
-mcp__tuicommander__ui action=tab id="sdk-test" title="SDK Test Suite" html="<contents of docs/examples/sdk-test.html>" pinned=false focus=true
+mcp__fastaf__ui action=tab id="sdk-test" title="SDK Test Suite" html="<contents of docs/examples/sdk-test.html>" pinned=false focus=true
 ```
 
 **From a plugin:**

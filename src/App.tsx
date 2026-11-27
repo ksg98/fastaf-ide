@@ -75,6 +75,7 @@ import { useTerminalContextMenus } from "./hooks/useTerminalContextMenus";
 import { useTerminalLifecycle } from "./hooks/useTerminalLifecycle";
 import { useTerminalReattachBridge } from "./hooks/useTerminalReattachBridge";
 import { useTerminalShellExit } from "./hooks/useTerminalShellExit";
+import { useWaitingItems } from "./hooks/useWaitingItems";
 import { useWorktreeConsolidation } from "./hooks/useWorktreeConsolidation";
 import { useWorktreeSwitchPrompt } from "./hooks/useWorktreeSwitchPrompt";
 import { t } from "./i18n";
@@ -127,6 +128,7 @@ import { prepareAgentLaunchCommand } from "./utils/agentSession";
 import { openFileBesideTerminal, openTerminalFilePath } from "./utils/filePreview";
 import { markdownDocumentPanelId } from "./utils/markdownDocumentPanelId";
 import { navigateToTerminal } from "./utils/navigateToTerminal";
+import { registerLinkConfirm } from "./utils/openUrl";
 import { initPaneTabAssignment } from "./utils/paneTabAssign";
 import { quickSwitcherHints } from "./utils/quickSwitcherHints";
 
@@ -320,6 +322,9 @@ const App: Component = () => {
 		import("./hooks/useFileDrop").FolderDropRequest | null
 	>(null);
 	useDialogIntegrations({ setPendingFolderDrop, confirm: (options) => dialogs.confirm(options) });
+	// Network and custom-scheme links open only after the owner confirms them here.
+	registerLinkConfirm((options) => dialogs.confirm(options));
+	onCleanup(() => registerLinkConfirm(null));
 
 	// Redirect keyboard input from sidebar to terminal
 	useKeyboardRedirect(true);
@@ -459,6 +464,9 @@ const App: Component = () => {
 		closeTerminalsForBranch: gitOps.closeTerminalsForBranch,
 	});
 
+	// Notify manual checks once in the bell; clear them when resolved.
+	useWaitingItems();
+
 	// Register built-in activity sections for git and worktree notifications
 	activityStore.registerSection({ id: "terminals", label: "TERMINALS", priority: 10, canDismissAll: true });
 	activityStore.registerSection({
@@ -478,7 +486,11 @@ const App: Component = () => {
 	useSystemLifecycle();
 
 	// FastAF's AI Chat runs on its own engine, never ego: no "Configure ego" route.
-	const detachedPanelBridge = useDetachedPanelBridge(undefined, () => openSettings("dictation"));
+	const detachedPanelBridge = useDetachedPanelBridge(
+		undefined,
+		() => openSettings("dictation"),
+		() => openSettings("ai-chat"),
+	);
 
 	// Notification sounds are now played natively via Rust (rodio) —
 	// no Web Audio warmup needed.
@@ -874,6 +886,7 @@ const App: Component = () => {
 			<MobileViewBanner />
 			{/* Title bar: lights + sidebar toggle | tab strip | notifications + panel toggles */}
 			<Toolbar
+				onNewShell={gitOps.handleNewTab}
 				repoPath={gitOps.currentRepoPath()}
 				runCommand={gitOps.activeRunCommand()}
 				onBranchClick={() => {
@@ -920,7 +933,7 @@ const App: Component = () => {
 							getNewAgentMenuItems={() => {
 								const target = gitOps.resolveNewTabTarget();
 								if (!target) return [];
-								return terminalContextMenus.buildSidebarAgentMenuItems(target.repoPath, target.branchName);
+								return terminalContextMenus.buildSidebarAgentMenuItems(target.repoPath, target.branchName, true);
 							}}
 							onReorder={(from, to) => {
 								const activeRepo = repositoriesStore.getActive();

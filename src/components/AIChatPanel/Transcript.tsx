@@ -1,4 +1,7 @@
+import type { MessageActionReaction, MessageActions } from "../../types/messageActions";
+import { PromptContent } from "../shared/PromptContent";
 import { Button } from "../ui/Button";
+import { isNoModelConfigured } from "./chatError";
 /**
  * The conversation, drawn from the projection `acpTranscript` builds.
  *
@@ -20,6 +23,7 @@ import {
 	Show,
 	Switch,
 } from "solid-js";
+import type { SendNowMode } from "../../hooks/usePty";
 import type { AcpNoticeAction, AcpTranscriptEntry } from "../../stores/acpTranscript";
 import { appLogger } from "../../stores/appLogger";
 import { settingsStore } from "../../stores/settings";
@@ -29,6 +33,7 @@ import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { stripAnswerMarkers } from "../../utils/stripAnswerMarkers";
+import { IconChevronRight, IconClose } from "../icons";
 import type { SearchOptions } from "../shared/DomSearchEngine";
 import { SearchBar } from "../shared/SearchBar";
 import { TerminalUserText, terminalAnswerRows, terminalToolTitle } from "../Terminal/chatPresentation";
@@ -36,9 +41,11 @@ import { filePathRegex, matchWebUrls } from "../Terminal/linkProvider";
 import { ANSWER_MARKER_RE, answerBlockRanges, type ChatBlock } from "../Terminal/suggestOverlay";
 import { ContentRenderer } from "../ui/ContentRenderer";
 import s from "./AIChatPanel.module.css";
+import { feedbackMessage, MessageMenu, quoteMessage } from "./MessageMenu";
 import { projectChatProtocolText } from "./protocolText";
 import { ToolTitle } from "./ToolTitle";
 import find from "./TranscriptFind.module.css";
+import { TruncatedTextAction } from "./TruncatedTextAction";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 /** Why a turn ended, for the turns that ended without an answer. */
@@ -54,6 +61,11 @@ const NOTICE_LABELS: Record<AcpNoticeAction["kind"], { title: string; button: st
 	open_result: { title: "Result ready", button: "Open result" },
 	answer: { title: "Question", button: "Answer" },
 	approve: { title: "Approval needed", button: "Approve" },
+};
+
+/** Every supported PTY steer stops the current request before delivery. */
+const SEND_NOW_LABEL: Record<SendNowMode, string> = {
+	interrupt: "Send now: stop the current request",
 };
 
 function settlement(stopReason: string): string {
@@ -310,6 +322,8 @@ export interface TranscriptProps {
 	fontSize?: number;
 	/** Let a host expose the existing follow state and jump action outside the transcript. */
 	onAtBottomChange?: (atBottom: boolean) => void;
+	/** True while the floating "New text below" badge is shown; hosts hide their own jump control meanwhile. */
+	onNewTextBelowChange?: (visible: boolean) => void;
 	onRegisterScrollToBottom?: (jump: (() => void) | undefined) => void;
 	/** Terminal-only reading layout; the agent scopes Claude Bash descriptions. */
 	terminalAgent?: string;
@@ -320,10 +334,14 @@ export interface TranscriptProps {
 	entries: () => AcpTranscriptEntry[];
 	/** Shown while a turn is running and nothing has streamed back yet. */
 	busy: () => boolean;
+	/** Drives the working indicator when set; defaults to `busy`. */
+	working?: () => boolean;
 	/** Accessible working text; defaults to Working… for AI Chat. */
 	busyLabel?: string;
 	/** History has no execution timestamps: never time it from the view's mount. */
 	observeToolDuration?: boolean;
+	/** Opens Settings > AI Chat; offered under a failed turn that names a missing provider or model. */
+	onSetupProvider?: () => void;
 	/** ego's provider-retry line ("… retrying in 2s (attempt 2/6)"), shown instead of the pulse. */
 	retry?: () => string | null;
 	emptyMessage: string;
@@ -332,6 +350,11 @@ export interface TranscriptProps {
 	onClear?: () => void;
 	canForkAtMessage?: () => boolean;
 	onFork?: (messageId: string) => void;
+	/** Host with a composer: quote reply and response feedback hand it text to draft (never sent). Absent hides both actions. */
+	onQuote?: (quoted: string) => void;
+	/** Host that can read a capped message back: its "… [truncated]" marker gets a button. */
+	onShowFullText?: (messageId: string) => void;
+	messageActions?: MessageActions;
 	/** `open_result` opens its file. `answer` and `approve` have nothing to open: the open interaction is drawn at the end, and the transcript scrolls there. */
 	onNoticeAction?: (action: AcpNoticeAction) => void;
 	/** Draw assistant text that a tool call follows in the same turn as a muted status line. */
@@ -346,18 +369,18 @@ export interface TranscriptProps {
 	children?: JSX.Element;
 }
 
-const CopyButton: Component<{ label: string; text: string; answer?: boolean }> = (props) => (
+function copyMessage(text: string): void {
+	void writeClipboard(text).catch((error) => appLogger.error("ai-chat", "Copy failed", error));
+}
+
+const CopyButton: Component<{ label: string; text: string }> = (props) => (
 	<Button
 		type="button"
 		variant="ghost"
 		size="compact"
 		class={s.copyAction}
 		aria-label={props.label}
-		onClick={() =>
-			void writeClipboard(props.answer ? stripAnswerMarkers(props.text) : props.text).catch((error) =>
-				appLogger.error("ai-chat", "Copy failed", error),
-			)
-		}
+		onClick={() => copyMessage(props.text)}
 	>
 		Copy
 	</Button>
@@ -414,6 +437,28 @@ const LinkedPlainText: Component<{ text: string; onOpenFile?: (href: string) => 
 	);
 };
 
+/** A long card (for example the compaction summary) shows its first line; the rest stays one click away. */
+const NoticeBody: Component<{ text: string }> = (props) => {
+	const split = createMemo(() => {
+		const text = props.text.trim();
+		const end = text.indexOf("\n");
+		return end < 0 ? { head: text, rest: "" } : { head: text.slice(0, end), rest: text.slice(end + 1).trim() };
+	});
+	return (
+		<Show when={split().rest} fallback={<div class={s.noticeBody}>{split().head}</div>}>
+			<details class={s.noticeDetails}>
+				<summary class={s.noticeBody}>
+					<span class={s.noticeChevron}>
+						<IconChevronRight size={12} stroke={2} />
+					</span>
+					<span>{split().head}</span>
+				</summary>
+				<div class={cx(s.noticeBody, s.noticeRest)}>{split().rest}</div>
+			</details>
+		</Show>
+	);
+};
+
 /** These exact harness turns are not words typed by the person reading the chat. */
 function isHarnessNotice(text: string): boolean {
 	return (
@@ -457,7 +502,12 @@ const UserText: Component<{ text: string; onOpenFile?: (href: string) => void }>
  * An answer spans the blocks the grid highlights (`answerBlockRanges`); the 💬 glyph is
  * dropped from each marked paragraph, which keeps `data-tuic-answer-start` so a later pass
  * still finds it. Code examples and quotations keep their literal marker; stored/copy text stays intact. */
-function highlightAnswers(container: HTMLDivElement | undefined): void {
+function highlightAnswers(container: HTMLDivElement | undefined, outerRail: boolean): void {
+	// Committed Markdown segments retain their DOM between streaming updates.
+	// Remove only our presentation wrappers before deriving scope again.
+	for (const region of container?.querySelectorAll("[data-tuic-answer-region]") ?? []) {
+		region.replaceWith(...region.childNodes);
+	}
 	const elements = Array.from(container?.querySelectorAll<HTMLElement>(":scope > div > *") ?? []);
 	const blocks: ChatBlock[] = elements.map((element) => {
 		const text = element.textContent ?? "";
@@ -507,6 +557,29 @@ function highlightAnswers(container: HTMLDivElement | undefined): void {
 			item.removeAttribute("data-tuic-answer-region-start");
 			item.removeAttribute("data-tuic-answer");
 		}
+	}
+	if (!outerRail) return;
+	// Scope stays on the original blocks/items. A list is atomic visual context:
+	// even a nested answer puts the rail outside the outermost list, without
+	// turning its unmarked siblings into answers or splitting its numbering.
+	const ruled = elements.map(
+		(element) => element.hasAttribute("data-tuic-answer") || !!element.querySelector("[data-tuic-answer]"),
+	);
+	let region: HTMLDivElement | undefined;
+	for (const [index, element] of elements.entries()) {
+		if (!ruled[index]) {
+			region = undefined;
+			continue;
+		}
+		// Never move content across ContentRenderer's independently updated
+		// segments. Adjacent fragments join visually, including their spacing.
+		if (!region || region.parentElement !== element.parentElement) {
+			region = document.createElement("div");
+			region.setAttribute("data-tuic-answer-region", "");
+			element.before(region);
+		}
+		region.append(element);
+		if (!ruled[index + 1]) region.setAttribute("data-tuic-answer-region", "end");
 	}
 }
 
@@ -563,8 +636,11 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 	let matchIndex = -1;
 	let stickToBottom = true;
 	let touchActive = false;
+	let selectionPointerDown = false;
+	let selectionFollowPending = false;
 	let lastScrollTop = 0;
 	const [newTextBelow, setNewTextBelow] = createSignal(false);
+	createEffect(() => props.onNewTextBelowChange?.(newTextBelow() && transcriptPreferences.enabled()));
 	let previousContent = new Map<string, number>();
 	createEffect(() => {
 		props.busy();
@@ -586,6 +662,10 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 		previousContent = content;
 		queueMicrotask(() => {
 			if (container && stickToBottom && !touchActive) {
+				if (selectionPointerDown || hasTranscriptSelection()) {
+					selectionFollowPending = true;
+					return;
+				}
 				container.scrollTop = container.scrollHeight;
 				lastScrollTop = container.scrollTop;
 				props.onAtBottomChange?.(true);
@@ -601,8 +681,28 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 			props.onAtBottomChange?.(true);
 		}
 	};
+	const hasTranscriptSelection = () => {
+		const selected = window.getSelection();
+		return !!selected && !selected.isCollapsed && !!selected.anchorNode && !!container?.contains(selected.anchorNode);
+	};
+	const resumeSelectionFollow = () => {
+		if (!selectionFollowPending || selectionPointerDown || hasTranscriptSelection()) return;
+		selectionFollowPending = false;
+		if (stickToBottom && !touchActive) scrollToBottom();
+	};
+	const endSelectionPointer = () => {
+		selectionPointerDown = false;
+		resumeSelectionFollow();
+	};
+	document.addEventListener("mouseup", endSelectionPointer);
+	document.addEventListener("selectionchange", resumeSelectionFollow);
+	onCleanup(() => {
+		document.removeEventListener("mouseup", endSelectionPointer);
+		document.removeEventListener("selectionchange", resumeSelectionFollow);
+	});
 	props.onRegisterScrollToBottom?.(scrollToBottom);
 	onCleanup(() => props.onRegisterScrollToBottom?.(undefined));
+	onCleanup(() => props.onNewTextBelowChange?.(false));
 	const onTouchEnd = () => {
 		touchActive = false;
 		if (stickToBottom) scrollToBottom();
@@ -625,9 +725,11 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 	};
 	const clearSearchSelection = () => {
 		const selection = window.getSelection();
-		if (container && selection?.rangeCount && container.contains(selection.getRangeAt(0).commonAncestorContainer)) {
-			selection.removeAllRanges();
-		}
+		if (!container || !selection?.rangeCount) return;
+		const owner = selection.getRangeAt(0).commonAncestorContainer;
+		// The Find bar floats outside the container, so the field's own caret range is never
+		// inside it: only a match highlight is removed, and the caret stays in the field.
+		if (container.contains(owner)) selection.removeAllRanges();
 	};
 	const openSearch = () => {
 		setFinding(true);
@@ -869,6 +971,9 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 				tabIndex={0}
 				onKeyDown={onKeyDown}
 				onScroll={onScroll}
+				onMouseDown={(event) => {
+					if (event.button === 0) selectionPointerDown = true;
+				}}
 				onTouchStart={() => {
 					touchActive = true;
 				}}
@@ -908,24 +1013,29 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 													<Show when={user().pending}>
 														<span class={s.pendingLabel}>Pending</span>
 													</Show>
-													<Show
-														when={props.terminalAgent}
-														fallback={<UserText text={user().text} onOpenFile={props.onOpenFile} />}
-													>
-														<TerminalUserText
-															text={user().text}
-															prose={(text) => <UserText text={text} onOpenFile={props.onOpenFile} />}
-														/>
-													</Show>
+													<PromptContent
+														text={user().text}
+														prose={(text) => (
+															<Show
+																when={props.terminalAgent}
+																fallback={<UserText text={text} onOpenFile={props.onOpenFile} />}
+															>
+																<TerminalUserText
+																	text={text}
+																	prose={(prose) => <UserText text={prose} onOpenFile={props.onOpenFile} />}
+																/>
+															</Show>
+														)}
+													/>
 													<Show when={user().queuedCommandId != null}>
 														<span class={s.pendingActions}>
-															<Show when={props.onSendPendingNow}>
+															<Show when={props.onSendPendingNow && user().sendNow}>
 																<Button
 																	variant="ghost"
 																	size="compact"
 																	shape="icon"
-																	aria-label="Send now: stop the current request"
-																	title="Send now: stop the current request"
+																	aria-label={SEND_NOW_LABEL[user().sendNow!]}
+																	title={SEND_NOW_LABEL[user().sendNow!]}
 																	disabled={props.pendingAction}
 																	onClick={() => props.onSendPendingNow?.(user().queuedCommandId!)}
 																>
@@ -950,12 +1060,23 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 																	disabled={props.pendingAction}
 																	onClick={() => props.onCancelPending?.(user().queuedCommandId!)}
 																>
-																	×
+																	<IconClose size={14} />
 																</Button>
 															</Show>
 														</span>
 													</Show>
-													<CopyButton label="Copy user message" text={user().text} />
+													<TruncatedTextAction
+														text={user().text}
+														messageId={user().messageId}
+														onShow={props.onShowFullText}
+													/>
+													<MessageMenu
+														role="user"
+														class={s.messageMenu}
+														triggerClass={s.copyAction}
+														onCopy={() => copyMessage(user().text)}
+														onReply={props.onQuote ? () => props.onQuote?.(quoteMessage(user().text)) : undefined}
+													/>
 												</div>
 											</Show>
 										)}
@@ -966,9 +1087,23 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 											const intermediate = () =>
 												props.muteIntermediate !== false && activity().intermediate.has(agent().id);
 											let content: HTMLDivElement | undefined;
+											const [rawShown, setRawShown] = createSignal(false);
+											const messageActions = createMemo(() => {
+												const actions = props.messageActions;
+												const messageId = agent().messageId;
+												if (!actions || !messageId) return undefined;
+												const text = stripAnswerMarkers(agent().text);
+												return {
+													reactions: actions.reactions()[messageId] ?? [],
+													disabled: props.busy() && latestAnswerId() === agent().id,
+													onReact: (reaction: MessageActionReaction, remove: boolean) =>
+														actions.send(messageId, text, { kind: "reaction", reaction, remove }),
+													onComment: (comment: string) => actions.send(messageId, text, { kind: "comment", comment }),
+												};
+											});
 											createEffect(() => {
 												projected().body;
-												queueMicrotask(() => highlightAnswers(content));
+												queueMicrotask(() => highlightAnswers(content, !!props.terminalAgent));
 											});
 											return (
 												<Show
@@ -1003,7 +1138,12 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 																</div>
 															)}
 														</Show>
-														<Show when={projected().body}>
+														<Show when={projected().body && rawShown()}>
+															<pre class={s.rawMarkdown} aria-label="Raw Markdown">
+																{stripAnswerMarkers(agent().text)}
+															</pre>
+														</Show>
+														<Show when={projected().body && !rawShown()}>
 															<ContentRenderer
 																contentRef={(element) => {
 																	content = element;
@@ -1025,24 +1165,39 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 																autoLinkFiles={true}
 															/>
 														</Show>
+														<TruncatedTextAction
+															text={agent().text}
+															messageId={agent().messageId}
+															onShow={props.onShowFullText}
+														/>
 														<div class={s.replyActions}>
-															<CopyButton label="Copy assistant message" text={agent().text} answer />
-															<Show when={props.canForkAtMessage?.() && agent().messageId}>
-																<Button
-																	type="button"
-																	variant="ghost"
-																	size="compact"
-																	class={s.copyAction}
-																	aria-label="Fork"
-																	disabled={props.busy()}
-																	onClick={() => {
-																		const id = agent().messageId;
-																		if (id) props.onFork?.(id);
-																	}}
-																>
-																	Fork
-																</Button>
-															</Show>
+															<MessageMenu
+																role="assistant"
+																class={s.messageMenu}
+																triggerClass={s.copyAction}
+																actions={messageActions()}
+																onCopy={() => copyMessage(stripAnswerMarkers(agent().text))}
+																raw={{ shown: rawShown(), onToggle: () => setRawShown(!rawShown()) }}
+																onReply={
+																	props.onQuote
+																		? () => props.onQuote?.(quoteMessage(stripAnswerMarkers(agent().text)))
+																		: undefined
+																}
+																onReact={
+																	!props.messageActions && props.onQuote && !props.busy()
+																		? (reaction) =>
+																				props.onQuote?.(feedbackMessage(stripAnswerMarkers(agent().text), reaction))
+																		: undefined
+																}
+																onFork={
+																	props.canForkAtMessage?.() && agent().messageId
+																		? () => {
+																				const id = agent().messageId;
+																				if (id) props.onFork?.(id);
+																			}
+																		: undefined
+																}
+															/>
 														</div>
 														<Show
 															when={
@@ -1072,7 +1227,7 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 												<div class={s.noticeTitle}>
 													{(notice().action && NOTICE_LABELS[notice().action!.kind].title) || "Notice"}
 												</div>
-												<div class={s.noticeBody}>{notice().text}</div>
+												<NoticeBody text={notice().text} />
 												<Show when={notice().action}>
 													{(action) => (
 														<Button type="button" class={s.noticeAction} onClick={() => runNoticeAction(action())}>
@@ -1139,7 +1294,18 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 										)}
 									</Match>
 									<Match when={entry.kind === "failed" && entry}>
-										{(failed) => <div class={s.settledNote}>{failed().message}</div>}
+										{(failed) => (
+											<div class={s.settledNote}>
+												{failed().message}
+												<Show when={props.onSetupProvider && isNoModelConfigured(failed().message)}>
+													<div>
+														<Button type="button" variant="primary" onClick={() => props.onSetupProvider?.()}>
+															Set up provider and model
+														</Button>
+													</div>
+												</Show>
+											</div>
+										)}
 									</Match>
 								</Switch>
 							</>
@@ -1149,7 +1315,7 @@ export const Transcript: Component<TranscriptProps> = (props) => {
 				<Show
 					when={props.retry?.()}
 					fallback={
-						<Show when={props.busy()}>
+						<Show when={(props.working ?? props.busy)()}>
 							<WorkingIndicator label={props.busyLabel} />
 						</Show>
 					}

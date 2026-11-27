@@ -18,8 +18,10 @@ import type { AcpAvailableCommand } from "../../types/acp";
 import { pastedImageFiles } from "../../utils/pastedImage";
 import { spacedUrlPaste } from "../../utils/pastedUrl";
 import { pathBasename } from "../../utils/pathUtils";
+import { promptKeyAction } from "../../utils/promptKeybinding";
 import { getRepoTextColor } from "../../utils/repoColor";
 import { ComposeSendIcon } from "../shared/ComposeActionIcons";
+import { PromptContent } from "../shared/PromptContent";
 import { Button } from "../ui/Button";
 import { Textarea } from "../ui/Textarea";
 import s from "./AIChatPanel.module.css";
@@ -42,11 +44,12 @@ export const Composer: Component<{
 	const keyboardCorrection = useKeyboardCorrection();
 	const [pasteError, setPasteError] = createSignal<string | null>(null);
 	const [uploading, setUploading] = createSignal(false);
+	const [resettingContext, setResettingContext] = createSignal(false);
 	const [commandNotice, setCommandNotice] = createSignal<string | null>(null);
 	const commandMenuId = createUniqueId();
 	const [commandIndex, setCommandIndex] = createSignal(0);
 	const [commandsDismissed, setCommandsDismissed] = createSignal(false);
-	type Command = AcpAvailableCommand & { run?: () => void; unavailable?: string };
+	type Command = AcpAvailableCommand & { run?: () => void; unavailable?: string; preserveDraft?: boolean };
 	const commands = createMemo<Command[]>(() => {
 		const chat = props.chat;
 		const live = !!chat.sessionId() && !!chat.connectionId?.();
@@ -59,7 +62,26 @@ export const Composer: Component<{
 					void chat.startSession();
 				},
 			},
-			{ name: "clear", description: "Clear the composer and its attachments", run: () => aiChatDraft.clear() },
+			{
+				name: "clear",
+				description: "Clear agent context by starting a new conversation",
+				unavailable:
+					busy || chat.held?.()
+						? "Wait for the current turn to finish before clearing context."
+						: !live || chat.phase() === "starting"
+							? "Open a conversation before clearing context."
+							: undefined,
+				// New selects an empty agent session without deleting the old history.
+				// Preserve the source tab's draft and attachments; only the new tab is empty.
+				preserveDraft: true,
+				run: () => {
+					setResettingContext(true);
+					void chat
+						.startSession()
+						.catch((error: unknown) => setCommandNotice(error instanceof Error ? error.message : String(error)))
+						.finally(() => setResettingContext(false));
+				},
+			},
 		];
 		if (live) {
 			host.push({
@@ -95,7 +117,10 @@ export const Composer: Component<{
 			host.push({
 				name: "fork",
 				description: "Fork the conversation into a new tab",
-				unavailable: busy ? "Wait for the current turn to finish before forking." : undefined,
+				unavailable:
+					busy && !chat.capabilities?.()?.forkAtMessage
+						? "This agent cannot fork a completed turn while another turn runs."
+						: undefined,
 				run: () => {
 					void chat.fork();
 				},
@@ -118,19 +143,8 @@ export const Composer: Component<{
 				},
 			});
 		}
-		const hostNames = new Set([
-			"new",
-			"clear",
-			"quit",
-			"q",
-			"usage",
-			"compact",
-			"fork",
-			"pause",
-			"resume",
-			"name",
-			"retry",
-		]);
+		const hostNames = new Set(host.map((command) => command.name));
+		if (hostNames.has("quit")) hostNames.add("q");
 		return [...host, ...(chat.availableCommands?.() ?? []).filter((command) => !hostNames.has(command.name))];
 	});
 	const commandText = () => aiChatDraft.text().match(/^\/(\S*)(?:\s([\s\S]*))?$/);
@@ -214,7 +228,7 @@ export const Composer: Component<{
 	});
 	const send = () => {
 		// Compaction may refuse or lose selection. Keep the draft until it can be accepted.
-		if (props.chat.compacting?.()) return;
+		if (props.chat.compacting?.() || resettingContext()) return;
 		if (props.mobileAttachments && uploading()) return;
 		browserDictation.cancel();
 		setCommandNotice(null);
@@ -224,7 +238,10 @@ export const Composer: Component<{
 		if (!text.trim() && images.length === 0 && files.length === 0) return;
 		if (text.startsWith("/")) {
 			const typed = text.match(/^\/(\S+)(?:\s([\s\S]*))?$/);
-			const name = typed?.[1] === "q" ? "quit" : typed?.[1];
+			const name =
+				typed?.[1] === "q" && commands().some((command) => command.name === "quit" && command.run)
+					? "quit"
+					: typed?.[1];
 			const command = commands().find((candidate) => candidate.name === name);
 			// A second slash identifies path text; advertised command names still take precedence.
 			if (!command && !typed?.[1].includes("/")) {
@@ -240,7 +257,7 @@ export const Composer: Component<{
 					setCommandNotice(command.unavailable ?? `/${name} does not accept arguments or attachments.`);
 					return;
 				}
-				aiChatDraft.clear();
+				if (!command.preserveDraft) aiChatDraft.clear();
 				command.run();
 				queueMicrotask(resize);
 				return;
@@ -383,7 +400,7 @@ export const Composer: Component<{
 				});
 			return;
 		}
-		if (event.key.toLowerCase() === "s" && event.ctrlKey && !event.metaKey && !event.altKey) {
+		if (promptKeyAction(event) === "park") {
 			event.preventDefault();
 			if (event.repeat) return;
 			browserDictation.cancel();
@@ -391,7 +408,7 @@ export const Composer: Component<{
 			queueMicrotask(resize);
 			return;
 		}
-		if (event.key !== "Enter" || event.shiftKey) return;
+		if (promptKeyAction(event) !== "send") return;
 		event.preventDefault();
 		send();
 	};
@@ -444,6 +461,36 @@ export const Composer: Component<{
 				ref={inputArea}
 				class={props.mobileAttachments ? `${s.inputArea} ${s.mobileComposer} ${mobileInput.form}` : s.inputArea}
 			>
+				<Show when={props.chat.sendingPrompts().length > 0}>
+					<div class={s.queueList} aria-label="Sending prompts" aria-live="polite">
+						<For each={props.chat.sendingPrompts()}>
+							{(prompt) => (
+								<div class={s.queueRow}>
+									<div class={s.queueText}>
+										<span>
+											{prompt.failed
+												? `Send failed. ${prompt.failure ?? "Submission could not complete."} Check the conversation before retrying. `
+												: "Sending… "}
+										</span>
+										<PromptContent text={prompt.text || "Attachment"} />
+										<For each={prompt.files}>{(file) => <span>{file.name}</span>}</For>
+										<Show when={prompt.images.length}>{prompt.images.length} image(s)</Show>
+									</div>
+									<Show when={prompt.failed}>
+										<Button
+											type="button"
+											variant="ghost"
+											aria-label={`Retry sending ${prompt.text}`}
+											onClick={() => void props.chat.retrySending(prompt.localId)}
+										>
+											Retry
+										</Button>
+									</Show>
+								</div>
+							)}
+						</For>
+					</div>
+				</Show>
 				<Show when={props.chat.queuedPrompts().length > 0}>
 					<div class={s.queueList} aria-label="Queued prompts">
 						<div class={s.queueHeader}>
@@ -454,7 +501,9 @@ export const Composer: Component<{
 								const label = queued.summary;
 								return (
 									<div class={s.queueRow}>
-										<span class={s.queueText}>{label}</span>
+										<div class={s.queueText}>
+											<PromptContent text={label} />
+										</div>
 										<Button
 											type="button"
 											shape="icon"
@@ -579,10 +628,11 @@ export const Composer: Component<{
 					</Show>
 					<div class={props.mobileAttachments ? mobileInput.composer : s.composerActions}>
 						<Textarea
+							embedded={props.mobileAttachments}
 							compact={!props.mobileAttachments}
 							ref={textarea}
 							data-control-layout="composer-editor"
-							class={props.mobileAttachments ? `${s.textarea} ${mobileInput.input}` : s.textarea}
+							class={props.mobileAttachments ? mobileInput.input : s.textarea}
 							autocorrect={props.mobileAttachments ? (keyboardCorrection.enabled() ? "on" : "off") : undefined}
 							spellcheck={props.mobileAttachments ? keyboardCorrection.enabled() : undefined}
 							autocapitalize={
@@ -688,7 +738,11 @@ export const Composer: Component<{
 				</Show>
 				<Show
 					when={props.onSessionSettings}
-					fallback={<span class={s.sessionSettingsSummary}>{sessionSummary(props.chat)}</span>}
+					fallback={
+						<span class={`${s.sessionSettingsSummary} ${props.mobileAttachments ? s.mobileSessionSummary : ""}`}>
+							{sessionSummary(props.chat)}
+						</span>
+					}
 				>
 					<Button
 						variant="ghost"

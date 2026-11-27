@@ -3,6 +3,7 @@ import {
 	createEffect,
 	createMemo,
 	createSignal,
+	createUniqueId,
 	For,
 	lazy,
 	onCleanup,
@@ -13,29 +14,41 @@ import {
 import { useVoiceAgent } from "../../hooks/useVoiceAgent";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
-import { type ConversationMeta, conversationStore, type ToolCallEntry } from "../../stores/conversationStore";
+import {
+	type ChatActivity,
+	type ConversationMessage,
+	type ConversationMeta,
+	conversationStore,
+	isFailedDelivery,
+	type ToolCallEntry,
+} from "../../stores/conversationStore";
 import { dictationStore } from "../../stores/dictation";
 import { ENCODABLE_EFFORT_LEVELS } from "../../stores/providerRegistry";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
 import { voiceStore } from "../../stores/voice";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
+import { CLEAR_CHAT_VIEW_EVENT } from "../../utils/aiChatView";
 import { writeClipboard } from "../../utils/clipboard";
 import { createThrottled } from "../../utils/createThrottled";
 import { getShellFamily, sendCommand } from "../../utils/sendCommand";
 import { MicMeter } from "../DictationToast/MicMeter";
 import {
+	IconAlert as UiAlert,
 	IconArrowUp as UiArrowUp,
 	IconChevronDown as UiChevronDown,
 	IconChevronRight as UiChevronRight,
 	IconClose as UiClose,
 	IconHistory as UiHistory,
 	IconMic as UiMic,
+	IconRefresh as UiRefresh,
 	IconSparkle as UiSparkle,
 	IconTrash as UiTrash,
 	IconWaveform as UiWaveform,
 } from "../icons";
+import { PromptContent } from "../shared/PromptContent";
 import p from "../shared/panel.module.css";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
@@ -44,8 +57,11 @@ import { VoiceOrb } from "../ui/VoiceOrb";
 // the Transcript/Composer components the terminal Chat view and mobile chat use;
 // sharing one module would make the two designs fight over the same class names.
 import s from "./FastAFChatPanel.module.css";
+import { MessageMenu, quoteMessage } from "./MessageMenu";
+import { NoticeText } from "./NoticeText";
 import { SessionKnowledgeBar } from "./SessionKnowledgeBar";
 import { trackPanelWidth } from "./trackPanelWidth";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 const ContentRenderer = lazy(() =>
 	import("../ui/ContentRenderer").then((module) => ({ default: module.ContentRenderer })),
@@ -187,6 +203,8 @@ const IconUnlock = () => (
 
 const IconSpark = () => <UiSparkle size={20} stroke={1.5} />;
 
+const IconRetry = () => <UiRefresh size={14} />;
+
 const IconArrowRight = () => <UiChevronRight size={14} />;
 
 const IconChevronDown = () => <UiChevronDown size={12} stroke={2} />;
@@ -210,6 +228,44 @@ const STARTERS: ReadonlyArray<{ label: string; prompt: string }> = [
 		prompt: "Summarize what has happened in this terminal session so far, in a few short bullet points.",
 	},
 ];
+
+/**
+ * Commands the composer runs itself instead of sending them as a message. They
+ * are offered as soon as the draft is a lone "/word"; anything else that starts
+ * with a slash (a path, a sentence) is an ordinary message.
+ */
+const SLASH_COMMANDS: ReadonlyArray<{ name: "clear" | "fork"; hint: string; detail: string }> = [
+	{
+		name: "clear",
+		hint: "Start a new conversation",
+		detail: "Starts a new conversation. The one on screen is saved and stays in History.",
+	},
+	{
+		name: "fork",
+		hint: "Branch from the last answer",
+		detail: "Continues from the last completed answer in a new conversation. The original stays in History.",
+	},
+];
+
+/** A whole draft that is one of the commands; "/new" is "/clear" under its other name. */
+const SLASH_EXACT = /^\/(clear|new|fork)$/i;
+
+/** What the header dot says in words, for the tooltip and for assistive technology. */
+const ACTIVITY_LABEL: Record<ChatActivity, string> = {
+	working: "Working",
+	waiting: "Waiting for you",
+	idle: "Idle",
+};
+
+/**
+ * The day a saved conversation was last touched. `updated` is Unix milliseconds
+ * (ai_agent/conversation.rs); it used to be multiplied by 1000 here, which put
+ * every row some 56,000 years ahead. A value small enough to be seconds is
+ * still read as seconds.
+ */
+export function historyDate(updated: number): string {
+	return new Date(updated < 1e11 ? updated * 1000 : updated).toLocaleDateString();
+}
 
 /** Fields stripped from the args display — internal plumbing the user doesn't need. */
 const TOOL_NOISE_FIELDS = new Set(["session_id", "timeout_ms"]);
@@ -407,7 +463,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		streamingRender();
 		reasoningRender();
 		textChunksRender();
-		conversationStore.messages().length;
+		conversationStore.visibleMessages().length;
 		if (messageListRef) {
 			messageListRef.scrollTop = messageListRef.scrollHeight;
 		}
@@ -420,10 +476,149 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		textareaRef.style.height = `${Math.min(textareaRef.scrollHeight, 150)}px`;
 	};
 
+	// ── Conversation actions, each of which says what it did ───────────────
+	// "Clear" could mean three things here, so none of them is silent: a new
+	// conversation keeps the old one, clearing the view hides and deletes
+	// nothing, and only the header's trash removes a conversation from History.
+	const notify = (title: string, message: string, level: "info" | "warn" | "error" = "info") =>
+		toastsStore.add(title, message, level);
+
+	/** `/clear`: a new conversation. False when a running turn refused it. */
+	const startNewConversation = async (): Promise<boolean> => {
+		const outcome = await conversationStore.newConversation();
+		if (outcome === "busy") {
+			notify("A reply is still running", "Stop it or let it finish, then start a new conversation.");
+			return false;
+		}
+		if (outcome === "started") notify("New conversation", "The previous one is saved in History.");
+		return true;
+	};
+
+	/** Cmd/Ctrl+K: hide what is on screen. */
+	let lastViewClear = 0;
+	const clearView = () => {
+		// The menu accelerator and the keybinding can both deliver one key press.
+		const now = Date.now();
+		if (now - lastViewClear < 300) return;
+		lastViewClear = now;
+		if (conversationStore.clearView()) {
+			notify(
+				"Conversation view cleared",
+				"Nothing was deleted. The messages are still saved, and History opens them again.",
+			);
+		} else {
+			notify("Nothing to clear", "The conversation view is already empty.");
+		}
+	};
+
+	/** The header's trash: the one action here that deletes. */
+	const deleteConversation = () => {
+		const hadMessages = conversationStore.messages().length > 0;
+		conversationStore.clearHistory();
+		if (hadMessages) notify("Conversation deleted", "It was removed from History.");
+	};
+
+	/** Branch at one answer, or at the last completed one. */
+	const fork = async (atLocalId?: number) => {
+		switch (await conversationStore.forkConversation(atLocalId)) {
+			case "forked":
+				notify("Conversation forked", "You are in the fork. The original is in History.");
+				break;
+			case "saved":
+				notify(
+					"Fork saved to History",
+					"This conversation is still running, so it stays on screen. Open the fork from History.",
+				);
+				break;
+			case "nothing":
+				notify("Nothing to fork yet", "A conversation can be forked once it has a completed answer.");
+				break;
+			case "failed":
+				notify("Fork failed", "The new conversation could not be saved.", "error");
+				break;
+		}
+	};
+
+	// In the main window Cmd/Ctrl+K arrives through the app's shortcut layer,
+	// which hands it over when the keyboard is in this panel (utils/aiChatView).
+	onMount(() => {
+		const onClear = () => {
+			if (props.visible) clearView();
+		};
+		window.addEventListener(CLEAR_CHAT_VIEW_EVENT, onClear);
+		onCleanup(() => window.removeEventListener(CLEAR_CHAT_VIEW_EVENT, onClear));
+	});
+
+	// ── The panel keeps the keyboard ───────────────────────────────────────
+	// A click on the thread or on one of its controls used to leave the focus
+	// on <body>, and the next key went to the terminal beside the chat. A click
+	// anywhere in the panel now leaves the focus inside it: on the control that
+	// was clicked, or on the composer. A text selection is left alone, so it
+	// can still be copied.
+	const focusComposer = () => {
+		if (textareaRef && !textareaRef.disabled) textareaRef.focus({ preventScroll: true });
+		else panelEl.focus({ preventScroll: true });
+	};
+
+	const claimFocus = (event: MouseEvent) => {
+		if (event.button !== 0 || !(event.target instanceof Element)) return;
+		const control = event.target.closest<HTMLElement>(
+			"button, a[href], input, textarea, select, summary, [contenteditable], [tabindex]",
+		);
+		if (control && control !== panelEl) {
+			// macOS does not focus a button on click; do it, so the key that follows is its own.
+			control.focus({ preventScroll: true });
+			return;
+		}
+		if (!window.getSelection()?.isCollapsed) return;
+		focusComposer();
+	};
+
+	const handlePanelKeyDown = (e: KeyboardEvent) => {
+		// A detached chat window has no app shortcut layer: it answers Cmd/Ctrl+K itself.
+		if (!isPanelMode() || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+		if (e.key.toLowerCase() !== "k") return;
+		e.preventDefault();
+		clearView();
+	};
+
+	// ── Slash commands ─────────────────────────────────────────────────────
+	const slashId = createUniqueId();
+	const [slashDismissed, setSlashDismissed] = createSignal(false);
+	const [slashIndex, setSlashIndex] = createSignal(0);
+	const slashMatches = createMemo(() => {
+		const typed = /^\/([a-z]*)$/i.exec(inputText());
+		if (!typed || slashDismissed() || isFrozen()) return [];
+		const query = typed[1].toLowerCase();
+		return SLASH_COMMANDS.filter((command) => command.name.startsWith(query));
+	});
+	createEffect(() => {
+		if (slashIndex() >= slashMatches().length) setSlashIndex(0);
+	});
+
+	const runSlashCommand = async (name: "clear" | "fork") => {
+		if (name === "fork") {
+			setInputText("");
+			autoResize();
+			await fork();
+			return;
+		}
+		// A refused /clear leaves the draft where it is.
+		if (await startNewConversation()) {
+			setInputText("");
+			autoResize();
+		}
+	};
+
 	// ── Send message ───────────────────────────────────────────────────────
 	const handleSend = () => {
 		const text = inputText().trim();
 		if (!text || isFrozen()) return;
+		const command = SLASH_EXACT.exec(text);
+		if (command) {
+			void runSlashCommand(command[1].toLowerCase() === "fork" ? "fork" : "clear");
+			return;
+		}
 		const sid = activeSessionId();
 
 		const turnOpts = { modelOverride: modelOverride(), reasoningEffort: effort() };
@@ -471,6 +666,23 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		setInputText((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")} ${text}` : text));
 		autoResize();
 		textareaRef?.focus();
+	};
+
+	/** Quote reply: the quote goes into the draft, under whatever is there; nothing is sent. */
+	const quoteIntoComposer = (text: string) => {
+		const quoted = quoteMessage(text);
+		setInputText((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")}\n\n${quoted}` : quoted));
+		queueMicrotask(() => {
+			autoResize();
+			if (!textareaRef) return;
+			textareaRef.focus();
+			textareaRef.setSelectionRange(textareaRef.value.length, textareaRef.value.length);
+			textareaRef.scrollTop = textareaRef.scrollHeight;
+		});
+	};
+
+	const copyMessage = (text: string) => {
+		void writeClipboard(text).catch((e) => appLogger.warn("ai-chat", "Copy failed", { error: String(e) }));
 	};
 
 	const stopDictation = async () => {
@@ -563,6 +775,26 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	};
 
 	const handleKeyDown = (e: KeyboardEvent) => {
+		const matches = slashMatches();
+		if (matches.length > 0) {
+			if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+				e.preventDefault();
+				const step = e.key === "ArrowDown" ? 1 : -1;
+				setSlashIndex((index) => (index + step + matches.length) % matches.length);
+				return;
+			}
+			if (e.key === "Escape") {
+				e.preventDefault();
+				e.stopPropagation();
+				setSlashDismissed(true);
+				return;
+			}
+			if (e.key === "Tab" || (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.shiftKey)) {
+				e.preventDefault();
+				void runSlashCommand(matches[slashIndex()].name);
+				return;
+			}
+		}
 		if (e.key === "Enter") {
 			if (e.metaKey || e.ctrlKey || e.shiftKey) {
 				// Cmd/Ctrl/Shift+Enter = newline (default behavior)
@@ -620,6 +852,8 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	const enhanceCodeBlocks = (container: HTMLDivElement, signal: AbortSignal) => {
 		const pres = container.querySelectorAll("pre");
 		for (const pre of pres) {
+			// The raw-Markdown view is the message's source, not a code block.
+			if (pre.classList.contains(s.rawMarkdown)) continue;
 			if (pre.parentElement?.classList.contains(s.codeBlockWrapper)) continue;
 
 			const parent = pre.parentElement;
@@ -675,14 +909,145 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		}
 	};
 
-	// ── Retry last message on error ────────────────────────────────────────
+	// ── Retry after an error ───────────────────────────────────────────────
+	// A turn that got no answer keeps its own Retry on its bubble. This one is
+	// for the error row: a reply that stopped early is asked again, with the
+	// model and effort it was asked with.
 	const handleRetry = () => {
 		const msgs = conversationStore.messages();
-		const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+		const error = conversationStore.error();
+		const unanswered = msgs.find((m) => isFailedDelivery(m) && m.failure === error);
+		if (unanswered?.localId != null) {
+			void conversationStore.retryMessage(unanswered.localId, activeSessionId());
+			return;
+		}
+		const lastUser = [...msgs].reverse().find((m) => m.role === "user" && !m.delivery);
 		if (lastUser) {
 			conversationStore.setError(null);
-			conversationStore.sendMessage(lastUser.content, activeSessionId());
+			conversationStore.sendMessage(
+				lastUser.content,
+				activeSessionId(),
+				lastUser.turn ?? { modelOverride: modelOverride(), reasoningEffort: effort() },
+			);
 		}
+	};
+
+	/** The error row, unless a message in the thread already carries that error on its bubble. */
+	const bannerError = () => {
+		const error = conversationStore.error();
+		if (!error) return null;
+		return conversationStore.visibleMessages().some((m) => isFailedDelivery(m) && m.failure === error) ? null : error;
+	};
+
+	/** An Ask turn the backend has taken and that has not said anything yet. */
+	const askWaiting = () =>
+		conversationStore.isStreaming() &&
+		!streamingRender() &&
+		!conversationStore.reasoningChunks() &&
+		!conversationStore.visibleMessages().some((m) => m.delivery === "sending");
+
+	// ── Header state dot ───────────────────────────────────────────────────
+	const activity = (): ChatActivity => conversationStore.chatActivity();
+	const activityDot = (state: ChatActivity) =>
+		state === "working" ? s.sessionDotWorking : state === "waiting" ? s.sessionDotWaiting : s.sessionDotOn;
+	const dotLabel = () => (activeTerminalName() ? ACTIVITY_LABEL[activity()] : "No terminal focused");
+
+	/** One settled message of the thread. A message object never changes: a new state is a new object, and a new row. */
+	const ThreadMessage: Component<{ msg: ConversationMessage }> = (row) => {
+		const msg = row.msg;
+		if (msg.role === "system") {
+			return (
+				<div class={s.noticeRow} role="note">
+					<NoticeText text={msg.content} />
+				</div>
+			);
+		}
+		if (msg.role === "user") {
+			return (
+				<div class={s.userTurn} data-delivery={msg.delivery}>
+					<div class={s.userRow}>
+						<MessageMenu
+							role="user"
+							class={s.userMenu}
+							triggerClass={s.menuTrigger}
+							align="start"
+							prefer="bottom"
+							onCopy={() => copyMessage(msg.content)}
+							onReply={msg.delivery || isFrozen() ? undefined : () => quoteIntoComposer(msg.content)}
+						/>
+						{/* Image attachments are drawn above the text, outside its tinted block. */}
+						<div class={s.userBody}>
+							<PromptContent text={msg.content} prose={(text) => <div class={s.userMsg}>{text}</div>} />
+						</div>
+					</div>
+					<Show when={msg.delivery === "sending"}>
+						<span class={s.sendNote} role="status">
+							Sending…
+						</span>
+					</Show>
+					<Show when={isFailedDelivery(msg)}>
+						<div class={s.sendFailed} role="alert">
+							<div class={s.sendFailedLine}>
+								<span class={s.sendFailedLabel}>
+									<UiAlert size={14} />
+									{msg.delivery === "not_sent" ? "Not sent" : "No reply"}
+								</span>
+								<button
+									type="button"
+									class={s.noteBtn}
+									disabled={conversationStore.isStreaming() || isFrozen()}
+									onClick={() => void conversationStore.retryMessage(msg.localId ?? -1, activeSessionId())}
+								>
+									Retry
+								</button>
+								<button
+									type="button"
+									class={s.noteBtn}
+									onClick={() => conversationStore.discardMessage(msg.localId ?? -1)}
+								>
+									Discard
+								</button>
+							</div>
+							<Show when={msg.failure}>{(failure) => <NoticeText class={s.sendFailedReason} text={failure()} />}</Show>
+						</div>
+					</Show>
+				</div>
+			);
+		}
+		const [rawShown, setRawShown] = createSignal(false);
+		let body!: HTMLDivElement;
+		const ac = new AbortController();
+		onCleanup(() => ac.abort());
+		// Copy and Run are injected into the rendered Markdown, which is rendered
+		// anew each time the raw view gives way to it.
+		createEffect(() => {
+			if (rawShown()) return;
+			const frame = requestAnimationFrame(() => enhanceCodeBlocks(body, ac.signal));
+			onCleanup(() => cancelAnimationFrame(frame));
+		});
+		return (
+			<div class={s.assistantMsg}>
+				<div class={s.assistantBody} ref={body}>
+					<Show when={rawShown()} fallback={<MarkdownContent content={msg.content} />}>
+						<pre class={s.rawMarkdown} aria-label="Raw Markdown">
+							{msg.content}
+						</pre>
+					</Show>
+				</div>
+				<div class={s.msgActions}>
+					<MessageMenu
+						role="assistant"
+						triggerClass={s.menuTrigger}
+						align="start"
+						prefer="bottom"
+						onCopy={() => copyMessage(msg.content)}
+						raw={{ shown: rawShown(), onToggle: () => setRawShown(!rawShown()) }}
+						onReply={isFrozen() ? undefined : () => quoteIntoComposer(msg.content)}
+						onFork={msg.localId == null ? undefined : () => void fork(msg.localId)}
+					/>
+				</div>
+			</div>
+		);
 	};
 
 	// ── Empty-state starters ───────────────────────────────────────────────
@@ -700,7 +1065,19 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	const agentBusy = () => conversationStore.agentState() === "running" || conversationStore.agentState() === "paused";
 
 	return (
-		<div id="ai-chat-panel" ref={panelEl} class={cx(s.panel, !props.visible && s.hidden)}>
+		<div
+			id="ai-chat-panel"
+			ref={panelEl}
+			class={cx(s.panel, !props.visible && s.hidden)}
+			data-focus-target="ai-chat"
+			tabIndex={-1}
+			onClick={claimFocus}
+			onKeyDown={handlePanelKeyDown}
+			onFocus={(e) => {
+				// Focus handed to the panel itself (a restored focus) belongs in the composer.
+				if (e.target === panelEl && textareaRef && !textareaRef.disabled) textareaRef.focus({ preventScroll: true });
+			}}
+		>
 			<PanelResizeHandle panelId="ai-chat-panel" minWidth={300} maxWidth={700} />
 
 			{/* ── Header — what this chat is attached to, and nothing else. Every
@@ -708,7 +1085,12 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			    next to the text it applies to. */}
 			<div class={p.header}>
 				<div class={p.headerLeft}>
-					<span class={cx(s.sessionDot, activeTerminalName() ? s.sessionDotOn : s.sessionDotOff)} />
+					<span
+						class={cx(s.sessionDot, activeTerminalName() ? activityDot(activity()) : s.sessionDotOff)}
+						role="img"
+						aria-label={dotLabel()}
+						title={dotLabel()}
+					/>
 					<span class={p.title}>AI Chat</span>
 					<Show when={activeTerminalName()}>{(name) => <span class={s.terminalName}>{name()}</span>}</Show>
 				</div>
@@ -723,9 +1105,9 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					</button>
 					<button
 						class={s.headerBtn}
-						onClick={() => conversationStore.clearHistory()}
-						title="Clear conversation"
-						aria-label="Clear conversation"
+						onClick={deleteConversation}
+						title="Delete conversation"
+						aria-label="Delete conversation"
 					>
 						<IconTrash />
 					</button>
@@ -747,7 +1129,16 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					<For each={historyList()}>
 						{(conv) => (
 							<button class={s.historyItem} onClick={() => void handleLoadConversation(conv.id)}>
-								<span class={s.historyTitle}>{conv.title || "Untitled"}</span>
+								<span class={s.historyTitle}>
+									<Show when={conversationStore.chatActivityOf(conv.id) !== "idle"}>
+										<span
+											class={cx(s.sessionDot, s.historyDot, activityDot(conversationStore.chatActivityOf(conv.id)))}
+											role="img"
+											aria-label={ACTIVITY_LABEL[conversationStore.chatActivityOf(conv.id)]}
+										/>
+									</Show>
+									{conv.title || "Untitled"}
+								</span>
 								<span class={s.historyMeta}>
 									<Show when={resolveSessionName(conv.session_id)}>
 										<span class={s.historySession}>{resolveSessionName(conv.session_id)}</span>
@@ -756,7 +1147,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 										<span class={s.historyModel}>{[conv.provider, conv.model].filter(Boolean).join(" / ")}</span>
 									</Show>
 									<span class={s.historyCount}>{conv.message_count} msgs</span>
-									<span class={s.historyDate}>{new Date(conv.updated * 1000).toLocaleDateString()}</span>
+									<span class={s.historyDate}>{historyDate(conv.updated)}</span>
 								</span>
 							</button>
 						)}
@@ -767,7 +1158,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			{/* ── Thread ──────────────────────────────────────────── */}
 			<div class={cx(s.messageList, showHistory() && s.hidden)} ref={messageListRef}>
 				<Show
-					when={conversationStore.messages().length > 0 || conversationStore.isStreaming() || agentBusy()}
+					when={conversationStore.visibleMessages().length > 0 || conversationStore.isStreaming() || agentBusy()}
 					fallback={
 						<div class={s.emptyState}>
 							<span class={s.emptyMark}>
@@ -802,33 +1193,18 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						</div>
 					}
 				>
-					<For each={conversationStore.messages()}>
-						{(msg) => (
-							<Show
-								when={msg.role === "user"}
-								fallback={
-									<div
-										class={s.assistantMsg}
-										ref={(el) => {
-											const ac = new AbortController();
-											onCleanup(() => ac.abort());
-											requestAnimationFrame(() => enhanceCodeBlocks(el, ac.signal));
-										}}
-									>
-										<MarkdownContent content={msg.content} />
-									</div>
-								}
-							>
-								<div class={s.userMsg}>{msg.content}</div>
-							</Show>
-						)}
-					</For>
+					<For each={conversationStore.visibleMessages()}>{(msg) => <ThreadMessage msg={msg} />}</For>
 
 					{/* Extended-thinking disclosure (Opus 4.7+): live reasoning, collapsible.
 					    Auto-opens while the model is thinking, stays available after. */}
 					<Show when={conversationStore.reasoningChunks()}>
 						<details class={s.reasoningDisclosure} open={conversationStore.isThinking()}>
-							<summary class={s.reasoningSummary}>Thinking</summary>
+							<summary class={s.reasoningSummary}>
+								<span class={s.noticeChevron}>
+									<IconArrowRight />
+								</span>
+								Thinking
+							</summary>
 							<div class={s.reasoningBody}>
 								<MarkdownContent content={reasoningRender()} streaming />
 							</div>
@@ -842,6 +1218,10 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 								<MarkdownContent content={text()} streaming />
 							</div>
 						)}
+					</Show>
+
+					<Show when={askWaiting()}>
+						<WorkingIndicator label="Thinking…" />
 					</Show>
 
 					{/* Agent tool calls — one compact row each */}
@@ -918,26 +1298,42 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 
 				<Show when={["completed", "cancelled", "error"].includes(conversationStore.agentState())}>
 					<div class={cx(s.statusRow, s.statusRowDone, conversationStore.agentState() === "error" && s.statusRowError)}>
-						<span class={s.statusText}>
-							{conversationStore.agentState() === "completed"
-								? `Agent finished${conversationStore.completionReason() ? ` — ${conversationStore.completionReason()}` : ""}`
-								: conversationStore.agentState() === "cancelled"
-									? "Agent stopped"
-									: `Agent error: ${conversationStore.agentError() ?? "unknown error"}`}
-						</span>
+						<NoticeText
+							class={s.statusNotice}
+							text={
+								conversationStore.agentState() === "completed"
+									? `Agent finished${conversationStore.completionReason() ? ` — ${conversationStore.completionReason()}` : ""}`
+									: conversationStore.agentState() === "cancelled"
+										? "Agent stopped"
+										: `Agent error: ${conversationStore.agentError() ?? "unknown error"}`
+							}
+						/>
+						{/* A run that failed keeps its task: it can be started again as it was. */}
+						<Show when={conversationStore.agentState() === "error" && conversationStore.agentGoal() && !isFrozen()}>
+							<button
+								class={s.statusBtn}
+								onClick={() => void conversationStore.retryAgent(activeSessionId())}
+								title="Run the task again"
+								aria-label="Run the task again"
+							>
+								<IconRetry />
+							</button>
+						</Show>
 						<button class={s.statusBtn} onClick={() => conversationStore.reset()} title="Dismiss" aria-label="Dismiss">
 							<IconClose />
 						</button>
 					</div>
 				</Show>
 
-				<Show when={conversationStore.error()}>
-					<div class={s.errorBanner}>
-						<span class={s.errorText}>{conversationStore.error()}</span>
-						<button class={s.retryBtn} onClick={handleRetry}>
-							Retry
-						</button>
-					</div>
+				<Show when={bannerError()}>
+					{(message) => (
+						<div class={s.errorBanner}>
+							<NoticeText class={s.errorText} text={message()} />
+							<button class={s.retryBtn} onClick={handleRetry}>
+								Retry
+							</button>
+						</div>
+					)}
 				</Show>
 
 				{/* Approval — the one thing that must not be missed, so it sits at
@@ -1084,10 +1480,38 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			{/* ── Composer — one glass field: the text on top, and beneath it the
 			    knobs that shape this turn on the left, the ways to send on the right. */}
 			<div class={cx(s.inputArea, isFrozen() && s.inputAreaFrozen)}>
+				{/* Commands the composer runs itself, offered while the draft is a lone "/word". */}
+				<Show when={slashMatches().length > 0}>
+					<div id={slashId} class={s.slashMenu} role="listbox" aria-label="Commands">
+						<For each={slashMatches()}>
+							{(command, index) => (
+								<div
+									id={`${slashId}-${command.name}`}
+									class={cx(s.slashItem, index() === slashIndex() && s.slashItemActive)}
+									role="option"
+									aria-selected={index() === slashIndex()}
+									title={command.detail}
+									onMouseEnter={() => setSlashIndex(index())}
+									onMouseDown={(e) => {
+										// Keep the focus in the textarea; the command runs on the press.
+										e.preventDefault();
+										void runSlashCommand(command.name);
+									}}
+								>
+									<span class={s.slashName}>/{command.name}</span>
+									<span class={s.slashHint}>{command.hint}</span>
+								</div>
+							)}
+						</For>
+					</div>
+				</Show>
 				<textarea
 					ref={textareaRef}
-					data-focus-target="ai-chat"
 					class={s.textarea}
+					aria-controls={slashMatches().length > 0 ? slashId : undefined}
+					aria-activedescendant={
+						slashMatches().length > 0 ? `${slashId}-${slashMatches()[slashIndex()]?.name}` : undefined
+					}
 					rows={1}
 					placeholder={
 						isFrozen()
@@ -1098,6 +1522,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					}
 					value={inputText()}
 					onInput={(e) => {
+						setSlashDismissed(false);
 						setInputText(e.currentTarget.value);
 						autoResize();
 					}}

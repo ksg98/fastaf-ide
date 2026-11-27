@@ -14,7 +14,9 @@ cpal = "0.18.2"
 # Playback only: Pocket renders PCM and the external engine's WAV is read by
 # speech::external, so no decoder is needed.
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
-whisper-rs = "0.16"
+# raw-api re-exports whisper-rs-sys: the backend label asks ggml's device
+# registry which GPU, if any, whisper.cpp will use.
+whisper-rs = { version = "0.16", features = ["raw-api"] }
 # FastAF links ONNX Runtime statically (ort's default download-binaries), the
 # same build its voice agent (Kokoro, Silero) has always used: one ort for the
 # whole binary, so Pocket TTS runs on that static runtime too and never loads

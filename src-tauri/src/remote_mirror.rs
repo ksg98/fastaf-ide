@@ -103,6 +103,21 @@ fn store_seed(state: &AppState, connection_id: &str, rows: Vec<SessionInfo>) {
         .insert(connection_id.to_string(), rows);
 }
 
+// Cached report stages cease to be current when their authoritative refresh fails.
+fn invalidate_stages(state: &Arc<AppState>, connection_id: &str) {
+    if let Some(mut rows) = state.remote_sessions.by_connection.get_mut(connection_id) {
+        for row in rows.values_mut() {
+            row.agent_report = Default::default();
+        }
+    }
+    republish(
+        state,
+        connection_id,
+        "boss-attention-changed",
+        serde_json::json!({}),
+    );
+}
+
 /// Put rows in the mirror without a daemon, so a router test can prove the HTTP
 /// transport carries them.
 #[cfg(test)]
@@ -162,8 +177,12 @@ pub(crate) const ORIGIN_MARKER: &str = "__tuic_origin";
 /// Everything else still reaches the local bus, where
 /// `state.rs` ignores `RemoteMirrored`, and `/events`, where a client that
 /// asked for the mirror wants it.
+/// Repository changes additionally produce `remote-repo-changed`, whose consumer
+/// verifies the owning connection before refreshing through that connection.
 #[cfg_attr(all(not(feature = "desktop"), not(test)), allow(dead_code))]
-const WINDOW_MIRRORABLE_EVENTS: [&str; 16] = [
+const WINDOW_MIRRORABLE_EVENTS: [&str; 18] = [
+    "boss-attention-changed",
+    "remote-repo-changed",
     "session-state-changed",
     "settings-changed",
     "session-closed",
@@ -186,6 +205,24 @@ const WINDOW_MIRRORABLE_EVENTS: [&str; 16] = [
 #[cfg_attr(all(not(feature = "desktop"), not(test)), allow(dead_code))]
 fn window_may_hear(event: &str) -> bool {
     WINDOW_MIRRORABLE_EVENTS.contains(&event)
+}
+
+/// Repository lifecycle frames are hints to reread the owning daemon. Their
+/// original names must not invoke the desktop's local worktree mutations.
+fn repository_change(event: &str, payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let kind = match event {
+        "repo-changed" => payload.get("kind")?.as_str()?,
+        "worktree-created" | "worktree-removed" => "git-state",
+        _ => return None,
+    };
+    if !matches!(kind, "git-state" | "working-tree") {
+        return None;
+    }
+    let path = payload.get("repo_path")?.as_str()?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({"repo_path": path, "kind": kind}))
 }
 
 /// One decoded SSE frame.
@@ -306,6 +343,9 @@ fn apply_frame(state: &Arc<AppState>, connection_id: &str, frame: &Frame) -> boo
     if matches!(
         frame.event.as_str(),
         "settings-changed"
+            | "repo-changed"
+            | "worktree-created"
+            | "worktree-removed"
             | "mcp-toast"
             | "mcp-confirm"
             | "mcp-confirm-resolved"
@@ -330,12 +370,18 @@ fn apply_frame(state: &Arc<AppState>, connection_id: &str, frame: &Frame) -> boo
     let reseed = match frame.event.as_str() {
         "session-state-changed" => {
             patch_state(state, connection_id, &payload);
-            false
+            // Stages include host-owned report/epoch facts absent from this push.
+            true
         }
+        "boss-attention-changed" => true,
         "session-created" | "session-closed" | "pty-exit" => true,
         _ => false,
     };
+    let repository_change = repository_change(&frame.event, &payload);
     republish(state, connection_id, &frame.event, payload);
+    if let Some(change) = repository_change {
+        republish(state, connection_id, "remote-repo-changed", change);
+    }
     reseed
 }
 
@@ -480,13 +526,26 @@ async fn consume_stream(
         for frame in decoder.push(&chunk) {
             if apply_frame(state, connection_id, &frame) {
                 match seed(client, base_url, token).await {
-                    Ok(rows) => store_seed(state, connection_id, rows),
-                    Err(e) => tracing::warn!(
-                        source = "remote",
-                        connection = connection_id,
-                        %e,
-                        "Could not re-read the remote session list"
-                    ),
+                    Ok(rows) => {
+                        store_seed(state, connection_id, rows);
+                        // Wake after the authoritative rows replace the cache. Keep
+                        // the remote origin stamp so this cannot echo around a hub.
+                        republish(
+                            state,
+                            connection_id,
+                            "boss-attention-changed",
+                            serde_json::json!({}),
+                        );
+                    }
+                    Err(e) => {
+                        invalidate_stages(state, connection_id);
+                        tracing::warn!(
+                            source = "remote",
+                            connection = connection_id,
+                            %e,
+                            "Could not re-read the remote session list"
+                        );
+                    }
                 }
             }
         }
@@ -514,6 +573,7 @@ async fn run(state: Arc<AppState>, connection_id: String, retry_delay: Duration)
         match seed(&client, &base_url, token.as_deref()).await {
             Ok(rows) => store_seed(&state, &connection_id, rows),
             Err(e) => {
+                invalidate_stages(&state, &connection_id);
                 tracing::warn!(
                     source = "remote",
                     connection = %connection_id,
@@ -534,6 +594,7 @@ async fn run(state: Arc<AppState>, connection_id: String, retry_delay: Duration)
         )
         .await
         {
+            invalidate_stages(&state, &connection_id);
             tracing::warn!(
                 source = "remote",
                 connection = %connection_id,
@@ -744,11 +805,69 @@ mod tests {
                 r#"{"session_id":"s1","state":{"awaiting_input":true,"question_text":"pick one"}}"#
                     .into(),
         };
-        assert!(!apply_frame(&state, "vps", &frame));
+        assert!(apply_frame(&state, "vps", &frame));
         let rows = mirrored_rows(&state);
         let session_state = rows[0].state.as_ref().expect("the row carries state");
         assert!(session_state.awaiting_input);
         assert_eq!(session_state.question_text.as_deref(), Some("pick one"));
+    }
+
+    // Catches: a failed authoritative refresh keeps an old remote stage current,
+    // or invalidation incorrectly clears another connection's facts.
+    #[tokio::test]
+    async fn boss_attention_remote_refresh_failure_invalidates_only_its_owner() {
+        let mut server = mockito::Server::new_async().await;
+        let events = server
+            .mock("GET", "/events")
+            .with_header("content-type", "text/event-stream")
+            .with_body("event: boss-attention-changed\ndata: {}\n\n")
+            .create_async()
+            .await;
+        let failed_refresh = server
+            .mock("GET", "/sessions")
+            .with_status(503)
+            .create_async()
+            .await;
+        let state = Arc::new(make_test_app_state());
+        let mut row = SessionInfo {
+            session_id: "s1".into(),
+            tuic_session: Some("peer".into()),
+            ..Default::default()
+        };
+        // A blocked stage warns while current; since 2876 an absent stage is silent.
+        row.agent_report.stage = Some("blocked".into());
+        store_seed(&state, "vps", vec![row.clone()]);
+        store_seed(&state, "other", vec![row]);
+        let attention = || {
+            let mut result = crate::boss_attention::BossAttention::default();
+            crate::boss_attention::add_health(&mut result, mirrored_rows(&state));
+            result
+        };
+        assert_eq!(
+            attention().health.len(),
+            2,
+            "a current blocked stage warns on both owners"
+        );
+        consume_stream(
+            &state,
+            &reqwest::Client::new(),
+            "vps",
+            &server.url(),
+            None,
+            STREAM_IDLE_TIMEOUT,
+        )
+        .await
+        .expect("finite event stream");
+        events.assert_async().await;
+        failed_refresh.assert_async().await;
+        let current = attention();
+        assert_eq!(
+            current.health.len(),
+            1,
+            "only the failed owner's stage stops being current"
+        );
+        assert_eq!(current.health[0].connection_id.as_deref(), Some("other"));
+        assert_eq!(current.health[0].kind, "Blocked");
     }
 
     #[test]
@@ -864,6 +983,7 @@ mod tests {
     #[test]
     fn only_safe_mirrored_events_reach_the_desktop_window() {
         for event in [
+            "remote-repo-changed",
             "session-state-changed",
             "session-closed",
             "progress-recorded",
@@ -893,6 +1013,85 @@ mod tests {
                 "{event} mutates local state and must not arrive from a remote daemon"
             );
         }
+    }
+
+    #[test]
+    fn repository_frames_publish_owner_stamped_refresh_hints() {
+        let state = Arc::new(make_test_app_state());
+        state
+            .remote
+            .force_connected_for_test("host", "http://daemon:9876", None);
+        let mut rx = state.event_bus.subscribe();
+        for event in ["repo-changed", "worktree-created", "worktree-removed"] {
+            let frame = Frame {
+                event: event.into(),
+                data: r#"{"repo_path":"/remote/repo","kind":"git-state","workspace_id":"feature"}"#
+                    .into(),
+            };
+            apply_frame(&state, "host", &frame);
+            // Raw events remain available to SSE consumers. Only the new,
+            // owner-aware refresh notification may reach the desktop window.
+            let AppEvent::RemoteMirrored {
+                event: original, ..
+            } = rx.try_recv().unwrap()
+            else {
+                panic!("missing original event");
+            };
+            assert_eq!(original, event);
+            let hint = rx.try_recv().unwrap();
+            let AppEvent::RemoteMirrored {
+                connection_id,
+                event,
+                payload,
+            } = &hint
+            else {
+                panic!("missing repository hint");
+            };
+            assert_eq!(connection_id, "host");
+            assert_eq!(event, "remote-repo-changed");
+            assert!(window_may_hear(event));
+            assert_eq!(
+                payload,
+                &serde_json::json!({
+                    "repo_path": "/remote/repo", "kind": "git-state",
+                    "__tuic_origin": {"connection": "host"}
+                })
+            );
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_and_disconnected_repository_hints_are_not_delivered() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"repo_path": 7}),
+            serde_json::json!({"repo_path": ""}),
+        ] {
+            assert!(repository_change("worktree-created", &payload).is_none());
+        }
+        let state = Arc::new(make_test_app_state());
+        let mut rx = state.event_bus.subscribe();
+        for event in ["repo-changed", "worktree-created", "worktree-removed"] {
+            apply_frame(
+                &state,
+                "disconnected",
+                &Frame {
+                    event: event.into(),
+                    data: r#"{"repo_path":"/remote/repo","kind":"git-state"}"#.into(),
+                },
+            );
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(
+            repository_change(
+                "repo-changed",
+                &serde_json::json!({
+                    "repo_path": "/remote/repo", "kind": "working-tree"
+                })
+            ),
+            Some(serde_json::json!({"repo_path": "/remote/repo", "kind": "working-tree"}))
+        );
     }
 
     // Catches: confirmations lose their locally trusted host label or a buffered
@@ -1191,6 +1390,22 @@ mod tests {
     #[tokio::test]
     async fn the_event_stream_is_read_unfiltered_and_every_frame_is_repeated_locally() {
         let mut server = mockito::Server::new_async().await;
+        let authoritative = server
+            .mock("GET", "/sessions")
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![SessionInfo {
+                    session_id: "s1".into(),
+                    state: Some(crate::state::SessionState {
+                        awaiting_input: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
         // No query is the assertion that matters: a `types=` allowlist here
         // would silently drop every event type nobody thought to name.
         let route = server
@@ -1227,12 +1442,20 @@ mod tests {
         .await
         .expect("the stream ended cleanly");
         route.assert_async().await;
+        authoritative.assert_async().await;
 
         let mut seen = Vec::new();
         while let Ok(AppEvent::RemoteMirrored { event, .. }) = rx.try_recv() {
             seen.push(event);
         }
-        assert_eq!(seen, vec!["session-state-changed", "pty-activity"]);
+        assert_eq!(
+            seen,
+            vec![
+                "session-state-changed",
+                "boss-attention-changed",
+                "pty-activity"
+            ]
+        );
         assert!(
             mirrored_rows(&state)[0]
                 .state

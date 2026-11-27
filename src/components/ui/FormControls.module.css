@@ -26,6 +26,7 @@
  --control-font-size: var(--font-md, 13px);
  --control-radius: var(--radius-md);
  --control-icon-height: 28px;
+ --control-icon-radius: 8px;
  --control-segment-padding-x: 10px;
 }
 /* Toolbar density: measured panel close/detach neighbours are 22px, and the
@@ -38,6 +39,7 @@
  --control-font-size: var(--font-sm, 12px);
  --control-radius: var(--radius-sm);
  --control-icon-height: 22px;
+ --control-icon-radius: var(--radius-md);
  --control-segment-padding-x: 6px;
 }
 /* Per-control spelling of toolbar density for isolated actions. */
@@ -129,7 +131,10 @@
 		color var(--duration-fast) var(--ease-out),
 		border-color var(--duration-fast) var(--ease-out);
 }
-/* Keep the native icon hit region square; only the decorative surface is circular. */
+/* FastAF: an icon button is a rounded square (the .iconBtn recipe: radius 8 at
+   28px, 6 at toolbar density), so a filled one is not a square block and a
+   ghost one hovers with a rounded wash. A circular one still draws its own
+   50% surface inside. Touch widths keep upstream's square hit region (below). */
 .iconButton {
  --control-height: var(--control-icon-height, 36px);
  width: var(--control-height);
@@ -137,7 +142,7 @@
  max-width: none;
  height: var(--control-height);
  padding: 0;
- border-radius: 0;
+ border-radius: var(--control-icon-radius, 8px);
 }
 .circleButton, .circleButton:focus-visible, .button.circleButton[aria-pressed="true"] {
  background: transparent;
@@ -153,7 +158,7 @@
  border: 1px solid var(--border);
  border-radius: 50%;
 }
-@media (max-width: 600px) { .iconButton { --control-height: 44px; } }
+@media (max-width: 600px) { .iconButton { --control-height: 44px; border-radius: 0; } }
 
 .secondary { background: var(--bg-tertiary); color: var(--fg-primary); }
 .primary { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); font-weight: 600; }
@@ -189,6 +194,10 @@
  width: var(--control-height, 36px);
  height: var(--control-height, 36px);
 }
+/* The hit box is a control-height square, but the track is 34px wide: at form
+   density (28px) and toolbar density (22px) it stuck out on both sides, over
+   whatever came next. The box is never narrower than the track. */
+.switchControl { min-width: 34px; }
 .switchInput, .colorInput input {
  position: absolute;
  inset: 0;
@@ -308,8 +317,10 @@
  padding-block: calc(var(--control-padding-x, 8px) / 2);
 }
 /* Shared intrinsic editor bounds; rich editors can retain their existing cap. */
-.autoGrow {
+.autoGrowMinimum, .autoGrow {
  min-height: var(--control-height, 36px);
+}
+.autoGrow {
  max-height: var(--auto-grow-max-height, calc(var(--control-height, 36px) * 3));
  overflow-y: auto;
 }
@@ -318,7 +329,7 @@
  resize: none;
 }
 @media (max-width: 600px) {
- .textareaCompact, .autoGrow { min-height: max(44px, var(--control-height, 36px)); }
+ .textareaCompact, .autoGrowMinimum, .autoGrow { min-height: max(44px, var(--control-height, 36px)); }
  .autoGrow { max-height: var(--auto-grow-max-height, calc(max(44px, var(--control-height, 36px)) * 3)); }
 }
 

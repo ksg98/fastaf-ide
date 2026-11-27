@@ -215,6 +215,10 @@
   border-radius: 0;
   outline: none;
   resize: none;
+  /* Text wraps, so there is nothing to scroll sideways. Without this a zoomed
+   * webview measures the row one pixel too wide, draws a horizontal scrollbar
+   * inside the one-line field, and the scrollbar hides half of the text. */
+  overflow-x: hidden;
   overflow-y: auto;
   box-sizing: border-box;
   color: var(--fg-primary);

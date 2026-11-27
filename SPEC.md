@@ -24,8 +24,6 @@ Codex global hook setup (#2625-c4b5): installed status requires native current-d
 - [x] Session Chat shows working feedback from Send and existing terminal busy state on desktop and mobile, hidden for idle and awaiting input (#2397-06b6).
 
 
-Headless GitHub issue intake (#2323-c294): after executor ownership, the runtime subscribes registered allowlisted github.com repositories to all-issue polling without a client. Repository/settings events and the existing 30-second tick reconcile configuration. Unresolved entries emit an explicit configuration error. Client paths, filters and stop calls do not disable the intake subscription; unrelated client repositories retain their filters.
-
 Development builds show a dismissible restart warning when Cargo dep-info inputs are newer than the backend executable, or that executable was rebuilt after application entry. Main and used bridge inputs are checked independently; unrelated frontend-only changes stay quiet. An edit followed by a revert still warns, as Cargo would rebuild. Missing build artifacts report identity unavailable. Release builds contain no warning module or debug identity (#2332-3eef). In development, missing local IPC commands explain the backend/frontend version mismatch and manual restart; AI Chat does not offer Retry for that failure. Release and remote-owner errors are unchanged (#2409-aa48).
 
 The Plans column groups compact Edit plan and Archive plan actions, with the archived toggle beside plan-list filters. Edit plan and New story use the main dialog area. The plan editor offers repository-document selection, wrapping title/source fields, an openable full source, a disabled-Save reason exposed as a native tooltip and accessible description, and conflict-safe draft retention. Other link entry appears only on request; compact header tabs scroll without wrapping, and plan state belongs to the detail pane. Failed project reads show a plain read error with its path and Retry instead of internal codes or empty-project guidance. Read retries keep the mounted plan editor and its unsaved draft. Native plan title/source corrections use atomic `update_plan` patches with a stored expected revision across MCP, HTTP, IPC, and CLI. Workflow planning and verification subjects include current plan metadata. Source changes wait until any running plan coordinator/planner finishes or is cancelled; title-only corrections stay available (#2170-d828).
@@ -171,9 +169,8 @@ All Tauri commands that perform I/O (git subprocesses, network, bcrypt) are `asy
 
 The SolidJS frontend is being refactored incrementally to improve module ownership,
 test isolation, and deferred loading without changing the framework or product
-behavior. The measured architecture map, dependency constraints, sequencing, and
-validation contract are maintained in
-[`docs/frontend/solid-refactoring-plan.md`](docs/frontend/solid-refactoring-plan.md).
+behavior. Upstream removed the plan document (`docs/frontend/solid-refactoring-plan.md`)
+in 2.1.2; the dependency constraints it set are enforced by `pnpm architecture:cycles`.
 
 The work preserves browser/Tauri transport parity and keeps terminal frame and
 paint scheduling imperative. Structural changes must remain independently tested
@@ -854,7 +851,7 @@ Some frontend-only stores persist to localStorage:
 - [x] Inter-Agent Messaging (`messaging` MCP tool: register, list_peers, send, inbox with channel push + polling fallback)
 - [x] Opt-in interrupting mail (`agent send urgency=interrupt`): safe Esc, ten-second confirmed-idle wait, full input submission and explicit urgent fallback; interrupted tools may leave partial work.
 - [x] Settings and the Prompt Library dialog share one aligned Smart Prompt editor with readable placements and conditional fields; Settings saves immediately, while the dialog retains Save/Cancel (#2603-8a87).
-- [x] Smart Prompts (29 built-in AI prompts with context variable resolution, inject/headless/API execution, toolbar dropdown, SmartButtonStrip, Command Palette integration, direct LLM API mode via genai crate)
+- [x] Smart Prompts (30 built-in AI prompts with context variable resolution, inject/headless/API execution, toolbar dropdown, SmartButtonStrip, Command Palette integration, direct LLM API mode via genai crate)
 - [x] AI Chat panel (`Cmd+Alt+A`) — streaming conversational AI with terminal context injection, multi-provider (Ollama/Anthropic/OpenAI/OpenRouter/ChatGPT sign-in), conversation persistence, OS-keyring API keys
 - [x] Shared terminal Chat and AI Chat new-text pill — detached content arrivals offer a return to the bottom; search alone does not trigger it; desktop/mobile provide a per-client opt-out (#1757-c6a9).
 - [x] AI Agent loop (ReAct) — terminal observe/act, filesystem, search, drive_agent, and reactive watch tools; pause/resume, destructive-command approval gate, tool-call cards
@@ -1142,7 +1139,7 @@ Automation worktree cleanup (#1623-8b2a): Automation runs retain automation/run 
 
 ### Guided event configuration (#2012-72ff)
 
-Three built-in Smart Prompts guide issue-to-draft-PR, incoming PR review and authorized bounded-fix configuration. They open in the composer for review and ask for owner/profile/GitHub/skill prerequisites, confirmed policy limits and supported host capabilities. They do not add a GitHub event runtime or grant publication authority; unavailable intake/publication stops with a draft policy. The after-beta live pilot is not yet verified. See [Guided event configuration](docs/user-guide/event-driven-templates.md).
+The three built-in guided Smart Prompts (issue-to-draft-PR, incoming PR review and authorized bounded-fix configuration) and their guide were removed with the legacy automations in the 2.1.2 sync.
 
 ### Built-in automation templates
 
@@ -1501,40 +1498,17 @@ archived stories stay searchable. No story file is written to the project;
 plans and the story mutation API are unchanged. See the native stories guide.
 
 
-## Optional issue triage (#2324-424d)
+## Removed legacy automations (upstream 2.1.2 sync)
 
-`event_intake.triage` adds off-by-default per-repository, policy-versioned issue
-evaluation before labelled implementation. OWNER/MEMBER/COLLABORATOR association
-is required. A separate existing-workspace definition has no precheck or automatic
-cron execution. Its profile is operator-attested read-only without push credentials;
-TUIC does not enforce credential isolation (future 2450-6845). Caller-bound
-`automations triage_decision` records accepted/rejected/needs_input immutably. The
-host adds the intake label for acceptance, or posts a rejection reason and adds its
-label, using durable at-most-once delivery claims. Unknown publication requires
-operator reconciliation, not replay. Triage ledger records outlive normal history
-retention. See [Automations](docs/user-guide/automations.md#optional-triage-before-labelled-intake).
-
-#### Reviewed event issue publication
-
-Event intake can opt in through `event_intake.workflow` to an explicit published
-native story workflow revision. Dispatch creates the native story and reuses its
-isolated artifact, independent review and configured check receipts. Draft
-publication requires current evidence matching the pushed SHA and includes review
-findings. Configurations without a workflow retain legacy behavior. See the
-[guide](docs/user-guide/automations.md#opt-in-reviewed-issue-workflows).
-
-#### Review-only incoming PR automation
-
-A separate default-off `pull_request_reviews` repository allowlist binds an enabled
-automation definition to no-host-tool ACP reviews. The shared GitHub poller feeds
-durable `PullRequestReview` triggers keyed by repository, PR and immutable GitHub
-head SHA; definition changes do not reset deduplication. A newer observed head
-revokes the older result's publication claim even under capacity pressure. The
-host compares immutable base/head SHAs, rechecks eligibility, then claims and posts
-one pinned COMMENT review. No generic agent, worktree, push, PR creation, approval
-or merge is available through this path. Unknown publication is non-retriable.
-The existing run history API carries output, publication intent and review URL.
-Deterministic checks and check-result publication are not part of this executor.
+GitHub issue intake (`event_intake`), optional issue triage
+(`event_intake.triage`, `automations triage_decision`), reviewed event issue
+publication (`event_intake.workflow`) and review-only incoming PR automation
+(`pull_request_reviews`) are gone, with the legacy workflow engine. Automations
+are prompt schedules only. On load, `automations.json` is backed up, then loses a saved
+`event_intake` or `pull_request_reviews` block and the definitions only those features used
+(`src-tauri/src/automations/definitions.rs`), and the run store removes their
+runs once (`src-tauri/src/automations/store.rs`). Stories, plans and Ideas moved
+from `workflow action=story` to the separate `story` MCP tool.
 
 ## Archived worktree retention — Implemented (#2469-c93f)
 
@@ -1583,7 +1557,7 @@ independent review, ordered FIX/STORY/ACCEPT triage, bounded total reviews and
 repairs, and typed proof requirements without weakening deterministic checks.
 Generic PR subjects remain evidence contracts, not native story completion.
 Old graph publications and serial event replay retain their existing semantics.
-See [backend evidence contract](docs/backend/workflows.md#typed-evidence-policy-wf06).
+See [backend evidence contract](docs/backend/workflows.md#legacy-engine-removed-3034-365e).
 
 ### Durable workflow timer foundation (WF19)
 
@@ -1598,7 +1572,7 @@ consumers build on this internal primitive; they are not installed by WF19.
 
 ### Native workflow integration (WF07)
 
-An opt-in typed integration action now pins expected base/source commits, checks a synthetic two-parent merge object, and publishes that exact no-ff result under a canonical repository lock. Durable phase records retain proof-obligation outbox debt, dependency refresh and cleanup independently. Native integration policy defaults to false through WF17; isolated trial clones only before repository parity approval. Cleanup uses TUIC non-force removal after integration, exact-tip archive and ownership checks. WF08 proof batching is not included. See [backend contract](docs/backend/workflows.md#opt-in-native-integration-wf07).
+An opt-in typed integration action now pins expected base/source commits, checks a synthetic two-parent merge object, and publishes that exact no-ff result under a canonical repository lock. Durable phase records retain proof-obligation outbox debt, dependency refresh and cleanup independently. Native integration policy defaults to false through WF17; isolated trial clones only before repository parity approval. Cleanup uses TUIC non-force removal after integration, exact-tip archive and ownership checks. WF08 proof batching is not included. See [backend contract](docs/backend/workflows.md#legacy-engine-removed-3034-365e).
 
 ### Branch-local workflow decisions (WF03)
 
@@ -1609,7 +1583,7 @@ revision and current subject digest, retain actor provenance, and continue the
 same worker generation without completing it. Deadlines never imply approval.
 Explicit run pause/cancel and historical NeedsInput replay remain available.
 IPC, HTTP and MCP use the same question/inbox service. See
-[workflow decisions](docs/backend/workflows.md#branch-local-questions-and-decision-inbox-wf03).
+[workflow decisions](docs/backend/workflows.md#legacy-engine-removed-3034-365e).
 
 
 ### Pinned reusable workflow Calls (WF09)

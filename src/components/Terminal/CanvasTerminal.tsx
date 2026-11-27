@@ -13,8 +13,9 @@ import { getSessionConnection } from "../../transportRuntime";
 import { filterMatchesToBlock } from "../../utils/blockSearchFilter";
 import { writeClipboard } from "../../utils/clipboard";
 import { formatRelativeTime } from "../../utils/formatRelativeTime";
+import { isHandlerLink } from "../../utils/handlerLink";
 import { ensureKeyboardViewportTracking, keyboardOcclusion } from "../../utils/keyboardViewport";
-import { handleOpenUrl } from "../../utils/openUrl";
+import { handleOpenUrl, openConfirmedLink } from "../../utils/openUrl";
 import { isImagePaste } from "../../utils/pastedImage";
 import { isPerfDebug } from "../../utils/perfDebug";
 import { markPerf, noteFrameRequest } from "../../utils/perfTrace";
@@ -117,6 +118,7 @@ import { kittySequenceForKey } from "./kittyKeyboard";
 import { fileUrlRegex, matchFilePaths, matchWebUrls } from "./linkProvider";
 import { createClickDragArbiter } from "./mouseGesture";
 import { buildScrollbarMarksHtml } from "./scrollbarMarks";
+import { trackClickOffset } from "./scrollbarThumb";
 import {
 	ANSWER_MARKER_RE,
 	answerOverlayKey,
@@ -325,6 +327,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	const openLink = (link: LinkTarget) => {
 		if (link.path.startsWith("http://") || link.path.startsWith("https://")) {
 			handleOpenUrl(link.path);
+		} else if (isHandlerLink(link.path)) {
+			// An OSC 8 network or custom-scheme link: the owner confirms it before a handler opens it.
+			void openConfirmedLink(link.path);
 		} else {
 			const path = link.path.startsWith("file://") ? link.path.slice(7) : link.path;
 			if (!invokeRef) return;
@@ -470,6 +475,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// A smooth-scroll gesture owns the base canvas (rendered locally from cache);
 		// don't let backend-frame repaints fight it until the gesture settles.
 		if (scroll.position != null) {
+			scheduleSmoothRender();
 			return;
 		}
 		if (rafId !== undefined) return;
@@ -484,6 +490,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		rafId = requestAnimationFrame(() => {
 			rafId = undefined;
 			if (!alive || hidden) return;
+			// Ownership may change after this repaint was queued but before it runs.
+			if (scroll.position != null) {
+				scheduleSmoothRender();
+				return;
+			}
 			const m = metrics();
 			if (currentFrame && m) {
 				const dirty = pendingDirtyRows.size > 0 ? new Set(pendingDirtyRows) : undefined;
@@ -519,8 +530,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				invokeRef("terminal_scroll", { sessionId: props.sessionId, delta: lines }).catch(ipcErr("terminal_scroll"));
 			}
 			if (pinSelectionToScrollEdge()) {
-				const m = metrics();
-				if (m) paintFrame(currentFrame, m);
+				scheduleRepaint();
 			}
 		}, EDGE_SCROLL_TICK_MS);
 	}
@@ -948,8 +958,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// Only a user-driven find/next/prev may move the viewport. A refresh triggered
 		// by the agent repainting must never yank the screen out from under the user.
 		if (scrollToActive && activeMatch) scrollToMatch(activeMatch);
-		const m = metrics();
-		if (currentFrame && m) paintFrame(currentFrame, m);
+		fullRepaintNeeded = true;
+		scheduleRepaint();
 		return { index: search.activeIndex, count: matches.length };
 	}
 
@@ -1463,8 +1473,13 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (cached) projectionRows.set(index, { ...cached, index });
 		}
 		viewportProjection = new ViewportProjection(projectionRows, markers.hidden, markers.answerMarkers);
+		// Every slot is a candidate: the renderer copies retained pixels by viewportTop
+		// (the same all-time space as paintFrame) and repaints only rows that differ,
+		// so a wheel frame costs the rows it exposes, not the whole viewport (2778).
 		gridRenderer.paintGrid(tempMap, m, {
-			fullRepaint: true,
+			fullRepaint: fullRepaintNeeded,
+			viewportTop: hist - intOffset,
+			dirtyIndices: new Set(Array.from({ length: rows }, (_, r) => r)),
 			projection: viewportProjection,
 			hiddenRows: markers.hidden,
 			hiddenAnswerMarkers: markers.answerMarkers,
@@ -1472,6 +1487,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		paintedHiddenRows = markers.hidden;
 		paintedAnswerMarkers = markers.answerMarkers;
 		lastMarkerPlan = markers;
+		fullRepaintNeeded = false;
 		if (octxOverscan && overscanRenderer) {
 			const ch = m.cellHeight;
 			const w = overscanCanvasRef.width / m.dpr;
@@ -2815,7 +2831,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 						overscanCanvasRef.width = 1;
 						overscanCanvasRef.height = 1;
 					}
-					rowMap.clear();
+					// Keep the last viewport rows: remeasure() repaints them on show
+					// while the authoritative frame is in flight. Only the canvas
+					// backing stores need reclaiming, not the viewport-sized row map.
 					fileLinkCache.clear();
 				}
 			},
@@ -2949,7 +2967,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (e.ctrlKey && e.metaKey && !blockTimestampsVisible) {
 				blockTimestampsVisible = true;
 				fullRepaintNeeded = true;
-				if (currentFrame && metrics()) paintFrame(currentFrame, metrics()!);
+				scheduleRepaint();
 			}
 
 			// Arrow Down with no modifiers: snap to bottom when scrolled up
@@ -3032,7 +3050,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					if (current) {
 						terminalsStore.toggleBlockFold(props.terminalId, current.promptLine);
 						fullRepaintNeeded = true;
-						if (metrics()) paintFrame(currentFrame, metrics()!);
+						scheduleRepaint();
 					}
 				}
 				e.preventDefault();
@@ -3244,7 +3262,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (blockTimestampsVisible && (!e.ctrlKey || !e.metaKey)) {
 				blockTimestampsVisible = false;
 				fullRepaintNeeded = true;
-				if (currentFrame && metrics()) paintFrame(currentFrame, metrics()!);
+				scheduleRepaint();
 			}
 		});
 
@@ -3480,7 +3498,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				// Past the edge: the scroll timer owns the selection end until the
 				// pointer comes back inside.
 				startSelectionScroll(distance);
-				if (currentFrame && m && pinSelectionToScrollEdge()) paintFrame(currentFrame, m);
+				if (pinSelectionToScrollEdge()) scheduleRepaint();
 				return;
 			}
 			stopSelectionScroll();
@@ -3488,8 +3506,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			const absRow = viewportRowToAbs(pos.row);
 			if (absRow === null) return;
 			selection.end = { col: pos.col, row: absRow };
-			const mRepaint = metrics();
-			if (currentFrame && mRepaint) paintFrame(currentFrame, mRepaint);
+			scheduleRepaint();
 		};
 
 		const scheduleLinkProbe = (e: MouseEvent) => {
@@ -3762,11 +3779,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// otherwise re-settle over this jump) so the terminal_scroll jump below
 			// actually repaints the view.
 			resetSmoothScroll();
-			const rect = scrollbarRef.getBoundingClientRect();
-			const clickRatio = (e.clientY - rect.top) / rect.height;
-			const targetOffset = Math.round((1 - clickRatio) * currentFrame.historySize);
+			// Same geometry as the paint (cached track height, thumb travel range), so
+			// the repainted thumb lands centred under the pointer.
+			const thumb = thumbFor(scrollbarTrackHeight, lastResizeRows, currentFrame);
+			const clickY = e.clientY - scrollbarRef.getBoundingClientRect().top;
 			// Coalesced absolute jump (latest-wins, back-pressured) — same path as wheel/touch.
-			scroll.pendingOffset = Math.max(0, Math.min(currentFrame.historySize, targetOffset));
+			scroll.pendingOffset = trackClickOffset(thumb, clickY, currentFrame.historySize);
 			scheduleScrollFlush();
 		});
 
@@ -3907,8 +3925,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			searchFind: async (query: string, blockScope?: boolean) => {
 				if (!query || !invokeRef) {
 					clearSearchState();
-					const m = metrics();
-					if (currentFrame && m) paintFrame(currentFrame, m);
+					fullRepaintNeeded = true;
+					scheduleRepaint();
 					return { index: -1, count: 0 };
 				}
 				searchQuery = query;
@@ -3919,22 +3937,22 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const match = search.next();
 				if (!match) return { index: -1, count: 0 };
 				scrollToMatch(match);
-				const m = metrics();
-				if (currentFrame && m) paintFrame(currentFrame, m);
+				fullRepaintNeeded = true;
+				scheduleRepaint();
 				return { index: search.activeIndex, count: search.matches.length };
 			},
 			searchPrev: () => {
 				const match = search.previous();
 				if (!match) return { index: -1, count: 0 };
 				scrollToMatch(match);
-				const m = metrics();
-				if (currentFrame && m) paintFrame(currentFrame, m);
+				fullRepaintNeeded = true;
+				scheduleRepaint();
 				return { index: search.activeIndex, count: search.matches.length };
 			},
 			searchClear: () => {
 				clearSearchState();
-				const m = metrics();
-				if (currentFrame && m) paintFrame(currentFrame, m);
+				fullRepaintNeeded = true;
+				scheduleRepaint();
 			},
 			paste: (text: string) => {
 				if (currentFrame?.bracketedPaste) {

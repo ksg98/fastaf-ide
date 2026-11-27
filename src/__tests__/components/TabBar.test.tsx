@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@solidjs/testing-library";
+import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useQuickSwitcherVisibility } from "../../hooks/useQuickSwitcherVisibility";
@@ -52,6 +52,7 @@ import type { ContextMenuItem } from "../../components/ContextMenu/ContextMenu";
 import { TabBar } from "../../components/TabBar/TabBar";
 import { ToastList } from "../../components/ToastContainer/ToastList";
 import { invoke, listen } from "../../invoke";
+import { appLogger } from "../../stores/appLogger";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { editorTabsStore } from "../../stores/editorTabs";
 import { globalWorkspaceStore } from "../../stores/globalWorkspace";
@@ -68,9 +69,12 @@ import { keyFor } from "../../utils/hotkey";
 import { adoptSuspendedSession } from "../../utils/suspendedSessions";
 
 describe("TabBar", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
+		vi.mocked(invoke)
+			.mockReset()
+			.mockImplementation(async (command) => (command === "list_active_sessions" ? [] : undefined));
+		await (await import("../../stores/activityStore")).activityStore.hydrate();
 		vi.mocked(listen).mockReset().mockResolvedValue(vi.fn());
 		localStorage.clear();
 		// Clean up any terminals from previous tests
@@ -119,6 +123,7 @@ describe("TabBar", () => {
 			fontSize: number;
 			cwd: string | null;
 			awaitingInput: AwaitingInputType;
+			lastError: string;
 		}> = {},
 	) {
 		return terminalsStore.add({
@@ -127,6 +132,7 @@ describe("TabBar", () => {
 			fontSize: overrides.fontSize ?? 14,
 			cwd: overrides.cwd ?? null,
 			awaitingInput: overrides.awaitingInput ?? null,
+			...(overrides.lastError ? { lastError: overrides.lastError } : {}),
 		});
 	}
 
@@ -162,7 +168,70 @@ describe("TabBar", () => {
 		expect(view.container.querySelector(".suspendedBadge")).toBeTruthy();
 	});
 
-	it("clicking new tab button calls onNewTab directly", () => {
+	// Catches: an agent label or later intent title hiding an explicit session rename.
+	it("renders a custom session rename instead of the agent label", async () => {
+		const expectedWarning = vi.spyOn(appLogger, "error").mockImplementation((_source, message) => {
+			expect(message).toMatch(/Refusing to persist settings: store not hydrated/);
+		});
+		const id = addTerminal({ name: "ego", sessionId: "renamed-ego" });
+		terminalsStore.update(id, { agentType: "ego" });
+		const view = render(() => (
+			<TabBar
+				onTabSelect={() => {}}
+				onTabClose={() => {}}
+				onCloseOthers={() => {}}
+				onCloseToRight={() => {}}
+				onNewTab={() => {}}
+			/>
+		));
+		terminalsStore.update(id, { name: "Ripresa eg42 · immagini", nameIsCustom: true });
+		const { handleIntentEvent } = await import("../../components/Terminal/intentTitle");
+		handleIntentEvent({
+			terminalId: id,
+			text: "Working on images",
+			title: "ego",
+			globalEnabled: true,
+			perAgentEnabled: true,
+		});
+		expect(view.getByText("Ripresa eg42 · immagini")).toBeTruthy();
+		expectedWarning.mockRestore();
+	});
+
+	// Catches: launch-menu agent labels being pinned as custom and suppressing every later title.
+	it("lets a launch-menu tab take a later agent intent title", async () => {
+		const agentConfigs = await import("../../stores/agentConfigs");
+		const configLoad = vi
+			.spyOn(agentConfigs, "ensureAgentConfigsForRepo")
+			.mockResolvedValue(agentConfigs.agentConfigsStore);
+		const { useTerminalContextMenus } = await import("../../hooks/useTerminalContextMenus");
+		const { handleIntentEvent } = await import("../../components/Terminal/intentTitle");
+		const id = addTerminal({ name: "Terminal" });
+		const menus = useTerminalContextMenus({
+			agentDetection: { getAvailable: () => [{ type: "ego" }] },
+			gitOps: { handleAddTerminalToWorkspace: async () => id },
+		} as never);
+		const view = render(() => (
+			<TabBar
+				onTabSelect={() => {}}
+				onTabClose={() => {}}
+				onCloseOthers={() => {}}
+				onCloseToRight={() => {}}
+				onNewTab={() => {}}
+			/>
+		));
+		await menus.buildSidebarAgentMenuItems("/repo", "main", true)[0].action();
+		handleIntentEvent({
+			terminalId: id,
+			text: "Working on images",
+			title: "Image work",
+			globalEnabled: true,
+			perAgentEnabled: true,
+		});
+		configLoad.mockRestore();
+		expect(view.getByText("Image work")).toBeTruthy();
+	});
+
+	it("Alt-clicking new tab button calls onNewTab directly", () => {
 		const onNewTab = vi.fn();
 		const { container } = render(() => (
 			<TabBar
@@ -173,7 +242,7 @@ describe("TabBar", () => {
 				onNewTab={onNewTab}
 			/>
 		));
-		fireEvent.click(container.querySelector(".newBtn")!);
+		fireEvent.click(container.querySelector(".newBtn")!, { altKey: true });
 		expect(onNewTab).toHaveBeenCalledTimes(1);
 	});
 
@@ -214,7 +283,7 @@ describe("TabBar", () => {
 			expect(launchClaude).toHaveBeenCalledTimes(1);
 		});
 
-		it("a short press still opens a plain tab", () => {
+		it("a short press opens the launch menu and Terminal opens a plain tab", () => {
 			const onNewTab = vi.fn();
 			const getItems = vi.fn(() => [{ label: "Claude Code", action: () => {} }]);
 			const { container } = renderWithAgents(onNewTab, getItems);
@@ -225,8 +294,13 @@ describe("TabBar", () => {
 			fireEvent.click(btn);
 			vi.advanceTimersByTime(1000);
 
+			expect(onNewTab).not.toHaveBeenCalled();
+			expect(getItems).toHaveBeenCalledTimes(1);
+			const terminal = Array.from(document.querySelectorAll(".menu .label")).find(
+				(label) => label.textContent === "Terminal",
+			)!;
+			fireEvent.click(terminal.closest(".item") ?? terminal);
 			expect(onNewTab).toHaveBeenCalledTimes(1);
-			expect(getItems).not.toHaveBeenCalled();
 		});
 
 		it("leaving the button cancels the press", () => {
@@ -253,7 +327,8 @@ describe("TabBar", () => {
 			expect(menuLabels(container)).not.toContain("Claude Code");
 
 			fireEvent.click(btn);
-			expect(onNewTab).toHaveBeenCalledTimes(1);
+			expect(onNewTab).not.toHaveBeenCalled();
+			expect(menuLabels(container)).toContain("Claude Code");
 		});
 
 		it("the native contextmenu of a touch long press does not open the list a second time", () => {
@@ -341,7 +416,7 @@ describe("TabBar", () => {
 			expect(menuLabels(container)).not.toContain("Add Agent");
 		});
 
-		it("with no agents available a long press falls back to opening a plain tab", () => {
+		it("with no agents available a long press offers the Terminal action", () => {
 			const onNewTab = vi.fn();
 			const { container } = renderWithAgents(onNewTab, () => []);
 			const btn = container.querySelector(".newBtn")!;
@@ -350,7 +425,8 @@ describe("TabBar", () => {
 			fireEvent.pointerUp(btn);
 			fireEvent.click(btn);
 
-			expect(onNewTab).toHaveBeenCalledTimes(1);
+			expect(onNewTab).not.toHaveBeenCalled();
+			expect(menuLabels(container)).toEqual(["Terminal"]);
 		});
 	});
 
@@ -364,7 +440,9 @@ describe("TabBar", () => {
 				onNewTab={() => {}}
 			/>
 		));
-		expect(container.querySelector(".newBtn")!.getAttribute("title")).toBe(`New Tab (${getModifierSymbol()}T)`);
+		expect(container.querySelector(".newBtn")!.getAttribute("title")).toBe(
+			`Launch agent · Alt/Option-click: Terminal (${getModifierSymbol()}T)`,
+		);
 	});
 
 	it("renders terminal tabs from the store", () => {
@@ -444,8 +522,10 @@ describe("TabBar", () => {
 		expect(tab.classList.contains("awaitingQuestion")).toBe(true);
 	});
 
-	it("tab awaiting error input has correct class", () => {
-		const id = addTerminal({ name: "Error", awaitingInput: "error" });
+	// Catches: the agent's error text never reaches the tab, so a dead tab
+	// looks the same as any other failure.
+	it("tab awaiting error input has correct class and shows the error text", () => {
+		const id = addTerminal({ name: "Error", awaitingInput: "error", lastError: "model refuses it" });
 		terminalsStore.setActive(id);
 
 		const { container } = render(() => (
@@ -460,6 +540,7 @@ describe("TabBar", () => {
 		const tab = container.querySelector(".tab")!;
 		expect(tab.classList.contains("awaitingInput")).toBe(true);
 		expect(tab.classList.contains("awaitingError")).toBe(true);
+		expect(tab.getAttribute("title")).toBe(`Terminal 1 (${getModifierSymbol()}1)\nmodel refuses it`);
 	});
 
 	it("tab with no awaitingInput has no awaiting classes", () => {
@@ -1505,6 +1586,149 @@ describe("TabBar", () => {
 	});
 
 	describe("context menu", () => {
+		// FastAF portals menus to <body> (ContextMenu.tsx), so menu entries are looked
+		// up on `screen` / `document`, not on the render container.
+		const renderIdentifierMenu = () =>
+			render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+		const settleIdentity = async () => {
+			for (let n = 0; n < 5; n++) await Promise.resolve();
+		};
+
+		// Catches: losing the stored alias while backend identity is pending, suspended, or exited.
+		it.each(["pending", "suspended", "exited"] as const)(
+			"keeps the tab alias copyable with %s identity",
+			async (state) => {
+				const id = addTerminal({ sessionId: state === "suspended" ? null : "durable-session" });
+				terminalsStore.update(id, {
+					alias: "durable-alias",
+					suspended: state === "suspended",
+					shellState: state === "exited" ? "exited" : "idle",
+				});
+				let finish: ((rows: unknown) => void) | undefined;
+				vi.mocked(invoke).mockImplementation(async (command) =>
+					command === "list_active_sessions"
+						? new Promise((resolve) => {
+								finish = resolve;
+							})
+						: undefined,
+				);
+				const view = renderIdentifierMenu();
+				fireEvent.contextMenu(view.container.querySelector(`[data-tab-id="${id}"]`)!);
+				fireEvent.click(screen.getByText("Alias: durable-alias"));
+				expect(mockWriteClipboard).toHaveBeenLastCalledWith("durable-alias");
+				finish?.([]);
+				await settleIdentity();
+			},
+		);
+
+		// Catches: stale results from the previously right-clicked tab leaking into a new menu.
+		it("ignores late identity from another tab and another connection", async () => {
+			const first = addTerminal({ name: "First", sessionId: "old-session" });
+			const second = addTerminal({ name: "Second", sessionId: "new-session" });
+			let finishOld!: (rows: unknown) => void;
+			let finishNew!: (rows: unknown) => void;
+			const oldRequest = new Promise((resolve) => {
+				finishOld = resolve;
+			});
+			const newRequest = new Promise((resolve) => {
+				finishNew = resolve;
+			});
+			let requests = 0;
+			vi.mocked(invoke).mockImplementation(async (command) =>
+				command === "list_active_sessions" ? (++requests === 1 ? oldRequest : newRequest) : undefined,
+			);
+			const view = renderIdentifierMenu();
+			fireEvent.contextMenu(view.container.querySelector(`[data-tab-id="${first}"]`)!);
+			fireEvent.contextMenu(view.container.querySelector(`[data-tab-id="${second}"]`)!);
+			finishNew([
+				{ session_id: "new-session", alias: "wrong-host", connection_id: "remote-other" },
+				{ session_id: "new-session", alias: "new-alias" },
+			]);
+			await settleIdentity();
+			finishOld([{ session_id: "old-session", alias: "old-alias" }]);
+			await settleIdentity();
+			expect(screen.queryByText("Alias: old-alias")).toBeNull();
+			expect(screen.queryByText("Alias: wrong-host")).toBeNull();
+			fireEvent.click(screen.getByText("Alias: new-alias"));
+			expect(mockWriteClipboard).toHaveBeenLastCalledWith("new-alias");
+			await settleIdentity();
+		});
+
+		// Catches: copying an old identity after the owning terminal switches sessions.
+		it("drops old identity on session replacement and hides unavailable identifiers", async () => {
+			const id = addTerminal({ sessionId: "old-session" });
+			let finish!: (rows: unknown) => void;
+			vi.mocked(invoke).mockImplementation(async (command) =>
+				command === "list_active_sessions"
+					? new Promise((resolve) => {
+							finish = resolve;
+						})
+					: undefined,
+			);
+			const view = renderIdentifierMenu();
+			fireEvent.contextMenu(view.container.querySelector(`[data-tab-id="${id}"]`)!);
+			terminalsStore.update(id, { sessionId: null });
+			finish([{ session_id: "old-session", alias: "stale-alias" }]);
+			await settleIdentity();
+			expect(
+				Array.from(document.querySelectorAll(".menu .label"), (node) => node.textContent).filter((label) =>
+					/Alias:|Session:|Copy (alias|session|process)/.test(label ?? ""),
+				),
+			).toEqual([]);
+		});
+
+		// Catches: copying identifiers for the active tab instead of the clicked tab.
+		it("shows one value-bearing action per tab identifier without PID or duplicate commands", async () => {
+			const first = addTerminal({ name: "First", sessionId: "first-session" });
+			const second = addTerminal({ name: "Second", sessionId: "a1223344-5566-7788-99aa-bbccddeeff00" });
+			terminalsStore.setActive(first);
+			terminalsStore.update(second, { alias: "two" });
+			const addToast = vi.spyOn(toastsStore, "add").mockImplementation(() => 0);
+			vi.mocked(invoke).mockImplementation(async (command) =>
+				command === "list_active_sessions"
+					? [
+							{ session_id: "first-session", child_pid: 11, alias: "one" },
+							{ session_id: "a1223344-5566-7788-99aa-bbccddeeff00", child_pid: 22, alias: "two" },
+						]
+					: undefined,
+			);
+			const view = render(() => (
+				<TabBar
+					onTabSelect={() => {}}
+					onTabClose={() => {}}
+					onCloseOthers={() => {}}
+					onCloseToRight={() => {}}
+					onNewTab={() => {}}
+				/>
+			));
+			fireEvent.contextMenu(view.container.querySelector(`[data-tab-id="${second}"]`)!);
+			for (let n = 0; n < 5; n++) await Promise.resolve();
+			const labels = Array.from(document.querySelectorAll(".menu .label"), (node) => node.textContent);
+			expect(labels.filter((label) => /Alias:|Session:|Copy (alias|session|process)/.test(label ?? ""))).toEqual([
+				"Session: a1223344-5566-7788-99aa-bbccddeeff00",
+				"Alias: two",
+			]);
+			for (const [label, value] of [
+				["Session: a1223344-5566-7788-99aa-bbccddeeff00", "a1223344-5566-7788-99aa-bbccddeeff00"],
+				["Alias: two", "two"],
+			]) {
+				fireEvent.contextMenu(view.container.querySelector(`[data-tab-id="${second}"]`)!);
+				for (let n = 0; n < 5; n++) await Promise.resolve();
+				fireEvent.click(screen.getByText(label));
+				for (let n = 0; n < 5; n++) await Promise.resolve();
+				expect(mockWriteClipboard).toHaveBeenCalledWith(value);
+			}
+			addToast.mockRestore();
+		});
+
 		it("focuses the detached Markdown window instead of selecting a second copy", () => {
 			const id = mdTabsStore.add("/repo", "notes.md");
 			uiStore.setDetached(`markdown-tab-${id}`, `panel-markdown-tab-${id}`);

@@ -80,7 +80,9 @@
 }
 
 .repoList {
-  /* container for repo sections */
+  /* Clip before overflow reaches the vertical scroller. On .content itself,
+     overflow-y:auto would turn overflow-x:clip back into scrollable hidden. */
+  overflow-x: clip;
 }
 
 /* ── Action rows (New terminal, Search) ── */
@@ -897,6 +899,12 @@
   opacity: 1;
 }
 
+/* Silent past the stall threshold while the agent claims to work: steady, not pulsing. */
+.branchTabDotStalled {
+  background: var(--warning);
+  opacity: 1;
+}
+
 .mergedBadge {
   display: inline-flex;
   align-items: center;
@@ -987,6 +995,10 @@
 
 /* Branch actions */
 .branchActions {
+  /* In flow, like the repo actions: the name gives way instead of being covered
+     (upstream 2.1 lays them over the row; FastAF's washes are translucent, so an
+     overlay would show the diff counts through it). Keyboard focus reveals them
+     too, and .repoList clips sideways so focus can never scroll the list. */
   display: flex;
   flex-shrink: 0;
   gap: 2px;
@@ -998,7 +1010,8 @@
 }
 
 @media (hover: hover) {
-  .branchItem:hover .branchActions {
+  .branchItem:hover .branchActions,
+  .branchItem:focus-within .branchActions {
     max-width: 48px;
     opacity: 1;
     pointer-events: auto;
@@ -1046,6 +1059,15 @@
 .branchAddBtn:hover {
   background: var(--row-selected);
   color: var(--fg-primary);
+}
+
+/* Keyboard focus reveals the cluster (above). Its box clips for the max-width
+   reveal, so an outer ring would show as four corners: draw the ring inside. */
+.branchAddBtn:focus-visible,
+.branchRemoveBtn:focus-visible {
+  outline: none;
+  color: var(--fg-primary);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .branchRemoveBtn:hover {
@@ -2388,9 +2410,14 @@
   cursor: pointer;
 }
 
-.mergedCleanup:hover {
+.mergedCleanup:hover:not(:disabled) {
   background: var(--row-selected);
   color: var(--fg-primary);
+}
+
+.mergedCleanup:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ── Rich density: detail lines under a branch / repo ── */
@@ -2676,18 +2703,88 @@
   font-size: var(--font-2xs);
 }
 
+/* One row per broken registration, in the branch rows' geometry: an alert in
+   the 16px state slot (so the folder name lines up with the branch names), the
+   name, what is wrong in muted meta type, then the one fix as a quiet text
+   button. Only the alert is coloured. */
 .worktreeDiagnostic {
-  margin: 2px 8px;
-  padding: 4px 8px 4px 34px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  margin: 0 8px;
+  padding: 0 4px 0 8px;
   font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+/* Icon, name and reason: the part the path-and-guidance tooltip describes. */
+.diagnosticInfo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Path on one line, what to do about it on the next. */
+.diagnosticInfo[data-tooltip]::after {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.diagnosticIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
   color: var(--warning);
 }
 
-.diagnosticGuidance {
-  margin-top: 2px;
-  font-size: var(--font-xs);
+.diagnosticName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sidebar-branch-fg);
+}
+
+.diagnosticState {
+  flex-shrink: 0;
+  font-size: var(--font-2xs);
+}
+
+/* The fix reads a step brighter than the reason beside it, so the two muted
+   words do not run together. */
+.mergedCleanup.diagnosticAction {
+  flex-shrink: 0;
   color: var(--fg-secondary);
+}
+
+/* Prune asks once more before it drops the registration. */
+.mergedCleanup.diagnosticConfirm,
+.mergedCleanup.diagnosticConfirm:hover:not(:disabled) {
+  color: var(--error);
+}
+
+.mergedCleanup.diagnosticConfirm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+}
+
+.diagnosticError {
+  margin: 0 8px;
+  padding: 0 8px 4px 34px;
+  font-size: var(--font-xs);
+  color: var(--error);
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* ── Stale-temp repair popover (#763-d219) ── */

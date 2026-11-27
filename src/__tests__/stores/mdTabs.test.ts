@@ -358,14 +358,24 @@ describe("mdTabsStore", () => {
 			});
 		});
 
-		it("updates the singleton Claude dashboard when opened from another session", () => {
-			testInScope(() => {
-				const id = store.addClaudeUsage("private-session");
-				expect(store.get(id)).toMatchObject({ type: "claude-usage", sessionId: "private-session" });
-				expect(store.addClaudeUsage("default-session")).toBe(id);
-				expect(store.get(id)).toMatchObject({ type: "claude-usage", sessionId: "default-session" });
-			});
-		});
+		// Catches: reopening a provider dashboard retaining the first session's account.
+		it.each(["claude", "codex", "grok"] as const)(
+			"updates the singleton %s dashboard when opened from another session",
+			(provider) => {
+				testInScope(() => {
+					const add =
+						provider === "claude"
+							? store.addClaudeUsage
+							: provider === "codex"
+								? store.addCodexUsage
+								: store.addGrokUsage;
+					const id = add("private-session");
+					expect(store.get(id)).toMatchObject({ type: `${provider}-usage`, sessionId: "private-session" });
+					expect(add("default-session")).toBe(id);
+					expect(store.get(id)).toMatchObject({ type: `${provider}-usage`, sessionId: "default-session" });
+				});
+			},
+		);
 	});
 
 	describe("openUiTab()", () => {
@@ -383,6 +393,26 @@ describe("mdTabsStore", () => {
 				if (urlTab?.type !== "plugin-panel") return;
 				expect(urlTab.url).toBe("https://example.test/two");
 				expect(urlTab.html).toBe("");
+			});
+		});
+		// catches: a focused model tab in another repo leaves Back pointing one step
+		// past the terminal Boss was working in; a same-repo open must add nothing
+		it("records a back step only when a focused open changes the repository", async () => {
+			const terminals = (await import("../../stores/terminals")).terminalsStore;
+			const { makeTerminal } = await import("../helpers/store");
+			testInScope(() => {
+				repositoriesStore.add({ path: "/Gits/alpha", displayName: "alpha" });
+				repositoriesStore.add({ path: "/Gits/beta", displayName: "beta" });
+				repositoriesStore.setActive("/Gits/alpha");
+				const older = terminals.add(makeTerminal({ name: "older" }));
+				terminals.setActive(older);
+				const working = terminals.add(makeTerminal({ name: "working" }));
+				terminals.setActive(working);
+				store.openUiTab("same", "Same", "<p>a</p>", false, undefined, true, "/Gits/alpha");
+				expect(terminals.getHistoryTarget("back")).toBe(older);
+				store.openUiTab("report", "Report", "<p>b</p>", false, undefined, true, "/Gits/beta");
+				expect(repositoriesStore.state.activeRepoPath).toBe("/Gits/beta");
+				expect(terminals.getHistoryTarget("back")).toBe(working);
 			});
 		});
 		it("creates a new plugin-panel tab with the given id", () => {

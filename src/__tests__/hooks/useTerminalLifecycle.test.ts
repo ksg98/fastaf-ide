@@ -711,6 +711,7 @@ describe("useTerminalLifecycle", () => {
 					closeSearch: vi.fn(),
 					toggleCompose: vi.fn(),
 					openComposeWithText: vi.fn(),
+					quoteIntoCompose: vi.fn(),
 					searchBuffer: vi.fn(() => []),
 					scrollToLine: vi.fn(),
 					scrollToTop: vi.fn(),
@@ -723,6 +724,47 @@ describe("useTerminalLifecycle", () => {
 
 			lifecycle.clearTerminal();
 			expect(mockClear).toHaveBeenCalled();
+		});
+	});
+
+	// Cmd/Ctrl+K reaches this handler from the native menu and from the
+	// keybinding, wherever the focus is. With the keyboard in AI Chat it used to
+	// wipe the terminal beside the chat the user meant.
+	describe("clearScrollback", () => {
+		const withActiveTerminal = () => {
+			const clear = vi.fn();
+			const id = terminalsStore.add(makeTerminal({ name: "T1" }));
+			terminalsStore.setActive(id);
+			terminalsStore.update(id, { ref: { clear } as never });
+			return clear;
+		};
+
+		afterEach(() => {
+			document.body.replaceChildren();
+		});
+
+		it("clears the active terminal", () => {
+			const clear = withActiveTerminal();
+			lifecycle.clearScrollback();
+			expect(clear).toHaveBeenCalledOnce();
+		});
+
+		it("hands the shortcut to AI Chat when the keyboard is in it, and leaves the terminal alone", () => {
+			const clear = withActiveTerminal();
+			const panel = document.createElement("div");
+			panel.setAttribute("data-focus-target", "ai-chat");
+			const composer = document.createElement("textarea");
+			panel.append(composer);
+			document.body.append(panel);
+			composer.focus();
+			const chatCleared = vi.fn();
+			window.addEventListener("fastaf:ai-chat-clear-view", chatCleared);
+
+			lifecycle.clearScrollback();
+
+			window.removeEventListener("fastaf:ai-chat-clear-view", chatCleared);
+			expect(chatCleared).toHaveBeenCalledOnce();
+			expect(clear).not.toHaveBeenCalled();
 		});
 	});
 
@@ -908,6 +950,7 @@ describe("useTerminalLifecycle", () => {
 				closeSearch: vi.fn(),
 				toggleCompose: vi.fn(),
 				openComposeWithText: vi.fn(),
+				quoteIntoCompose: vi.fn(),
 				searchBuffer: vi.fn(() => []),
 				scrollToLine: vi.fn(),
 				scrollToTop: vi.fn(),

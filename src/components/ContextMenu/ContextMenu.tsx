@@ -1,10 +1,13 @@
-import { type Component, createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { cx } from "../../utils";
+import { cx } from "../../utils/cx";
+import { IconCheck } from "../icons";
 import s from "./ContextMenu.module.css";
 
 export interface ContextMenuItem {
 	label: string;
+	icon?: JSX.Element;
+	labelContent?: JSX.Element;
 	shortcut?: string;
 	action: () => void;
 	separator?: boolean;
@@ -12,10 +15,17 @@ export interface ContextMenuItem {
 	children?: ContextMenuItem[];
 	/** Native tooltip shown on hover — e.g. the full path behind a "Copy Path" item */
 	title?: string;
+	/**
+	 * The chosen entry among alternatives (a workspace, a sort order, a layout).
+	 * When any item of a menu sets it, every row of that menu gets a leading
+	 * check column, so the labels line up whether or not their row is ticked.
+	 */
+	checked?: boolean;
 }
 
 export interface ContextMenuProps {
 	items: ContextMenuItem[];
+	size?: "large";
 	x: number;
 	y: number;
 	visible: boolean;
@@ -88,6 +98,8 @@ const MenuItem: Component<{
 	item: ContextMenuItem;
 	onClose: () => void;
 	isLast?: boolean;
+	/** The menu has checkable rows: reserve the check column on this one too. */
+	checkColumn?: boolean;
 }> = (props) => {
 	let wrapRef: HTMLDivElement | undefined;
 	let submenuRef: HTMLDivElement | undefined;
@@ -127,6 +139,8 @@ const MenuItem: Component<{
 					type="button"
 					class={cx(s.item, props.item.disabled && s.disabled)}
 					title={props.item.title}
+					aria-label={props.item.labelContent ? props.item.label : undefined}
+					aria-current={props.item.checked ? "true" : undefined}
 					onClick={() => {
 						if (props.item.disabled) return;
 						if (hasChildren()) {
@@ -142,7 +156,19 @@ const MenuItem: Component<{
 					}}
 					disabled={props.item.disabled}
 				>
-					<span class={s.label}>{props.item.label}</span>
+					<Show when={props.checkColumn}>
+						<span class={s.check} aria-hidden="true">
+							<Show when={props.item.checked}>
+								<IconCheck size={14} />
+							</Show>
+						</span>
+					</Show>
+					<Show when={props.item.icon}>
+						<span class={s.icon} aria-hidden="true">
+							{props.item.icon}
+						</span>
+					</Show>
+					<span class={s.label}>{props.item.labelContent ?? props.item.label}</span>
 					<Show when={props.item.shortcut}>
 						<span class={s.shortcut}>{props.item.shortcut}</span>
 					</Show>
@@ -158,6 +184,7 @@ const MenuItem: Component<{
 									item={child}
 									onClose={props.onClose}
 									isLast={i() === (props.item.children?.length ?? 0) - 1}
+									checkColumn={hasCheckColumn(props.item.children ?? [])}
 								/>
 							)}
 						</For>
@@ -170,6 +197,8 @@ const MenuItem: Component<{
 		</Show>
 	);
 };
+
+const hasCheckColumn = (items: ContextMenuItem[]) => items.some((item) => item.checked !== undefined);
 
 export const ContextMenu: Component<ContextMenuProps> = (props) => {
 	let menuRef: HTMLDivElement | undefined;
@@ -274,7 +303,7 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
 			<Portal>
 				<div
 					ref={menuRef}
-					class={s.menu}
+					class={cx(s.menu, props.size === "large" && s.large)}
 					onClick={(e) => e.stopPropagation()}
 					style={{
 						left: `${props.x}px`,
@@ -283,7 +312,14 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
 					}}
 				>
 					<For each={props.items}>
-						{(item, i) => <MenuItem item={item} onClose={props.onClose} isLast={i() === props.items.length - 1} />}
+						{(item, i) => (
+							<MenuItem
+								item={item}
+								onClose={props.onClose}
+								isLast={i() === props.items.length - 1}
+								checkColumn={hasCheckColumn(props.items)}
+							/>
+						)}
 					</For>
 				</div>
 			</Portal>

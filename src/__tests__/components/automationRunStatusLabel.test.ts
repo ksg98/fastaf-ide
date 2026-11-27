@@ -22,7 +22,9 @@ const STATUSES: RunStatus[] = [
 	"skipped_duplicate",
 ];
 
-const TRIGGERS: AutomationRun["trigger"]["kind"][] = ["manual", "scheduled", "event", "pull_request_review", "triage"];
+/** Every trigger kind of `AutomationRun` (contract.ts). The issue, review and triage
+ * triggers left with the legacy automations; a retained run of one reads as unknown. */
+const TRIGGERS: AutomationRun["trigger"]["kind"][] = ["manual", "scheduled"];
 
 describe("Automations run status wording", () => {
 	// Catches: a card or run row printing the backend's raw enum ("needs_you").
@@ -54,5 +56,7 @@ describe("Automations run status wording", () => {
 
 	it("degrades an unknown trigger kind to readable text", () => {
 		expect(runTriggerLabel("webhook_call")).toBe("Webhook call");
+		// A run retained from the removed PR-review automation still reads as words.
+		expect(runTriggerLabel("pull_request_review")).toBe("Pull request review");
 	});
 });

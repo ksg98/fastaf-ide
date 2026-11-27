@@ -97,7 +97,7 @@ export function isStale(ms: number | null, now: number = Date.now()): boolean {
 }
 
 /** Build a multi-line tooltip string with full branch commit info */
-function branchTooltip(branch: BranchDetail): string {
+function branchTooltip(branch: BranchDetail, merged: boolean): string {
 	const parts: string[] = [branch.name];
 	const when = parseGitDate(branch.last_commit_date);
 	if (when !== null) {
@@ -109,7 +109,7 @@ function branchTooltip(branch: BranchDetail): string {
 	if (branch.last_commit_message) {
 		parts.push(`Message: ${branch.last_commit_message}`);
 	}
-	if (branch.is_merged) parts.push("Merged");
+	if (merged) parts.push("Merged");
 	return parts.join("\n");
 }
 
@@ -204,6 +204,10 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	const [loading, setLoading] = createSignal(false);
 	const [loadError, setLoadError] = createSignal<string | null>(null);
 	const [recentNames, setRecentNames] = createSignal<string[]>([], { equals: sameNames });
+	// Merge classification runs per local branch and is far slower than the
+	// list itself (#2777-1579), so it loads separately and never blocks the rows.
+	const [mergedNames, setMergedNames] = createSignal<ReadonlySet<string>>(new Set());
+	const isMerged = (branch: BranchDetail) => !branch.is_remote && mergedNames().has(branch.name);
 	/** Short hash of a detached HEAD (no local branch is current), for the context strip. */
 	const [detachedAt, setDetachedAt] = createSignal<string | null>(null);
 	const [search, setSearch] = createSignal("");
@@ -266,7 +270,17 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		}
 	}
 
+	async function fetchMergedNames(repoPath: string) {
+		try {
+			const names = await invoke<string[]>("get_merged_branches", { path: repoPath });
+			if (props.repoPath === repoPath) setMergedNames(new Set(names));
+		} catch (err) {
+			appLogger.warn("git", "Failed to determine merged branches", err);
+		}
+	}
+
 	async function fetchBranches(repoPath: string) {
+		void fetchMergedNames(repoPath);
 		if (branches().length === 0) setLoading(true);
 		setLoadError(null);
 		try {
@@ -332,6 +346,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 				setRenaming(null);
 				setCreating(false);
 				setOptionsOpen(false);
+				setMergedNames(new Set<string>());
 			},
 		),
 	);
@@ -349,7 +364,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	const currentBranch = createMemo(() => localBranches().find((b) => b.is_current));
 
 	/** Local branches merged into main and safe to delete (not current, not main). */
-	const mergedBranches = createMemo(() => localBranches().filter((b) => b.is_merged && !b.is_current && !b.is_main));
+	const mergedBranches = createMemo(() => localBranches().filter((b) => isMerged(b) && !b.is_current && !b.is_main));
 
 	/** Recently checked-out local branches, newest first — without the current one,
 	 *  which the context strip already shows. */
@@ -594,7 +609,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		let deleted = 0;
 		for (const branch of targets) {
 			// -d (safe): refuses any branch that isn't actually merged, so a stale
-			// is_merged flag can never cause data loss.
+			// merged badge can never cause data loss.
 			if (await deleteBranchByName(branch.name, false)) deleted++;
 		}
 		setSelectedKey(null);
@@ -1060,12 +1075,17 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 	// --- Dialog helpers ---
 
+	const dialogBranchMerged = () => {
+		const branch = dialogData()?.branch;
+		return branch !== undefined && isMerged(branch);
+	};
+
 	const dialogData = createMemo(() => {
 		const d = dialog();
 		if (!d) return null;
 		if (d.type === "delete") {
 			const { branch } = d;
-			const info = branch.is_merged
+			const info = isMerged(branch)
 				? "This branch is merged into main."
 				: "This branch has unmerged commits. Delete refuses to remove it; Force delete discards them.";
 			return {
@@ -1326,7 +1346,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 					isSelected() && s.branchRowSelected,
 					isSelected() && keyboardNav() && s.branchRowFocused,
 				)}
-				title={branchTooltip(branch)}
+				title={branchTooltip(branch, isMerged(branch))}
 				onClick={() => {
 					pickRow(key);
 					containerRef?.focus();
@@ -1372,7 +1392,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 							&#x21E3;{branch.base_behind}
 						</span>
 					</Show>
-					<Show when={branch.is_merged}>
+					<Show when={isMerged(branch)}>
 						<span class={s.merged}>Merged</span>
 					</Show>
 					<Show when={when !== null}>
@@ -1542,7 +1562,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 				title={dialogData()?.title ?? ""}
 				message={dialogData()?.message ?? ""}
 				confirmLabel="Delete"
-				discardLabel={dialogData()?.branch.is_merged ? undefined : "Force delete"}
+				discardLabel={dialogBranchMerged() ? undefined : "Force delete"}
 				kind="warning"
 				onClose={() => setDialog(null)}
 				onDiscard={() => void doDeleteBranch(true)}

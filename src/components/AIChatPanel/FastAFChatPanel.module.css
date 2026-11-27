@@ -21,6 +21,12 @@
   overflow: hidden;
 }
 
+/* The panel itself takes the focus only to hand it to the composer (or to hold
+   it while no terminal is attached); it is never a thing to draw a ring on. */
+.panel:focus {
+  outline: none;
+}
+
 /* Compound selectors outrank the `display` each target sets on its own — .panel
    is declared above this rule, .messageList below it, so source order alone
    would hide one and not the other. */
@@ -47,7 +53,10 @@
   background: var(--row-selected);
 }
 
-/* Attached-terminal dot: green when a terminal is focused, hollow when not. */
+/* The chat's state dot: hollow with no terminal focused, green when attached
+   and idle, the busy pulse while a turn or an agent runs, the attention pulse
+   while it waits on the user (an approval, a paused run). The words are in its
+   tooltip and its accessible name, so colour never speaks alone. */
 .sessionDot {
   width: 6px;
   height: 6px;
@@ -61,6 +70,28 @@
 
 .sessionDotOff {
   box-shadow: inset 0 0 0 1.5px var(--fg-muted);
+}
+
+.sessionDotWorking {
+  background: var(--activity);
+  animation: chatDotPulse 1.4s ease-in-out infinite;
+}
+
+.sessionDotWaiting {
+  background: var(--attention);
+  animation: chatDotPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes chatDotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionDotWorking,
+  .sessionDotWaiting {
+    animation: none;
+  }
 }
 
 .terminalName {
@@ -200,31 +231,244 @@
 
    `auto` in contain-intrinsic-size makes the browser remember each turn's last
    rendered height, so the scrollbar does not jump as turns scroll out. */
-.userMsg {
+.userTurn {
   content-visibility: auto;
   contain-intrinsic-size: auto 80px;
-  align-self: flex-end;
-  max-width: 88%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* A turn with a note hanging under it (Sending…) paints outside its own box,
+   which the containment above would clip. One turn at most is in that state. */
+.userTurn[data-delivery] {
+  content-visibility: visible;
+}
+
+/* The menu trigger sits in the gutter the bubble leaves on its left. */
+.userRow {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.userMenu {
+  flex-shrink: 0;
+  margin-bottom: 5px;
+}
+
+/* Attached images sit above the message as their own objects, not inside its
+   tinted block (shared/PromptContent lays them out; this only aligns them). */
+.userBody {
+  min-width: 0;
+  max-width: min(88%, calc(100% - 28px));
+  font-size: var(--font-md);
+  line-height: 1.5;
+}
+
+.userBody [data-prompt-images] {
+  margin-left: auto;
+}
+
+.userMsg {
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
   background: var(--wash-1);
   color: var(--fg-primary);
   padding: 7px 12px;
   border-radius: 12px 12px 4px 12px;
   box-shadow: var(--highlight-inset);
-  font-size: var(--font-md);
-  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
+/* Submitted, not confirmed yet. Both cues wait 300ms, so a send the backend
+   takes at once (the usual case on the desktop) never flashes them. */
+.userTurn[data-delivery="sending"] .userMsg {
+  animation: sendingDim 120ms var(--ease-out) 300ms both;
+}
+
+@keyframes sendingDim {
+  to { opacity: 0.6; }
+}
+
+.sendNote {
+  position: absolute;
+  top: calc(100% + 1px);
+  right: 2px;
+  font-size: var(--font-xs);
+  line-height: 12px;
+  color: var(--fg-muted);
+  animation: sendNoteIn 120ms var(--ease-out) 300ms both;
+}
+
+@keyframes sendNoteIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* A turn that got no answer keeps its text and says so under the bubble:
+   what happened and the two things to do about it, then why. */
+.sendFailed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.sendFailedLine {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sendFailedLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 6px;
+  color: var(--error);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.noteBtn {
+  composes: btnGhost from "../shared/controls.module.css";
+}
+
+.sendFailedLine .noteBtn {
+  min-height: 22px;
+  padding: 0 8px;
+  font-size: var(--font-sm);
+}
+
+.sendFailedReason {
+  max-width: 100%;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  line-height: 18px;
+}
+
+/* ── Message menu ───────────────────────────────────────── */
+/* One quiet trigger per message, shown while the message is hovered or holds
+   the focus (MessageMenu.module.css keeps it up while its menu is open). An
+   answer keeps a slim row for it under its text, so nothing moves when it
+   appears; half of that row lies in the gap to the next turn. */
+.msgActions {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  margin-bottom: -12px;
+}
+
+.userTurn:hover .menuTrigger,
+.userTurn:focus-within .menuTrigger,
+.assistantMsg:hover .menuTrigger,
+.assistantMsg:focus-within .menuTrigger {
+  opacity: 1;
+}
+
+/* The message's Markdown source, in the same well as a code block. */
+.rawMarkdown {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  box-shadow: 0 0 0 1px var(--border-subtle);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Notices ────────────────────────────────────────────── */
+/* A system message is a quiet row. Its text, like an error's, shows the first
+   line; when there is more, a chevron opens it (NoticeText). */
+.noticeRow {
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  background: var(--wash-0);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  line-height: 20px;
+}
+
+.noticeText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.noticeDetails {
+  min-width: 0;
+}
+
+.noticeSummary {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius-sm);
+}
+
+.noticeSummary::-webkit-details-marker {
+  display: none;
+}
+
+.noticeSummary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.noticeChevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 12px;
+  height: 1lh;
+  opacity: 0.7;
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+details[open] > summary > .noticeChevron {
+  transform: rotate(90deg);
+}
+
+.noticeRest {
+  margin: 2px 0 2px 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* The assistant's turn sits flat on the panel — the panel is its bubble. */
 .assistantMsg {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
   align-self: flex-start;
   width: 100%;
   font-size: var(--font-md);
   line-height: 1.55;
   color: var(--fg-primary);
+}
+
+/* The text of a settled answer carries the containment (see .userTurn above),
+   not the answer as a whole: its menu row hangs out of the box, into the gap
+   below, and containment would clip it. */
+.assistantBody {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 .assistantMsg :global(#markdown-content) {
@@ -373,6 +617,23 @@
   white-space: nowrap;
 }
 
+/* The row a run ends on: its text wraps, and a long reason opens on click. */
+.statusRowDone {
+  align-items: flex-start;
+}
+
+.statusRowDone .statusBtn {
+  margin-top: 2px;
+}
+
+.statusNotice {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  font-weight: 500;
+  line-height: 20px;
+}
+
 .statusMeta {
   color: var(--fg-secondary);
   font-size: var(--font-xs);
@@ -412,7 +673,7 @@
 /* Request errors — inline, with the retry right beside the message. */
 .errorBanner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   min-height: 28px;
   padding: 4px 6px 4px 10px;
@@ -426,9 +687,7 @@
 .errorText {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 20px;
 }
 
 .retryBtn {
@@ -436,7 +695,9 @@
 }
 
 .errorBanner .retryBtn {
+  flex-shrink: 0;
   min-height: 22px;
+  margin-top: -1px;
   padding: 0 8px;
   font-size: var(--font-xs);
   color: var(--error);
@@ -720,6 +981,13 @@
   max-width: 100%;
 }
 
+/* A conversation that is working or waiting in one of the open terminals. */
+.historyDot {
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
 .historyMeta {
   display: flex;
   gap: 8px;
@@ -757,6 +1025,9 @@
 }
 
 .reasoningSummary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   cursor: pointer;
   font-size: var(--font-sm);
   color: var(--fg-secondary);
@@ -764,16 +1035,8 @@
   list-style: none;
 }
 
-.reasoningSummary::before {
-  content: "▸";
-  display: inline-block;
-  margin-right: 6px;
-  color: var(--fg-muted);
-  transition: transform var(--duration-base) var(--ease-out);
-}
-
-.reasoningDisclosure[open] > .reasoningSummary::before {
-  transform: rotate(90deg);
+.reasoningSummary::-webkit-details-marker {
+  display: none;
 }
 
 .reasoningBody {
@@ -930,6 +1193,45 @@
   opacity: 0.6;
 }
 
+/* Commands the composer runs itself (/clear, /fork), listed at the top of the
+   card while the draft is a lone "/word". Rows, not a second field. */
+.slashMenu {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: -4px -2px 0 -6px;
+}
+
+.slashItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-md);
+}
+
+.slashItemActive {
+  background: var(--row-selected);
+}
+
+.slashName {
+  flex-shrink: 0;
+  min-width: 44px;
+  color: var(--fg-primary);
+}
+
+.slashHint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
 .textarea {
   width: 100%;
   background: transparent;
@@ -944,6 +1246,9 @@
   max-height: 180px;
   line-height: 1.45;
   box-sizing: border-box;
+  /* Same as the compose dock: text wraps, so never a sideways scrollbar (a
+   * zoomed webview would draw one inside a one-line field). */
+  overflow-x: hidden;
   overflow-y: auto;
   outline: none;
 }

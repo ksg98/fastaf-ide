@@ -1,8 +1,8 @@
 /* Plans and Stories — a FastAF dialog (STYLE_GUIDE › Menus, popovers,
    dialogs; Side panels for the columns). One material from --surface-overlay
    (glass in a flat theme, tonal in Codex Dark), columns split by one hairline,
-   rows that light with --row-active, views as --row-selected pills, sentence
-   case throughout. */
+   rows that light with --row-active, sentence case throughout. The Workflows
+   dialog borrows the frame and the header. */
 
 .dialog {
   display: flex;
@@ -44,7 +44,7 @@
   flex-shrink: 0;
 }
 
-/* ── Header: title · project · view pills · action · window controls ── */
+/* ── Header: title · story backend · project · action · window controls ── */
 
 .header {
   display: grid;
@@ -101,46 +101,189 @@
   white-space: nowrap;
 }
 
-/* View pills: muted at rest, --row-selected behind the open view. */
-.viewTab {
+/* ── Story backend: which connector serves this project ─────────────── */
+
+/* One muted line beside the title: a state dot, then name · how it was chosen
+   · availability. It is a disclosure; the details open as a popover. */
+.backend {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+}
+
+.backend summary {
   display: inline-flex;
   align-items: center;
-  height: 28px;
-  padding: 0 10px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fg-muted);
-  font-family: inherit;
-  font-size: var(--font-md);
-  font-weight: 500;
+  gap: 6px;
+  max-width: 100%;
+  list-style: none;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
+  transition: color var(--duration-fast) var(--ease-out);
 }
 
-.viewTab:hover:not(:disabled) {
-  background: var(--wash-0);
-  color: var(--fg-secondary);
+.backend summary > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.viewTab[aria-pressed="true"] {
-  background: var(--row-selected);
+.backend summary > span + span::before {
+  content: "·";
+  margin-right: 6px;
+}
+
+.backend summary::-webkit-details-marker {
+  display: none;
+}
+
+.backend summary::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.backend[data-availability="available"] summary::before {
+  background: var(--success);
+}
+
+.backend[data-availability="approval_required"] summary::before {
+  background: var(--attention);
+}
+
+.backend[data-availability="unavailable"] summary::before {
+  background: var(--error);
+}
+
+.backend summary:hover,
+.backend details[open] > summary {
   color: var(--fg-primary);
 }
 
-.viewTab:focus-visible {
+.backend summary:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
 }
 
-.viewTab:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.backendPopover {
+  position: absolute;
+  top: calc(100% + 12px);
+  left: -8px;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 360px;
+  max-width: calc(100vw - 64px);
+  padding: 12px;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+  color: var(--fg-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.headerActions > .headerAction {
-  margin-left: 10px;
+.backendPopover p {
+  margin: 0;
+}
+
+.backendPopover > p:first-child {
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+}
+
+/* What it is, in rows that line up: a muted label, then the value. */
+.backendFacts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.backendFacts dt {
+  color: var(--fg-muted);
+}
+
+.backendFacts dd {
+  margin: 0;
+  color: var(--fg-secondary);
+}
+
+.backendFacts dd.backendId,
+.backendId {
+  color: var(--fg-muted);
+  font: var(--font-xs) / 1.5 var(--font-mono);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.backendError {
+  color: var(--error);
+}
+
+.backendActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* A connector that needs approval: nothing can be read yet, so the body is the
+   question — the empty-state recipe (24px icon, 13px/500 title, muted lines,
+   centred a little above the middle) with the one action under it. */
+.approval {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 0;
+  padding: 32px 24px 72px;
+  overflow-y: auto;
+  text-align: center;
+}
+
+.approvalIcon {
+  flex-shrink: 0;
+  margin-bottom: 4px;
+  color: var(--fg-muted);
+}
+
+.approval h3 {
+  margin: 0;
+  font-size: var(--font-md);
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.approval p {
+  max-width: 460px;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.approval p.backendId {
+  max-width: 560px;
+  text-wrap: wrap;
+}
+
+.approval > button {
+  flex-shrink: 0;
+  margin-top: 10px;
 }
 
 .windowControls {
@@ -266,9 +409,9 @@ button.item[data-control-layout="row"] small {
   margin-right: 6px;
 }
 
-.itemMeta > :first-child {
-  flex-shrink: 0;
-  max-width: 55%;
+.itemMeta > :first-child:not(:only-child) {
+  flex-shrink: 1;
+  max-width: 60%;
 }
 
 /* A story row: the row, its phase picker at the right end. The whole row
@@ -330,6 +473,135 @@ button.item[data-control-layout="row"] small {
 
 .storyListRow > .phaseSelector > span {
   display: none;
+}
+
+/* The picker carries its story's phase as a 6px dot before the value, in the
+   board columns' colours (STYLE_GUIDE: a coloured dot says state). Backlog and
+   won't fix have no tone, so their dot is muted. The label text leads, then
+   the dot, then the menu. */
+.phaseSelector > span {
+  order: -1;
+}
+
+.phaseSelector[data-status]::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--phase-tone, var(--fg-muted));
+}
+
+.storyListRow > .phaseSelector {
+  gap: 0;
+}
+
+.phaseSelector[data-status="ready"] {
+  --phase-tone: var(--accent);
+}
+
+.phaseSelector[data-status="in_progress"],
+.phaseSelector[data-status="review"] {
+  --phase-tone: var(--warning);
+}
+
+.phaseSelector[data-status="qa"] {
+  --phase-tone: var(--attention);
+}
+
+.phaseSelector[data-status="blocked"] {
+  --phase-tone: var(--error);
+}
+
+.phaseSelector[data-status="done"] {
+  --phase-tone: var(--success);
+}
+
+.phaseSelector[data-status="wont_fix"] select {
+  color: var(--fg-muted);
+}
+
+/* ── Waiting on you: what needs an answer, above the columns ────────── */
+
+.waiting {
+  flex-shrink: 0;
+  padding: 8px 6px 6px;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+}
+
+/* The section label: sentence case, 12px/600, in the rows' text column. */
+.waiting h3 {
+  margin: 0 0 4px;
+  padding: 0 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.waiting p {
+  margin: 4px 0;
+  padding: 0 8px;
+  overflow-wrap: anywhere;
+}
+
+/* Three rows, then it scrolls: the list never pushes the columns away. */
+.waiting .waitingList {
+  max-height: 94px;
+  padding: 0;
+  overflow-y: auto;
+}
+
+/* One line per item: its title, then what kind of answer it wants; an item
+   answered here ends with its two answers. The whole row lights. */
+.waitingRow {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  min-width: 0;
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.waitingRow:hover {
+  background: var(--wash-0);
+}
+
+.waiting .waitingRow > button.item[data-control-layout="row"] {
+  flex: 1 1 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  width: auto;
+  min-width: 0;
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+
+.waiting .waitingRow > button.item[data-control-layout="row"]:hover {
+  background: transparent;
+}
+
+.waiting button.item[data-control-layout="row"] > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.waiting button.item[data-control-layout="row"] small {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.waitingActions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding-right: 4px;
 }
 
 /* ── Filters and inline forms ───────────────────────────────────────── */
@@ -500,8 +772,7 @@ button.item[data-control-layout="row"] small {
 }
 
 /* Disclosures draw their own chevron, never the native triangle. */
-.form summary,
-.timeline summary {
+.form summary {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -509,13 +780,11 @@ button.item[data-control-layout="row"] small {
   cursor: pointer;
 }
 
-.form summary::-webkit-details-marker,
-.timeline summary::-webkit-details-marker {
+.form summary::-webkit-details-marker {
   display: none;
 }
 
-.form summary::before,
-.timeline summary::before {
+.form summary::before {
   content: "";
   width: 5px;
   height: 5px;
@@ -526,8 +795,7 @@ button.item[data-control-layout="row"] small {
   transition: transform var(--duration-fast) var(--ease-out);
 }
 
-.form details[open] > summary::before,
-.timeline details[open] > summary::before {
+.form details[open] > summary::before {
   margin-bottom: 4px;
   transform: rotate(45deg);
 }
@@ -1032,135 +1300,6 @@ button.boardCard[data-control-layout="card"] small.boardCardId {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* ── Run history ────────────────────────────────────────────────────── */
-
-.runContent {
-  display: grid;
-  grid-template-columns: minmax(220px, 28%) minmax(0, 1fr);
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.runList,
-.runDetail {
-  min-width: 0;
-  overflow-y: auto;
-}
-
-.runList {
-  border-right: var(--hairline-w) solid var(--hairline);
-}
-
-.runDetail {
-  padding: 16px 20px 24px;
-}
-
-.runDetail h3 {
-  margin: 2px 0 0;
-  font-size: var(--font-lg);
-  font-weight: 600;
-}
-
-.timeline {
-  margin: 16px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.timeline li {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: 12px;
-  padding: 8px 0;
-  border-top: var(--hairline-w) solid var(--hairline);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-}
-
-/* "story started" → "Story started": sentence case on the event's name. */
-.timeline li > div > span:first-child {
-  display: inline-block;
-}
-
-.timeline li > div > span:first-child::first-letter {
-  text-transform: uppercase;
-}
-
-.timeline summary {
-  color: var(--fg-muted);
-}
-
-.timeline time,
-.eventSequence {
-  color: var(--fg-muted);
-  font: var(--font-xs) var(--font-mono);
-  white-space: nowrap;
-}
-
-.timeline pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: var(--font-xs) var(--font-mono);
-}
-
-.incidents {
-  margin: 20px 0;
-  padding-top: 16px;
-  border-top: var(--hairline-w) solid var(--hairline);
-}
-
-.incidents h4 {
-  margin: 0;
-  font-size: var(--font-sm);
-}
-
-/* An incident is a tinted callout, not a bordered box. */
-.incident {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--attention) 10%, transparent);
-}
-
-.incident > .eyebrow {
-  display: block;
-}
-
-.incident > .eyebrow::first-letter {
-  text-transform: uppercase;
-}
-
-.incidentCause {
-  margin: 6px 0;
-  color: var(--fg-primary);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.incidentIds {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 12px;
-  margin: 8px 0;
-  color: var(--fg-muted);
-  font: var(--font-xs) var(--font-mono);
-}
-
-.incidentIds dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.incidentNext {
-  margin: 10px 0 0;
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 /* ── Editors (new story, edit story, edit plan) ─────────────────────── */
 
 .editorContent {
@@ -1268,6 +1407,81 @@ button.boardCard[data-control-layout="card"] small.boardCardId {
 
 /* ── Narrow windows ─────────────────────────────────────────────────── */
 
+/* A section label with its one action at the right end. */
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  margin-bottom: 4px;
+}
+
+.detail .sectionHead > h4 {
+  margin: 0;
+}
+
+/* Delivery runs: a state dot, the run's short id, what it is doing. */
+.detail ul.runs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.runRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  min-width: 0;
+}
+
+.runDot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.runDot[data-state="busy"] {
+  background: var(--activity);
+}
+
+.runDot[data-state="waiting"] {
+  background: var(--warning);
+}
+
+.runDot[data-state="done"] {
+  background: var(--success);
+}
+
+.runDot[data-state="failed"] {
+  background: var(--error);
+}
+
+.runId {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  font: var(--font-sm) var(--font-mono);
+}
+
+.runStatus {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.runRow > button {
+  flex-shrink: 0;
+}
+
+
 @media (max-width: 760px) {
   .content {
     grid-template-columns: minmax(135px, 34%) minmax(0, 1fr);
@@ -1275,7 +1489,6 @@ button.boardCard[data-control-layout="card"] small.boardCardId {
 
   .detail {
     grid-column: 1 / -1;
-    min-height: 260px;
     border-top: var(--hairline-w) solid var(--hairline);
   }
 
@@ -1283,42 +1496,22 @@ button.boardCard[data-control-layout="card"] small.boardCardId {
     border-right: 0;
   }
 
-  .runContent {
-    grid-template-columns: minmax(145px, 38%) minmax(0, 1fr);
-  }
-
-  .runDetail {
-    padding: 14px;
-  }
-
-  .timeline li {
-    grid-template-columns: 32px minmax(0, 1fr);
-  }
-
-  .timeline time {
-    grid-column: 2;
-  }
-
+  /* One 40px row still: the path gives way first, the backend line truncates. */
   .header {
-    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
-    height: auto;
-    min-height: 40px;
-    padding-block: 6px;
   }
 
-  .headerActions {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    justify-content: flex-start;
+  .header .project {
+    display: none;
   }
 
-  .header > .windowControls {
-    grid-column: 2;
-    grid-row: 1;
+  /* The lists keep their share of the height; the detail scrolls under them. */
+  .content {
+    grid-template-rows: minmax(190px, 46%) minmax(0, 1fr);
+    overflow: hidden;
   }
 
-  .headerActions button {
-    white-space: nowrap;
+  .detail {
+    min-height: 0;
   }
 }

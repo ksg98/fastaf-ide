@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, loadConfigFromFile, transformWithOxc } from "vite";
+import { testTmpRoot } from "../../../scripts/test-tmp-root.mjs";
 
 const repo = fileURLToPath(new URL("../../../", import.meta.url));
 const grammarPath = "src-tauri/crates/tuic-terminal/src/intent_marker.json";
-const scratchRoot = join(repo, ".tmp");
+// The watcher filter below maps scratch paths back onto the repo, so the scratch root can sit
+// outside the checkout (the temp dir).
+const scratchRoot = testTmpRoot();
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "vite-intent-"));
+// Vite resolves its root to the real path and the watcher reports real paths. The macOS temp dir
+// is reached through a symlink (/var -> /private/var), so with the unresolved path the filter
+// below mapped every watched path outside the repo (the scratch root itself was ignored) and no
+// event ever equalled `target`: the probe then waited forever. Resolve the real path once.
+const scratch = realpathSync(mkdtempSync(join(scratchRoot, "vite-intent-")));
 let server;
 try {
 	const loaded = await loadConfigFromFile({ command: "serve", mode: "development" }, join(repo, "vite.config.ts"));

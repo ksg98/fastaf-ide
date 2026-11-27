@@ -27,7 +27,7 @@
   color: var(--fg-secondary);
 }
 
-.inline > .section:not(.controls) {
+.inline > .section {
   order: 1;
   flex: none;
   gap: 6px;
@@ -35,17 +35,69 @@
   margin-right: 4px;
 }
 
-.inline > .githubStatus {
+/* Nothing to say (100 % zoom, no status text): no empty item, no stray gap. */
+.inline > .section:empty {
+  display: none;
+}
+
+/* The right-hand group (agent badge, provider recovery, tickers, offline, PR,
+   toggles) has no box of its own in the title bar: its children are cluster
+   items too, in the same order-1 run as the status text unless a rule below
+   moves them. */
+.inline > .rightGroup {
+  display: contents;
+}
+
+.inline > .rightGroup > * {
+  order: 1;
+}
+
+.inline .agentBadge,
+.inline .tickerArea {
+  margin-right: 4px;
+}
+
+.inline .remoteOffline {
+  order: 0;
+}
+
+.inline .githubStatus {
   order: 2;
   margin: 0 4px 0 0;
   padding-left: 0;
   border-left: none;
 }
 
-.inline > .controls {
+.inline .controls {
   order: 10;
   margin-left: 6px;
   -webkit-app-region: no-drag;
+}
+
+/* Tickers are ambient; the tab pills are how the user gets around. So in the
+   title bar the pool has no width of its own: it adds nothing to the cluster's
+   size (width: 0) and grows into whatever the row has left once the tab strip
+   is at its natural width (Toolbar.module.css gives that spare room to the
+   right cluster). It stops at the pool's natural width (--ticker-pool-width,
+   set by TickerArea) and at 320px; TickerArea measures what it got, pins what
+   fits and rotates the rest in the last slot. */
+.inline .tickerArea {
+  flex: 1 1 auto;
+  width: 0;
+  max-width: min(var(--ticker-pool-width, 0px), 320px);
+  /* Status text stays in one run after the agent badge; when only some tickers
+     fit, the room left over sits between them and the icon buttons. */
+  justify-content: flex-start;
+}
+
+/* Less room than one rotating slot needs: TickerArea shows nothing. The area
+   still has to grow to notice when room comes back, so it moves to the front
+   of the cluster, where its empty width is the drag space that is there
+   anyway, instead of leaving a hole between the agent badge and the bell.
+   Only the order changes: a margin that differed between the two states would
+   change the width being measured and flip the state back. */
+.inline > .rightGroup > .tickerAreaCollapsed {
+  order: -1;
 }
 
 .inline .info {
@@ -113,11 +165,20 @@
   flex: 1;
 }
 
+.rightGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  max-width: 75%;
+  min-width: 0;
+  margin-left: auto;
+}
+
 .controls {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
   flex: 0 0 auto;
   overflow: visible;
 }
@@ -137,7 +198,7 @@
 .info {
   color: var(--fg-secondary);
   flex: 1 1 0;
-  min-width: 60px;
+  min-width: 0;
   overflow: hidden;
   transition: color 600ms ease-out;
 }
@@ -208,7 +269,10 @@
   border-radius: var(--radius-md);
   background: var(--bg-tertiary);
   white-space: nowrap;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .agentUsage {
@@ -249,7 +313,54 @@
   box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
+/* Holds every ticker: side by side while they fit, the overflow rotates in the last slot */
+.tickerArea {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Natural pool width, capped by the bar; no reserved gap after the usage badge. */
+  flex: 0 1 auto;
+  width: var(--ticker-pool-width);
+  max-width: 45vw;
+  /* TickerArea reads this box right after sizing it. Under reduced motion every
+     element gets a 0.01ms transition on all properties (global.css), which
+     would hand that reading the previous width for one frame. */
+  transition: none;
+  justify-content: flex-end;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tickerAreaEmpty {
+  display: none;
+}
+
+/* Renders the whole pool at natural width so the layout can measure it; never visible */
+.tickerProbe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  gap: 8px;
+  width: max-content;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.tickerPinned {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* One row: icon · label · text · cycle badge. Only the text gives way when the
+   slot is short, so a squeezed ticker keeps its label and its "2/3" badge
+   instead of ending in an ellipsis where the badge was. */
 .tickerMessage {
+  display: inline-flex;
+  align-items: center;
   font-family: var(--font-ui);
   font-size: var(--font-sm);
   padding: 2px 6px;
@@ -257,9 +368,8 @@
   color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   flex: 0 1 auto;
-  min-width: 60px;
+  min-width: 0;
 }
 
 .tickerClickable {
@@ -279,8 +389,8 @@
 .tickerIcon {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   margin-right: 3px;
-  vertical-align: middle;
 }
 
 .tickerIcon svg {
@@ -289,15 +399,21 @@
 }
 
 .tickerLabel {
+  flex-shrink: 0;
   color: var(--fg-secondary);
   font-weight: 600;
 }
 
+/* A flex item drops the spaces at its edges; the separator is " · ". */
 .tickerSep {
+  flex-shrink: 0;
+  white-space: pre;
   color: var(--fg-muted);
 }
 
 .tickerText {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -569,6 +685,10 @@
   color: var(--error);
   white-space: nowrap;
   cursor: default;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toggleBtn { position: relative; overflow: visible; }

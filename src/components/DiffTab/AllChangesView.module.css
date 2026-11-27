@@ -1,0 +1,145 @@
+/* All Changes — the scope row over the diff, and the commit picker. One row,
+   one hairline: what is compared on the left, how much changed on the right,
+   in the UI font (the diff under it is mono). It stays pinned while the files
+   scroll; each file's own header sticks right under it. */
+
+/* The file list reads the pinned row's height to park its file headers. */
+:has(> .bar.bar) {
+  --diff-header-height: 40px;
+}
+
+.bar {
+  composes: toolbar from "../ui/FormControls.module.css";
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  height: 40px;
+  padding: 0 14px 0 10px;
+  overflow: hidden;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+  background: var(--bg-primary);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.bar > * {
+  flex-shrink: 0;
+}
+
+.bar select.base {
+  flex: 0 1 180px;
+  min-width: 96px;
+}
+
+/* A switch and its words. The shared switch keeps its 34px track at any
+   control height, so the label gives it that width. */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.toggle > [data-form-control="switch"] {
+  width: 34px;
+}
+
+/* How much changed, at the row's right end; it gives way first. */
+.bar > .stats {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  text-overflow: ellipsis;
+}
+
+.statAdd {
+  color: var(--success);
+}
+
+.statDel {
+  color: var(--error);
+}
+
+/* The states under the row: centred, in the UI font. */
+.fallback {
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-ui);
+}
+
+/* ── Commit / range: one row per commit, Shift-click for a range ────── */
+
+.commitList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 188px;
+  padding: 6px 0;
+  overflow-y: auto;
+  border-bottom: var(--hairline-w) solid var(--hairline);
+  font-family: var(--font-ui);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button[data-control-layout="row"].commitRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  height: 28px;
+  margin: 0 6px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: var(--font-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+button[data-control-layout="row"].commitRow:hover {
+  background: var(--wash-0);
+}
+
+/* A multi-selection, so --row-picked: it reads in a flat and a tonal theme. */
+button[data-control-layout="row"].commitRowSelected,
+button[data-control-layout="row"].commitRowSelected:hover {
+  background: var(--row-picked);
+}
+
+button[data-control-layout="row"].commitRow:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.commitSubject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commitHash {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+}

@@ -18,6 +18,16 @@ vi.mock("../../../transport", () => ({
 		},
 	),
 }));
+// Browser-mode `listen()` (invoke.ts) reaches the shared SSE stream directly, not through the
+// transport index mocked above. Left real, every store that listens for a backend event joins
+// one stream, and the next event type widens its filter with a POST to a backend this test
+// does not have: the unmocked-fetch guard then throws on the stream's timer, outside any test,
+// and the run exits 1 with every test green. Nothing here reads backend events (the recorded
+// frames arrive through subscribePty), so the stream is inert and nothing outlives the case.
+vi.mock("../../../transport/sse", () => ({
+	subscribeSse: () => () => {},
+	emitSseLocalEvent: () => {},
+}));
 vi.mock("../CanvasTerminal", () => ({ default: () => null }));
 
 import { terminalsStore } from "../../../stores/terminals";

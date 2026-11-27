@@ -1,6 +1,67 @@
 # FastAF — Complete Feature Reference
 
-- **Pending Chat prompt controls** — Busy Session Chat sends wait in TUIC’s existing idle-gate queue on desktop and mobile. Each host-owned Pending prompt has Cancel and, for Claude, Codex and ego, a compact return-key action labelled **Send now: stop the current request**. Send now claims its queue id once; a prompt already taken by the idle gate is not sent again. Claude and Codex use Escape followed by confirmed idle; ego uses native Ctrl+Enter. Native CLI receipts from earlier direct sends remain read-only. (#2589-4bc4).
+Desktop builds: macOS (Apple Silicon), Windows x64 and Linux x64. Linux and
+Windows builds use Vulkan for GPU dictation and fall back to the CPU without a
+usable device. There is no Linux ARM64 desktop build; the remote daemon does
+ship for Linux ARM64. See [the CI guide](guides/ci.md#linux-desktop-packages).
+
+The 2.1.2 sync removed the legacy role/kind workflow engine and the legacy
+automations built on it (PR review, GitHub issue intake, triage); the neutral
+workflow engine and the prompt scheduler remain, and stories, plans and Ideas
+use the separate `story` MCP tool. Entries below that describe WF-numbered
+features of the old engine are kept as history and link to
+[what was removed](backend/workflows.md#legacy-engine-removed-3034-365e).
+
+### Workflows dialog
+
+**Workflows** (Command Palette, or the button in the Plans and Stories header) is the place for workflow definitions. One bar holds four views and the open draft's state and actions:
+
+- **Designer** — three columns split by hairlines. Left: Drafts, Templates, Activities and Published. Middle: the steps of the open draft, with one **Add step** menu. Right: the open step (label, configuration, execution policy, input mappings, where each outcome leads, preset). Configuration forms come from backend schemas; labels are presentation only. A published workflow opens read only, with **Customize in a new draft**.
+- **Triggers** — saved trigger bindings and the open one: pick a published workflow, map the source's fields, preview the normalized payload, then **Enable binding** (an overlap with other bindings must be acknowledged). A binding held without intake shows its reason ("No intake: …") under its row.
+- **Preview** — **Run preview** on sample input, which never runs an activity or enables a trigger, and **Inspect a run** by its ID, which reads a run's saved state and never resumes it.
+- **Definition** — the draft as JSON, and the correction region.
+- **Validate**, **Save draft** and **Publish** act on the open draft. Validation comes before publication, and Publish waits until the draft is saved.
+
+A compatible backend catalog is required. A catalog failure is shown under the bar, and saved drafts stay available while it lasts.
+
+Internal correction metanode contracts retain the selected publication, durable correction limit and source-bound assessment data. The neutral loop owns admission/replay; native committed-candidate review/check assessment and generation fences refuse stale evidence. MCP exposes pinned criteria and the region through the existing neutral action; Designer renders criteria, selected child publication, correction limits and generated contracts; retained scope iteration drives the displayed consumed correction count (#016-358f).
+
+- **Configured neutral workflow adapters** — One installed native provider
+  delegates saved script/HTTP operations, configured mediated model requests,
+  installed Jira/GitLab project bindings and the enabled Telegram alias. Catalog
+  discovery is local; agent execution rechecks Operator authority and external
+  writes require exact approval. Pure preview needs no run binding. Public starts
+  bind trusted backend callers before dispatch; see [workflow transport](backend/workflows.md).
+Internal correction metanode contracts retain the selected publication, durable correction limit and source-bound assessment data. The neutral loop owns admission/replay; native committed-candidate review/check assessment and generation fences refuse stale evidence. MCP exposes pinned criteria and the region through the existing neutral action; Designer rendering remains pending (#016-358f).
+
+Internal structured workflow scripts now have a bounded, versioned input/result
+adapter with exact effect identity and conservative mutation reconciliation.
+Authenticated public start binding is installed; generic Designer script rendering is verified.
+See [the script interface](backend/workflow-script-interface.md).
+
+- **Scheduled neutral text workflows** — Cron bindings reuse the automation timer and durable trigger receipts. Literal text can feed a model, condition and local exact approval inbox in a plain directory. Native repository actions retain their Git scope.
+
+- **Neutral source triggers** — Pinned workflow bindings validate typed mappings, preview overlapping filters, deduplicate source generations and retain uncertain effects before PR replacement. See [trigger admission](backend/workflow-trigger-admission.md).
+
+- **Internal typed workflow HTTP** — Installed connector contracts bind credentials,
+  destinations and method semantics; bounded cursor output feeds collections.
+  Configured host composition is installed; authenticated public start binds trusted backend callers. See [the contract](backend/workflow-http-connectors.md).
+
+- Forced steering: Chat Send now, Compose Steer and urgent peer mail interrupt the active Claude Code, Codex or ego turn before submitting the full message, including during Stop hooks.
+
+Prompt composers share Enter/Ctrl+Enter to send, Shift+Enter for newline, and
+Cmd+S/Ctrl+S to park or swap drafts without sending. See
+[the keyboard model](frontend/prompt-input-keyboard-inventory.md).
+
+Managed worker recovery: after the configurable stall threshold, a silent local managed PTY receives one nudge and its parent one `stalled` notice that names the stop command. Recovery never stops the PTY; the parent decides. A BLOCKED hold is not silence; running background work is reported in the notice. Independently, a managed child that stops (idle, refused turn, dialog or exit) without a RESULT or BLOCKED for its current task gives its parent one typed `child_report` mail of subscription kind `report` within about 15 s. A parent mail to an idle managed child that starts no turn within 20 s gives the parent one typed `delivery_failed` mail with the reason.
+
+- **Typed agent reports** — Claude, Codex and ego can send ready/waiting/blocked/failed/dropped/progress metadata and structured questions. Session inventories derive stages from live facts and expose host report time. See [Agent Teams](user-guide/agent-teams.md#typed-reports-and-agent-stages).
+
+Internal neutral workflows have typed native workspace/artifact pins, named verification, story transitions, exact-approved commit and canonical local bare push adapters. Native exact-change review uses the existing reviewer and pins the staged artifact; commit requires its passing persisted receipt. Native GitHub publication supports separately approved account/repository/artifact-bound branch and PR actions, with provider read-back receipts. Trusted public caller/run binding remains pending; unbound dispatch refuses. See [native workflow operations](backend/workflows.md).
+
+- **Compose queue controls** — The Compose **N queued** list has a labelled **Cancel** action for each item and keeps **Clear all**. Supported items also show **Steer**, which uses the same backend delivery as Session Chat Send now. Claude Code, Codex and ego interrupt the running turn, confirm idle, then submit the selected full text. The tooltip states that the current request stops. Steer is hidden while a native question waits.
+
+- **Pending Chat prompt controls** — Busy Session Chat sends wait in FastAF’s existing idle-gate queue on desktop and mobile. Each host-owned Pending prompt has Cancel and, for Claude, Codex and ego, a compact return-key Send now action. Send now uses one forced-steer flow for all three harnesses: reserve the next ready composer, send Escape to a working turn, confirm idle, then submit the selected full text before ordinary queued inputs or mail wakes. The tooltip reads **Send now: stop the current request**. An idle recipient skips Escape. A prompt already taken by the idle gate is not sent again, and a refused Send now keeps the prompt queued. Native CLI receipts from earlier direct sends remain read-only. (#2589-4bc4).
 
 - **Terminal Ctrl+Enter** — Desktop and browser/remote CLI grids use CSI u for negotiated Kitty reporting and identified ego sessions, enabling ego busy-turn steering. Legacy shells and other nonnegotiating agents receive CR. Plain Enter and Compose shortcuts stay unchanged (#2599-0a6b).
 
@@ -11,6 +72,8 @@
 
 
 - **Mobile Chat queue** — Terminal CLI and Chat show pending prompt text and a Queued count above the input, including CLI/desktop additions. Cancel one prompt or clear the queue; delivered entries disappear (#2463-ad1c).
+- **Chat message menus** — User and assistant messages in AI Chat and Session Chat have a quiet **⋯** menu with Copy, raw/formatted Markdown, and Quote reply. AI Chat adds conversational thumbs up/down, heart, celebrate, and comments for completed answers with native IDs. Add/remove actions name the exact source and use the original conversation queue; accepted marks persist across desktop and phone. Offline errors do not change marks. Terminal Chat retains drafted response feedback. Menus stay inside the viewport and support keyboard navigation (#2539-6c53, #2872-6aff).
+- **AI Chat state from ACP** — Each AI Chat shows working while its turn, a tool call or an ego child runs, and waiting while a permission or question is open. The state is derived once in Rust and is the same on desktop, browser and phone; a child in one chat never marks another busy, and an answered question does not return after a reconnect (#2637-c6d3).
 - **Chat working feedback** — Desktop and mobile AI Chat and Session Chat show a theme-accent breathing orb with accessible **Working…** text. Reduced motion shows a static dot. Existing busy state controls its lifetime; provider retry status, native questions and permissions take precedence (#2535-8b6b).
 
 
@@ -22,6 +85,8 @@
 Development builds show a dismissible restart warning when Cargo dep-info inputs are newer than the backend executable, or that executable was rebuilt after application entry. Main and used bridge inputs are checked independently; unrelated frontend-only changes stay quiet. An edit followed by a revert still warns, as Cargo would rebuild. Missing build artifacts report identity unavailable. Release builds contain no warning module or debug identity (#2332-3eef). In development, missing local IPC commands explain the backend/frontend version mismatch and manual restart; AI Chat does not offer Retry for that failure. Release and remote-owner errors are unchanged (#2409-aa48).
 
 The Plans column groups Edit plan with Archive plan and keeps the archived toggle with list filters. Edit plan and New story use the main dialog area. The plan editor offers repository-document selection, wrapping title/source fields, an openable full source, a disabled-Save explanation, and conflict-safe draft retention. Native plan title/source corrections use atomic `update_plan` patches with a stored expected revision across MCP, HTTP, IPC, and CLI. Workflow planning and verification subjects include current plan metadata. Source changes wait until any running plan coordinator/planner finishes or is cancelled; title-only corrections stay available (#2170-d828).
+
+Workflows is a separate dialog (palette **Workflows**) with four views: Designer, Triggers, Preview and Definition. Its header has a **Plans and stories** button and Plans and Stories has a **Workflows** button, so each links to the other; Escape closes Workflows first.
 
 Plans and Stories offers an explicit All plans choice for a combined List/Kanban view. Rust supplies the project-scoped stories, visible ids and columns. Rows and cards label their plan; existing filters and archive scopes still apply. Story actions and dependency candidates retain plan ownership. Select one plan for plan actions or story creation (#2358-b0b2).
 
@@ -45,7 +110,6 @@ Workspace Settings uses consistent headers, section cards, and aligned fields ac
 
 Application Settings pages use shared headers, cards and right-aligned controls. Audio output discovery remains explicit; visual notification and client-local preferences retain their existing scope.
 
-
 Settings policy foundation (#1786-9cbd): shared owner-service writes enforce
 host-issued caller authority, write-only secrets and one-use, five-minute human
 approval for exposure/execution changes. The existing desktop/browser/mobile
@@ -54,7 +118,9 @@ publication remains a separate integration step.
 
 Mobile terminal Send supports long-press Queue for the next agent ready window.
 
-Published story workflows can start in Plans and Stories through the owning daemon. When the existing readiness check reports no imported host routing policy, Plans and Stories hides workflow Start controls and shows a neutral sentence. Routing policy controls arrive in a later version. Hosts with a policy retain the existing start flow. Run history renders graph positions, decisions, evidence and paged event payloads, with explicit graph recovery and cancellation. IPC/HTTP and the generated `workflow action=run` MCP schema share the native run service. Plan start remains visibly unavailable pending plan dispatch. The grouped `workflow` MCP tool exposes typed story, run, proposal_create, report and launch actions through existing service owners. Proposal retries preserve coordinator ownership and proposal-key idempotency. Legacy workflow tools remain until cutover; scheduled automations stay separate. `tuic workflow` forwards the same envelope.
+A story's detail in Plans and Stories has a **Delivery workflow** section: its delivery runs as rows (state dot, short run ID, status, and Resume on a running run that lost its owner), **Run delivery workflow** and **Edit in Designer**. The Stories / Run history / Designer pills and Start story workflow of the legacy engine are gone; a run is read in Workflows › Preview › Inspect a run. The grouped `workflow` MCP tool exposes `definition`, `run`, `proposal_create`, `report` and `launch`; stories, plans and Ideas use the separate `story` tool. Scheduled automations stay separate. `fastaf workflow` forwards the same envelope.
+
+Terminal workflow runs remove their own untouched checkouts and branches after verified agent closure. Changed or still-owned work is retained with a run incident and a base-cleanup refusal that names its run. Allocation receipts survive restart; caller-supplied checkouts keep their existing lifecycle. See [Run checkout lifecycle](backend/workflows.md).
 
 Native workflow backend definitions support bounded Fork/all-Join regions, nested and collection branches, typed If/else outcomes, persisted resource waits and generation-fenced critic repair. Exclusive Join and old serial replay remain unchanged. Dedicated Designer controls are a separate delivery.
 
@@ -159,11 +225,11 @@ Plans and Stories combines open/closed and optional story-type filters, includin
 
 Native stories support one revision-checked `update_story` patch through MCP, CLI, IPC and HTTP. It amends metadata including nullable story type, optional problem/risk, ordered criteria and dependencies on unclaimed Backlog/Ready stories without active run ownership. Changed requirements lose checks; priority-only edits keep them, and workflow evidence follows existing fingerprints. StoriesDialog provides one revision-checked Edit form with Save/Cancel, retained conflict drafts, and metadata, criteria and dependency fields. QA and other started work are not editable. Criteria use separate ordered entries so multiline requirement text is preserved during edits. Edited titles must contain 1 to 200 Unicode characters after trimming. Invalid titles disable Save without truncating the draft.
 
- Native plans and stories are available through `tuic story`, the `workflow action=story` MCP entry, desktop IPC, and authenticated HTTP. They support criteria, dependencies, revision-checked transitions, and live-tab claims. WontFix closes cancelled scope but never satisfies a prerequisite; a human can remove a cancelled dependency from a Backlog story. In manual plans, approving a prerequisite immediately releases eligible dependents. Plans with a workflow run require current integration receipts before release. Story import/export is outside this release.
+ Native plans and stories are available through `fastaf story`, the `story` MCP tool, desktop IPC, and authenticated HTTP. They support criteria, dependencies, revision-checked transitions, and live-tab claims. WontFix closes cancelled scope but never satisfies a prerequisite; a human can remove a cancelled dependency from a Backlog story. In manual plans, approving a prerequisite immediately releases eligible dependents. Plans with a workflow run require current integration receipts before release. Story import/export is outside this release.
 
 Plans and Stories keeps a stable, viewport-bounded size while tabs and selections change; long content scrolls inside. On desktop, its header can detach it into a resizable window and bring it back through the shared panel controls. The Plans and Stories dialog provides a manual project view on desktop and in the browser: choose a top-level Markdown plan from the project, add a path or link when needed, create stories, inspect criteria and dependency status, identify transitively abandoned prerequisites, remove a direct cancelled prerequisite, start work without a terminal, check criteria, submit reviews, approve, and block outcomes. It renders the service's cancellation count, all-cancelled flag, and plan state, including while a story is selected. A coordinator or independent reviewer may approve after checking the acceptance criteria; the session that claimed a story cannot approve it. Approval records the acting session or local API provenance.
 
-Versioned workflow definitions are available through IPC and HTTP. The Plans and Stories Designer tab can select a seeded draft, add nodes by dragging or clicking, connect outcomes, edit node settings, save, and publish. Published revisions are immutable and validated before use. The two built-in templates are `Story delivery` and `Resolve plan`; automatic graph execution is still under development.
+Versioned workflow definitions are available through IPC and HTTP. The Plans and Stories Designer tab can select a seeded draft, add nodes by dragging (mouse, pen or touch) to a canvas position or by clicking, move nodes by six-dot handle or arrow keys with a persisted layout, apply Author presets (Planner, Research, Prompt draft, Mockup, Implement, Validate) that keep the host route authoritative, add For each and Splitter regions, connect, re-label and remove outcome links, edit node settings, save, and publish. Published revisions are immutable and validated before use. The two built-in templates are `Story delivery` and `Resolve plan`; automatic graph execution is still under development.
 
 Durable workflow run storage records event history, pinned graph revisions, node attempts, external effect intents, TUIC-run check receipts, and checked integration receipts. Desktop and HTTP clients can start and inspect a run, list a plan's runs, replay events, and send explicit run commands. The Plans and Stories dialog shows a run timeline with paged events. A managed MCP caller can explicitly launch a pinned attempt in a registered isolated worktree, create a plan story with an idempotent proposal key, and submit a typed outcome bound to the spawned session. Story attempts with overlapping or unknown file scope are serialized, and story worktree assignments are recorded before spawn. Dependents remain held until the accepted prerequisite has a current canonical integration receipt; an operator performs the merge explicitly in this slice. An unrelated canonical commit requires a fresh TUIC-computed recertification with pinned checks before release resumes. Reviewer reports can retain criterion-indexed findings and an artifact digest as advisory evidence. A worker input request pauses its run until an operator records an answer and resumes it; valid reports from other running workers remain durable during that pause. The daemon now owns run recovery, serial graph positioning, explicit graph resume, cancellation and idle duration timers under a database owner lock. Serial Agent effects, independent story policy and plan dispatch execute in the owning daemon; public story graph starts and history controls are available. Public API plan starts use slice E dispatch; the plan UI control remains visibly unavailable. E2E evaluation remains pending.
 
@@ -191,7 +257,7 @@ per cell and the configured history limit still apply.
 
 The extension offers **Let agents capture any site** as an optional Chrome all-sites grant. Approved capture needs no further browser-action gesture; without the grant, temporary `activeTab` access remains available. Capture consent is separate from agent eval and remote error-read consent. The sidebar reports when Chrome does not add a separate eval grant.
 
-Agents can use `ui action=design_start/stop/status/reload/navigate/screenshot/errors/eval` with the same armed-recipient ownership and extension host grants. Existing Design Mode denials remain effective. The separate `design_mode` tool is retired without an alias.
+Agents can use `ui action=design_start/stop/status/reload/navigate/screenshot/errors/eval` with the same armed-recipient ownership and the sidebar host consent. Existing Design Mode denials remain effective. The separate `design_mode` tool is retired without an alias.
 
 The extension sends a heartbeat every five seconds. A stale mode stops after 60 seconds without a heartbeat, or ten minutes after Start if the extension has not connected. Agents can request a page reload with `ui action=design_reload repo_path=<repoPath>`; the worker reloads the reviewed tab once per new sequence.
 
@@ -230,26 +296,31 @@ Expanded tool rows use theme colours for Bash/execute commands, flags, strings a
 - **Mobile session Chat appearance** — The session detail CLI/Chat view shares desktop prompt/answer theme tokens and transcript typography. Mobile keeps its existing touch-sized switch and native input; AI Chat is a separate surface.
 - **Deferred update restart** — After an in-app update installs, FastAF restarts only when no session is busy or awaiting input; the APP UPDATE notification shows how many are busy and offers **Restart now** (with confirmation). Turn off in **Settings → General → Updates → Wait for agents before restarting** (`defer_update_relaunch`, default on).
 - **Eager resume after an update** — When the app restarts to apply an update, every agent tab with a confirmed session id resumes by itself on every branch, without selecting the branch first. Tabs without a confirmed id keep the click-to-resume banner. Turn off in **Settings → General → Updates → Resume all agents after an update** (`eager_resume_after_update`, default on).
-- **Terminal Chat reading layout** — One reading card per turn with whole-answer Copy on hover or focus. The green bar follows only CLI-owned answer blocks, not the whole message, on desktop and mobile; 96-character answer and 80-character prompt limits, collapsible two-line terminal pastes, and compact system notices. Tool activity stays in its collapsed row; Claude Bash uses its description when present. No time separators are shown because transcript entries carry no timestamp.
+- **Terminal Chat reading layout** — One reading card per turn with whole-answer Copy on hover or focus. The green bar encloses adjacent CLI-owned answer blocks in an outer region, not the whole message, on desktop and mobile. A marked item at any nesting level puts its intact outer list inside the rail; unmarked items remain context without acquiring answer ownership. Bullets and numbering always stay to the right of the rail; 96-character answer and 80-character prompt limits, collapsible two-line terminal pastes, and compact system notices. Tool activity stays in its collapsed row; Claude Bash uses its description when present. No time separators are shown because transcript entries carry no timestamp.
+- **Codex tool activity** — Trusted native tool hooks restore Working for the exact session and turn. Native user-input questions set Input and settle on their own result, prompt replacement, stop, interruption or exit. Background tools preserve open human approvals; permission-owner hooks await upstream support (#2626-f570, #2695-41da).
+- **Current tool readout** — The mobile session card and details sheet show the tool an agent runs now, from verified native metadata of Claude, Codex, Grok, ego terminals, Pi and OpenCode. Name only (64 characters), never arguments; one tool end never hides another live tool; turn, session and shell end clear it. Metadata only, never a state change (#2636-5551).
 - **Codex hook trust** — Explicit global installation trusts only exact TUIC definitions returned by the installed CLI and verifies native readback. Missing support or unverified trust shows review in `/hooks`, never an operational badge. Status reads do not grant trust.
 - **Codex terminal Chat** — Completed rollout messages and tools use the shared ACP transcript after a native SessionStart hook supplies exact ownership. Live PID, rollout id and cwd are validated on every read; heuristic IDs never enable Chat. Requires trusted TUIC native hooks on macOS/Linux; unsupported or unbound terminals keep Chat unavailable.
 - **Intermediate Chat text** — Assistant text that a tool call follows in the same turn renders smaller in the terminal Chat view, AI Chat and mobile chat, but keeps the normal readable text colour in dark and light themes; the last text of a turn keeps the normal size. Switch it off in **Settings → Appearance → Chat → Mute Intermediate Text** (`chat_mute_intermediate_text`, default on).
+- **Prompt image previews** — Path-based image attachments in Pending bubbles, session Chat, AI Chat messages and queue lists share framed previews above the text. One image uses one frame, two sit side by side, and three or more use a two-column grid. Missing images show an unavailable placeholder; the raw `[image: path]` markers do not appear in the message text.
+
 - **Chat transcript presentation** — Harness notices use compact system notes, image placeholders use attachment chips, adjacent thinking blocks share a disclosure, and TUIC answers retain the CLI highlight. Historical tool cards show status without fabricated execution timing.
 
 ### 1.2 Tab Bar
 - Lives in the title bar (section 4), right of the sidebar column: 28px pill tabs, the `+` and Multiview buttons follow the last tab, and empty strip space drags the window
-- Create: `Cmd+T`, `+` button (click = new tab, right-click or long press = agent list)
+- Create: `Cmd+T` for a plain terminal; `+` opens the agent launch menu, ranked by what was launched on the branch (Alt/Option-click opens a plain terminal)
 - Close: `Cmd+W`, middle-click, context menu
 - Reopen last closed: `Cmd+Shift+T` (remembers last 10 closed tabs)
 - Switch: `Cmd+1` through `Cmd+9`, `Ctrl+Tab` / `Ctrl+Shift+Tab`
 - Hold `Cmd` alone (`Ctrl` on Windows/Linux) for 450 ms to reveal the first nine terminal-tab shortcuts; other keys, mouse buttons, scrolling, release, blur, or visibility changes dismiss the hints.
 - Rename: double-click tab name (inline editing)
 - Reorder: drag-and-drop with visual drop indicators (works for all tab types: terminal, diff, editor, markdown, plugin panels)
-- Tab status dot (left of name): grey=idle, blue-pulse=busy, unseen colour=completed while not viewed, orange-pulse=question (needs input), red-pulse=error
+- Tab status dot (left of name): grey=idle, blue-pulse=busy, unseen colour=completed while not viewed, orange-pulse=question (needs input), red-pulse=error, steady amber=stalled (an agent that claims to work but has been silent past its stall threshold)
+- Returning to a terminal tab shows its last rows at once; it no longer stays blank until the next frame arrives
 - Tab type colors: red gradient=diff, blue gradient=editor, teal gradient=markdown, purple gradient=panel, amber gradient=remote PTY session
 - Remote PTY sessions (created via HTTP/MCP) show "PTY:" prefix and amber styling
 - Progress bar (OSC 9;4)
-- Context menu (right-click): Close Tab, Close Other Tabs, Close Tabs to the Right, Detach to Window, Copy Path
+- Context menu (right-click): Close Tab, Close Other Tabs, Close Tabs to the Right, Detach to Window, Copy Path. Terminal tabs show clickable **Session: <full ID>** and **Alias: <value>** rows when available. Each row copies its displayed value; the tab menu does not show a process ID.
   - Copy Path appears on every file-backed tab — diff, editor, markdown, HTML preview, and a plugin panel opened from a `file://` url — and copies the ABSOLUTE path with `$HOME` shortened to `~`. The tab stores keep `filePath` relative to the tab's filesystem root, so the root is joined back on before copying
   - "Open in Browser" on a `file://` plugin panel hands the file to the OS default application, not to the URL allowlist (which permits only http/https/mailto, because the URLs it was built for come off a PTY)
 - **Context menu shortcut chords** — while a context menu is open, pressing a menu item's keyboard shortcut chord (modifier + key, or Enter) fires that action directly without needing to click. Modifier-only keystrokes (Cmd, Shift, etc.) do not close the menu so multi-key chords can form; any other non-matching key closes the menu normally
@@ -258,7 +329,7 @@ Expanded tool rows use theme colours for Bash/execute commands, flags, strings a
   - Closing the floating window automatically returns the tab to the main window
   - Requires an active PTY session (disabled for tabs without a session)
 - Overflow menu on scroll arrows (right-click) shows clipped tabs; the `+` button always stays visible regardless of scroll position
-- `+` button: click opens a terminal in the active branch; right-click or long press (500 ms) lists the enabled agents (with a submenu per run config) and opens a new tab running the chosen one
+- `+` button: click, right-click or long press (500 ms) opens the agent launch menu below the button, with each agent and run config listed directly. The most-used choice in the active branch comes first; a branch with no history uses repository counts, and ties keep the configured order. Successful menu launches persist in local UI preferences across restarts. Choose Terminal, Alt/Option-click `+`, or use `Cmd/Ctrl+T` for a plain terminal. Each row shows the agent icon; a run configuration follows the agent's name in muted type, and the default one is ticked only where an agent has several. Rows are the standard 28px menu rows; Terminal has its own icon.
 - Tab pinning: pinned tabs are visible across all branches (not scoped to branch key)
 - Right-click a sidebar session row to add it to the Global Workspace, or remove it when already included. This uses the same membership action as the tab context menu.
 
@@ -268,6 +339,7 @@ Expanded tool rows use theme colours for Bash/execute commands, flags, strings a
 - Navigate: `Alt+←/→` (vertical), `Alt+↑/↓` (horizontal)
 - Close active pane: `Cmd+W`
 - Drag-resize divider between panes
+- Drag to split: drag a tab from the tab bar or a pane tab strip onto the left, right, top or bottom edge of a pane (or of the unsplit terminal area) to split it 50/50 with the tab on that side. A highlight shows the half the tab will take. The pane center moves the tab into that pane. An edge that cannot split (depth limit, or the tab is the only one in that pane) acts as the center. A pane that the move leaves empty closes
 - Up to 6 panes in same direction (N-way split)
 - Split layout persists per branch
 
@@ -412,6 +484,7 @@ Terminal output is segmented into command blocks — one per prompt+output cycle
 
 A multi-line editor docked under the terminal for writing a prompt without fighting the agent's own input box.
 
+- **CLI Compose layout** — Desktop terminals reserve the minimum editor row and footer when Compose opens. Longer drafts overlay terminal output without repeated PTY resizing; closing restores the full viewport. Pinning keeps the same reservation. Leaving Compose focus collapses its extra height to reveal terminal input; refocusing restores growth and retains the draft.
 - **Chat input** — With the compose dock on screen, Chat does not open this panel: the dock is its input (1.20a). In a detached terminal window, which has no dock, Chat opens and focuses Compose automatically below the conversation. It stays docked after send or queue and clears submitted text. Chat hides the close and pin controls; `Esc` returns to CLI, where permission prompts must be answered. Returning to CLI restores the tab's previous open/pin state, and unsent drafts survive both directions, including while send or queue is pending
 - **Send now** — `Enter` (or the ▶ button) types the text into the composer and submits it immediately, steering whatever the agent is doing
 - **Shortcut hints** — the newline legend shows only `Ctrl+Enter`. Panels up to 640px wide hide the legend instead of wrapping; all keyboard bindings remain available
@@ -508,7 +581,7 @@ A terminal tab can be suspended from its context menu (**Suspend Tab**) or with 
 - Top: **New terminal** (opens a terminal in the active repo's active branch, `Cmd+T`) and **Search projects** (Enter activates the first match, Esc clears)
 - "Projects" section header with the **active-only filter** (see 2.8) and **Add repository** (`+`), always visible
 - Repos are folder rows (open folder while expanded); branches sit under them as plain rows whose text lines up with the repo name, with one 6px state dot in front (see 2.3)
-- Footer: one row — git sync icons on the left (2.4), workspaces / help / settings on the right
+- Footer: one row — git sync icons on the left (2.4), the layers menu (**Workspaces, sorting & layout**: workspaces, sort order and the sidebar layout, see 2.7a) / help / settings on the right
 
 - Right-click a session row to copy its PTY session ID, live PTY child PID, or exact session alias. Entries show their values on hover and confirm copies; unknown PID and absent alias entries are hidden.
 
@@ -559,6 +632,7 @@ Right-click the main worktree row → **Switch Branch** submenu to checkout a di
 - When enabled, every branch with at least one open terminal session gets an expandable activity card. Enabling the setting does not create sessions: an agent appears only after it is running in a terminal assigned to that branch.
 - Agent rows show the agent icon, terminal name, current intent/task (falling back to the last substantial prompt), compact age since the backend's last semantic session activity, and the same busy/idle signal used by the terminal tab and branch icon. Terminal redraws do not reset this age. Plain shells remain visible as terminal rows.
 - A sub-agent row shows a muted robot tag with its parent agent in the tooltip; the repo GitHub badge retains the accent color to distinguish its action from session metadata.
+- A stalled agent (it claims to work but has been silent past its stall threshold) shows a steady amber dot on its row here and on its tab. The branch row's own dot stays busy.
 - Clicking a row switches to that session.
 - Every branch shows its agents by default; collapsing is remembered per workspace. A separate, always-visible chevron toggles the list by click or Enter/Space. The status icon and row select the branch without changing agent visibility.
 - Single-session branches can expand too.
@@ -569,7 +643,8 @@ Right-click the main worktree row → **Switch Branch** submenu to checkout a di
 - Pull, Push, Fetch, Stash buttons — execute in active terminal
 
 ### 2.5 Sidebar Resize
-- Drag right edge to resize (200-500px range)
+- Drag right edge to resize (300-500px range)
+- Row starts stay visible while resizing or focusing branch actions; horizontal overflow does not scroll the list
 - Toggle visibility: `Cmd+[`
 - Width persists across sessions
 
@@ -584,20 +659,30 @@ Right-click the main worktree row → **Switch Branch** submenu to checkout a di
 - Sidebar footer button opens a popover showing all parked repos
 - Unpark a repo from the popover to restore it to the main list
 
-### 2.7a Sidebar Layout (compact / rich)
+### 2.7a Sidebar Layout (Compact / Rich / Live agents)
 - Rich repository metadata hides zero PR and worktree counts; positive counts update live
-- Toolbar button (left of the filter icon) cycles auto, compact and rich and prints the mode (A, C, R); the mode is saved in UI prefs (`sidebar_density`)
-- Compact: one-line rows. Rich: compact-sized navigation with inline branch facts and expanded intent only for working agents. Auto: rich when the conservative expanded-row budget fits the window or the primary pointer is a finger, compact otherwise
+- Chosen in the sidebar footer's layers menu (**Workspaces, sorting & layout**): **Layout: Compact**, **Layout: Rich**, **Layout: Live agents**, the current one ticked in the menu's leading tick column, like the sort entries. The title bar has no layout or filter toggle
+- Compact is the default. The choice is saved in UI prefs (`sidebar_density`: `compact`, `rich` or `harness`); a saved Live agents layout and an old `auto` preference both open in Compact
+- Compact: one-line rows. Rich: compact-sized navigation with inline branch facts and expanded intent only for working agents. Live agents: only branches with a running agent, using rich rows (see 2.9)
 - Rich branch row: PR state word and title; last-commit age, ahead/behind the upstream, diff stats, dirty-file count (opens Changes), merged, stale (no commit for 30 days), unknown (removal blocked), unmerged; never stale, merged, dirty or unknown on a main checkout. Compact carries the age, ahead/behind and stale rule on the branch name tooltip
 - Rich agent row: state (working, idle, needs input, error) and the agent's intent, task or last prompt; in-session subagents (state, title, tool calls, age; more than 3 fold into a count); TUIC child sessions nested under the parent. Compact carries state and line on the row tooltip
 - Rich repo header: current branch, open PR count, worktree count, age of the last remote poll
 
 ### 2.8 Active-Only Filter
-- Toggled from the filter icon in the toolbar (next to the sidebar collapse button); the icon turns accent-colored while engaged
+- Toggled from the funnel button in the Projects header (always visible, next to Add repository); the button turns accent-colored while engaged
 - When on, the sidebar shows only repositories that have at least one open terminal — empty groups are dropped entirely (no orphaned headers)
-- An accent banner at the top of the sidebar makes it unmistakable that repos are hidden, shows a `shown / total` count, and offers "Show all" to clear the filter
+- A pill under the Projects header (**Active only · shown/total · Show all**) makes it unmistakable that repos are hidden; clicking it clears the filter
 - If the filter hides every repo, a dedicated empty state offers "Show all"
 - Session-only (not persisted across restarts)
+
+### 2.9 Live Agents Layout
+- Chosen as **Layout: Live agents** in the sidebar footer's layers menu (2.7a)
+- Keeps only session rows whose agent is alive (working, idle or awaiting input); shell-only terminals and ended agent sessions are dropped
+- Keeps only branches with such a session, repositories with a kept branch and groups with a kept repository; other branches of a qualifying repository are hidden. Order, indentation, icons and badges of the kept rows are unchanged
+- The pill under the Projects header reads **Live agents only · shown/total · Show all**; with nothing to show, the empty state says **No live agent sessions**. Visibility follows session state live
+- **Show all** leaves the layout and returns to the one it was entered from (Compact or Rich)
+- A branch keeps the quick-switcher number it has in the full list, so the number on screen always opens that branch
+- Not restored at launch: agents are not running yet, so the sidebar opens in Compact
 
 ---
 
@@ -616,10 +701,11 @@ Replaced by the Git Panel's Changes tab (section 3.8). `Cmd+Shift+D` now opens t
 
 ### 3.3 Markdown Panel (`Cmd+Shift+M`)
 
+- **Selective review reads**: desktop and mobile send the changed current-file line ranges across saved local edits, with enclosing-section guidance; first-open reviews without local saves, external replacements, and unavailable baselines keep whole-file reading. Tweak counts and resolved-marker cleanup remain included.
 - **Mobile review send**: send saved checkbox edits, source edits, and tweak comments from the mobile Markdown view. Choose a repository agent; the originating session is selected when available. The backend delivers at idle or queues for the next idle window and reports the outcome.
 - Renders `.md` and `.mdx` files with syntax-highlighted code blocks
 - A Markdown document tab, including one opened through `tuic://open`, can be detached from its tab context menu into a resizable window. Its tab remains in the main window; selecting it focuses the document window, and closing that window returns the document to the tab. The detached viewer rereads the file on focus and while open.
-- Rendered Markdown links open files and directories in FastAF, including local symlinks and parent paths; direct UNC hrefs are refused, and paths that reach macOS privacy-protected home directories are not probed. Heading and `file:line` or `file:line:column` targets work without navigating the WebView; web and email links use the system handler
+- Rendered Markdown links open files and directories in FastAF, including local symlinks and parent paths; direct UNC hrefs open with the system handler after a click and confirmation (the host is never probed), and paths that reach macOS privacy-protected home directories are not probed. Heading and `file:line` or `file:line:column` targets work without navigating the WebView; web and email links use the system handler
 - File list from repository's markdown files
 - Clickable file paths in terminal open `.md` files here
 - Auto-show: adding any markdown tab automatically opens the Markdown panel if it's closed
@@ -640,7 +726,9 @@ Replaced by the Git Panel's Changes tab (section 3.8). `Cmd+Shift+D` now opens t
 
 ### 3.4 File Browser Panel (`Cmd+E`)
 
-- **Symbolic links**: link icon, target path and target kind in tree and list views; outside-target opens show a specific refusal without adding read access. Delete removes only the link, including unavailable links, and failed deletes show an error notification.
+- **Bounded remote file API**: `/fs/read` can return exact byte pages as base64, including files above the text editor limit. Pages are capped at 1 MiB with total size, continuation and clamp fields. Existing text reads are unchanged.
+
+- **Symbolic links**: link icon, target path and target kind in tree and list views; links are followed wherever they point, also to another volume, for reads, edits, creates and deletes inside a linked directory; requested paths stay repository-relative (absolute, drive, network and above-root `..` paths are refused). Delete removes only the link, including unavailable links, and failed deletes show an error notification.
 - **Remote file drops**: native OS files dropped onto a connected remote repository are copied through its authenticated daemon connection; sources remain on the Mac. Directory copies require confirmation and existing names are skipped. Each top-level upload is limited to 256 MiB (including archive overhead) and 10,000 entries; symlinks and special files are rejected. Native destination filenames and safe executable permissions are preserved; uploads abort after 30 seconds without data.
 - Directory tree of active repository
 - **Auto-refresh**: nonrecursive directory watchers cover the current listing and visible expanded tree folders, including non-Git roots and nested repositories. External file and folder creation, deletion and renaming refresh the affected listing; collapsed folders reload when reopened
@@ -695,12 +783,12 @@ Replaced by the Git Panel's Changes tab (section 3.8). `Cmd+Shift+D` now opens t
 - Drop cursor: ghost cursor shown when dragging text over the editor
 - Special character highlighting: invisible chars (zero-width spaces, control chars) rendered as placeholders
 - CSS color preview: inline color swatches next to hex/rgb/rgba/hsl values
-- **Large-file support**: files up to 250 MB open via a dedicated read path (`read_file_editor` / `MAX_EDITOR_LARGE_FILE_SIZE`). Files that exceed this cap are refused up front with an informational notice instead of hanging the UI. Standard syntax highlighting is disabled above 500 KB, but the file still opens and is fully editable
+- **Large-file support**: files up to 250 MB open via a dedicated read path (`read_file_editor` / `MAX_EDITOR_LARGE_FILE_SIZE`). Files that exceed this cap are refused up front with an informational notice instead of hanging the UI. In a browser or on the phone, the whole-file read stops at 10 MB on a `tuic-remote` host; the notice then offers **Load in pages**, which reads the file in bounded 1 MiB pages up to the same 250 MB limit and stops if the file changes on disk. Standard syntax highlighting is disabled above 500 KB, but the file still opens and is fully editable
 - **Inline git blame** (GitLens-style): a dim italic `author · relative time · summary` annotation at the end of the active line, following the cursor over already-loaded blame data (fetched on load/save/repo-revision via `get_file_blame`, never per keystroke). Lines with uncommitted edits show `You · Uncommitted changes`. On by default (`inline_blame_enabled` config field); no annotation for external (non-repo) files
 
 ### 3.6 Ideas Panel (`Cmd+Alt+N`)
 - Quick notes / idea capture with send-to-terminal
-- Agents use planner `add_idea`, `list_ideas`, and `update_idea` through `workflow action=story`, `tuic story`, IPC, or HTTP. Ideas keep their agent/session source and project scope in `notes.json`. Backend changes reload open panels through `ideas-changed`; stale panel saves merge by idea id and changed field, so they do not erase agent additions.
+- Agents use planner `add_idea`, `list_ideas`, and `update_idea` through the `story` MCP tool, `fastaf story`, IPC, or HTTP. Ideas keep their agent/session source and project scope in `notes.json`. Backend changes reload open panels through `ideas-changed`; stale panel saves merge by idea id and changed field, so they do not erase agent additions.
 - `Enter` submits idea, `Shift+Enter` inserts newline
 - Per-idea actions: Edit (copies back to input), Queue (agent tabs only), Send to Terminal (sends + return), Delete
 - Queue leaves the idea in the agent's Compose FIFO for its next idle window instead of typing it
@@ -756,6 +844,9 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 - List all stash entries via `get_stash_list`. A stash is a two-line row: its subject, then `stash@{n}` · "WIP on main" or "on feat/x" (the raw message is the tooltip)
 - Click a row (or `↑ ↓` then `Enter`) to open its diff in a well under it: a header per file (name, folder, `+N −N`), then the hunks
 - Apply, Pop and Drop (the trash icon) stay on the row, quiet until it is hovered, focused or open (`git_stash_apply` / `git_stash_pop` / `git_stash_drop`). Pop and Drop ask first ("Pop stash@{1}?" / "Drop stash@{1}?"), and a failed apply, pop or drop shows git's message under its row. The same three are in the right-click menu
+- **Check if still needed** (the sparkle on a row and in its right-click menu) asks FastAF's AI whether the stash is redundant, obsolete, still useful or unclear, from facts git computed. A stash is dropped only when it is proven redundant. A kept stash says so under its row ("Kept, still useful." and the reason); a dropped one leaves a quiet block above the rows with its title, "Dropped. HEAD already has its changes.", the command that restores it and a copy button
+- **Check all** is in the Git panel header, beside the detach and close buttons, while the Stashes tab is open
+- Below 340px the row's actions wait for hover or keyboard focus and slide in over the end of the title
 - Empty state: "No stashes — Stash work in progress to set it aside without committing."
 
 **Branches tab (`Cmd+G` — opens Git Panel directly on this tab):**
@@ -772,7 +863,7 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 - **Delete merged** (Branch options › "Delete N merged branches…", disabled when none qualify) bulk-deletes all local branches already merged into main, behind a confirm dialog listing the targets. Uses the same fresh integration proof as MCP and compares each ref with the proved tip; content-based proofs require an archive of that tip, so a stale merged flag can never delete unmerged work
 - Empty, loading and error states: "No branches", "Loading branches…", and "Couldn't load branches" with a **Retry** button
 - MCP `repo branch_integrations` and `repo branch_integration` report proof, tip, archive requirements and worktree paths. The branch panel and sidebar use the same backend classifier.
-- Backend: `get_branches_detail`, `delete_branch`, `create_branch`, `get_recent_branches`
+- Backend: `get_branches_detail`, `get_merged_branches`, `delete_branch`, `create_branch`, `get_recent_branches`. The list renders from `get_branches_detail` first; merged badges arrive from `get_merged_branches` when the classification is done
 - Click on sidebar "GIT" vertical label also opens Git Panel on the Branches tab
 
 **Keyboard navigation:**
@@ -797,6 +888,7 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 - Recency-weighted ranking: recently used actions surface first
 - Each row shows action label, category badge, and keybinding hint. On macOS the hint uses menu glyphs (`⌘⌥←`, `⇧`, `↩`, `⎋`, `⌫`); on Windows and Linux modifiers read `Ctrl+`, `Alt+`, `Shift+` with arrows as arrows and other named keys as short words (`comboToDisplay` in `src/utils/hotkey.ts`)
 - Keyboard-navigable: `↑/↓` to move, `Enter` to execute, `Esc` to close
+- Picking a repository (or **Unpark: …**) also expands its group and its row in the sidebar and scrolls it into view
 - Browser mode mounts the same palette and exposes it through the magnifying-glass toolbar button, so it does not depend on the browser forwarding `Cmd/Ctrl+P`
 - Browser actions are fail-closed: only commands explicitly verified against the web UI or HTTP transport are shown; native dialogs, detached windows, updater controls, MCP configuration, and user-plugin management remain omitted
 - **Search modes**: type `!` to search files by name, `?` to search file contents, `~` to search across all open terminal buffers. File/content results open in editor tab (content matches jump to the matched line). Terminal results navigate to the terminal tab/pane and scroll to the matched line. Leading spaces after prefix are ignored
@@ -806,6 +898,7 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 - Powered by `actionRegistry.ts` (`ACTION_META` map)
 
 ### 3.12 Activity Dashboard (`Cmd+Shift+A`)
+- Open from the **Agents** ticker in the title bar's status cluster by clicking its label or counts, or focus it and press Enter or Space. The cycle badge advances tickers without opening the dashboard
 - Real-time view of all active terminal sessions in a compact list
 - The inline overlay stays close to the detached window's compact width and fits narrow main windows
 - An oversized saved detached Activity window opens at its compact 550×650 default after restart; smaller saved sizes remain available
@@ -904,12 +997,14 @@ The one band above the content, laid out like Codex's title bar: traffic lights 
 - **Worktrees section** — worktree creation events (from MCP/agent)
 - **Messages section** — agent/MCP notices and agent spawns go directly to the bell, with repository scope and an explicit **Open terminal** action when a session is known. Consecutive identical notices from the same origin within five seconds produce one item and one requested sound. User-action toasts are also retained when **Keep toasts in the bell** is enabled. Overflow from the two-card limit is retained even with that setting off; dedicated-domain toasts that explicitly opt out of Messages stay visible or queued.
 - **Automatic agent toast cards** — MCP toast notices show a transient card only while their origin terminal tab is active. Settings → Notifications → **Show cards from the active terminal** defaults on and is saved per client; turning it off restores urgent-only cards. Urgent notices always show a card, and notices without an origin session remain bell-only unless urgent.
-- **Transient toast placement** — top-right of the terminal area, offset left of a docked panel, with at most two visible cards. Same-kind notices in the same repository/session within five seconds show a ×N summary; every new member restarts its dismissal timer. Errors take a visible slot ahead of informational cards. Tall cards scroll within the upper region so their action buttons remain reachable without covering the bottom input. Clicking a card dismisses it; navigation uses its explicit action.
+- **Transient toast placement** — top-right of the terminal area, offset left of a docked panel, with at most two visible cards. While a modal dialog is open the stack moves to the bottom left, 8px from the window edge, so it does not cover the dialog's buttons. Only the cards take clicks; the space around them passes clicks through. Same-kind notices in the same repository/session within five seconds show a ×N summary; every new member restarts its dismissal timer. Errors take a visible slot ahead of informational cards. Tall cards scroll within the upper region so their action buttons remain reachable without covering the bottom input. Clicking a card dismisses it; navigation uses its explicit action.
 - **Plugin activity sections** — registered by plugins via activityStore
 - Click PR notification: opens full PR detail popover for that branch
 - Individual dismiss (×) per notification, section "Dismiss All", auto-dismiss after 5min focused time
 
 ### 4.5 IDE Launcher
+
+- The Terminals section opens a FastAF shell tab in the active repository or worktree.
 - Button with current IDE icon — click to open repo/file in IDE
 - Dropdown: shows all detected installed IDEs, grouped by category
 - Categories: Code Editors, JetBrains, Terminals, Git Tools, System
@@ -928,26 +1023,37 @@ The status bar no longer has its own strip: it renders inside the title bar's ri
 - Zoom indicator: current zoom (shown only when not 100%)
 - Status info text — only while it says something other than "Ready" (with pendulum ticker for overflow, pulse animation on new messages)
 - CWD path: not shown in the title bar (the bottom-strip placement still shows it: shortened with `~/`, click to copy)
+
+### 5.2 Status group order
+- One cluster in the title bar, in order: status text (only while it is not "Ready"), agent badge (or provider recovery), tickers, Offline machines, PR/CI badges, notification bell, IDE launcher, panel toggles
+- Tickers take only the room the tab strip leaves, up to their natural width and 320px: they sit side by side while they fit, the rest rotate in the last slot, and under one slot's width (110px) they step aside altogether. The tab strip is as wide as its tabs; the cluster's empty start drags the window
+- The agent badge shows usage for the active session. An ego session that runs on a Claude, Codex or Grok subscription shows that provider's icon
 - Unified agent badge with priority cascade:
   1. Rate limit warning (highest): count + countdown timer when sessions are rate-limited
   2. Matching Claude or Codex Usage API ticker: live utilization from the active provider (click opens that provider's dashboard)
   3. PTY usage limit: weekly/session percentage from terminal output detection
   4. Agent name (lowest): icon + name of detected agent
+  - Claude usage HTTP 429 returns an immediate **rate-limited, retry HH:MM** badge in host local time, with a shared per-profile two-to-five-minute cooldown and credential-free profile diagnostics. The request never sleeps through a provider retry hint or invokes a generating fallback for that throttle.
+  - The subscription quota registry registers Claude and Codex readers. Codex can use recorded rollout limits; active reads use non-generating usage endpoints. An expired Claude login is rejected before a request. The Claude usage dashboard no longer sends a generating fallback when the usage request fails.
+  - The status-bar quota display shares the registry store with the Claude and Codex dashboards. Switching between bound sessions selects cached quota, with no provider request or frontend quota interval. Mobile session details read cached Claude/Codex quota from the registry through the session usage endpoint. A Grok reader joins the registry: the Grok CLI's ACP `_x.ai/billing` request runs with the bound `GROK_HOME` (FastAF never reads the Grok token store), the current period gives the window, and a failed read waits for the registry cooldown; an expired login waits for a new `grok login`. The Grok dashboard reads the same registry entry, so it no longer starts the CLI on every refresh.
+  - The registry also registers an ego reader. It reads only ego's `rate_limits` contract: passively from the usage report v6 that the session usage reader already runs, and actively from `ego auth usage <provider> --json` with the bound `EGO_HOME`. No Claude, Codex or Grok CLI is needed. This requires an ego release with `auth usage`; an older ego reports the quota as unavailable.
   - Color coding: blue < 70%, yellow 70–95%, red pulsing >= 96%
-  - The shared usage ticker is absorbed into the badge only when its provider label matches the active Claude or Codex agent; stale results from the previous provider stay hidden during an asynchronous tab switch
+  - One placement rule (`usagePlacement` in `agentUsage.ts`) decides where usage shows: the usage message of the active agent session goes to its badge, and the ticker area excludes the same messages. A result for another session (the previous tab during a switch) shows nowhere. An ego tab shows the usage of the subscription it is bound to, labelled by that provider; it never needs a Codex or Claude CLI login, and its badge opens no CLI dashboard (#3068-c03b)
+  - One formatter (`formatAgentUsage`) writes the badge for every provider, in a fixed order: the weekly window percent (only when the snapshot has one), then what is left before the monthly limit (a monthly window as percent left, a credit balance as an amount). Claude extra usage is a pay-as-you-go overage budget, not a limit, and is never shown. Each shown limit carries the time to its reset, for example `7d: 78% -4d · 30d: 60% left -5h`. The tooltip keeps the full reset date. No tool name is shown in the badge
+  - The badge is written only when its text, label or priority changes: a same-value refresh or another account's push causes no repaint, a switch between sessions with quota never empties it, and a stale or backoff state keeps the last good text
   - The usage poll has no default provider: it stays silent until a Claude or Codex tab is focused, then follows that provider and stays on it while the active tab is a shell. A Codex-only install is therefore never shown a Claude reading (or a Claude "no token") it did not ask for
   - Codex windows are named by duration (`5h`, `7d`) because the API does not label them, and only the account limit is rendered. A plan whose account limit reports a single window shows a single reading; per-model limits stay in the dashboard, where their model name is visible
 - Shared ticker area: multi-source rotating messages from plugins with source labels, counter badge (1/3 ▸), click-to-cycle, right-click popover, and priority tiers (low/normal/urgent)
 - Non-modal popups (ticker popover, status info balloon, GitHub panel, Smart Prompts dropdown) have no backdrop: wheel and clicks reach the sidebar and terminal while they are open, and an outside press dismisses them without being consumed (shared `useOutsideDismiss` hook)
 - Update badge: "Update vX.Y.Z" (click to download & install), progress percentage during download
 
-### 5.2 GitHub Section (center)
+### 5.3 GitHub Section (inside the right group)
 - Branch badge: name + ahead/behind counts — click for branch popover
 - PR badge: number + highest-priority state label and color — click for PR detail popover
   - PR lifecycle filtering: CLOSED PRs hidden immediately; MERGED PRs hidden after 5 minutes of accumulated user activity
 - CI badge: ring indicator — click for PR detail popover
 
-### 5.3 Right Section — Panel Toggles
+### 5.4 Right Section — Panel Toggles
 - Ideas (lightbulb icon) — `Cmd+Alt+N`
 - File Browser (pages icon) — `Cmd+E`
 - Markdown (document icon) — `Cmd+Shift+M`
@@ -960,6 +1066,18 @@ The status bar no longer has its own strip: it renders inside the title bar's ri
 ---
 
 ## 6. AI Agent Support
+
+On macOS, process detection falls back to the current kernel process name if an
+update unlinks a running executable. Existing foreground and composer guards
+still apply; unknown names do not gain agent identity.
+
+- **Env-prefixed Claude launches** — named Unix launches and resumes receive status hooks and init instructions through the same PATH shim, including `env CLAUDE_CONFIG_DIR=… claude`. Explicit settings and administrative commands retain precedence.
+
+- **Independent ego advisors** — the Unix shim isolates headless and redirected advisors from implicit parent UI instructions, attachments and MCP identity. Direct terminals and explicit one-launch hosted peers retain their context.
+
+- **Pi managed status extension** — opt-in native lifecycle status with paired extension-modal waits, safe marked-file installation and session-shutdown cleanup. Background tools cannot clear an open modal (#2629-9537).
+
+- Grok native hooks settle cancelled/failed turns and retract permission waits on matching tool outcomes, replacement prompts and turn/session end (#2624-848f).
 
 ### Launch instruction editing
 
@@ -1037,6 +1155,8 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 
 ### 6.4 Question Detection
 
+- OpenCode 2.2.3 private `--standalone` launches use the native v2 plugin interface. Native form and permission waits settle by request/session ownership on answer, cancel, rejection or execution/session shutdown, without requiring another tool. The shared background service remains uninstrumented.
+
 - ego question titles exclude preceding diagnostics and working rows. Default-mode command approvals expose native keys and preserve the refusal explanation wait.
 - Ego terminal project-trust prompts (`? [y/N]`) expose mobile Yes/No controls and an Input state, including hard-wrapped project paths.
 - Grok native Ask and enforced command-approval radio forms export their options, selected state and immediate numeric-answer semantics; the Ask free-text action remains waiting until submission.
@@ -1088,8 +1208,8 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
   App Server. The Codex CLI owns OAuth and refresh; TUIC does not read its token.
 - **Grok dashboard:** billing-period usage, subscription tier, on-demand spend,
   cap, and prepaid balance from Grok Build's official `_x.ai/billing` ACP
-  extension. The short-lived connection is telemetry-only; normal Grok tabs
-  remain PTY sessions.
+  extension, read through the quota registry. The short-lived connection is
+  telemetry-only; normal Grok tabs remain PTY sessions.
 - **Gemini:** terminal rate-limit detection remains available, but there is no
   account dashboard because Gemini CLI has no stable machine-readable account
   quota interface. Session-local `/stats` is not treated as account headroom.
@@ -1159,6 +1279,7 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - `slash_mode` cleared on user-input events and status-line events
 
 ### 6.13 Inter-Agent Messaging
+- **Ego interactive spawn**: the built-in MCP spawn fallback sends the task as one positional argument, without the headless `run` subcommand. Explicit arguments and named run profiles keep precedence.
 - **Claude background output**: managed MCP peers default to `CLAUDE_CODE_TMPDIR=$HOME/Gits/.tmp/claude/`, created before spawn; explicit inherited, run-config or caller values take precedence.
 - Agent-to-agent coordination when multiple agents are spawned in parallel, carried by the `agent` MCP tool — there is no separate `messaging` tool
 - **Identity**: Each agent uses its `$TUIC_SESSION` env var (stable tab UUID) as its messaging identity. A headerless external caller may `register` without `tuic_session` to be issued an MCP-scoped UUID, or supply a stable UUID to reclaim an existing identity
@@ -1166,6 +1287,7 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - **Dual delivery**: Real-time push via MCP `notifications/claude/channel` over SSE into already working Claude Code turns; idle/completed managed agents and managed non-Claude agents use submitted PTY delivery even when their MCP bridge has an SSE stream; polling fallback via `inbox` is always available
 - **Channel support**: FastAF declares `experimental.claude/channel` capability; spawned Claude Code agents automatically get `--dangerously-load-development-channels server:tuicommander`
 - **Lifecycle**: Peer registrations cleaned up on MCP session delete and TTL reap; `PeerRegistered`/`PeerUnregistered` events broadcast via event bus for frontend visibility
+- **Inbound webhook**: `POST /agent/webhook/{to}` files the raw body (max 64 KB) as mail from sender `webhook` in the inbox of the peer that `{to}` names (id, name, PTY id or alias); an unknown recipient is refused and nothing is filed. Managed agents learn from their launch instructions that a script can call them back this way when it ends
 - **Limits**: 64 KB max message size, 100 messages per inbox (lifecycle-first eviction; peer mail back-pressure), optional path filtering for `list_peers`
 - FastAF acts as the messaging hub — no external daemon needed
 - **Durable task handles**: `agent action=spawn` returns `task_id` and `poll_interval_ms` alongside `session_id`. The `agent` MCP tool polls that handle without blocking — `agent action=task_get` returns `{task_id, status, status_message?, result?, error_detail?, poll_interval_ms}` where status is `working|input_required|completed|failed|cancelled` (the last three final), and `agent action=task_cancel` marks the task cancelled **without** killing the agent (`session action=kill` does that). Use this instead of `agent action=wait` / `session action=wait` when work runs past their 300 s cap or when the client may reconnect: the outcome is recorded by the session exit path whether or not anyone was listening. Tasks live for the FastAF process only — they are deliberately not persisted, because a restart tears down every PTY
@@ -1180,6 +1302,12 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - Streaming via Tauri `Channel<ChatStreamEvent>` (`chunk`/`end`/`error`); cancellable mid-stream
 - Conversation persistence: save / load / delete with in-memory cap of 100 messages per conversation. Files at `<config_dir>/ai-chat-conversations/<id>.json`
 - **Conversation history panel** — click the clock/history icon in the header to browse all saved conversations (title, terminal name, message count, date). Click a row to load it
+- **Message menu** — a **⋯** button on each message, shown on hover or keyboard focus: Copy message, Show raw Markdown / Show formatted message (answers), Quote reply (drafts the message as a `>` quote, never sends) and Fork from here (answers). Reactions and comments are not offered on the desktop; they exist only in the phone's Chat tab
+- **New conversation and fork** — `/clear` or `/new` saves the conversation on screen and starts an empty one (refused while a reply runs); `/fork` and Fork from here branch at a completed answer into a new saved conversation titled "Fork: …", and a fork taken while a reply is running is saved to History without being opened. A lone `/` lists the commands. Each turn reaches the model without the earlier turns, so a fork branches the transcript only
+- **Clearing** — `Cmd/Ctrl+K` with the cursor in the chat hides the messages on screen and deletes nothing (the terminal's scrollback is left alone; with the cursor in the terminal the key clears scrollback as before). The header's trash, **Delete conversation**, is the one action that deletes
+- **Sending and failed turns** — a sent message shows Sending… until the reply starts; a message that could not be sent stays as Not sent and a turn the provider failed as No reply, each with its reason, Retry (same text, model and effort, the draft untouched) and Discard. A failed agent task offers Run the task again
+- **Images, notices, state** — a `[image: /path]` marker previews above the message (the model receives text only); a long notice or error shows its first line and opens on click; the header dot shows idle, working or waiting for you, and a conversation busy in another terminal carries the dot on its History row
+- **Keyboard focus** — after a click in the thread or on a control of the panel, typing stays in the chat and no longer goes to the terminal beside it
 - **Usage footer** — live token counter at the bottom: prompt tokens (↑N), completion tokens (↓N), estimated cost ($X.XXXX), cache hit rate
 - Terminal context menu: *Send selection to AI Chat*, *Explain this error*. Toolbar toggle + hotkey
 - **Detachable panel** — click the detach icon in the header to pop the panel into a separate window (500×700). The main window shows a placeholder with "Bring back". Closing the detached window automatically restores the panel. **The two windows hand the conversation over through disk, they do not share it live.**
@@ -1254,6 +1382,7 @@ FastAF-only; upstream 2.0 removed its scheduler with its embedded engine. Source
 - Repo watcher: monitors `.git/index`, `.git/refs/`, `.git/HEAD`, `.git/MERGE_HEAD` for changes
 
 ### 7.2 Worktrees
+- MCP creation receipts and worktree inventory include the durable creator's FastAF session identity, including ACP peers without a terminal. Legacy and unbound checkouts report `null`; recycled allocations receive the new creator.
 - Shared story, plan, and idea stores link only when the main checkout already ignores them. Directory-only ignores also cover the new symlinks; unignored stores are skipped with a warning instead of making the worktree dirty or hiding main-checkout files.
 - Auto-creation on branch select (non-main branches)
 - Configurable storage strategies: sibling (`__wt`), app directory, inside-repo (`.worktrees/`), or Claude Code default (`.claude/worktrees/`)
@@ -1482,8 +1611,8 @@ The `tuic-dictation` Rust crate implements audio, transcription and speech; the 
 ### 9.1 Whisper Inference
 - Local processing via `whisper-rs` (no cloud)
 - macOS: GPU-accelerated via Metal
-- Linux: CPU (optional CUDA/Vulkan build feature)
-- Windows: CPU-only (the whisper.cpp Vulkan backend's shader build is broken on the Windows CI runner; `vulkan` will be re-enabled once stabilized)
+- Linux: GPU via Vulkan when a Vulkan driver is present, CPU otherwise
+- Windows: GPU via Vulkan when a Vulkan driver is present, CPU otherwise
 
 ### 9.2 Models
 | Model | Size | Quality |
@@ -1572,7 +1701,7 @@ The `-q5` / `-q8` models are whisper.cpp's own quantized conversions of the same
 - Changing the language or the voice **stops the reply written for the previous one** mid-sentence — a sentence half said in one voice does not finish in another. Changing any other dictation setting leaves the voice alone.
 
 ### 9.10 The model is told when you start and stop talking
-- **Notify model when hands-free changes** (on by default): arming tells the agent that what arrives from now on was spoken and that it can answer out loud; disarming tells it to go back to text.
+- **Notify model when hands-free changes** (on by default): arming tells the agent that messages are spoken and asks it to acknowledge aloud at once, then give a short spoken answer when done; disarming tells it to go back to text.
 - Both notices are typed like a spoken turn — at once, even into a busy agent — and land in the terminal the conversation was armed for, not in whatever tab you focused since. A start notice held by a dialog goes before any spoken turn; a stop notice that meets a dialog is dropped, because the conversation it belonged to is already over.
 - Change your mind before the agent reads the start notice and it is **withdrawn**, with no stop notice behind it. What the agent ends up holding always matches the mode you are actually in.
 - **Your own start notice**: replace the text the agent reads at the start with your own instructions (for example a reply language or a length limit). Leave it empty, or press **Reset to default**, to send the built-in text. A notice written on several lines is sent as one line.
@@ -1626,12 +1755,13 @@ The `-q5` / `-q8` models are whisper.cpp's own quantized conversions of the same
 
 ### 10.5 Smart Prompts
 
-AI automation layer with 29 built-in context-aware prompts. Each prompt includes a description explaining what it does. Prompts auto-resolve git context variables and execute via inject (PTY write), shell script (direct run), headless (one-shot subprocess), or API (direct LLM call) mode.
+AI automation layer with 30 built-in context-aware prompts. Each prompt includes a description explaining what it does. Prompts auto-resolve git context variables and execute via inject (PTY write), shell script (direct run), headless (one-shot subprocess), or API (direct LLM call) mode.
 
 - **Open**: `Cmd+K` or toolbar lightning bolt button
 - Drawer with category filtering (All/Custom/Recent/Favorites), search by name/description, and enable/disable toggles
 - Prompt rows show inline badges: execution mode (inject/shell/headless/api), built-in, placement tags
 - Prompts are context-aware: 31 variables auto-resolved from git, GitHub, and terminal state
+- Git context follows the active terminal checkout; `{base_branch}` uses an explicit repository setting or Git detection for Automatic. Templates using both `{branch}` and `{base_branch}` are disabled with an explanation when refreshed checkout context shows equal branches. Cached workspace names do not veto execution; each run checks Git again.
 - **Variable Input Dialog**: unresolved variables show a compact form with variable name + description before execution
 - **Edit Prompt dialog**: full editor with name, description, content textarea, variable insertion dropdown (grouped by Git/GitHub/Terminal with descriptions), placement checkboxes, execution mode, auto-execute, and keyboard shortcut capture
 - **Inject target**: when a prompt is not submitted immediately, the target selects the review surface: the **Compose box** (default) or editable text in the **Terminal**
@@ -1643,13 +1773,14 @@ AI automation layer with 29 built-in context-aware prompts. Each prompt includes
 
 | Category | Prompts |
 |----------|---------|
-| **Git & Commit** | Smart Commit, Commit & Push, Amend Commit, Generate Commit Message |
-| **Code Review** | Review Changes, Review Staged, Review PR, Address Review Comments |
+| **Git & Commit** | Smart Commit, Commit & Push, Amend Commit, Generate Commit Message, Check Stash |
+| **Code Review** | Review Changes, Review Staged, Review PR, Address Review Comments, Review Issue |
 | **Pull Requests** | Create PR, Update PR Description, Generate PR Description |
 | **Merge & Conflicts** | Resolve Conflicts, Merge Main Into Branch, Rebase on Main |
 | **CI & Quality** | Fix CI Failures, Fix Lint Issues, Write Tests, Run & Fix Tests |
 | **Investigation** | Investigate Issue, What Changed?, Summarize Branch, Explain Changes |
 | **Code Operations** | Suggest Refactoring, Security Audit |
+| **File menu** (right-click a file) | Explain This File, Review This File, Write Tests for This File, Suggest Refactoring |
 
 ### 10.7 Context Variables
 
@@ -1658,7 +1789,7 @@ Variables are resolved from the Rust backend (`resolve_context_variables`) and f
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `{branch}` | git | Current branch name |
-| `{base_branch}` | git | Detected default branch (main/master/develop) |
+| `{base_branch}` | repository settings / git | Explicit configured base branch, with Git detection for Automatic or unloaded settings |
 | `{repo_name}` | git | Repository directory name |
 | `{repo_path}` | git | Full filesystem path to the repository root |
 | `{repo_owner}` | git | GitHub owner parsed from remote URL |
@@ -1727,6 +1858,11 @@ Variables are resolved from the Rust backend (`resolve_context_variables`) and f
 ---
 
 ## 11. Settings
+
+Ego credential inventory uses versioned machine output. Full named-account IDs,
+legacy provider slots and missing local sources stay distinct. Named and orphan
+accounts do not generate legacy auth edit targets; malformed inventory fails
+without a human-text fallback.
 
 
 Malformed config fields recover independently, retaining valid preferences. A startup warning names reset fields and the original backup path. Legacy scrollback reflow is enabled once, without overriding later user choices.
@@ -1971,7 +2107,7 @@ Terminal Compose uses `Enter` to send, `Ctrl+Enter` or `Shift+Enter` for a new l
 | `Cmd+1`–`Cmd+9` | Switch to tab by number |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Cmd+Ctrl+Backspace` | Return to last terminal — toggles back to the previously focused terminal, switching repo/branch if needed (`focus-last-terminal`) |
-| `Cmd+Alt+←` / `Cmd+Alt+→` | Terminal history back / forward — walks the last 10 activated terminals across repos/branches, browser-style: stepping does not reorder the history and activating another terminal drops the forward part; closed terminals leave it. The toolbar has matching arrow buttons (disabled at the ends, tooltip names the target). The Mobile Sessions screen has a sort button (Default / Recent) next to the search lens; Recent orders by the sessions last opened on that device (`history-back`, `history-forward`) |
+| `Cmd+Alt+←` / `Cmd+Alt+→` | Terminal history back / forward — walks the last 10 activated terminals across repos/branches, browser-style: stepping does not reorder the history and activating another terminal drops the forward part; closed terminals leave it. When a model-driven open (`ui` tab, file or markdown open) moves the view to another repository, the first Back returns to the terminal that was on screen; a same-repository open adds no step. The toolbar has matching arrow buttons (disabled at the ends, tooltip names the target). The Mobile Sessions screen has a sort button (Default / Recent) next to the search lens; Recent orders by the sessions last opened on that device (`history-back`, `history-forward`) |
 | `Cmd+U` | Jump to next waiting terminal — cycles to the next terminal awaiting input (agent question/error) across all repos/branches, switching context as needed; does nothing if none are waiting (`jump-waiting-terminal`) |
 | `Cmd+L` | Clear terminal |
 | `Cmd+Shift+L` | Refresh terminal (fix glyphs) |
@@ -1979,6 +2115,7 @@ Terminal Compose uses `Enter` to send, `Ctrl+Enter` or `Shift+Enter` for a new l
 | `Cmd+V` | Paste to terminal |
 | `Cmd+Home` | Scroll to top |
 | `Cmd+End` | Scroll to bottom |
+| `Down` (while scrolled back) | Scroll to bottom. The key is not sent to the terminal; at the bottom, `Down` goes to the program as usual |
 | `Shift+PageUp` | Scroll one page up |
 | `Shift+PageDown` | Scroll one page down |
 | `Cmd+Shift+R` | Run saved command |
@@ -2200,7 +2337,7 @@ shortcuts and the Global Hotkey. Keys macOS itself claims before the process
 - Upstream TUICommander's file-viewer plugins (`docx-preview`, `xlsx-preview`, `sqlite-viewer`) come from its unlicensed plugin repository; FastAF does not ship or list them
 
 ### 17.4 Deep Links (`tuic://`)
-- `tuic://install-plugin?url=https://...` — Download and install plugin (HTTPS only, confirmation dialog)
+- `tuic://install-plugin?url=https://...` — Download and install plugin (HTTPS, or plain HTTP from `localhost`/loopback; confirmation dialog)
 - CLI `tuic <dir>` / `tuic open <dir>` and MCP `repo action=add` register and activate directories through the running server, without an OS URL handler; repeat adds preserve existing workspaces and terminals. MCP `ui tab` rejects `tuic://open-repo` and directs callers to `repo add`.
 - `tuic://open-repo?path=/path` — Activate a repo already in the sidebar; a folder that is not in it yet is added after one confirmation (native deep-link flow)
 - `tuic://settings?tab=plugins` — Open Settings to specific tab
@@ -2220,9 +2357,9 @@ shortcuts and the Global Hotkey. Keys macOS itself claims before the process
 ### 17.4.1 TUIC SDK (`window.tuic`)
 - Injected automatically into every plugin iframe (inline and same-origin URL mode)
 - Feature detection: `if (window.tuic)` — `tuic.version` reports SDK version
-- **Files:** `tuic.open(path, {pinned?})`, `tuic.edit(path, {line?})`, `tuic.getFile(path): Promise<string>`
+- **Files:** `tuic.open(path, {pinned?})`, `tuic.edit(path, {line?})` (both accept an absolute path outside registered repositories as an external file), `tuic.getFile(path): Promise<string>`
 - **External URLs:** `tuic.openUrl(url)` accepts `http`, `https`, and `mailto` only
-- **Path resolution:** relative paths resolve against active repo; absolute paths match longest repo prefix; `../` traversal outside repo root is blocked
+- **Path resolution:** relative paths resolve against the asking panel's repository; absolute paths match longest repo prefix; `../` traversal outside repo root is blocked
 - **Repository:** `tuic.activeRepo()` returns active repo path; `tuic.onRepoChange(cb)` / `tuic.offRepoChange(cb)` for live updates
 - **Terminal:** `tuic.terminal(repoPath)` — open terminal in repository
 - **UI feedback:** `tuic.toast(title, {message?, level?, sound?})` — native toast notifications with optional sound (info blip, warn double-beep, error descending sweep); `tuic.clipboard(text)` — copy to clipboard from sandboxed iframe
@@ -2279,7 +2416,6 @@ the desktop for the session repository. Each entry shows its title and relative
 path and opens the existing mobile Markdown viewer. Desktop opens and closes
 update the list through SSE; worktree files retain their original checkout.
 
-
 Waiting terminal ego questions show **Input**, including narrow terminals whose selector footer wraps mid-word. Native selectors open automatically when a new question arrives or a waiting session opens. Tap the question icon in the session header to hide or reopen the full question and its wrapping options. A `selection_required` reply refusal reopens the controls and preserves the draft without sending an answer. Single-choice submits one option; multiple-choice toggles options until **Submit answers**; free-text uses the composer. The card overlays the terminal without reserving rows. Native choice dialogs hide suggested actions while their answer controls are open. Other waiting reports show their current suggested actions instead of generic Yes/No confirmations.
 
 Phone-optimized progressive web app for monitoring AI agents remotely. Separate SolidJS entry point (`src/mobile/`) served by the existing HTTP server at `/mobile`.
@@ -2321,7 +2457,7 @@ keeps its long-press shortcut; Commands (/) inserts a slash in agent terminals.
 - Search recursively for files by name or repository-relative path from the tree
 - File view and editor keep Back, file name, and Edit or Cancel/Save on one row with 44 px buttons; the editor fills the remaining height and soft-wraps lines
 - From a session header's overflow menu, open Files at that session's worktree root, or at the registered repository containing its working directory; Back returns to the still-mounted session and preserves its output and draft
-- Markdown paths in session output open here through the desktop terminal-path resolver. Absolute, relative, `file://`, and `tuic://open//` references are supported, including line numbers. Files outside registered repositories are refused with a toast naming the path.
+- Markdown paths in session output open here through the desktop terminal-path resolver. Absolute, relative, `file://`, and `tuic://open//` references are supported, including line numbers. Files outside registered repositories open from their own folder; directories outside them are refused with a toast naming the path.
 - Show an explicit error when the session has no repository path, no registered repository contains its working directory, or the directory request fails
 - Open `.md` files as rendered Markdown using the desktop's shared `ContentRenderer`; other UTF-8 text files remain plain text
 - Tap a task-list checkbox (a 44 px target around the box) in a rendered `.md` file to toggle `- [ ]` / `- [x]` / `- [~]` on disk; tap a paragraph, heading or list item to select it and add a comment, saved as the same `<!--tweak:block:...-->` / `item` marker the desktop Markdown tab writes
@@ -2427,6 +2563,7 @@ keeps its long-press shortcut; Commands (/) inserts a slash in agent terminals.
 - `PushManager.subscribe()` flow with user gesture (click handler) for iOS/Firefox
 - Push subscriptions stored in `push_subscriptions.json`, survive restarts
 - API endpoints: `POST/DELETE /api/push/subscribe`, `GET /api/push/vapid-key`, `POST /api/push/test`
+- Push providers: built-in Google, Mozilla, Windows and Apple hosts, plus hosts the owner adds in **Settings → All Settings** (`services.push.added_providers`). HTTPS is required; a subscription cannot add its own provider, and removing a host stops delivery to it
 - Triggers: an explicit managed-agent `progress type=blocked` report (with its question text), a parsed agent question when a real title is available, `PtyExit` (session completed), and a still-pending ACP permission or form elicitation. A bare AskUserQuestion hook can signal awaiting without text; it does not spend the push limit before the title arrives
 - Deep link: notification click navigates to `/mobile/session/<id>`, opening the specific session detail
 - ACP interaction pushes link to `/mobile?repo=…&session=…`, selecting the correct Chat conversation; answered requests and ordinary ACP activity do not push
@@ -2483,26 +2620,27 @@ Mobile terminal queued prompts have a **Hide** action beside the existing FIFO c
 
 FastAF aggregates upstream MCP servers and exposes them through its own `/mcp` endpoint. Any MCP client (Claude Code, Cursor, VS Code) connecting to TUIC automatically gains access to all configured upstream tools.
 
-### Opt-in interrupting agent mail
+### Forced urgent agent mail
 
-`agent action=send urgency=interrupt` sends Esc to a safe working Claude Code,
-Codex or ego, waits up to ten seconds for confirmed idle, then submits the full
-message as one input. Dialogs and drafts block the input. Unsupported agents
-and idle timeouts use the existing urgent notice/inbox fallback. The receipt
-reports `interrupt_delivered`, `interrupt_fallback_reason` and `delivery_path`.
-Normal and urgent mail remain non-interrupting. Interrupted tools may leave
-partial work, and their child processes may continue.
+`agent action=send urgency=urgent` (`interrupt` is an alias) uses the same
+forced-steer flow as Chat Send now and Compose Steer. It sends Escape to a safe
+working Claude Code, Codex or ego, confirms idle within ten seconds, then submits
+the full message. Dialogs and drafts block input. Unsupported agents and timeouts
+stay inbox-only, never an ordinary queued notice. Receipts report
+`urgent_delivered`, `interrupt_delivered`, both failure reasons and `delivery_path`.
+Normal mail remains non-interrupting. Interrupted tools may leave partial work,
+and their child processes may continue.
 
 ### 19.1 Architecture
 - TUIC acts as both an MCP server (to downstream clients) and an MCP client (to upstream servers)
 - All upstream tools are exposed via the single `POST /mcp` Streamable HTTP endpoint
-- Native TUIC tools (`session`, `agent`, `repo`, `workflow`, `automations`, `remote`, `secret`, `progress`, `ui`, `plugin_dev_guide`, `voice`, `settings`, `debug`) coexist with upstream tools
+- Native FastAF tools (`session`, `agent`, `repo`, `story`, `workflow`, `automations`, `remote`, `secret`, `progress`, `ui`, `plugin_dev_guide`, `voice`, `settings`, `debug`) coexist with upstream tools
 - Tool routing: names containing `__` are routed to the upstream registry; all others handled natively
 
 ### 19.1.1 Lazy Tool Discovery (`collapse_tools`)
 - Native MCP switches in Settings use domain sections, with rare and conditional tools separate. Each tool retains its own saved switch and existing permission gates.
 - When `collapse_tools: true` (Settings > MCP > TUIC Tools > "Collapse tools"), the full tool list is replaced with 3 meta-tools: `search_tools`, `get_tool_schema`, `call_tool`
-- Grok sessions (`clientInfo.name` matching `grok-shell-*`) receive the same 3 meta-tools automatically because Grok rejects nested qualified names such as `tuicommander__upstream__tool`; this per-session compatibility mode leaves the global setting and other clients unchanged, and the bridge restores it after TUIC reconnects
+- Grok sessions (`clientInfo.name` matching `grok-shell-*`) receive the same 3 meta-tools automatically because Grok rejects nested qualified names such as `fastaf__upstream__tool`; this per-session compatibility mode leaves the global setting and other clients unchanged, and the bridge restores it after TUIC reconnects
 - Cuts MCP context from ~35k tokens to ~500 tokens per agent turn; agent fetches schemas on demand via BM25-ranked search
 - BM25 index backed by `AppState::tool_search_index` (rebuilds automatically when the tool set changes)
 - Settings native-tool switches and descriptions come from the backend MCP registry, including disabled tools; newly registered tools appear automatically. Every native tool can be disabled.
@@ -2669,7 +2807,6 @@ partial work, and their child processes may continue.
 - `fastaf [path]` — open file or directory (VS Code/Zed style)
 - `fastaf open --goto file:line:col` — open at specific position
 - `fastaf open --wait` — block until file closed ($EDITOR support)
-- `fastaf diff <a> <b>` — diff view
 
 ### 21.3 Session Management (tmux-compatible)
 - `fastaf ls` / `fastaf new` / `fastaf kill` / `fastaf send` / `fastaf capture`
@@ -2678,7 +2815,7 @@ partial work, and their child processes may continue.
 - tmux key name translation (Enter, C-c, Space, etc.)
 
 ### 21.4 Agent Orchestration
-- `fastaf bg <log> -- <cmd>` — run a detached command without inheriting the foreground `TUIC_SESSION` or `TUIC_PARENT`; the runner retains caller-bound completion wake and mail routing
+- `fastaf bg <log> -- <cmd>` — run a detached command without inheriting the foreground `TUIC_SESSION` or `TUIC_PARENT`; the runner retains caller-bound completion evidence and typed wake authority; a native user stop revokes old automatic wakes without removing explicit queued requests
 - `fastaf agent spawn <type> <prompt> [--repo <path>]` — spawn AI agent on an initial prompt
 - `fastaf agent ls` — list running agents
 - `fastaf agent send <peer-uuid> <message>` — deliver to a registered peer's inbox through the registry, the same path as the MCP `agent action=send` tool. Reports `Delivered` only when something surfaced the message; an `inbox_only` route reads `Buffered`
@@ -2707,7 +2844,7 @@ partial work, and their child processes may continue.
 - `tuic-bridge` is published for every one of those targets too, and belongs next
   to the daemon: the daemon writes an MCP entry naming it into the config of each
   agent installed on the machine, so an agent launched there gets the full
-  `tuicommander` tool surface (`session`, `repo`, `progress`, `agent`, peer mail)
+  `fastaf` tool surface (`session`, `repo`, `progress`, `agent`, peer mail)
 - Agents reach the daemon over its local IPC endpoint (`mcp.sock`, or the
   `tuicommander-mcp` named pipe) — never over the authenticated TCP port
 - Runs the desktop's background tasks that a machine needs: process snapshots,
@@ -2747,6 +2884,10 @@ partial work, and their child processes may continue.
   preserve the OS user's agent configs (`~/.claude.json`, `~/.codex/config.toml`).
   Without it, `RemoteOptions.agent_configs` defaults to `true`; workers sharing
   an agent-config owner must use the flag on every launch
+- `--no-automations` starts no automation scheduler or event intake: no
+  schedule, issue event or pull-request review starts a run or session, and the
+  run ledger is not opened. Workflow runs started through the workflow API keep
+  executing their steps. Without the flag, automations run as before
 - `TUIC_PAIRING_TOKEN` is consumed once as the daemon session token and removed
   from the environment before child processes can inherit it
 
@@ -3044,7 +3185,8 @@ the child environment; pipe output is masked for exact and common encoded
 values, including wraps. User consent binds exact argv, names
 and directory. Values and templates live only until exit. One-time nonce links
 support browser entry on the existing application origin and transport. Use
-HTTPS for phone entry. TUIC inspection tools are gated while a form is open. See
+HTTPS for phone entry. FastAF inspection and capture calls are gated while a form
+is open; toasts and remote upstreams stay available. See
 [Private secret forms](user-guide/secrets.md) for limits and consent.
 
 Workflow safety includes owned check-tree teardown, credential-derived operator authority, and receipt-based plan completion that reopens after canonical ref movement.
@@ -3100,14 +3242,11 @@ Both archive and restore refuse claimed stories and plans that contain a claimed
 
 `story_archive_history` (`story_id`) and `plan_archive_history` (`plan_id`) return `{type:"archive_history",value:[{revision,archived,actor}]}` in revision order. Events commit atomically with the record and retain caller provenance. Existing status transition history remains separate. Transition history uses readable command labels and 1-based criterion numbers, with the current criterion text when available. Actors show a live session name or an eight-character session ID; hover the actor to see the complete session ID. The current history API does not return timestamps. Consecutive archive-only revisions preserve accepted-work integration receipts; a work change or a moved canonical Git ref still invalidates them. Example: `tuic story '{"action":"archive_story","story_id":"<id>","expected_revision":1}' --project /absolute/project`.
 
-
 Workflow graph slice C: the owning daemon executes pinned serial Agent/Judge/Loop/Pause/Notify/Join nodes through the existing RunStore ledger and managed launch fences. Named sol/sonnet profiles are required. New unsupported Gate and plan node publications are refused visibly. Manual pauses suspend active duration. Slice F supplies public story graph starts and history controls; D/E add independent approval and plan dispatch; graph completion alone never closes a native story.
-
 
 ### Workflow story policy (slice D)
 
 The daemon runs pinned deterministic checks before accepting an independent reviewer approval. Native approval history preserves the reviewer actor and revision; the run retains the reviewed artifact and check receipts. A workflow implementer cannot approve its story after exit or claim release. Integration remains an explicit operator action.
-
 
 ### Workflow plan dispatch (slice E)
 
@@ -3169,7 +3308,7 @@ prechecks, workspace and duration controls, pause/resume, Run now, confirmed
 delete and recent status history. Open **Automations** from the command palette.
 Step 8 API integration is required before use; see [Automations](user-guide/automations.md).
 
-The Automations palette action also matches **scheduler** and **schedule**. Automations cards show the repository name (full path on hover), common schedules in plain language, secondary cron and the backend next run in its named timezone. Definitions and Runs use keyboard tabs (Left/Right, Home/End). The single toolbar includes **Select first automation on open**, enabled by default and saved for this browser/WebView. Turning it off restores manual selection. Refresh keeps unsaved edits.
+The Automations palette action also matches **scheduler** and **schedule**. Automations cards show the repository name (full path on hover), common schedules in plain language, secondary cron and the backend next run in its named timezone. Definitions and Runs use keyboard tabs (Left/Right, Home/End). The dialog selects the first automation on open unless a specific definition, run or new draft is already requested. Refresh keeps unsaved edits.
 
 ### Automation transport availability
 
@@ -3268,12 +3407,7 @@ types and the fields of each type; the form uses the shared setting controls,
 blocks Create until the required fields of the current type are set, and opens
 the created item. The Tasks shell integrates this component separately.
 
-
 Automation worktree cleanup (#1623-8b2a): Automation runs retain automation/run IDs and the exact created workspace path and ID in their saved snapshot, including after definition deletion. Worktree cleanup is explicit and limited to final runs. The backend resolves the saved identity and rechecks shared Git integration/archive proof, dirt, submodule commits and live sessions; it never forces removal or closes sessions. Shared `automation_action` actions `worktree_preview` and `cleanup_worktree` accept a saved run `id` on IPC, HTTP, MCP and CLI.
-
-### Guided event configuration (#2012-72ff)
-
-Three built-in Smart Prompts guide issue-to-draft-PR, incoming PR review and authorized bounded-fix configuration. They open in the composer for review and ask for owner/profile/GitHub/skill prerequisites, confirmed policy limits and supported host capabilities. They do not add a GitHub event runtime or grant publication authority; unavailable intake/publication stops with a draft policy. The after-beta live pilot is not yet verified. See [Guided event configuration](user-guide/event-driven-templates.md).
 
 ### Built-in automation templates
 
@@ -3339,6 +3473,8 @@ The existing MCP `repo` tool reads linked work items or explicit references, URL
 
 MCP call audit view (#2136-dc79): Settings > MCP > Call audit lists the body-free `GET /mcp/audit` rows behind the `mcp_call_audit_enabled` setting (off in release, on in debug). Off records nothing. Effects distinguish read-only, completed, failed, not-started and uncertain dispatch; known operation and target names replace opaque metadata (#2299-07d3).
 
+MCP usage rollup (#2808-5998): Settings > MCP > Usage keeps daily counts per client kind, role, tool and action (calls, errors, rejected arguments, reply size, catalogue bytes served) for 90 days and shows the last 7 days per role. On by default; the switch stops counting. No arguments, replies or names are stored.
+
 ### Background tray and menu-bar icon
 
 Tray and menu-bar icon: Settings > General offers Always, Only in background (default), or Never. The native menu shows live working/awaiting agent counts, Show FastAF and Quit. An attention mark appears for awaiting agents while hidden and clears on Show. Left-click shows the app on macOS and Windows; Linux uses the menu. Never, a failed tray build, or a Linux desktop without a StatusNotifier host falls back to minimizing without clearing terminal visibility. A native notice appears on the first background entry of each app run.
@@ -3383,7 +3519,6 @@ Use **Follow task** in an item detail to follow comments locally; use **Unfollow
 
 GitHub provides a full normal-comment count, so an increase is detected even beyond the first page. Jira and GitLab provide paged comment entries: newly observed comments notify when their creation time is newer than the prior baseline, or when a previously unseen comment ID shares its latest timestamp. Unloaded pages, unseen review sources and items that are not refreshed cannot produce a notice. Editing a comment or loading older history does not notify. No Linear provider is shipped, so it is not covered.
 
-
 Suspended tabs wake on open, submit or peer mail through the same Rust transition. Concurrent wakes share one replacement PTY and retain the TUIC peer identity. A failed wake leaves the suspended tab available for retry.
 
 ### Automatic idle-agent hibernation
@@ -3410,7 +3545,6 @@ Settings owner validation covers typed shortcut records and bounded pane geometr
 ### Internal settings choice discovery
 
 Owner-backed dynamic choices support cache-only describe and explicit refresh. Notification output devices retain their UI option objects and distinguish unavailable discovery from successful empty results (#1908-c327).
-
 
 Agent model settings support typed model edits without starting a CLI. Explicit
 choice refresh probes only the addressed Claude run config with `--help`, using
@@ -3551,7 +3685,7 @@ percentage used and client-local reset times. The session menu scrolls inside th
 remaining session pane, below banners and above navigation. Markdown entries are
 unique by absolute file path; files in different worktrees remain separate.
 
-Worktree discovery diagnostics: forced duplicate-branch checkouts remain visible as read-only paths, missing or moved registrations show repair guidance without automatic pruning, and a folded repository retains a diagnostic count. Bare repository metadata is excluded from missing-checkout diagnostics, including discovery from its linked checkouts. Discovery errors are reported and not cached as empty success. Bisect and relative-gitdir rebase preserve branch identity.
+Worktree discovery diagnostics: forced duplicate-branch checkouts remain visible as read-only paths, missing or moved registrations are one sidebar row each (warning glyph, worktree name, `link broken` or `folder missing`) with **Repair** (`git worktree repair`) or **Prune** (a second click confirms; only the registration is dropped) and no automatic pruning, and a folded repository retains a diagnostic count. Bare repository metadata is excluded from missing-checkout diagnostics, including discovery from its linked checkouts. Discovery errors are reported and not cached as empty success. Bisect and relative-gitdir rebase preserve branch identity.
 
 Unavailable detached registrations are excluded from automatic orphan cleanup in both Ask and On modes, including the Ask countdown. They remain repair diagnostics until restored or explicitly removed. Safe-only removal rechecks availability, so a directory moved after assessment cannot be pruned automatically. Explicit user-confirmed removal remains available.
 
@@ -3561,7 +3695,6 @@ Native story notes: the shared project-scoped story service appends immutable co
 ## Archived worktree retention
 
 Opt-in global and per-repository retention in days (0/Off by default). Repository refresh removes only eligible recorded checkouts under `__archived/`, keeps dirty or unsafe archives with named status reasons, and retains commit recovery refs. No new timer or branch deletion. See [Worktrees](user-guide/worktrees.md#archived-worktree-retention).
-
 
 ### Typed workflow commands (WF05)
 
@@ -3590,7 +3723,7 @@ seven-rule FIX/STORY/ACCEPT triage and separate review/repair budgets. The defau
 policy permits two reviews and one repair. Native independent approval and
 required deterministic checks remain mandatory. PR review subjects do not mark
 native stories Done. Old publications and runs keep their prior policy. See
-[workflow evidence policy](backend/workflows.md#typed-evidence-policy-wf06).
+[workflow evidence policy](backend/workflows.md#legacy-engine-removed-3034-365e).
 
 ### Durable workflow timer receipts
 
@@ -3599,7 +3732,7 @@ bounded retry/backoff and explicit expiry outcomes. Independent service timers
 can flush a one-row cohort through a recovery pause. Activation pauses retain
 their deadlines; cancellation fences delivery. Question expiry never implies
 approval. This is internal infrastructure for later proof, provider and inbox
-consumers, not a new Designer control. See [workflows](backend/workflows.md#durable-timers-wf19).
+consumers, not a new Designer control. See [workflows](backend/workflows.md#legacy-engine-removed-3034-365e).
 
 ## Pending prompt recall and transcript cleanup
 
@@ -3607,12 +3740,10 @@ ArrowUp in an empty desktop Compose or AI Chat composer recalls the latest
 host-owned user prompt after successful withdrawal. AI Chat supports text-only
 ACP prompts; desktop Compose supports the PTY idle-gate FIFO for every detected
 agent. Native CLI Pending receipts are not cancellation handles. Slash menus,
-nonempty drafts, and modified arrow keys retain their normal behavior. See
-[coverage and evidence](frontend/chat-wrap-recall-evidence.md).
+nonempty drafts, and modified arrow keys retain their normal behavior.
 
 Terminal Chat keeps short inline code chips together. Empty ACP plan snapshots
 clear the prior steps without drawing a blank Plan card.
-
 
 ### Branch-local workflow decisions
 
@@ -3620,8 +3751,15 @@ Workflow questions and approvals retain structured answer schemas, revision and
 subject fences, actor provenance and restart-safe deadlines. An unanswered question
 suspends its activation, not disjoint delivery. The project inbox counts pending
 and expired questions without a coordinator; all transports use the same service.
-No timeout grants consent. See [workflow decisions](backend/workflows.md#branch-local-questions-and-decision-inbox-wf03).
+No timeout grants consent. See [workflow decisions](backend/workflows.md#legacy-engine-removed-3034-365e).
 
+### Post-land workflow proof cohorts
+
+Workflow integration debt has repository-owned, timer-flushed cohorts of up to
+twelve landings, a single durable parent waiter, pinned validation commands and
+explicit unfinished states. Dispatch requires an approved explicit operator and
+complete gate policy. Later landings remain separate debt. Registry backup and
+restore preserve raw identities and omitted evidence with verified digests.
 
 ### Pinned reusable workflow Calls
 
@@ -3631,6 +3769,93 @@ and stable activation-owned child identities. Completed, blocked, failed,
 cancelled and uncertain remain distinct. Recovery reuses the child; cancellation
 requests stop without erasing independent integration proof debt. Story Dispatch
 remains the delivery fan-out. Usage coverage stays unknown until measured.
-See [backend contract](backend/workflows.md#pinned-reusable-subflows-wf09).
+See [backend contract](backend/workflows.md#legacy-engine-removed-3034-365e).
 
 The Plans and Stories toolbar pill shows active-plan, Ready and In progress counts with distinct glyphs and a tooltip line for each number. Ready comes from the Rust `summary` action, not a frontend subtraction; Done/total remains the progress bar tooltip. Ready-only work therefore remains visible when no story is running.
+
+### Native Windows agent hook availability
+
+Native Windows does not install or inject FastAF's external POSIX status hooks. Hook state returns `unsupported`, and hook/status setters reject changes before writing preferences or user hook files. Saved preferences and existing hooks remain intact. Settings hides these controls based on the owning backend response, including remote machines. External agents retain heuristic detection; ego keeps native PTY OSC signals and its separate ACP path.
+
+- Claude permission attention: native permission requests and permission notifications set waiting for input; matching tool outcomes and native dialog answers retract it. Ordinary idle notices remain idle, and unrelated tools preserve open dialogs.
+
+Workflow rule controls use the existing Designer: independent duplicates retain template origin/version, discard restores the latest publication, review caps and exact Agent contracts are editable, and typed command/decision contracts are validated before publication. Plans and Stories offers explicit routing import and live/replay pin inspection.
+
+Managed PTYs expose a configurable silence flag with one parent alarm; detached background commands have a finite configurable deadline and a timeout completion wake.
+
+### Waiting on you
+
+Plans and Stories lists the project's stories that wait for manual checks under **Waiting on you**, one row per item. An entry selects its plan and story. The workflow questions and unread reports of the legacy engine are gone with it. The activity bell notifies each item once in **WAITING ON YOU**; a refresh, a reseed or a restart does not notify it again, and the entry leaves the bell when the item is resolved. An unreadable source hides its items without clearing them. Activity Dashboard shows agent health only: failures, input delivery stalls and host-owned stalled flags.
+
+Fabbrica help requests, approvals and ask-state outside requests also appear under **Waiting on you** in every project and in the bell. FastAF reads them through the Fabbrica control MCP, added as the MCP upstream named `fabbrica` in Settings › MCP (OAuth, one owner consent). It polls every 30 s, and at once when that upstream changes state: `tasks_list`, then `help_list` for each active task, then `outside_requests_list`. An entry opens the Fabbrica console. Help requests and approvals are answered there; an outside request also has **Accept** and **Decline** in the section (`outside_request_answer`, once, then the list is read again); an answered item leaves the section and the bell on the next read. Without consent the section says **Connect Fabbrica**; when a read fails it says that Fabbrica state is unknown, and the bell keeps its Fabbrica entries.
+
+### Automation completion tab policy
+
+Automation definitions accept optional `close_on_finish` (default `false`) through
+MCP, HTTP, IPC and the editor. Confirmed completed runs close only their recorded
+session through the existing tab-close lifecycle. Failed, unknown and input-blocked
+runs stay open. This option does not remove worktrees, branches or sibling tabs.
+
+## Automations timezone selection
+
+The Timezone dropdown filters zone names while open. It includes the names accepted
+by the backend, including aliases and fixed-offset zones. New automations select
+the host-local zone returned by schedule preview, not the browser zone. A saved
+zone outside the list remains selected until you choose another zone.
+
+Internal workflow rework: immutable project-owned script/subflow descriptors keep
+typed IO and outcomes outside instance configuration. Publication verifies inline
+script content and exact child-publication targets. Runtime and authoring
+integration remain pending; see [workflow contracts](backend/workflows.md#neutral-reusable-operation-contracts-002-eeb6).
+
+Reusable-operation project catalogs combine host descriptors with verified saved
+versions. Host-owned target-kind registration prevents a user-defined script or
+subflow from selecting an available native handler; descriptor IDs cannot replace
+host entries. These remain internal contracts, not executable authoring features.
+
+### Automatic story backend selection
+
+Plans and Stories names the story backend beside its title with a state dot (FastAF native, or an external connector such as Wiz), and adds a word only when the backend needs something ("needs approval", "unavailable"). A popover says how it was chosen (Chosen, Connector, Installed at, Fingerprint) and offers the two overrides. A connector that waits for approval is a plain question in the dialog body, with the installation path, its fingerprint and one Approve button. Passive Wiz markers select a globally user-approved installed connector; no per-repository command map is required. Generic stories folders do not select Wiz. Unapproved, changed or failed connectors remain visible and fail closed. Explicit bindings and existing records remain supported. Capabilities and provenance refresh with project and repository changes.
+
+- Story backend discovery retains open native work before connector approval, exposes
+  human native/automatic overrides, pins active-run selection across restarts, resolves
+  applicable registry scopes, and compares displayed entry/version approval identity.
+  Dialog refresh rejects mixed backend generations. Runs started before pins keep the
+  pre-pin rule (legacy command binding, otherwise native).
+
+Story backend capabilities preserve limited external editing: title, priority
+and one criterion addition can remain available independently of full editing.
+Restricted backends save exactly one supported change at a time; native editing
+and legacy aggregate behavior are unchanged.
+
+Plugin binary previews can request file size and exact bounded ranges through the existing `fs:read` capability, without reading the entire file.
+
+### Opt-in backend heap profiling
+
+Diagnostic `heap-profile` builds expose controlled jemalloc captures and separate Rust allocator/native/OS metrics. Normal builds keep the system allocator. See [the runbook](backend/heap-profiling.md).
+
+Workflow steps the catalog offers (`InstalledFamilies::load`, `workflows/run/native_config.rs`): approval and the GitHub operations are always there; saved script and typed HTTP targets come from the project's reusable operations; Telegram steps appear when a Telegram bot is configured in Settings › Telegram; model and agent steps appear only when an ego executable and an ego profile are set (FastAF does not install ego). **Jira and GitLab steps appear only when a plugin with the id `jira` or `gitlab` is installed and has a matching account. FastAF bundles neither plugin**, so these steps stay hidden unless you install one yourself. See [Jira workflow contracts](backend/workflows.md#installed-jira-cloud-activities-011-2a30).
+
+Neutral workflow transports (staged): shared catalog, versioned drafts, pinned metanode graphs, validation, pure preview and retained run inspection across desktop, HTTP and MCP. Native execution requires the installed backend provider. See [workflow transport](backend/workflows.md#neutral-workflow-transport-015).
+
+- Staged workflow migration preview: read-only old-to-new policy/configuration report, exact legacy source pins and explicit preservation blockers. Executable conversion and Designer integration remain pending (017-70f7).
+
+Catalog-backed migration audit: the neutral action resolves installed component pins and explicitly lists missing replacements per source node. Current full templates remain blocked; no incomplete draft or live migration is emitted (017-70f7).
+
+Scoped neutral roles use pinned mediated profiles, literal prompts, exact native tools and host-generated source/session-bound reports. Existing-story dispatch saves exact child publication/cohort pins and joins native completed/blocked receipts through the same run owner; combined-artifact batch approval remains explicitly unattested. See [the contract](backend/workflows.md#scoped-roles-and-pinned-story-children-020-6471-022-597e).
+Native story proposal creation retains exact effect approval, project backend selection, durable review caps and responsible caller receipts. See [workflow contracts](backend/workflows.md#owned-native-story-proposals-021-6e1b).
+Native GitHub workflow publication supports exact-head review verdicts and the separately approved MarkReady action. See `docs/backend/workflows.md` (024-c9ee).
+
+### Source-bound native issue effects
+
+Native workflows can read their admitted issue and request separately approved
+comments or additive labels with account, requirements and generation fences.
+Lost write replies remain uncertain. See [the workflow reference](backend/workflows.md#source-bound-issue-operations-023-026f).
+
+Native GitHub publication keeps its approved literal HTTPS destination and token through command-scoped identity rewrites, overriding host-wide Git URL rewrites without modifying saved configuration. Competing exact rewrites refuse; artifact, approval and ref lease checks still apply.
+
+Mediated model restart continuation reconciles owned tool effects, then sends their recorded identities and results in a new exact-model prompt. A durable replacement-session fence preserves original tool history and budgets; uncertain tools, active original transports and cancellation prevent continuation. This is new-prompt continuation, with protocol evidence only; it does not resume an interrupted provider turn (#006-6885).
+
+Review policy composition exposes a durable shared reviewer admission budget, source-bound role findings and native proposal dispositions through `native.review.bounded`, `native.correction.policy.assess` and the shared `correction_policy_region` action. Native independent review/current configured checks remain required. Accounting separates reviews, corrections, check attempts and proposals; exhaustion routes to the existing operator port. See [backend workflow policy composition](backend/workflows.md#retained-review-and-correction-policy-composition).
+
+- **Retained workflow operator decisions:** exact typed waits, human and proof-gated automatic closure, and frozen-scope release consent through existing native authorities. See [contract](backend/workflow-operator-decisions.md).

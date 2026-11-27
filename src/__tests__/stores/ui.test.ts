@@ -22,7 +22,29 @@ describe("uiStore", () => {
 
 		store = (await import("../../stores/ui")).uiStore;
 		await store.hydrate();
+		await (await import("../../stores/activityStore")).activityStore.hydrate();
 		mockInvoke.mockClear();
+	});
+
+	it("ranks branch launches before repository history without leaking other repositories or reordering ties", () => {
+		// Catches: stale repository preferences overriding the branch, or ties losing the configured order.
+		const entries = [{ key: "first" }, { key: "second" }, { key: "third" }];
+		store.recordAgentLaunch("/repo", "main", "second");
+		store.recordAgentLaunch("/repo", "main", "second");
+		store.recordAgentLaunch("/repo", "feature", "third");
+		expect(store.rankAgentLaunches("/repo", "feature", entries).map((x) => x.key)).toEqual([
+			"third",
+			"first",
+			"second",
+		]);
+		expect(store.rankAgentLaunches("/repo", "new", entries).map((x) => x.key)).toEqual(["second", "third", "first"]);
+		expect(store.rankAgentLaunches("/other", "feature", entries)).toEqual(entries);
+		store.recordAgentLaunch("/repo", "feature", "first");
+		expect(store.rankAgentLaunches("/repo", "feature", entries).map((x) => x.key)).toEqual([
+			"first",
+			"third",
+			"second",
+		]);
 	});
 
 	afterEach(() => {
@@ -88,6 +110,7 @@ describe("uiStore", () => {
 			const restarted = (await import("../../stores/ui")).uiStore;
 			await testInScopeAsync(async () => {
 				await restarted.hydrate();
+				await (await import("../../stores/activityStore")).activityStore.hydrate();
 				expect(restarted.state.editorWrapText).toBe(false);
 				expect(restarted.state.editorWrapCode).toBe(true);
 			});
@@ -96,21 +119,41 @@ describe("uiStore", () => {
 
 	describe("sidebar density", () => {
 		// Catches: the toggle changing the view but not the saved prefs, so the choice is lost on restart.
-		// FastAF defaults to compact; the cycle order is unchanged.
-		it("cycles compact, rich, auto and saves each choice", () => {
-			testInScope(() => {
+		// FastAF starts on compact; the cycle order is upstream's (rich, compact, harness).
+		it("cycles compact, harness, rich and saves each choice", async () => {
+			await testInScopeAsync(async () => {
 				expect(store.state.sidebarDensityMode).toBe("compact");
 				store.cycleSidebarDensityMode();
+				expect(store.state.sidebarDensityMode).toBe("harness");
+				expect(store.state.repoFilterHarnessOnly).toBe(true);
+				await vi.advanceTimersByTimeAsync(600);
+				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
+					base: expect.anything(),
+					config: expect.objectContaining({ sidebar_density: "harness" }),
+				});
+				store.cycleSidebarDensityMode();
 				expect(store.state.sidebarDensityMode).toBe("rich");
+				expect(store.state.repoFilterHarnessOnly).toBe(false);
 				flushPersist();
 				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
 					base: expect.anything(),
 					config: expect.objectContaining({ sidebar_density: "rich" }),
 				});
 				store.cycleSidebarDensityMode();
-				expect(store.state.sidebarDensityMode).toBe("auto");
-				store.cycleSidebarDensityMode();
 				expect(store.state.sidebarDensityMode).toBe("compact");
+			});
+		});
+
+		// Catches: the layout menu changing the view without saving it.
+		it("picks a layout directly and saves it", () => {
+			testInScope(() => {
+				store.setSidebarDensityMode("rich");
+				expect(store.state.sidebarDensityMode).toBe("rich");
+				flushPersist();
+				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
+					base: expect.anything(),
+					config: expect.objectContaining({ sidebar_density: "rich" }),
+				});
 			});
 		});
 
@@ -126,6 +169,78 @@ describe("uiStore", () => {
 				// A value saved by an older build (comfortable, touch) is not a mode now.
 				mockInvoke.mockResolvedValueOnce({ sidebar_density: "touch" });
 				await store.hydrate();
+				expect(store.state.sidebarDensityMode).toBe("rich");
+			});
+		});
+		// FastAF: an old "auto" (or no saved mode) opens on FastAF's default, compact.
+		it.each(["auto", undefined])(
+			"defaults old preferences to compact (%s) — catches stale filters reopening H",
+			async (mode) => {
+				mockInvoke.mockResolvedValueOnce({ sidebar_density: mode, repo_filter_harness_only: true });
+				await testInScopeAsync(async () => {
+					await store.hydrate();
+					expect(store.state.sidebarDensityMode).toBe("compact");
+					expect(store.state.repoFilterHarnessOnly).toBe(false);
+				});
+			},
+		);
+
+		it("starts in compact when H was saved — catches hidden sessions after restart", async () => {
+			mockInvoke.mockResolvedValueOnce({ sidebar_density: "harness" });
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.sidebarDensityMode).toBe("compact");
+				expect(store.state.repoFilterHarnessOnly).toBe(false);
+			});
+		});
+
+		it("keeps H when the preferences sync re-reads it — catches runtime refresh switching H to R", async () => {
+			const { settingsRefresh } = await import("../../services/settingsRefresh");
+			let apply: ((value: unknown) => void) | undefined;
+			vi.spyOn(settingsRefresh, "register").mockImplementation((reader) => {
+				if (reader.section === "preferences") apply = reader.apply as (value: unknown) => void;
+				return () => {};
+			});
+			await testInScopeAsync(async () => {
+				const stop = store.startRemoteSync();
+				store.setSidebarDensityMode("harness");
+				expect(store.state.sidebarDensityMode).toBe("harness");
+				await vi.advanceTimersByTimeAsync(600);
+				apply!({ sidebar_density: "harness", repo_filter_harness_only: true });
+				expect(store.state.sidebarDensityMode).toBe("harness");
+				apply!({ sidebar_density: "compact" });
+				expect(store.state.sidebarDensityMode).toBe("compact");
+				stop();
+			});
+		});
+
+		it.each(["rich", "compact"] as const)("restores saved %s mode", async (mode) => {
+			// Catches: resetting every saved mode instead of only the live-session filter.
+			mockInvoke.mockResolvedValueOnce({ sidebar_density: mode });
+			await store.hydrate();
+			expect(store.state.sidebarDensityMode).toBe(mode);
+		});
+
+		// FastAF: "Show all" returns to the layout H was entered from, not always to rich.
+		it.each(["compact", "rich"] as const)(
+			"clears manual H through Show all back to %s — catches a latched filter after leaving H",
+			async (before) => {
+				await testInScopeAsync(async () => {
+					store.setSidebarDensityMode(before);
+					store.setRepoFilterHarnessOnly(true);
+					expect(store.state.repoFilterHarnessOnly).toBe(true);
+					store.setRepoFilterHarnessOnly(false);
+					expect(store.state.sidebarDensityMode).toBe(before);
+					expect(store.state.repoFilterHarnessOnly).toBe(false);
+				});
+			},
+		);
+
+		// Catches: "Show all" on the active-only pill flipping the layout when H was never on.
+		it("leaves the layout alone when H is cleared while it is off", () => {
+			testInScope(() => {
+				store.setSidebarDensityMode("rich");
+				store.setRepoFilterHarnessOnly(false);
 				expect(store.state.sidebarDensityMode).toBe("rich");
 			});
 		});

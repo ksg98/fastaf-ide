@@ -1,7 +1,8 @@
-import { type Component, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { type Component, createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { type GrokUsageApiResponse, grokPeriodLabel } from "../../features/grokUsage";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
+import { providerQuotaStore } from "../../stores/providerQuota";
 import s from "../ClaudeUsageDashboard/ClaudeUsageDashboard.module.css";
 
 function rateClass(usedPercent: number): string {
@@ -20,25 +21,50 @@ export function formatPeriodEnd(value: string | null | undefined): string {
 	return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 }
 
-export const GrokUsageDashboard: Component = () => {
-	const [usage, setUsage] = createSignal<GrokUsageApiResponse | null>(null);
+export const GrokUsageDashboard: Component<{ sessionId?: string | (() => string | undefined) }> = (props) => {
+	const selectedSessionId = () => (typeof props.sessionId === "function" ? props.sessionId() : props.sessionId);
+	const [hostUsage, setUsage] = createSignal<GrokUsageApiResponse | null>(null);
 	const [error, setError] = createSignal<string | null>(null);
 	const [loading, setLoading] = createSignal(true);
 
-	const refresh = async () => {
-		try {
-			setUsage(await invoke<GrokUsageApiResponse>("get_grok_usage_api"));
-			setError(null);
-		} catch (reason) {
-			const message = String(reason);
-			setError(message);
-			appLogger.warn("network", "Grok usage fetch failed", message);
-		}
+	const usage = () => {
+		const sessionId = selectedSessionId();
+		if (!sessionId) return hostUsage();
+		const detail = providerQuotaStore.viewForAgent(sessionId, "grok")?.snapshot?.detail;
+		return detail?.provider === "grok" ? (detail.response as GrokUsageApiResponse) : null;
 	};
-
-	onMount(() => void refresh().finally(() => setLoading(false)));
-	const timer = setInterval(() => void refresh(), 5 * 60 * 1000);
-	onCleanup(() => clearInterval(timer));
+	createEffect(
+		on(selectedSessionId, (sessionId) => {
+			let disposed = false;
+			setUsage(null);
+			setError(null);
+			setLoading(true);
+			const refresh = async () => {
+				try {
+					if (sessionId) {
+						await providerQuotaStore.start();
+					} else {
+						const response = await invoke<GrokUsageApiResponse>("get_grok_usage_api");
+						if (!disposed) setUsage(response);
+					}
+					if (!disposed) setError(null);
+				} catch (reason) {
+					if (disposed) return;
+					const message = String(reason);
+					setError(message);
+					appLogger.warn("network", "Grok usage fetch failed", message);
+				} finally {
+					if (!disposed) setLoading(false);
+				}
+			};
+			void refresh();
+			const timer = setInterval(() => void refresh(), 5 * 60 * 1000);
+			onCleanup(() => {
+				disposed = true;
+				clearInterval(timer);
+			});
+		}),
+	);
 
 	return (
 		<div class={s.dashboard}>

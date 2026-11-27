@@ -9,20 +9,19 @@
 
 .btn {
   composes: btn from "../shared/controls.module.css";
-  /* Split-button geometry: fixed 26px height, compact padding, and toolbar
-     drag-region opt-out. Composed rules drive color, radius, border, hover
-     wash, and focus ring. */
   -webkit-app-region: no-drag;
+}
+
+/* Ghost split button in the title bar: 28px, compact padding, the name and the
+   chevron 7px apart. Every rule is scoped under .split so it outranks the
+   composed .btn recipe whatever order the two stylesheets load in; as one-class
+   rules the paddings below lost to it and the chevron drifted 24px from the name. */
+.split .btn {
   height: 28px;
+  min-height: 28px;
   padding: 0 8px;
   gap: 6px;
   font-size: var(--font-md);
-}
-
-/* Ghost in the title bar. Scoped under .split so it outranks the composed
-   .btn recipe whatever order the two stylesheets load in. */
-.split .btn {
-  min-height: 28px;
   background: transparent;
   border: none;
   box-shadow: none;
@@ -30,12 +29,12 @@
   font-weight: 400;
 }
 
-.main {
+.split .main {
   border-radius: 8px 0 0 8px;
   padding-right: 4px;
 }
 
-.arrowBtn {
+.split .arrowBtn {
   border-radius: 0 8px 8px 0;
   padding: 0 7px 0 3px;
 }
@@ -48,6 +47,7 @@
 
 .icon {
   display: block;
+  flex-shrink: 0;
   width: 16px;
   height: 16px;
 }
@@ -57,32 +57,36 @@
 }
 
 .arrow {
-  font-size: 8px;
   color: var(--fg-muted);
 }
 
+/* The "Open in" menu: the app's menu recipe (ContextMenu.module.css): overlay
+   surface, hairline, radius 8, 4px inset, 28px rows with a 16px leading icon. */
 .dropdown {
   position: absolute;
   top: 100%;
   right: 0;
-  margin-top: 4px;
-  min-width: 160px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  margin-top: 6px;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   box-shadow: var(--highlight-inset), var(--shadow-dropdown);
-  z-index: 100;
-  overflow: hidden;
+  z-index: var(--z-dropdown);
 }
 
 .section {
-  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
 }
 
+/* Sentence-case group label, the way a Codex menu heads its groups. */
 .sectionTitle {
-  padding: 3px 10px;
-  font-size: var(--font-2xs);
-  font-weight: 600;
+  padding: 6px 10px 2px;
+  font-size: var(--font-sm);
   color: var(--fg-muted);
 }
 
@@ -91,63 +95,63 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 5px 10px;
-  background: none;
+  min-height: 28px;
+  padding: 0 10px;
+  background: transparent;
   border: none;
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-family: inherit;
   font-size: var(--font-md);
   cursor: pointer;
   text-align: left;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .item:hover:not(:disabled) {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+  background: var(--surface-hover);
+}
+
+.item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .item:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
+/* The app the main button opens. The tick says so; no band, no accent text. */
 .item.selected {
-  background: var(--bg-highlight);
-  color: var(--accent);
+  color: var(--fg-primary);
 }
 
 .itemName {
   flex: 1;
+  white-space: nowrap;
+}
+
+/* Stroke-set glyphs in the icon column (FastAF shell, Run) and the tick on the
+   chosen app: a step quieter than the label, like every other menu. */
+.glyph,
+.itemCheck {
+  flex-shrink: 0;
+  color: var(--fg-secondary);
 }
 
 .itemCheck {
-  color: var(--accent);
-  font-size: var(--font-xs);
+  margin-left: 16px;
 }
 
 .divider {
   height: 1px;
-  background: var(--border);
-  margin: 4px 0;
-}
-
-.action {
-  color: var(--fg-secondary);
-}
-
-.action:hover:not(:disabled) {
-  color: var(--fg-primary);
+  background: var(--border-subtle);
+  margin: 4px 6px;
 }
 
 .shortcut {
+  margin-left: 24px;
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  margin-left: auto;
-}
-
-.iconEmoji {
-  display: flex;
-  align-items: center;
-  width: 14px;
-  height: 14px;
 }

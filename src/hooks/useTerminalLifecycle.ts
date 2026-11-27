@@ -12,6 +12,7 @@ import { settingsStore } from "../stores/settings";
 import { tabOrderingStore } from "../stores/tabManager";
 import { terminalsStore } from "../stores/terminals";
 import { uiStore } from "../stores/ui";
+import { routeClearToAiChat } from "../utils/aiChatView";
 import { readClipboard, writeClipboard } from "../utils/clipboard";
 import { getFocusedFrameSelection } from "../utils/focusedSelection";
 import { markdownDocumentPanelId } from "../utils/markdownDocumentPanelId";
@@ -422,6 +423,8 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 	};
 
 	const clearScrollback = () => {
+		// With the keyboard in AI Chat the shortcut clears the chat view, not this terminal.
+		if (routeClearToAiChat()) return;
 		const active = terminalsStore.getActive();
 		if (active?.ref) {
 			active.ref.clear();

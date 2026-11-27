@@ -1,8 +1,11 @@
+import "../fixtures/dialogActivityHydration";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StoriesDialog } from "../../components/StoriesDialog/StoriesDialog";
 import { invoke } from "../../invoke";
+import { storiesUi } from "../../stores/storiesUi";
+import { nativeBackendStatusReply } from "../fixtures/nativeBackendStatus";
 
 vi.mock("../../invoke", () => ({ invoke: vi.fn() }));
 vi.mock("../../stores/modalStack", () => ({ registerModal: vi.fn() }));
@@ -26,10 +29,16 @@ const actions = () =>
 		.map(([, args]) => (args as { action: { action: string; input?: unknown } }).action);
 
 beforeEach(() => {
+	storiesUi.setVisibility("all");
 	vi.mocked(invoke).mockReset();
 	generate = async () => draft;
 	vi.mocked(invoke).mockImplementation(async (command, args) => {
-		if (command === "story_capabilities") return true;
+		if (command === "story_capabilities") return { backend: "native", operations: {} };
+		if (
+			command === "story_action_command" &&
+			(args as { action?: { action?: string } })?.action?.action === "backend_status"
+		)
+			return nativeBackendStatusReply;
 		if (command === "story_generate_draft") return generate();
 		const action = (args as { action: { action: string } }).action;
 		if (action.action === "list_plans")

@@ -20,7 +20,10 @@ const EGO_STEER_METHOD: &str = "_ego/steer";
 const EGO_EXTENSIONS: &str = "ego";
 const EGO_HOLD_EXTENSION: &str = "hold";
 const EGO_COMPACT_EXTENSION: &str = "compact";
+const EGO_CHILD_ACTIVITY_EXTENSION: &str = "childActivity";
+const EGO_COMPACTED_EXTENSION: &str = "compacted";
 
+mod activity;
 mod connection;
 mod ego_ext;
 mod events;
@@ -28,11 +31,13 @@ mod manager;
 mod mcp_host;
 pub(crate) mod oneshot;
 
+pub use activity::{
+    AcpActiveTool, AcpChatActivity, AcpChatActivityState, AcpChildActivity, AcpHumanWait,
+    AcpHumanWaitKind,
+};
 pub use events::{AcpEventJournal, AcpEventStream};
 pub use manager::{AcpClientManager, INITIALIZE_TIMEOUT};
-pub use mcp_host::{
-    McpNotify, McpOverAcpError, McpOverAcpHost, McpReply, TUICOMMANDER_MCP_SERVER_ID,
-};
+pub use mcp_host::{EGO_MCP_SERVER_ID, McpNotify, McpOverAcpError, McpOverAcpHost, McpReply};
 
 /// The three ways a connection attaches to a session ego already owns.
 ///
@@ -123,14 +128,21 @@ pub struct AcpSessionAuthority {
     pub mcp_servers: Vec<v1::McpServer>,
 }
 
-/// The name TUICommander's own MCP server carries in every ego session.
+/// The name FastAF's own MCP server carries in every ego session:
+/// `tuicommander`, NOT [`tuic_ipc::MCP_SERVER_NAME`].
 ///
-/// It is a public contract, not an implementation detail: it appears in users'
-/// ego rule files, so renaming it breaks policy somebody else wrote.
-pub const TUICOMMANDER_MCP_SERVER_NAME: &str = "tuicommander";
+/// Every other agent sees the server as `fastaf`. ego keeps the old name on
+/// purpose: it matches tool permissions on this name, and users' ego rule files
+/// say `tool(tuicommander/<name>)`. Renaming it would make those rules stop
+/// matching without a word, and a DENY rule that no longer matches loosens
+/// permissions nobody agreed to loosen. The managed launch's own pre-approvals
+/// (`--allow tool(<this>/<name>)`) and the `--mcp @FILE` server a managed ego
+/// child gets use the same name, so the two always agree.
+pub const EGO_MCP_SERVER_NAME: &str = tuic_ipc::LEGACY_MCP_SERVER_NAME;
 
-/// The one MCP server an attended ego session is given: `tuicommander`, served
-/// by this process on the ACP connection itself (MCP-over-ACP).
+/// The one MCP server an attended ego session is given: `tuicommander` (see
+/// [`EGO_MCP_SERVER_NAME`]), served by this process on the ACP connection
+/// itself (MCP-over-ACP).
 ///
 /// Synthesised here rather than accepted from a caller — see
 /// `AcpSessionAuthority` for why a request body must not be able to name one.
@@ -149,8 +161,8 @@ pub const TUICOMMANDER_MCP_SERVER_NAME: &str = "tuicommander";
 #[must_use]
 pub fn tuicommander_acp_mcp_server() -> v1::McpServer {
     v1::McpServer::Acp(v1::McpServerAcp::new(
-        TUICOMMANDER_MCP_SERVER_NAME,
-        TUICOMMANDER_MCP_SERVER_ID,
+        EGO_MCP_SERVER_NAME,
+        EGO_MCP_SERVER_ID,
     ))
 }
 
@@ -164,7 +176,11 @@ pub struct EgoAcpConfig {
     pub executable: PathBuf,
     pub profile: String,
     pub master_prompt: String,
+    /// Host presentation guidance is for attended AI Chat, never unattended work.
+    pub ai_chat: bool,
 }
+
+pub(crate) const AI_CHAT_PRESENTATION_INSTRUCTIONS: &str = "AI Chat presentation instructions:\nAI Chat renders fenced code blocks with the `mermaid` language tag. When a diagram helps explain architecture, flows, or relationships, prefer Mermaid over ASCII diagrams. Use diagrams only when useful.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
@@ -204,12 +220,23 @@ pub fn launch_spec(config: &EgoAcpConfig, root: &Path) -> Result<LaunchSpec, Acp
     }
 
     validate_master_prompt(&config.master_prompt).map_err(AcpClientError::invalid_input)?;
+    let mut instructions = if config.ai_chat {
+        AI_CHAT_PRESENTATION_INSTRUCTIONS.to_owned()
+    } else {
+        String::new()
+    };
     if !config.master_prompt.is_empty() {
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
         // A fixed heading keeps a literal leading @ from becoming ego's @file input.
-        args.extend([
-            "--append-system".into(),
-            format!("AI Chat master instructions:\n{}", config.master_prompt),
-        ]);
+        instructions.push_str(&format!(
+            "AI Chat master instructions:\n{}",
+            config.master_prompt
+        ));
+    }
+    if !instructions.is_empty() {
+        args.extend(["--append-system".into(), instructions]);
     }
 
     Ok(LaunchSpec {
@@ -242,6 +269,19 @@ pub fn build_initialize_request() -> v1::InitializeRequest {
         .elicitation(
             v1::ElicitationCapabilities::new().form(v1::ElicitationFormCapabilities::new()),
         );
+    // Opt in to ego's extension frames. Ego sends each only to a client that
+    // asked for this exact version, so an older client sees no
+    // `session_info_update` it cannot read: child activity (ego story
+    // 772-d55a) and the compaction transition update
+    // (`session_info_update._meta.ego.compacted`).
+    let mut client_capabilities = client_capabilities;
+    client_capabilities.meta = Some(serde_json::Map::from_iter([(
+        EGO_EXTENSIONS.to_owned(),
+        serde_json::json!({
+            EGO_CHILD_ACTIVITY_EXTENSION: { "version": activity::CHILD_ACTIVITY_VERSION },
+            EGO_COMPACTED_EXTENSION: { "version": 1 }
+        }),
+    )]));
 
     v1::InitializeRequest::new(ProtocolVersion::V1).client_capabilities(client_capabilities)
 }
@@ -466,6 +506,18 @@ pub enum AcpStreamFrame {
     End,
 }
 
+/// One bounded read of a connection's journal, for a reader without a socket.
+///
+/// Pass `next` back as `after` to read on. `next > latest` means the reader has
+/// everything the journal held when the page was taken.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpEventPage {
+    pub events: Vec<AcpEventEnvelope>,
+    pub next: u64,
+    pub latest: u64,
+}
+
 /// One thing that happened on a connection, in the order it happened.
 ///
 /// Every event carries the generation it belongs to. A late event from a
@@ -571,6 +623,13 @@ pub enum AcpClientEvent {
         request_id: AcpHostRequestId,
         action: v1::ElicitationAction,
     },
+    /// What the session is doing changed: busy, waiting on a person, or idle.
+    ///
+    /// Carried whole, with its revision, so a host that also holds a snapshot
+    /// keeps whichever of the two is newer.
+    ActivityChanged {
+        activity: AcpChatActivity,
+    },
 }
 
 /// Why a host might want to come and look, and where.
@@ -633,6 +692,10 @@ impl AcpNotice {
             AcpClientEvent::ConnectionState {
                 state:
                     AcpConnectionState::Closed | AcpConnectionState::Failed | AcpConnectionState::Killed,
+            }
+            | AcpClientEvent::AttachmentState {
+                state:
+                    AcpAttachmentState::Idle | AcpAttachmentState::Closed | AcpAttachmentState::Detached,
             }
             | AcpClientEvent::TurnSettled { .. }
             | AcpClientEvent::TurnFailed { .. } => (AcpNoticeKind::Settled, None),
@@ -830,6 +893,10 @@ pub struct AcpAttachmentSnapshot {
     pub cwd: PathBuf,
     pub additional_directories: Vec<PathBuf>,
     pub config_options: Vec<v1::SessionConfigOption>,
+    /// Ego's reason when its latest config update reported a failed session
+    /// setup. No offer follows it; a later config update replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_failure: Option<String>,
     #[serde(default)]
     pub available_commands: Vec<v1::AvailableCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -839,20 +906,19 @@ pub struct AcpAttachmentSnapshot {
     pub queued_prompts: Vec<AcpQueuedPrompt>,
     pub pending_permission_ids: Vec<AcpHostRequestId>,
     pub pending_elicitation_ids: Vec<AcpHostRequestId>,
+    #[serde(default)]
+    pub activity: AcpChatActivity,
 }
 
 impl AcpAttachmentSnapshot {
-    /// The actor retains the most recently settled turn in active_turn. It is
-    /// history, not in-flight work; queued prompts and open seats are work.
-    pub(crate) fn is_quiescent(&self) -> bool {
-        self.state == AcpAttachmentState::Idle
-            && self
-                .active_turn
-                .as_ref()
-                .is_none_or(|turn| turn.state == AcpTurnState::Settled)
-            && self.queued_prompts.is_empty()
-            && self.pending_permission_ids.is_empty()
-            && self.pending_elicitation_ids.is_empty()
+    /// Whether an absolute select value is currently advertised by this session.
+    pub(crate) fn offers_config_value(&self, id: &str, wanted: &str) -> bool {
+        self.config_options.iter().any(|option| {
+            option.id.0.as_ref() == id
+                && matches!(&option.kind,
+                v1::SessionConfigKind::Select(select)
+                if connection::offers_value(select, &v1::SessionConfigValueId::new(wanted)))
+        })
     }
 }
 
@@ -1189,15 +1255,6 @@ impl AcpClientError {
         .with_session_id(session_id)
     }
 
-    /// A live subscriber fell far enough behind that it missed events.
-    pub(super) fn stream_lagged(connection_id: AcpConnectionId) -> Self {
-        Self::new(
-            AcpClientErrorCode::StreamGap,
-            format!("ACP connection {connection_id} produced events faster than this subscriber read them"),
-        )
-        .with_connection_id(connection_id)
-    }
-
     pub(super) fn unsupported_protocol(message: impl Into<String>) -> Self {
         Self::new(AcpClientErrorCode::UnsupportedProtocol, message)
     }
@@ -1274,7 +1331,12 @@ pub struct AcpCapabilitySnapshot {
     /// One version for `_ego/pause` and `_ego/resume`, which arrive together.
     pub ego_hold_version: Option<u32>,
     pub ego_compact_version: Option<u32>,
+    /// `_meta.ego.compacted` on `session_info_update`: the agent announces the
+    /// successor of an automatic compaction. Advertised, never inferred.
+    pub ego_compacted_version: Option<u32>,
     pub ego_steer_version: Option<u32>,
+    /// Ego publishes child activity on `session_info_update`; see `activity`.
+    pub ego_child_activity_version: Option<u32>,
     hold_availability: ExtensionAvailability,
     compact_availability: ExtensionAvailability,
 }
@@ -1368,6 +1430,15 @@ pub fn capability_snapshot(
         client_boolean_config: false,
         ego_hold_version: exact_extension_version(hold),
         ego_compact_version: exact_extension_version(compact),
+        ego_compacted_version: ego_extensions(agent)
+            .and_then(|ego| ego.get(EGO_COMPACTED_EXTENSION))
+            .filter(|compacted| {
+                compacted.get("version").and_then(Value::as_u64) == Some(1)
+                    && compacted.get("update").and_then(Value::as_str)
+                        == Some("session_info_update")
+                    && compacted.get("field").and_then(Value::as_str) == Some("_meta.ego.compacted")
+            })
+            .map(|_| 1),
         ego_steer_version: ego_extensions(agent)
             .and_then(|ego| ego.get("steer"))
             .filter(|steer| {
@@ -1377,6 +1448,15 @@ pub fn capability_snapshot(
                         .get("contentTypes")
                         .and_then(Value::as_array)
                         .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("text")))
+            })
+            .map(|_| 1),
+        ego_child_activity_version: ego_extensions(agent)
+            .and_then(|ego| ego.get(EGO_CHILD_ACTIVITY_EXTENSION))
+            .filter(|child| {
+                child.get("version").and_then(Value::as_u64)
+                    == Some(activity::CHILD_ACTIVITY_VERSION)
+                    && child.get("update").and_then(Value::as_str) == Some("session_info_update")
+                    && child.get("field").and_then(Value::as_str) == Some("_meta.ego.childActivity")
             })
             .map(|_| 1),
         hold_availability: hold,
@@ -1605,5 +1685,75 @@ mod session_tree_tests {
             rows[2].meta.as_ref().unwrap()["tuicommander"]["lineageDepth"],
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod ego_server_name_tests {
+    use super::*;
+
+    // Catches: ego's server following the `fastaf` rename. ego matches its
+    // permission rules on this name, so users' `tool(tuicommander/<name>)`
+    // DENY rules would silently stop matching.
+    #[test]
+    fn ego_sees_the_server_as_tuicommander_not_fastaf() {
+        assert_eq!(EGO_MCP_SERVER_NAME, "tuicommander");
+        assert_eq!(EGO_MCP_SERVER_ID, EGO_MCP_SERVER_NAME);
+        assert_ne!(EGO_MCP_SERVER_NAME, tuic_ipc::MCP_SERVER_NAME);
+        assert_eq!(
+            serde_json::to_value(tuicommander_acp_mcp_server()).unwrap(),
+            serde_json::json!({ "type": "acp", "name": "tuicommander", "serverId": "tuicommander" })
+        );
+    }
+}
+
+#[cfg(test)]
+mod compacted_capability_tests {
+    use super::*;
+
+    #[test]
+    fn initialize_requests_the_compacted_update_version_one() {
+        // Catches: client never opts in, so ego withholds the compaction update.
+        let wire = serde_json::to_value(build_initialize_request()).unwrap();
+        assert_eq!(
+            wire["clientCapabilities"]["_meta"]["ego"]["compacted"],
+            serde_json::json!({"version": 1})
+        );
+    }
+
+    fn snapshot(compacted: Option<Value>) -> AcpCapabilitySnapshot {
+        let mut wire: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/acp/ego-compacted-initialize.json"
+        ))
+        .unwrap();
+        wire["agentCapabilities"]["_meta"]["ego"]["compacted"] = compacted.unwrap_or(Value::Null);
+        capability_snapshot(&serde_json::from_value(wire).unwrap()).unwrap()
+    }
+
+    // Catches: the recorded ego advertisement not being read, so TUIC never follows a successor.
+    #[test]
+    fn the_recorded_ego_golden_advertises_compacted_version_one() {
+        let wire = include_str!("../../tests/fixtures/acp/ego-compacted-initialize.json");
+        let recorded = capability_snapshot(&serde_json::from_str(wire).unwrap()).unwrap();
+        assert_eq!(recorded.ego_compacted_version, Some(1));
+    }
+
+    // Catches: a different version, update kind or field being treated as the v1 contract.
+    #[test]
+    fn a_different_or_missing_compacted_advertisement_is_not_version_one() {
+        for advertised in [
+            None,
+            Some(
+                serde_json::json!({"version": 2, "update": "session_info_update", "field": "_meta.ego.compacted"}),
+            ),
+            Some(
+                serde_json::json!({"version": 1, "update": "other", "field": "_meta.ego.compacted"}),
+            ),
+            Some(
+                serde_json::json!({"version": 1, "update": "session_info_update", "field": "_meta.ego.other"}),
+            ),
+        ] {
+            assert_eq!(snapshot(advertised).ego_compacted_version, None);
+        }
     }
 }

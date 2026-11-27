@@ -1,15 +1,31 @@
-import { type Component, createEffect, createMemo, createSignal, For, Match, on, Show, Switch } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	For,
+	Match,
+	on,
+	onCleanup,
+	Show,
+	Switch,
+} from "solid-js";
+import { Portal } from "solid-js/web";
+import { useSmartPrompts } from "../../hooks/useSmartPrompts";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
+import { promptLibraryStore } from "../../stores/promptLibrary";
 import { repositoriesStore } from "../../stores/repositories";
 import { cx } from "../../utils";
+import { writeClipboard } from "../../utils/clipboard";
 import { ConfirmDialog } from "../ConfirmDialog/ConfirmDialog";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
 import { FileIcon } from "../FileBrowserPanel/FileIcon";
-import { IconAlert, IconArchive, IconClose, IconGit, IconTrash } from "../icons";
+import { IconAlert, IconArchive, IconCheck, IconClose, IconCopy, IconGit, IconSparkle, IconTrash } from "../icons";
 import { EmptyState } from "../shared/EmptyState";
 import { Spinner } from "../shared/Spinner";
 import s from "./StashesTab.module.css";
+import { checkStash } from "./stashCheck";
 
 /** Mirrors the Rust StashEntry struct from git.rs */
 interface StashEntry {
@@ -21,7 +37,18 @@ interface StashEntry {
 
 export interface StashesTabProps {
 	repoPath: string | null;
+	/** Where the tab's one list-level action goes: the Git panel header's action
+	 *  slot, so "Check all" costs the list no row of its own. */
+	headerSlot?: HTMLElement;
 }
+
+/** A check line that belongs to no row: why the check cannot run, or a stash it
+ *  dropped (what it was, and the command that brings it back). */
+type CheckLine =
+	| { kind: "blocked"; message: string }
+	| { kind: "dropped"; title: string; summary: string; restore?: string; archiveRef?: string };
+
+const COPIED_MS = 1500;
 
 // ---------------------------------------------------------------------------
 // Stash message and diff — what git prints, shaped for two lines and a well
@@ -182,6 +209,28 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 	const [focusedIndex, setFocusedIndex] = createSignal(-1);
 	/** The focus ring belongs to the keyboard: a click expands without drawing it. */
 	const [keyboardNav, setKeyboardNav] = createSignal(false);
+	const { executeSmartPrompt, canExecute } = useSmartPrompts();
+	const [checking, setChecking] = createSignal(false);
+	/** What the last check said about a stash it kept, by stash commit: a drop
+	 *  renumbers every `stash@{n}` after it, the hash stays. */
+	const [checkNotes, setCheckNotes] = createSignal<Record<string, string>>({});
+	/** Check lines that belong to no row: why the check cannot run, and each
+	 *  stash it dropped (where the archive is, how to restore it). */
+	const [checkLog, setCheckLog] = createSignal<CheckLine[]>([]);
+	const [copied, setCopied] = createSignal<string | null>(null);
+	let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+	onCleanup(() => clearTimeout(copiedTimer));
+
+	async function copyRestore(command: string) {
+		try {
+			await writeClipboard(command);
+			setCopied(command);
+			clearTimeout(copiedTimer);
+			copiedTimer = setTimeout(() => setCopied(null), COPIED_MS);
+		} catch (err) {
+			appLogger.warn("git", "Failed to copy the restore command", err);
+		}
+	}
 
 	// Confirm dialog state
 	const [confirmVisible, setConfirmVisible] = createSignal(false);
@@ -227,6 +276,18 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 		),
 	);
 
+	// What a check said belongs to the repository it ran in.
+	createEffect(
+		on(
+			repoPath,
+			() => {
+				setCheckNotes({});
+				setCheckLog([]);
+			},
+			{ defer: true },
+		),
+	);
+
 	async function runStashCommand(command: string, stashRef: string) {
 		const repo = repoPath();
 		if (!repo) return;
@@ -250,6 +311,59 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 			});
 		} finally {
 			setBusyRef(null);
+		}
+	}
+
+	/** Check one stash, or every listed stash. Git computes the facts, the smart
+	 *  prompt classifies, and only the backend drops (after archiving the commit).
+	 *  Pass them oldest first (highest index): a drop renumbers only the stashes
+	 *  after it, which are already done. */
+	async function handleCheck(targets: StashEntry[]) {
+		const repo = repoPath();
+		const prompt = promptLibraryStore.getSmartById("smart-stash-check");
+		if (!repo || !prompt || checking()) return;
+		setCheckNotes({});
+		const gate = canExecute(prompt);
+		if (!gate.ok) {
+			setCheckLog([{ kind: "blocked", message: gate.reason ?? "Cannot run the stash check" }]);
+			return;
+		}
+		setChecking(true);
+		setCheckLog([]);
+		setCommandError(null);
+		try {
+			for (const stash of targets) {
+				setBusyRef(stash.ref_name);
+				try {
+					const r = await checkStash(repo, stash.ref_name, prompt, executeSmartPrompt);
+					if (r.dropped) {
+						setCheckLog((prev) => [
+							...prev,
+							{
+								kind: "dropped",
+								title: parseStashMessage(stash.message).title,
+								summary: r.summary,
+								restore: r.restore,
+								archiveRef: r.archiveRef,
+							},
+						]);
+						// The drop renumbered the stashes after this one: a cached diff, an
+						// open row or the spinner would now name a different stash.
+						setBusyRef(null);
+						setDiffs({});
+						setExpandedRef(null);
+						await fetchStashes(repo);
+					} else {
+						setCheckNotes((prev) => ({ ...prev, [stash.hash]: r.summary }));
+					}
+				} catch (err) {
+					appLogger.error("git", `Stash check failed for ${stash.ref_name}`, err);
+					setCheckNotes((prev) => ({ ...prev, [stash.hash]: `Kept. ${String(err)}` }));
+				}
+			}
+		} finally {
+			setBusyRef(null);
+			setChecking(false);
 		}
 	}
 
@@ -326,9 +440,16 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 		const ref = menuRef();
 		if (!ref) return [];
 		const busy = busyRef() !== null;
+		const stash = stashes().find((entry) => entry.ref_name === ref);
 		return [
 			{ label: "Apply", action: () => handleApply(ref), disabled: busy },
 			{ label: "Pop", action: () => handlePop(ref), disabled: busy, separator: true },
+			{
+				label: "Check if still needed",
+				action: () => stash && void handleCheck([stash]),
+				disabled: busy || checking() || !stash,
+				separator: true,
+			},
 			{ label: "Drop", action: () => handleDrop(ref), disabled: busy },
 		];
 	};
@@ -375,7 +496,8 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 						<EmptyState tone="error" icon={IconAlert} title="Couldn't load stashes" description={message()} />
 					)}
 				</Match>
-				<Match when={stashes().length === 0}>
+				{/* A check that dropped the last stash still has its outcome to show. */}
+				<Match when={stashes().length === 0 && checkLog().length === 0}>
 					<EmptyState
 						icon={IconArchive}
 						title="No stashes"
@@ -384,6 +506,43 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 				</Match>
 				<Match when={true}>
 					<div class={s.list}>
+						{/* What a check had to say outside the rows: why it cannot run, and each
+						    stash it dropped, whose row is gone. The restore command can be
+						    selected and copied. */}
+						<For each={checkLog()}>
+							{(line) =>
+								line.kind === "blocked" ? (
+									<div class={s.checkLine} role="status">
+										<IconAlert size={14} class={s.checkIcon} />
+										<div class={s.checkText}>{line.message}</div>
+									</div>
+								) : (
+									<div class={s.checkLine} role="status">
+										<IconArchive size={14} class={s.checkIcon} />
+										<div class={s.checkText}>
+											<div class={s.checkTitle} title={line.archiveRef}>
+												{line.title}
+											</div>
+											<div>{line.summary}</div>
+											<Show when={line.restore}>{(command) => <code class={s.checkCommand}>{command()}</code>}</Show>
+										</div>
+										<Show when={line.restore}>
+											{(command) => (
+												<button
+													type="button"
+													class={s.iconBtn}
+													title={copied() === command() ? "Copied" : "Copy the command that restores it"}
+													aria-label="Copy the restore command"
+													onClick={() => void copyRestore(command())}
+												>
+													{copied() === command() ? <IconCheck size={14} /> : <IconCopy size={14} />}
+												</button>
+											)}
+										</Show>
+									</div>
+								)
+							}
+						</For>
 						<For each={stashes()}>
 							{(stash, i) => {
 								const label = createMemo(() => parseStashMessage(stash.message));
@@ -437,7 +596,7 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 													</Show>
 												</span>
 											</div>
-											{/* Apply · Pop · Drop stay visible, quiet until the row is
+											{/* Apply · Pop · Check · Drop stay visible, quiet until the row is
 											    hovered, focused or open; a spinner takes their place. */}
 											<div class={s.stashActions} onClick={(e) => e.stopPropagation()}>
 												<div class={cx(s.actionGroup, isBusy() && s.actionGroupHidden)}>
@@ -458,6 +617,16 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 														onClick={() => handlePop(stash.ref_name)}
 													>
 														Pop
+													</button>
+													<button
+														type="button"
+														class={s.iconBtn}
+														title="Check if this stash is still needed: it is dropped only when proven redundant"
+														aria-label={`Check ${stash.ref_name}`}
+														disabled={isBusy() || checking()}
+														onClick={() => void handleCheck([stash])}
+													>
+														<IconSparkle size={16} />
 													</button>
 													<button
 														type="button"
@@ -495,6 +664,13 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 												</div>
 											)}
 										</Show>
+										<Show when={checkNotes()[stash.hash]}>
+											{(note) => (
+												<div class={s.stashNote} role="status">
+													{note()}
+												</div>
+											)}
+										</Show>
 										<Show when={isExpanded()}>
 											<Switch>
 												<Match when={diffLoading()[stash.ref_name] || diff() === undefined}>
@@ -516,6 +692,25 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 					</div>
 				</Match>
 			</Switch>
+
+			{/* The list's one action lives in the Git panel header, beside the window
+			    controls, instead of a "Stashes N" row that repeats the tab's name. */}
+			<Show when={props.headerSlot && stashes().length > 0 ? props.headerSlot : undefined}>
+				{(slot) => (
+					<Portal mount={slot()}>
+						<button
+							type="button"
+							class={s.headerBtn}
+							title="Check all stashes: drop the ones proven redundant, keep the rest"
+							aria-label="Check all stashes"
+							disabled={checking() || busyRef() !== null}
+							onClick={() => void handleCheck([...stashes()].reverse())}
+						>
+							<IconSparkle size={16} />
+						</button>
+					</Portal>
+				)}
+			</Show>
 
 			<ContextMenu
 				items={menuItems()}

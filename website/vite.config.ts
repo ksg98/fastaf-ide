@@ -36,12 +36,15 @@ function partials(): Plugin {
     name: "partials",
     transformIndexHtml: {
       order: "pre",
-      handler: (html) =>
+      handler: (html, { filename }) =>
         html
           .replace(/<!-- @include ([a-z-]+) -->/g, (_, name) =>
             readFileSync(resolve(__dirname, "partials", `${name}.html`), "utf8"),
           )
-          .replaceAll("%FILM_SRC%", `/video/${film.FILM_ASSET}`),
+          .replaceAll(
+            "%FILM_SRC%",
+            filename === input.main ? film.HOME_FILM_URL : `/video/${film.FILM_ASSET}`,
+          ),
     },
   };
 }

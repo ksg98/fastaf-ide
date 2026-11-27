@@ -7,7 +7,6 @@ import type { RepositoryState } from "../../stores/repositories";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { getFirstVisibleRepo, getVisibleLayout, getVisibleRepoSequence } from "../../stores/sidebarLayout";
-import { sidebarPluginStore } from "../../stores/sidebarPluginStore";
 import { tunnelPanelStore } from "../../stores/tunnelPanel";
 import { tunnelsStore } from "../../stores/tunnels";
 import { SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, uiStore } from "../../stores/ui";
@@ -15,14 +14,7 @@ import { isTauri } from "../../transport";
 import { cx } from "../../utils";
 import { keyFor } from "../../utils/hotkey";
 import { getRepoTextColor } from "../../utils/repoColor";
-import {
-	countSidebarRows,
-	createCoarsePointer,
-	createViewportHeight,
-	roomyMaxRows,
-	SidebarDensityContext,
-	sidebarDensity,
-} from "../../utils/sidebarDensity";
+import { SidebarDensityContext, sidebarDensity } from "../../utils/sidebarDensity";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
 import {
 	IconAlert,
@@ -117,14 +109,15 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		return layout.ungrouped.length > 0 || layout.groups.some((g) => g.repos.length > 0);
 	});
 
-	// A repo with at least one open terminal — what the "active only" filter keeps
-	// and what rich density folds the others away from.
+	// A repo with at least one open terminal — what rich density folds the others
+	// away from (the "active only" filter itself lives in stores/sidebarLayout.ts).
 	const repoIsActive = (repo: RepositoryState) => Object.values(repo.workspaces).some((b) => b.terminals.length > 0);
 
-	// Layout after the shared visibility pipeline (named-workspace filter, "active
-	// only" filter, search, sort) — see stores/sidebarLayout.ts. Empty groups are
-	// dropped there so no orphaned group header is left behind. useQuickSwitcher
-	// walks the same pipeline, so shortcut numbering cannot drift from the rows.
+	// Layout after the shared visibility pipeline (named-workspace filter, the
+	// "Live agents" layout or the "active only" filter, search, sort) — see
+	// stores/sidebarLayout.ts. Empty groups are dropped there so no orphaned group
+	// header is left behind. useQuickSwitcher walks the same pipeline, so shortcut
+	// numbering cannot drift from the rows.
 	const filteredLayout = createMemo(() => getVisibleLayout());
 
 	// True when the filtered layout has at least one visible repo. Distinguishes
@@ -134,33 +127,19 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		return layout.ungrouped.length > 0 || layout.groups.some((g) => g.repos.length > 0);
 	});
 
+	const clearRepoFilters = () => {
+		uiStore.setRepoFilterActiveOnly(false);
+		uiStore.setRepoFilterHarnessOnly(false);
+	};
+
 	const countRepos = (layout: { groups: Array<{ repos: unknown[] }>; ungrouped: unknown[] }) =>
 		layout.ungrouped.length + layout.groups.reduce((n, g) => n + g.repos.length, 0);
 	const totalRepoCount = createMemo(() => countRepos(groupedLayout()));
 	const shownRepoCount = createMemo(() => countRepos(filteredLayout()));
 
-	// Density follows how much is on screen and how the user points: a short list
-	// or a finger gets the rich layout (detail lines, idle repos folded). The
-	// compact layout is FastAF's 30px Codex rows; rich only adds detail lines.
-	const coarsePointer = createCoarsePointer();
-	const viewportHeight = createViewportHeight();
-	const density = createMemo(() => {
-		const layout = filteredLayout();
-		// A collapsed group keeps its header row (counted below) but renders no repos.
-		const repos = [...layout.ungrouped, ...layout.groups.filter((g) => !g.group.collapsed).flatMap((g) => g.repos)];
-		// RepoSection renders each panel with items under every open repo: a header
-		// row, plus one row per item unless the panel is collapsed.
-		const pluginRows = sidebarPluginStore
-			.getPanels()
-			.filter((p) => p.items.length > 0)
-			.reduce((n, p) => n + 1 + (p.collapsed ? 0 : p.items.length), 0);
-		return sidebarDensity(
-			countSidebarRows(repos, settingsStore.state.tabTreeEnabled, pluginRows) + layout.groups.length,
-			coarsePointer(),
-			uiStore.state.sidebarDensityMode,
-			roomyMaxRows(viewportHeight()),
-		);
-	});
+	// The layout is the user's choice (footer menu): FastAF's 30px Codex rows in
+	// compact, detail lines in rich and in the "Live agents" layout.
+	const density = () => sidebarDensity(uiStore.state.sidebarDensityMode);
 
 	const drag = useSidebarDragDrop();
 
@@ -358,7 +337,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		}
 	};
 
-	// Named-workspace/sort footer menu + its dialogs
+	// Named-workspace/sort/layout footer menu + its dialogs
 	const workspaceMenu = createContextMenu();
 	const [saveWorkspaceOpen, setSaveWorkspaceOpen] = createSignal(false);
 	const [renameWorkspaceTarget, setRenameWorkspaceTarget] = createSignal<string | null>(null);
@@ -374,15 +353,13 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		return paths;
 	};
 
-	// ContextMenuItem has no checked field — "✓ " label prefix marks the active entry
-	const checkLabel = (active: boolean, label: string) => (active ? `✓ ${label}` : label);
-
 	const workspaceMenuItems = createMemo((): ContextMenuItem[] => {
 		const activeId = repositoriesStore.state.activeNamedWorkspaceId;
 		const sortMode = repositoriesStore.state.sortMode;
 		const items: ContextMenuItem[] = [
 			{
-				label: checkLabel(activeId === null, t("sidebar.allProjects", "All projects")),
+				label: t("sidebar.allProjects", "All projects"),
+				checked: activeId === null,
 				action: () => repositoriesStore.setActiveNamedWorkspace(null),
 			},
 		];
@@ -390,7 +367,8 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 			const workspace = repositoriesStore.state.namedWorkspaces[id];
 			if (!workspace) continue;
 			items.push({
-				label: checkLabel(activeId === id, workspace.name),
+				label: workspace.name,
+				checked: activeId === id,
 				action: () => repositoriesStore.setActiveNamedWorkspace(id),
 			});
 		}
@@ -415,16 +393,40 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 			separator: true,
 		});
 		items.push({
-			label: checkLabel(sortMode === "manual", t("sidebar.sortManual", "Sort: Manual")),
+			label: t("sidebar.sortManual", "Sort: Manual"),
+			checked: sortMode === "manual",
 			action: () => repositoriesStore.setSortMode("manual"),
 		});
 		items.push({
-			label: checkLabel(sortMode === "name", t("sidebar.sortName", "Sort: Name A–Z")),
+			label: t("sidebar.sortName", "Sort: Name A–Z"),
+			checked: sortMode === "name",
 			action: () => repositoriesStore.setSortMode("name"),
 		});
 		items.push({
-			label: checkLabel(sortMode === "recent", t("sidebar.sortRecent", "Sort: Recently active")),
+			label: t("sidebar.sortRecent", "Sort: Recently active"),
+			checked: sortMode === "recent",
 			action: () => repositoriesStore.setSortMode("recent"),
+			separator: true,
+		});
+		// Sidebar layout (upstream's R/C/H toolbar switch). FastAF's title bar has no
+		// room for a mode letter, and these are view choices like the sort above.
+		const layoutMode = uiStore.state.sidebarDensityMode;
+		items.push({
+			label: t("sidebar.layoutCompact", "Layout: Compact"),
+			checked: layoutMode === "compact",
+			action: () => uiStore.setSidebarDensityMode("compact"),
+		});
+		items.push({
+			label: t("sidebar.layoutRich", "Layout: Rich"),
+			checked: layoutMode === "rich",
+			title: t("sidebar.layoutRichHint", "Detail lines on every row"),
+			action: () => uiStore.setSidebarDensityMode("rich"),
+		});
+		items.push({
+			label: t("sidebar.layoutLiveAgents", "Layout: Live agents"),
+			checked: layoutMode === "harness",
+			title: t("sidebar.layoutLiveAgentsHint", "Only branches with a running agent, with detail lines"),
+			action: () => uiStore.setSidebarDensityMode("harness"),
 		});
 		return items;
 	});
@@ -617,19 +619,23 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 						</div>
 					</div>
 
-					{/* Repo filter status — only rendered while the "active only" filter is
-					    engaged (toggled from the Projects header). Keeps it unmistakable that
+					{/* Repo filter status — only rendered while the "active only" filter
+					    or the "Live agents" layout is engaged. Keeps it unmistakable that
 					    repos are hidden, so nobody panics, while taking zero space at rest. */}
-					<Show when={hasVisibleRepos() && uiStore.state.repoFilterActiveOnly}>
+					<Show when={hasVisibleRepos() && (uiStore.state.repoFilterActiveOnly || uiStore.state.repoFilterHarnessOnly)}>
 						<button
 							type="button"
 							class={s.filterStatus}
-							onClick={() => uiStore.setRepoFilterActiveOnly(false)}
+							data-testid="sidebar-filter-status"
+							onClick={clearRepoFilters}
 							title={t("sidebar.filterShowAll", "Show all")}
 						>
 							<IconFunnel size={13} />
 							<span>
-								{t("sidebar.filterActiveOnly", "Active only")} · {shownRepoCount()}/{totalRepoCount()}
+								{uiStore.state.repoFilterHarnessOnly
+									? t("sidebar.filterLiveAgents", "Live agents only")
+									: t("sidebar.filterActiveOnly", "Active only")}{" "}
+								· {shownRepoCount()}/{totalRepoCount()}
 							</span>
 							<span class={s.filterStatusClear}>{t("sidebar.filterShowAll", "Show all")}</span>
 						</button>
@@ -700,17 +706,19 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 									<p>
 										{uiStore.state.repoSearchQuery
 											? t("sidebar.noSearchMatches", "No projects match your search")
-											: uiStore.state.repoFilterActiveOnly
-												? t("sidebar.noActiveRepos", "No repositories with open terminals")
-												: t("sidebar.emptyWorkspace", "This workspace is empty")}
+											: uiStore.state.repoFilterHarnessOnly
+												? t("sidebar.noLiveAgents", "No live agent sessions")
+												: uiStore.state.repoFilterActiveOnly
+													? t("sidebar.noActiveRepos", "No repositories with open terminals")
+													: t("sidebar.emptyWorkspace", "This workspace is empty")}
 									</p>
 									<Show when={uiStore.state.repoSearchQuery}>
 										<button type="button" onClick={() => uiStore.setRepoSearchQuery("")}>
 											{t("sidebar.clearSearch", "Clear search")}
 										</button>
 									</Show>
-									<Show when={uiStore.state.repoFilterActiveOnly}>
-										<button type="button" onClick={() => uiStore.setRepoFilterActiveOnly(false)}>
+									<Show when={uiStore.state.repoFilterActiveOnly || uiStore.state.repoFilterHarnessOnly}>
+										<button type="button" onClick={clearRepoFilters}>
 											{t("sidebar.filterShowAll", "Show all")}
 										</button>
 									</Show>
@@ -806,8 +814,9 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 							type="button"
 							class={s.footerAction}
 							onClick={(e) => workspaceMenu.open(e)}
-							aria-label={t("sidebar.workspacesAndSort", "Workspaces & sorting")}
-							title={t("sidebar.workspacesAndSort", "Workspaces & sorting")}
+							aria-label={t("sidebar.workspacesAndSort", "Workspaces, sorting & layout")}
+							title={t("sidebar.workspacesAndSort", "Workspaces, sorting & layout")}
+							data-testid="sidebar-view-menu"
 						>
 							<IconLayers size={16} />
 						</button>
@@ -991,7 +1000,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 					onClose={addRepoMenu.close}
 				/>
 
-				{/* Named-workspace/sort footer menu */}
+				{/* Named-workspace/sort/layout footer menu */}
 				<ContextMenu
 					items={workspaceMenuItems()}
 					x={workspaceMenu.position().x}

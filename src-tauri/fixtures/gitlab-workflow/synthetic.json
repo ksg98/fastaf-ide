@@ -1,0 +1,83 @@
+{
+  "provenance": "Written for FastAF from the public GitLab REST API v4 reference (issues, merge requests, pipelines). Every value is synthetic: this is not a capture of a GitLab server and nothing here comes from the upstream plugins repository, which FastAF does not vendor. It proves response shape and the identity checks only.",
+  "issue": {
+    "id": 1,
+    "iid": 1,
+    "project_id": 1,
+    "title": "Export drops the last row",
+    "description": "Synthetic issue body.",
+    "state": "opened",
+    "created_at": "2026-11-27T10:00:00.000Z",
+    "updated_at": "2026-11-27T10:00:00.000Z",
+    "closed_at": null,
+    "labels": [
+      "bug"
+    ],
+    "author": {
+      "id": 1,
+      "username": "fixture-user",
+      "name": "Fixture User",
+      "state": "active",
+      "web_url": "https://gitlab.example.invalid/fixture-user"
+    },
+    "assignees": [],
+    "confidential": false,
+    "web_url": "https://gitlab.example.invalid/fastaf/fixture/-/issues/1"
+  },
+  "mr": {
+    "id": 1,
+    "iid": 1,
+    "project_id": 1,
+    "title": "Keep the last row in exports",
+    "description": "Synthetic merge request body.",
+    "state": "opened",
+    "created_at": "2026-11-27T10:02:00.000Z",
+    "updated_at": "2026-11-27T10:06:00.000Z",
+    "target_branch": "main",
+    "source_branch": "fix-export",
+    "source_project_id": 1,
+    "target_project_id": 1,
+    "author": {
+      "id": 1,
+      "username": "fixture-user",
+      "name": "Fixture User",
+      "state": "active",
+      "web_url": "https://gitlab.example.invalid/fixture-user"
+    },
+    "draft": false,
+    "merge_status": "can_be_merged",
+    "sha": "7c3f1e9a4b2d8065f1a3c9e7b5d2046a8f0c1e3b",
+    "diff_refs": {
+      "base_sha": "2a9d4c6e8f01b3572c4e6a8b0d1f3e5a7c9b2d40",
+      "head_sha": "7c3f1e9a4b2d8065f1a3c9e7b5d2046a8f0c1e3b",
+      "start_sha": "2a9d4c6e8f01b3572c4e6a8b0d1f3e5a7c9b2d40"
+    },
+    "head_pipeline": {
+      "id": 1,
+      "iid": 1,
+      "project_id": 1,
+      "sha": "7c3f1e9a4b2d8065f1a3c9e7b5d2046a8f0c1e3b",
+      "ref": "refs/merge-requests/1/head",
+      "status": "failed",
+      "source": "merge_request_event",
+      "created_at": "2026-11-27T10:05:00.000Z",
+      "updated_at": "2026-11-27T10:06:00.000Z",
+      "web_url": "https://gitlab.example.invalid/fastaf/fixture/-/pipelines/1"
+    },
+    "web_url": "https://gitlab.example.invalid/fastaf/fixture/-/merge_requests/1"
+  },
+  "pipelines": [
+    {
+      "id": 1,
+      "iid": 1,
+      "project_id": 1,
+      "sha": "7c3f1e9a4b2d8065f1a3c9e7b5d2046a8f0c1e3b",
+      "ref": "refs/merge-requests/1/head",
+      "status": "failed",
+      "source": "merge_request_event",
+      "created_at": "2026-11-27T10:05:00.000Z",
+      "updated_at": "2026-11-27T10:06:00.000Z",
+      "web_url": "https://gitlab.example.invalid/fastaf/fixture/-/pipelines/1"
+    }
+  ]
+}

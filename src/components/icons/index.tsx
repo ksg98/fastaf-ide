@@ -209,6 +209,11 @@ export const IconTerminal = icon(() => (
 	</>
 ));
 
+/** Run a command (the "Open in" menu's Run entry). */
+export const IconPlay = icon(() => (
+	<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" />
+));
+
 export const IconGrid = icon(() => (
 	<>
 		<rect width="7" height="7" x="3" y="3" rx="1.5" />
@@ -478,5 +483,59 @@ export const IconTextSearch = icon(() => (
 		<path d="M10 18H3" />
 		<circle cx="17" cy="15" r="3" />
 		<path d="m21 19-1.9-1.9" />
+	</>
+));
+
+// ── Chat message menu (AIChatPanel/MessageMenu) ──────────────────────────
+
+/** Quote a message into the composer. */
+export const IconQuote = icon(() => (
+	<>
+		<path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+		<path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+	</>
+));
+
+/** Continue from a message in a new conversation. */
+export const IconFork = icon(() => (
+	<>
+		<circle cx="12" cy="18" r="3" />
+		<circle cx="6" cy="6" r="3" />
+		<circle cx="18" cy="6" r="3" />
+		<path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" />
+		<path d="M12 12v3" />
+	</>
+));
+
+export const IconThumbsUp = icon(() => (
+	<>
+		<path d="M7 10v12" />
+		<path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
+	</>
+));
+
+export const IconThumbsDown = icon(() => (
+	<>
+		<path d="M17 14V2" />
+		<path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z" />
+	</>
+));
+
+export const IconHeart = icon(() => (
+	<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
+));
+
+/** The "celebrate" reaction. */
+export const IconPartyPopper = icon(() => (
+	<>
+		<path d="M5.8 11.3 2 22l10.7-3.79" />
+		<path d="M4 3h.01" />
+		<path d="M22 8h.01" />
+		<path d="M15 2h.01" />
+		<path d="M22 20h.01" />
+		<path d="m22 2-2.24.75a2.9 2.9 0 0 0-1.96 3.12c.1.86-.57 1.63-1.45 1.63h-.38c-.86 0-1.6.6-1.76 1.44L14 10" />
+		<path d="m22 13-.82-.33c-.86-.34-1.82.2-1.98 1.11c-.11.7-.72 1.22-1.43 1.22H17" />
+		<path d="m11 2 .33.82c.34.86-.2 1.82-1.11 1.98C9.52 4.9 9 5.52 9 6.23V7" />
+		<path d="M11 13c1.93 1.93 2.83 4.17 2 5-.83.83-3.07-.07-5-2-1.93-1.93-2.83-4.17-2-5 .83-.83 3.07.07 5 2Z" />
 	</>
 ));

@@ -1,6 +1,7 @@
 //! Shared instance namespaces and HTTP framing, independent of sync/async I/O.
 
 pub mod app_instance;
+pub mod hook_clock;
 pub mod http;
 
 /// Backend deadlines shared with the CLI and stdio bridge.
@@ -28,6 +29,35 @@ pub fn socket_path(instance: &AppInstance, config_dir: &Path, temp_dir: &Path) -
         Some(id) => named_socket_path(id, temp_dir),
         None => config_dir.join("mcp.sock"),
     }
+}
+
+/// File in a named instance's config directory that names the socket the app bound.
+///
+/// A named socket lives in the app's TMPDIR, and a client in another shell can
+/// have a different one (`make agent-test` gives its app a private TMPDIR). The
+/// config directory is the base that both sides compute the same way.
+pub const SOCKET_POINTER_FILE: &str = "mcp-socket";
+
+/// Record `socket` as the endpoint of the instance that owns `config_dir`.
+pub fn publish_socket_path(config_dir: &Path, socket: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(config_dir)?;
+    let staged = config_dir.join(format!(".{SOCKET_POINTER_FILE}.{}", std::process::id()));
+    std::fs::write(&staged, socket.as_os_str().as_encoded_bytes())?;
+    std::fs::rename(&staged, config_dir.join(SOCKET_POINTER_FILE))
+}
+
+/// The socket a client should try for `instance`: the one the app published
+/// in its config directory when that socket exists, else [`socket_path`].
+pub fn client_socket_path(instance: &AppInstance, config_dir: &Path, temp_dir: &Path) -> PathBuf {
+    if instance.named_id().is_some()
+        && let Ok(published) = std::fs::read_to_string(config_dir.join(SOCKET_POINTER_FILE))
+    {
+        let published = PathBuf::from(published);
+        if published.is_absolute() && published.exists() {
+            return published;
+        }
+    }
+    socket_path(instance, config_dir, temp_dir)
 }
 
 /// Preserve the deployed short socket name (first eight SHA-256 bytes).
@@ -78,7 +108,39 @@ pub fn check_unix_socket_path(path: &Path) -> Result<(), String> {
     ))
 }
 
-/// Windows IPC endpoint. Kept identical to the server's existing pipe contract.
+/// The name FastAF's MCP server carries: `serverInfo.name`, and the key it is
+/// installed under in every agent's MCP configuration. Clients derive tool
+/// names from that key, so Claude Code shows `mcp__fastaf__<tool>`.
+pub const MCP_SERVER_NAME: &str = "fastaf";
+
+/// The server's name before the rename, and the name upstream TUICommander
+/// still uses. Readers accept it so old configurations, sessions and
+/// transcripts keep working; nothing writes it.
+pub const LEGACY_MCP_SERVER_NAME: &str = "tuicommander";
+
+/// Text every FastAF-built `tuic-bridge` carries in its bytes and upstream
+/// TUICommander's bridge does not (that one says "TUICommander MCP is
+/// unavailable"). It has been in the bridge since FastAF 1.6.4.
+///
+/// The app reads it to tell whether an old `tuicommander` entry in an agent's
+/// configuration runs one of FastAF's own bridges, and may be renamed, or
+/// another install's, and must be left alone. A path cannot answer that: both
+/// apps publish bridges into the same `mcp-bridge/<sha256>/` store, and each
+/// release has a new path. Rewording it breaks that migration for binaries
+/// built afterwards, which `tuic-bridge`'s tests guard.
+pub const BRIDGE_FAMILY_MARKER: &str = "FastAF MCP is unavailable";
+
+/// Windows IPC endpoint of the default instance. Kept identical to the
+/// server's existing pipe contract.
 pub const PIPE_NAME: &str = r"\\.\pipe\tuicommander-mcp";
+
+/// Resolve the server's Windows pipe. A named instance appends its id, so an
+/// isolated instance never shares the default instance's pipe.
+pub fn pipe_name(instance: &AppInstance) -> String {
+    match instance.named_id() {
+        Some(id) => format!("{PIPE_NAME}-{id}"),
+        None => PIPE_NAME.to_string(),
+    }
+}
 
 pub mod review_agents;

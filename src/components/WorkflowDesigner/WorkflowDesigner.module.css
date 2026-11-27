@@ -1,7 +1,8 @@
-/* Workflow designer — the Designer view inside Plans and Stories. It sits on
-   the dialog's own surface: a 40px bar, drafts and the node palette on the
-   left, the canvas as a recessed well, the inspector on the right, columns
-   split by one hairline. Sentence-case 12px/600 section labels. */
+/* Workflow designer — the body of the Workflows dialog. It sits on the dialog's
+   own surface (STYLE_GUIDE › Menus, popovers, dialogs): one bar with the views
+   as pills and the open draft's actions, then list | steps | open step, split
+   by one hairline each. Rows light with --wash-0 and --row-active, section
+   labels are sentence case 12px/600, JSON sits in recessed wells. */
 
 .designer {
   display: flex;
@@ -11,82 +12,245 @@
   color: var(--fg-primary);
 }
 
-.header {
+.hidden {
+  display: none;
+}
+
+/* ── Bar: views, then the draft's state and actions ─────────────────── */
+
+.bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   flex-shrink: 0;
-  height: 44px;
-  padding: 0 10px 0 16px;
+  min-height: 44px;
+  padding: 0 10px;
   border-bottom: var(--hairline-w) solid var(--hairline);
 }
 
-.header h3 {
-  margin: 0;
-  font-size: var(--font-md);
-  font-weight: 600;
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
-.canvasTitle small,
-.muted {
+/* Pills: muted at rest, --row-selected behind the open one, no ring. */
+.tab {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--font-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.tab:hover {
+  background: var(--wash-0);
+  color: var(--fg-secondary);
+}
+
+.tab[aria-selected="true"] {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.toolbar > button {
+  flex-shrink: 0;
+}
+
+.toolbar.hidden {
+  display: none;
+}
+
+/* Where the draft stands: one muted line that gives way before the buttons. */
+.status {
+  min-width: 0;
+  margin: 0 6px 0 0;
+  overflow: hidden;
   color: var(--fg-muted);
   font-size: var(--font-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.iconBtn {
+  composes: iconBtn from "../shared/controls.module.css";
+  flex-shrink: 0;
 }
 
+/* ── What went wrong, under the bar ─────────────────────────────────── */
+
+.banner {
+  flex-shrink: 0;
+  max-height: 120px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.error {
+  margin: 0;
+  padding: 6px 16px;
+  color: var(--error);
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.banner .error + .error {
+  padding-top: 0;
+}
+
+/* ── Designer: list | steps | open step ─────────────────────────────── */
+
+/* The body is a fieldset, so one `disabled` covers every control while a call
+   is in flight: drop the frame a fieldset draws and let it shrink. */
 .body {
   display: grid;
-  grid-template-columns: minmax(170px, 21%) minmax(0, 1fr) minmax(200px, 24%);
+  grid-template-columns: minmax(200px, 23%) minmax(0, 1fr) minmax(280px, 32%);
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.body.hidden {
+  display: none;
 }
 
 .sidebar,
 .canvas,
 .inspector {
   min-width: 0;
-  overflow: auto;
+  overflow-y: auto;
 }
 
 .sidebar {
-  padding: 12px 6px;
+  padding: 12px 6px 14px;
   border-right: var(--hairline-w) solid var(--hairline);
 }
 
-.inspector {
-  padding: 12px 14px;
-  border-left: var(--hairline-w) solid var(--hairline);
-}
-
-.sidebar h4,
-.inspector h4 {
-  margin: 0 0 8px;
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  font-weight: 600;
-}
-
-.sidebar h4 {
+/* The name sits in the rows' text column: 8px in from the row edge. */
+.sidebar > .field {
   padding: 0 8px;
 }
 
-.sidebar h4:not(:first-child) {
-  margin-top: 20px;
+.canvas {
+  padding: 0 6px 14px;
 }
 
-/* A draft is a row: name, then kind and revisions; open --row-active. */
-button.draft[data-control-layout="row"] {
+.inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 12px 16px 24px;
+  border-left: var(--hairline-w) solid var(--hairline);
+}
+
+/* A column's header: the label, then its actions as 28px controls. */
+.columnHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 2px 0 8px;
+}
+
+.columnHeader h4,
+.sectionHead h4 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.headerButtons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* A group inside the list column: label left, its one action right. */
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  margin-top: 10px;
+  padding: 0 2px 0 8px;
+}
+
+/* "Add step" is a menu dressed as a quiet button: it always reads the same. */
+.designer .columnHeader select.addStep[data-form-control] {
+  flex: 0 0 auto;
+  width: auto;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--fg-secondary);
+  font-weight: 500;
+}
+
+.designer .columnHeader select.addStep[data-form-control]:hover:enabled {
+  background: var(--wash-0);
+  color: var(--fg-primary);
+}
+
+/* ── Rows ───────────────────────────────────────────────────────────── */
+
+.rows {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* A row: its name, then muted context at the right end. Hover --wash-0, the
+   open one --row-active. */
+button.row[data-control-layout="row"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  flex-shrink: 0;
   width: 100%;
-  padding: 6px 8px;
+  min-height: 30px;
+  padding: 5px 8px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -98,195 +262,540 @@ button.draft[data-control-layout="row"] {
   transition: background var(--duration-fast) var(--ease-out);
 }
 
-button.draft[data-control-layout="row"] strong {
-  font-weight: 500;
-}
-
-button.draft[data-control-layout="row"]:hover {
+button.row[data-control-layout="row"]:hover:enabled {
   background: var(--wash-0);
 }
 
-button.draft[data-control-layout="row"][aria-current="true"] {
+button.row[data-control-layout="row"][aria-current="true"] {
   background: var(--row-active);
 }
 
-.draft small {
-  color: var(--fg-muted);
-  font-size: var(--font-sm);
+button.row[data-control-layout="row"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
-/* The palette: quiet add-rows, not a wall of raised buttons. */
-.palette {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px;
-}
-
-.palette button {
-  justify-content: flex-start;
-  border-color: transparent;
-  background: transparent;
-  color: var(--fg-secondary);
-  font-weight: 400;
-  text-align: left;
-}
-
-.palette button:hover:enabled {
-  border-color: transparent;
-  background: var(--wash-0);
-  color: var(--fg-primary);
-}
-
-/* The canvas is a recessed well; nodes sit on it as quiet cards. */
-.canvas {
-  padding: 14px 16px;
-  background: var(--bg-primary);
-}
-
-.canvasTitle {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  color: var(--fg-secondary);
-  font-size: var(--font-md);
-  font-weight: 500;
-}
-
-.graph {
-  display: flex;
-  align-items: flex-start;
-  gap: 24px;
-  min-width: min-content;
-  margin-top: 32px;
-  padding-bottom: 20px;
-}
-
-.nodeColumn {
-  flex: 0 0 132px;
-  width: 132px;
-}
-
-button.node[data-control-layout="card"] {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  min-height: 72px;
-  padding: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--wash-0);
-  color: var(--fg-primary);
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
-}
-
-button.node[data-control-layout="card"]:hover {
-  background: var(--wash-1);
-}
-
-/* Selected: the --row-selected fill and a stronger hairline, no ring. */
-button.node[data-control-layout="card"][aria-pressed="true"] {
-  border-color: var(--border-strong);
-  background: var(--row-selected);
-}
-
-.node strong {
-  font: 500 var(--font-sm) var(--font-mono);
-  overflow-wrap: anywhere;
-}
-
-.nodeType {
-  color: var(--fg-muted);
-  font-size: var(--font-sm);
-}
-
-.nodeType::first-letter {
-  text-transform: uppercase;
-}
-
-.links {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 2px;
-  color: var(--fg-muted);
-  font: var(--font-xs) var(--font-mono);
-  overflow-wrap: anywhere;
-}
-
-.nodeName {
-  margin: 0;
-  font: 500 var(--font-md) var(--font-mono);
-}
-
-.inspector .muted {
-  margin: 2px 0 0;
-}
-
-.inspector label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 14px 0;
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-}
-
-.inspector select,
-.inspector textarea,
-.inspector input {
-  width: 100%;
-}
-
-.inspector button {
-  width: 100%;
-  margin-top: 8px;
-}
-
-.error,
-.notice {
-  margin: 0;
-  padding: 8px 16px;
-  font-size: var(--font-sm);
-}
-
-.error {
-  background: color-mix(in srgb, var(--error) 12%, transparent);
-  color: var(--error);
-}
-
-.notice {
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-  color: var(--success);
-}
-
-.draft:focus-visible,
-.node:focus-visible {
+button.row[data-control-layout="row"]:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-@media (max-width: 760px) {
+.rowIcon {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.rowName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rowMeta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.empty {
+  margin: 0;
+  padding: 4px 8px 6px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+}
+
+/* ── Blocks, fields and labels ──────────────────────────────────────── */
+
+/* A run of fields; blocks stack with more air than their own fields. */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.blockTitle h4 {
+  margin: 0;
+  font-size: var(--font-base);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--font-base);
+  font-weight: 600;
+}
+
+/* Section label: sentence case, 12px/600, no tracking. */
+.label {
+  margin: 4px 0 -4px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.muted {
+  margin: 2px 0 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.purpose {
+  margin: 0;
+  color: var(--fg-secondary);
+  line-height: 1.45;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.designer :is(input, select, textarea)[data-form-control] {
+  width: 100%;
+}
+
+/* A field's name, its type in muted text, then its one small action. */
+.fieldHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  min-width: 0;
+}
+
+.fieldHead > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fieldType {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.resetBtn {
+  composes: iconBtn from "../shared/controls.module.css";
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-md);
+}
+
+.fieldError {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+/* The fields a choice opens hang under it on one guide line, never in a box. */
+.subfields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+/* Two fields side by side. */
+.pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.inspector .pair {
+  grid-template-columns: minmax(0, 1fr) 84px;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* An outcome and where it leads, on one line. */
+.ports {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.port {
+  display: contents;
+}
+
+.portName {
+  overflow: hidden;
+  color: var(--fg-secondary);
+  font: var(--font-sm) var(--font-mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+}
+
+.chip {
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--fg-secondary);
+  font: var(--font-xs) var(--font-mono);
+  line-height: 18px;
+}
+
+/* name · type, as rows that line up. */
+.facts {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: var(--font-sm);
+}
+
+.facts dt {
+  overflow: hidden;
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--fg-muted);
+  text-align: right;
+}
+
+.plainList {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fg-primary);
+  line-height: 1.5;
+}
+
+/* Disclosures draw their own chevron, never the native triangle. */
+.disclosure {
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+}
+
+.disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  list-style: none;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 3px 1px 2px;
+  border-right: 1.5px solid var(--fg-muted);
+  border-bottom: 1.5px solid var(--fg-muted);
+  transform: rotate(-45deg);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.disclosure[open] > summary::before {
+  margin-bottom: 3px;
+  transform: rotate(45deg);
+}
+
+.disclosure > summary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+.disclosure > :not(summary) {
+  margin-top: 8px;
+}
+
+.disclosure > .label {
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+
+/* JSON, read only: a recessed well that scrolls on its own. */
+.code {
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--inset-well);
+  color: var(--fg-secondary);
+  font: var(--font-xs) / 1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.canvas > .code {
+  max-height: none;
+  margin: 0 2px;
+}
+
+/* JSON, editable. */
+.designer textarea.codeInput[data-form-control] {
+  min-height: 96px;
+  font: var(--font-sm) / 1.5 var(--font-mono);
+}
+
+.designer textarea.codeTall[data-form-control] {
+  flex: 1;
+  min-height: 320px;
+}
+
+/* A note about one thing in a list of results. */
+.note {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+.note p {
+  margin: 0;
+}
+
+/* ── The other views: one scrolling pane each ───────────────────────── */
+
+.pane {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 20px 24px;
+  overflow-y: auto;
+}
+
+/* Compound for every class a pane carries that sets `display`, so the hidden
+   view stays hidden whatever order the rules are emitted in. */
+.pane.hidden,
+.paneFlush.hidden {
+  display: none;
+}
+
+/* Triggers has its own columns and footer: no padding, no scroll of its own. */
+.paneFlush {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Two equal columns, one hairline between them. */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0 40px;
+  align-items: start;
+  min-height: 100%;
+}
+
+.split > .block {
+  min-height: 100%;
+}
+
+/* ── Triggers: saved bindings | the open one ────────────────────────── */
+
+.triggers {
+  display: grid;
+  grid-template-columns: minmax(200px, 23%) minmax(0, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.triggers > .sidebar {
+  padding-top: 0;
+}
+
+.binding {
+  display: flex;
+  flex-direction: column;
+}
+
+.stateDot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin: 0 5px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.stateDot[data-state="on"] {
+  background: var(--success);
+}
+
+.stateDot[data-state="held"] {
+  background: var(--warning);
+}
+
+/* Why a saved binding takes nothing in, under its row. */
+.refusal {
+  padding: 0 8px 6px 32px;
+  color: var(--warning);
+  font-size: var(--font-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.triggerForm {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.triggerScroll {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 12px 20px 20px;
+  overflow-y: auto;
+}
+
+.triggerScroll > .error {
+  margin: 0 -8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px 32px;
+  align-items: start;
+}
+
+.overlap {
+  margin: 0;
+  color: var(--fg-primary);
+  font: var(--font-sm) var(--font-mono);
+}
+
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+
+/* The binding's state and its two actions: a bar with one hairline above. */
+.footerBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  min-height: 48px;
+  padding: 0 14px 0 20px;
+  border-top: var(--hairline-w) solid var(--hairline);
+}
+
+/* The state line gives way; the two actions stay on one line. */
+.footerBar .status {
+  flex: 1 1 0;
+  margin: 0;
+}
+
+.footerBar .buttons {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Narrow ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .bar {
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding-bottom: 6px;
+  }
+
+  .tabs {
+    min-height: 44px;
+  }
+
+  /* The open step moves under the steps; the list column keeps its height. */
   .body {
-    grid-template-columns: 150px minmax(0, 1fr);
+    grid-template-columns: minmax(176px, 30%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .sidebar {
+    grid-row: 1 / -1;
   }
 
   .inspector {
-    grid-column: 1 / -1;
-    max-height: 210px;
     border-top: var(--hairline-w) solid var(--hairline);
     border-left: 0;
   }
 
-  .palette {
-    grid-template-columns: 1fr;
+  .split,
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px 0;
   }
 
-  .graph {
-    margin-top: 24px;
+  .split > .block {
+    min-height: 0;
+  }
+
+  .triggers {
+    grid-template-columns: minmax(176px, 30%) minmax(0, 1fr);
   }
 }

@@ -238,7 +238,7 @@ A **mobile companion PWA** lets you monitor agents from your phone, answer quest
 
 ### Automate repetitive workflows
 
-**29 built-in Smart Prompts** turn common tasks into one-click operations: Smart Commit, Review Changes, Create PR, Fix CI, and more. Context variables like branch, diff, and PR data are resolved automatically.
+**30 built-in Smart Prompts** turn common tasks into one-click operations: Smart Commit, Review Changes, Create PR, Fix CI, and more. Context variables like branch, diff, and PR data are resolved automatically.
 
 - Inject mode (PTY write), headless mode (subprocess), or shell script mode (direct execution)
 - 35 context variables auto-resolved from git, GitHub, terminal, and file context
@@ -248,7 +248,7 @@ A **mobile companion PWA** lets you monitor agents from your phone, answer quest
 
 Voice is the front door to FastAF, and all of it runs on your machine: speech-to-text, turn detection and the spoken reply. No cloud speech service and no API keys. Pair it with a local Ollama model and no data leaves your machine.
 
-- **Speech in:** whisper-rs, GPU-accelerated on macOS (Metal) and Windows (Vulkan), CPU on Linux (optional CUDA/Vulkan)
+- **Speech in:** whisper-rs, GPU-accelerated on macOS (Metal), Windows and Linux (Vulkan, CPU when no driver is present)
 - **Speech out:** Kokoro text-to-speech with selectable voices and speed
 - **Turn-taking:** Silero voice-activity detection, barge-in, echo cancellation, mute without hanging up
 - **Voice agent:** hands-free conversation with the AI agent, which drives your terminals ([Voice to action](#-voice-to-action))
@@ -342,7 +342,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 <details>
 <summary><strong>Productivity</strong> — Smart Prompts, palette, keybindings, dictation</summary>
 
-- Smart Prompts (`Cmd+Shift+K`): 29 built-in AI automation prompts with auto-resolved context variables
+- Smart Prompts (`Cmd+Shift+K`): 30 built-in AI automation prompts with auto-resolved context variables
 - Command palette (`Cmd+P`): fuzzy search all actions, files (`!`), file contents (`?`), terminal buffers (`~`)
 - Configurable keybindings with chord support and conflict detection
 - Claude Usage Dashboard: rate limits, 7-day chart, 52-week heatmap, per-project breakdown

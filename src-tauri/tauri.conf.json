@@ -99,12 +99,14 @@
     "linux": {
       "deb": {
         "depends": [
-          "libayatana-appindicator3-1"
+          "libayatana-appindicator3-1",
+          "libvulkan1"
         ]
       },
       "rpm": {
         "depends": [
-          "libayatana-appindicator-gtk3"
+          "libayatana-appindicator-gtk3",
+          "libvulkan.so.1()(64bit)"
         ]
       }
     }

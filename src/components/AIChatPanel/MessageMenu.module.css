@@ -1,0 +1,122 @@
+/* Per-message actions: one quiet trigger and a menu (ui/Dropdown).
+ *
+ * The trigger is invisible at rest. Its host reveals it while the message is
+ * hovered or holds focus (FastAFChatPanel.module.css, AIChatPanel.module.css);
+ * here it only stays up while its own menu is open, on keyboard focus, and on
+ * touch screens, which have no hover. Fallbacks after a token are for the
+ * mobile stylesheet, which does not define the desktop wash tokens. */
+.root {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.trigger,
+.reaction {
+  composes: iconBtn from "../shared/controls.module.css";
+}
+
+.root .trigger,
+.root .reaction {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-md);
+}
+
+.root .trigger {
+  color: var(--fg-muted);
+  opacity: 0;
+  transition: opacity var(--duration-fast, 120ms) var(--ease-out, ease-out),
+    background var(--duration-fast, 120ms) var(--ease-out, ease-out),
+    color var(--duration-fast, 120ms) var(--ease-out, ease-out);
+}
+
+.root .trigger:hover:not(:disabled) {
+  color: var(--fg-primary);
+}
+
+.root .trigger:focus-visible,
+.root[data-open] .trigger {
+  opacity: 1;
+}
+
+.root[data-open] .trigger {
+  color: var(--fg-primary);
+  background: var(--row-selected, color-mix(in srgb, currentColor 12%, transparent));
+}
+
+/* A reaction that was sent stays on its message: it is state, not chrome. */
+.root .reaction {
+  color: var(--fg-primary);
+  background: var(--row-selected, color-mix(in srgb, currentColor 12%, transparent));
+}
+
+.root .reaction:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.menu {
+  min-width: 200px;
+}
+
+.menu svg {
+  display: block;
+  color: var(--fg-secondary);
+}
+
+/* The comment draft (hosts with message actions): one tinted block under the
+   message, the field on top and its two actions at the right. */
+.comment {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-basis: 100%;
+  width: min(400px, calc(100vw - 64px));
+  max-width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  border-radius: var(--radius-lg);
+  background: var(--wash-0, color-mix(in srgb, currentColor 5%, transparent));
+}
+
+.commentHint {
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  line-height: 1.4;
+}
+
+.commentActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.note {
+  flex-basis: 100%;
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+}
+
+.noteError {
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+
+/* No hover on touch: the trigger stays visible, at a finger-sized target. */
+@media (hover: none) {
+  .root .trigger {
+    opacity: 1;
+  }
+}
+
+@media (pointer: coarse) {
+  .root .trigger,
+  .root .reaction {
+    width: 44px;
+    height: 44px;
+  }
+}

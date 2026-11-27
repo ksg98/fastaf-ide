@@ -1,7 +1,10 @@
+import "../fixtures/dialogActivityHydration";
 import { readFileSync } from "node:fs";
 import { cleanup, fireEvent, render } from "@solidjs/testing-library";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { StoriesDialog } from "../../components/StoriesDialog/StoriesDialog";
+import { storiesUi } from "../../stores/storiesUi";
+import { nativeBackendStatusReply } from "../fixtures/nativeBackendStatus";
 
 const plans = ["Alpha", "Beta"].map((title) => ({
 	id: title,
@@ -26,7 +29,12 @@ const stories = [1, 40].map((count, index) => ({
 }));
 vi.mock("../../invoke", () => ({
 	invoke: vi.fn().mockImplementation(async (command, args) => {
-		if (command === "story_capabilities") return true;
+		if (command === "story_capabilities") return { backend: "native", operations: {} };
+		if (
+			command === "story_action_command" &&
+			(args as { action?: { action?: string } })?.action?.action === "backend_status"
+		)
+			return nativeBackendStatusReply;
 		if (args.action.action === "transition_history") return { type: "transitions", value: [] };
 		if (args.action.action === "list_notes") return { type: "notes", value: [] };
 		if (args.action.action === "list_plans") return { type: "plans", value: plans };
@@ -41,9 +49,10 @@ vi.mock("../../components/WorkflowDesigner/WorkflowDesigner", () => ({
 	WorkflowDesigner: () => <div>Designer content</div>,
 }));
 
+beforeEach(() => storiesUi.setVisibility("all"));
 afterEach(cleanup);
 
-it("catches content-derived dialog height when switching between empty stories and Designer", async () => {
+it("catches content-derived dialog height when switching between empty stories and a story", async () => {
 	const sheet = document.createElement("style");
 	sheet.textContent = readFileSync("src/components/StoriesDialog/StoriesDialog.module.css", "utf8");
 	document.head.append(sheet);
@@ -60,10 +69,29 @@ it("catches content-derived dialog height when switching between empty stories a
 		expect(size()).toEqual(initial);
 		fireEvent.click(getByRole("button", { name: "Beta" }));
 		expect(size()).toEqual(initial);
-		fireEvent.click(getByRole("button", { name: "Designer" }));
-		expect(size()).toEqual(initial);
-		fireEvent.click(getByRole("button", { name: /^Stories$/ }));
-		expect(size()).toEqual(initial);
+	} finally {
+		sheet.remove();
+	}
+});
+
+// FastAF's list row keeps the picker at the right end of the story's own line
+// (upstream stacks it on a second, full-width line).
+it("keeps the phase selector at the end of its story row, whatever the title's length", async () => {
+	const sheet = document.createElement("style");
+	sheet.textContent = readFileSync("src/components/StoriesDialog/StoriesDialog.module.css", "utf8");
+	document.head.append(sheet);
+	try {
+		const { findByLabelText } = render(() => <StoriesDialog project="/sizing-fixture" onClose={() => {}} />);
+		const select = await findByLabelText(/Phase for Story 0/);
+		const phase = select.closest("label") as HTMLElement;
+		const row = phase.parentElement as HTMLElement;
+		const rowButton = row.querySelector("button") as HTMLElement;
+		// Happy DOM has no layout engine: a row that never wraps, a picker that never
+		// shrinks and a title that takes the rest keep the picker on the row's right end.
+		expect(getComputedStyle(row).display).toBe("flex");
+		expect(getComputedStyle(row).flexWrap).not.toBe("wrap");
+		expect(getComputedStyle(phase).flexShrink).toBe("0");
+		expect(getComputedStyle(rowButton).flexGrow).toBe("1");
 	} finally {
 		sheet.remove();
 	}

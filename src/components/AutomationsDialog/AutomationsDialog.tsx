@@ -1,6 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { t } from "../../i18n";
-import { appLogger } from "../../stores/appLogger";
 import { automationsUi, createAutomationsStore } from "../../stores/automations";
 import { registerModal } from "../../stores/modalStack";
 import { IconClose, IconRefresh } from "../icons";
@@ -20,16 +19,6 @@ export function AutomationsDialog(props: { onClose: () => void; adapter?: Automa
 	const [focusProfile, setFocusProfile] = createSignal(false);
 	const [tab, setTab] = createSignal("definitions");
 	const [search, setSearch] = createSignal("");
-	const preferenceKey = "tuic-automations-select-first";
-	const [selectFirst, setSelectFirst] = createSignal(
-		(() => {
-			try {
-				return localStorage.getItem(preferenceKey) !== "false";
-			} catch {
-				return true;
-			}
-		})(),
-	);
 	const [confirmDelete, setConfirmDelete] = createSignal(false);
 	let panel: HTMLDivElement | undefined, searchInput: HTMLInputElement | undefined;
 	const priorFocus = document.activeElement;
@@ -39,7 +28,6 @@ export function AutomationsDialog(props: { onClose: () => void; adapter?: Automa
 		void store.refresh().then(() => {
 			const first = store.items()[0];
 			if (
-				selectFirst() &&
 				first &&
 				!store.draft() &&
 				!focusProfile() &&
@@ -135,7 +123,7 @@ export function AutomationsDialog(props: { onClose: () => void; adapter?: Automa
 					</div>
 				</Show>
 				{/* One bar under the header: the tabs where a panel puts its title, then the
-				    list's tools (search, the open preference, refresh, new) on the same row. */}
+				    list's tools (search, refresh, new) on the same row. */}
 				<div class={s.bar}>
 					<DialogTabs
 						selected={tab()}
@@ -156,22 +144,6 @@ export function AutomationsDialog(props: { onClose: () => void; adapter?: Automa
 								value={search()}
 								onInput={setSearch}
 							/>
-							<label class={s.check}>
-								<input
-									type="checkbox"
-									checked={selectFirst()}
-									onChange={(event) => {
-										const value = event.currentTarget.checked;
-										setSelectFirst(value);
-										try {
-											localStorage.setItem(preferenceKey, String(value));
-										} catch (error) {
-											appLogger.warn("settings", "Could not save automation selection preference", error);
-										}
-									}}
-								/>
-								{t("automations.selectFirst", "Select first automation on open")}
-							</label>
 							<button
 								type="button"
 								class={s.iconBtn}
@@ -182,7 +154,14 @@ export function AutomationsDialog(props: { onClose: () => void; adapter?: Automa
 							>
 								<IconRefresh size={16} />
 							</button>
-							<Button type="button" disabled={store.busy()} onClick={() => store.create()}>
+							<Button
+								type="button"
+								disabled={store.busy()}
+								onClick={() => {
+									store.create();
+									void store.preview();
+								}}
+							>
 								{t("automations.new", "New automation")}
 							</Button>
 						</div>

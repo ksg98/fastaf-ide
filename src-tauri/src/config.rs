@@ -137,7 +137,7 @@ mod dictation_config {
         #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates speech levelling for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
         #[schemars(range(min = 0.0, max = 1.0))]
         pub speech_levelling: f32,
-        /// Minutes without any transcription (default 20, Boss 2026-09-30) before the Whisper model is
+        /// Minutes without any transcription (default 20) before the Whisper model is
         /// released from memory (it holds ~1.5 GiB for large-v3-turbo). The next
         /// dictation reloads it lazily (~0.5 s). 0 keeps it loaded for the life
         /// of the process. No UI control.
@@ -930,6 +930,11 @@ pub(crate) struct PushConfig {
     #[serde(default = "default_vapid_subject")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"service_restart","effect":"Reconfigures the owning service after persistence; a failed apply must report recovery.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
     pub(crate) vapid_subject: String,
+    /// Push service hosts the owner added beyond the built-in providers. An endpoint
+    /// host matches an entry exactly or as a subdomain. HTTPS is always required.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Allows browser push subscriptions to these push service hosts; removing a host stops delivery to its subscriptions.","operations":["get","set"],"confirmationClass":"network_exposure"}))]
+    pub(crate) added_providers: Vec<String>,
 }
 
 impl Default for PushConfig {
@@ -940,6 +945,7 @@ impl Default for PushConfig {
             vapid_private_key_exists: false,
             vapid_public_key: String::new(),
             vapid_subject: default_vapid_subject(),
+            added_providers: Vec::new(),
         }
     }
 }
@@ -1006,10 +1012,20 @@ pub(crate) struct AppConfig {
     #[serde(default)]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Allows MCP agents to write work items.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
     pub(crate) mcp_work_item_writes: bool,
+    /// URL patterns every `net:http` plugin may reach without an account,
+    /// localhost and LAN included (#2659-b083). Same syntax as a manifest
+    /// `allowedUrls` entry. Account requests keep the account host rule.
+    #[serde(default)]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Lets every net:http plugin reach these URLs without an account, LAN included.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
+    pub(crate) plugin_http_destinations: Vec<String>,
     /// Record and show body-free outcomes of MCP tools/call requests. Default on in debug builds only.
     #[serde(default = "default_mcp_call_audit_enabled")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Starts or stops recording MCP call outcomes and showing them in Settings.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) mcp_call_audit_enabled: bool,
+    /// Keep a persistent daily count of MCP calls per role and tool (no arguments or bodies). Default on.
+    #[serde(default = "default_true")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Starts or stops the persistent daily MCP usage counts.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) mcp_usage_rollup_enabled: bool,
     /// Fixed port for MCP server (0 = OS-assigned)
     #[serde(default = "default_mcp_port")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates mcp port for the current owner.","operations":["get","set"],"confirmationClass":"execution_authority"}))]
@@ -1059,6 +1075,10 @@ pub(crate) struct AppConfig {
     #[serde(default)]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates ai chat launches for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) ai_chat_launches: HashMap<String, crate::acp_chat::ChatLaunch>,
+    /// Accepted conversational marks, indexed by conversation and native message ID.
+    #[serde(default)]
+    #[schemars(extend("x-not-setting" = "Conversation marks; changed through the message action API."))]
+    pub(crate) ai_chat_message_reactions: HashMap<String, HashMap<String, Vec<String>>>,
     /// Default font size for new terminals
     #[serde(default = "default_font_size")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
@@ -1435,13 +1455,10 @@ fn default_index_strategy() -> String {
     "active_and_switch".to_string()
 }
 
-/// 1 GB. Measured on this workload: an ordinary repo indexes to 60-100 MB, so
-/// this holds 10-15 of them resident and only starts evicting for an outlier —
-/// a 645 MB working tree indexed to 1.9 GB on its own. Set low enough to bound
-/// the process well under the 4 GB memory tripwire in `cpu_watchdog`, high
-/// enough that a normal day of switching repos never pays for a rebuild.
+/// Keep a smaller set of content indices resident. Evicted indices reload from
+/// snapshots on their next use. Saved budgets are not changed.
 fn default_index_memory_budget_mb() -> usize {
-    1024
+    256
 }
 
 fn default_standby_timeout() -> u16 {
@@ -1516,7 +1533,9 @@ impl Default for AppConfig {
             theme: "codex-dark".to_string(),
             mcp_server_enabled: true,
             mcp_work_item_writes: false,
+            plugin_http_destinations: Vec::new(),
             mcp_call_audit_enabled: default_mcp_call_audit_enabled(),
+            mcp_usage_rollup_enabled: true,
             mcp_port: default_mcp_port(),
             mcp_config_installed: false,
             ide: String::new(),
@@ -1527,6 +1546,7 @@ impl Default for AppConfig {
             ai_chat_sessions: HashMap::new(),
             ai_chat_peer_ids: HashMap::new(),
             ai_chat_launches: HashMap::new(),
+            ai_chat_message_reactions: HashMap::new(),
             default_font_size: 13,
             attachment_max_bytes: default_attachment_max_bytes(),
             attachment_retention_days: default_attachment_retention_days(),
@@ -1734,10 +1754,10 @@ pub(crate) struct UIPrefsConfig {
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates file browser view mode for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     #[schemars(extend("enum" = ["flat","tree"]))]
     pub(crate) file_browser_view_mode: String,
-    /// Sidebar layout: "auto" (rich for a short list or a finger), "compact" or "rich".
+    /// Sidebar layout: "compact", "rich" or "harness" (rich rows, only branches with a live agent). "auto" is kept for configs saved by older builds.
     #[serde(default = "default_sidebar_density")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates sidebar density for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
-    #[schemars(extend("enum" = ["auto","compact","rich"]))]
+    #[schemars(extend("enum" = ["auto","compact","rich","harness"]))]
     pub(crate) sidebar_density: String,
     /// Appearance used by the mobile PWA; independent of the desktop terminal theme.
     #[serde(default = "default_mobile_theme")]
@@ -1795,8 +1815,8 @@ fn default_file_browser_view_mode() -> String {
     "tree".to_string()
 }
 
-/// Compact by default (FastAF): `auto` switches a short repo list to the rich
-/// layout, which is not FastAF's Codex-style sidebar. Still user-selectable.
+/// Compact by default (FastAF): the rich layout is not FastAF's Codex-style
+/// sidebar. Still user-selectable.
 fn default_sidebar_density() -> String {
     "compact".to_string()
 }
@@ -2427,6 +2447,10 @@ pub(crate) struct AgentsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Updates headless agent for the current owner.","operations":["get","set"],"confirmationClass":"ordinary"}))]
     pub(crate) headless_agent: Option<String>,
+    /// Name of the run configuration that workflow Agent steps launch with, chosen in Settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"live","effect":"Selects the run configuration that workflow Agent steps launch with.","operations":["get","set"],"confirmationClass":"ordinary"}))]
+    pub(crate) workflow_profile: Option<String>,
     /// User additions appended after generated modules for every agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-setting" = {"sensitivity":"public","apply":"next_session","effect":"Used when the next session or process starts; existing sessions retain their launch configuration.","operations":["get","set"],"confirmationClass":"ordinary"}))]
@@ -2507,6 +2531,7 @@ impl Default for AgentsConfig {
             launch_additions_migrated: false,
             agents: HashMap::new(),
             headless_agent: None,
+            workflow_profile: None,
             launch_instructions: None,
             launch_modules: HashMap::new(),
             launch_instructions_disabled: false,
@@ -3227,6 +3252,42 @@ where
         Ok(result)
     }
 
+    /// One-time rewrite of the raw document, under both locks, for keys the typed
+    /// schema no longer accepts. When `mutate` changes it, the original bytes are
+    /// first copied to `<file>.<backup_suffix>` (an existing copy is kept).
+    pub(crate) fn rewrite_raw_with_backup<F>(
+        &self,
+        backup_suffix: &str,
+        mutate: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce(&mut serde_json::Value) -> bool,
+    {
+        let _guard = CONFIG_WRITE_LOCK.lock();
+        let _file_lock = self.acquire_file_lock()?;
+        let content = match std::fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("Could not read {}: {error}", self.path.display())),
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return Ok(false);
+        };
+        if !mutate(&mut value) {
+            return Ok(false);
+        }
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".");
+        name.push(backup_suffix);
+        let backup = self.path.with_file_name(name);
+        if !backup.exists() {
+            persist_atomic(&backup, content.as_bytes())?;
+        }
+        let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+        persist_atomic(&self.path, &bytes)?;
+        Ok(true)
+    }
+
     /// Read authoritative safety state without quarantining malformed input. Repeated
     /// ownership checks must not turn the first read error into an empty default.
     pub(crate) fn read_preserving_invalid(&self) -> Result<T, String> {
@@ -3313,7 +3374,7 @@ where
 /// Side effects the caller must action after a successful config write.
 #[derive(Debug)]
 pub(crate) struct ConfigSaveEffects {
-    /// `disabled_native_tools` or `collapse_tools` moved — notify MCP clients.
+    /// The settings opt-in, `mcp_capabilities` or `collapse_tools` moved — notify MCP clients.
     pub tools_changed: bool,
     /// A listener-affecting field moved — rebind the HTTP server.
     pub server_changed: bool,
@@ -3341,7 +3402,7 @@ where
     let guard = config_write_lock();
     let cached = state.config.read().clone();
     let requested = mutate(&cached)?;
-    commit_config_change_locked(state, &guard, cached.clone(), cached, requested)
+    commit_config_change_locked(state, &guard, cached.clone(), cached, requested, false)
 }
 
 /// Save an interactive client's edit relative to the snapshot it loaded.
@@ -3352,7 +3413,23 @@ pub(crate) fn commit_config_save(
 ) -> Result<ConfigSaveEffects, String> {
     let guard = config_write_lock();
     let cached = state.config.read().clone();
-    commit_config_change_locked(state, &guard, cached, base, requested)
+    commit_config_change_locked(state, &guard, cached, base, requested, false)
+}
+
+/// Error text of a save refused because it changes an owner-confirmed setting.
+pub(crate) const CONFIRMATION_REQUIRED: &str = "confirmation_required";
+
+/// `commit_config_save` for a writer that bypasses the settings facade (`PUT /config`).
+/// Refuses, before anything is written, any change to a setting the facade gates on
+/// owner confirmation; those go through the facade's proposal/approval flow.
+pub(crate) fn commit_config_save_unconfirmed(
+    state: &crate::AppState,
+    base: AppConfig,
+    requested: AppConfig,
+) -> Result<ConfigSaveEffects, String> {
+    let guard = config_write_lock();
+    let cached = state.config.read().clone();
+    commit_config_change_locked(state, &guard, cached, base, requested, true)
 }
 
 fn commit_config_change_locked(
@@ -3361,6 +3438,7 @@ fn commit_config_change_locked(
     cached: AppConfig,
     mut base: AppConfig,
     mut requested: AppConfig,
+    refuse_owner_confirmed: bool,
 ) -> Result<ConfigSaveEffects, String> {
     preserve_redacted_app_config_secrets(&mut base, &cached);
     preserve_redacted_app_config_secrets(&mut requested, &cached);
@@ -3378,9 +3456,15 @@ fn commit_config_change_locked(
         .map_err(|e| format!("Could not serialize current config: {e}"))?;
     let mut next_json = previous_json.clone();
     apply_json_merge_delta(&mut next_json, &delta);
+    if refuse_owner_confirmed
+        && crate::settings::policy::app_config_requires_confirmation(&previous_json, &next_json)
+    {
+        return Err(CONFIRMATION_REQUIRED.to_owned());
+    }
     let settings_changed = next_json != previous_json;
     let mut next: AppConfig =
         serde_json::from_value(next_json).map_err(|e| format!("Invalid config: {e}"))?;
+    migrate_settings_mcp_opt_in(&mut next, false);
     // A client older than FastAF's removal of "beta" may still send it.
     migrate_retired_beta_channel(&mut next);
 
@@ -3591,9 +3675,19 @@ fn read_app_config_unlocked(
     };
     migrate_flat_services(&mut val);
     let migrated_capabilities = val.get("disabled_native_tools").is_some();
+    // Before the single opt-in, a document without a saved policy denied settings.
+    let unsaved_capabilities =
+        val.get("mcp_capabilities").is_none() && val.get("disabled_native_tools").is_none();
     let (mut config, fields) = recover_app_config_fields(val).map_err(|e| {
         AppConfigReadError::Corrupt(format!("Invalid config {}: {e}", path.display()))
     })?;
+    let migrated_settings_opt_in = migrate_settings_mcp_opt_in(
+        &mut config,
+        unsaved_capabilities
+            || fields
+                .iter()
+                .any(|field| field.starts_with("mcp_capabilities")),
+    );
     config.config_recovery = None;
     let recovered = !fields.is_empty();
     if recovered {
@@ -3624,8 +3718,20 @@ fn read_app_config_unlocked(
             || migrated_duration
             || migrated_channel
             || migrated_reflow
-            || migrated_capabilities,
+            || migrated_capabilities
+            || migrated_settings_opt_in,
     ))
+}
+
+/// MCP settings access has one visible switch: `settings_mcp_enabled`.
+/// A saved `settings` capability denial, or a policy the old default denied
+/// (`implied_denial`), turns that switch off. Values are never ORed together,
+/// so no legacy combination widens access. Returns whether the config changed.
+pub(crate) fn migrate_settings_mcp_opt_in(config: &mut AppConfig, implied_denial: bool) -> bool {
+    let saved_denial = config.mcp_capabilities.take_settings_denial();
+    let disabled =
+        (saved_denial || implied_denial) && std::mem::take(&mut config.settings_mcp_enabled);
+    saved_denial || disabled
 }
 
 /// Use serde itself as the type oracle, not a second schema that can drift.
@@ -4295,13 +4401,14 @@ fn validate_keyed_value(
 /// every save into a conflict. Measured 2026-08-31: `ego` went 331 -> 357
 /// additions in 70 seconds while 29 consecutive saves were rejected, wedging
 /// unrelated intent — registering a repository — behind a number nobody edited.
-const DERIVED_BRANCH_FIELDS: [&str; 6] = [
+const DERIVED_BRANCH_FIELDS: [&str; 7] = [
     "additions",
     "deletions",
     "isMerged",
     "lastActiveTerminal",
     "lastCommitTs",
     "lifecycleStatus",
+    "cleanup",
 ];
 
 /// Both keys a repository record can hold its entries under.
@@ -4620,7 +4727,7 @@ fn apply_repository_mutation_batch(
     Ok(changed)
 }
 
-fn repository_file() -> PathBuf {
+pub(crate) fn repository_file() -> PathBuf {
     config_dir().join(REPOSITORIES_FILE)
 }
 
@@ -4632,6 +4739,52 @@ pub(crate) fn registered_repo_paths() -> Vec<String> {
         .and_then(|r| r.as_object())
         .map(|obj| obj.keys().cloned().collect())
         .unwrap_or_default()
+}
+
+type RepositoryFileKey = (PathBuf, u64, Option<std::time::SystemTime>, u64);
+
+type LocalRepositoryPaths = Option<(RepositoryFileKey, Vec<String>)>;
+
+static LOCAL_REPOSITORY_PATHS: std::sync::LazyLock<std::sync::Mutex<LocalRepositoryPaths>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+thread_local! {
+    static LOCAL_REPOSITORY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Paths of the repositories on this machine (no `connectionId`), parsed from
+/// `repositories.json` only when the file changed. The attention snapshot asked
+/// about 0.7 times a second and each time read and parsed ~350 KB. Every writer
+/// replaces the file atomically, so its size, mtime or inode moves.
+pub(crate) fn local_repository_paths() -> Vec<String> {
+    let path = repository_file();
+    let key = std::fs::metadata(&path).ok().map(|m| {
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&m);
+        #[cfg(not(unix))]
+        let inode = 0;
+        (path.clone(), m.len(), m.modified().ok(), inode)
+    });
+    let mut cache = LOCAL_REPOSITORY_PATHS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let (Some(key), Some((cached, paths))) = (&key, cache.as_ref())
+        && key == cached
+    {
+        return paths.clone();
+    }
+    #[cfg(test)]
+    LOCAL_REPOSITORY_READS.with(|count| count.set(count.get() + 1));
+    let paths: Vec<String> = load_repositories()["repos"]
+        .as_object()
+        .into_iter()
+        .flat_map(|repos| repos.iter())
+        .filter(|(_, repo)| repo["connectionId"].as_str().is_none())
+        .map(|(path, _)| path.clone())
+        .collect();
+    *cache = key.map(|key| (key, paths.clone()));
+    paths
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -6238,7 +6391,9 @@ mod tests {
             theme: "dark".to_string(),
             mcp_server_enabled: true,
             mcp_work_item_writes: false,
+            plugin_http_destinations: Vec::new(),
             mcp_call_audit_enabled: false,
+            mcp_usage_rollup_enabled: true,
             mcp_port: 4000,
             mcp_config_installed: false,
             ide: "cursor".to_string(),
@@ -6254,6 +6409,7 @@ mod tests {
                 "/repo/project".to_string(),
                 "550e8400-e29b-41d4-a716-446655440a01".to_string(),
             )]),
+            ai_chat_message_reactions: HashMap::new(),
             ai_chat_launches: HashMap::from([(
                 "observer-session".to_string(),
                 crate::acp_chat::ChatLaunch {
@@ -6425,13 +6581,10 @@ mod tests {
             r#"{"shell":null,"font_family":"JetBrains Mono","font_size":14,"theme":"tokyo-night","worktree_dir":null}"#,
         )
         .unwrap();
+        assert!(!loaded.settings_mcp_enabled);
         assert_eq!(
             loaded.mcp_capabilities.denied,
-            vec![
-                "settings".to_string(),
-                "diagnostics".to_string(),
-                "automations".to_string()
-            ]
+            vec!["diagnostics".to_string(), "automations".to_string()]
         );
     }
 
@@ -6447,12 +6600,12 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         doc.as_object_mut().unwrap().remove("mcp_capabilities");
         doc["disabled_native_tools"] =
-            serde_json::json!(["task", "workflow_report", "unrecognized_tool"]);
+            serde_json::json!(["task", "design_mode", "unrecognized_tool"]);
         fs::write(&path, doc.to_string()).unwrap();
         let config = load_app_config();
         assert_eq!(
             config.mcp_capabilities.denied,
-            ["automations", "agent_tasks", "workflow.reports"]
+            ["automations", "agent_tasks", "design"]
         );
         assert_eq!(
             config.mcp_capabilities.migration_unknown_tools,
@@ -6463,7 +6616,7 @@ mod tests {
         assert!(migrated.get("disabled_native_tools").is_none());
         assert_eq!(
             migrated["mcp_capabilities"]["denied"],
-            serde_json::json!(["automations", "agent_tasks", "workflow.reports"])
+            serde_json::json!(["automations", "agent_tasks", "design"])
         );
         assert_eq!(load_app_config().mcp_capabilities, config.mcp_capabilities);
         assert_eq!(fs::read(&path).unwrap(), saved);
@@ -9579,6 +9732,22 @@ mod tests {
         assert!(classify_stale_temp_repo(&path, &repo).is_none());
     }
 
+    // RED: repository_intent_view_ignores_derived_cleanup_record — catches: a refresh-derived
+    // cleanup record counted as a competing edit, turning every save into a conflict.
+    #[test]
+    fn repository_intent_view_ignores_derived_cleanup_record() {
+        let record = |tip: &str| {
+            Some(serde_json::json!({"workspaces": {"w": {
+                "branchName": "w",
+                "cleanup": {"proof": {"tip": tip}, "decision": {"eligible": false}}
+            }}}))
+        };
+        assert_eq!(
+            repository_intent_view(&record("aaa")),
+            repository_intent_view(&record("bbb"))
+        );
+    }
+
     #[test]
     fn survives_a_workspace_with_diffstat_or_commit_state() {
         let path = stale_temp_candidate_path();
@@ -10991,6 +11160,21 @@ mod tests {
     }
 
     // Catches: the debug default not applied (empty view for developers) or release defaulting on.
+    // Catches: the usage rollup defaults off for an older config file that lacks the field.
+    #[test]
+    fn mcp_usage_rollup_defaults_on_for_every_build_and_legacy_files() {
+        assert!(AppConfig::default().mcp_usage_rollup_enabled);
+        let mut file = serde_json::to_value(AppConfig::default()).unwrap();
+        file.as_object_mut()
+            .unwrap()
+            .remove("mcp_usage_rollup_enabled");
+        let legacy: AppConfig = serde_json::from_value(file.clone()).unwrap();
+        assert!(legacy.mcp_usage_rollup_enabled);
+        file["mcp_usage_rollup_enabled"] = serde_json::json!(false);
+        let off: AppConfig = serde_json::from_value(file).unwrap();
+        assert!(!off.mcp_usage_rollup_enabled);
+    }
+
     #[test]
     fn mcp_call_audit_defaults_on_only_in_debug_builds() {
         assert_eq!(
@@ -11301,5 +11485,34 @@ mod refresh_review_tests {
             matches!(event, crate::state::AppEvent::SettingsChanged(ref change) if change.section == "app" && change.persisted && change.applied)
         );
         assert!(events.try_recv().is_err());
+    }
+    // Catches: the attention snapshot reading and parsing repositories.json on every
+    // call (~0.7/s, ~350 KB each), or a cache that outlives a save and lists a
+    // repository that was removed.
+    #[test]
+    fn local_repository_paths_reads_the_file_only_when_it_changes() {
+        let dir = tempfile::tempdir_in(crate::test_support::test_temp_root()).unwrap();
+        let _guard = set_config_dir_override(dir.path().to_path_buf());
+        replace_repositories_for_test(serde_json::json!({"repos": {
+            "/local": {}, "/remote": {"connectionId": "c1"}
+        }}))
+        .unwrap();
+        let reads = || LOCAL_REPOSITORY_READS.with(std::cell::Cell::get);
+        let before = reads();
+        assert_eq!(local_repository_paths(), vec!["/local".to_string()]);
+        assert_eq!(local_repository_paths(), vec!["/local".to_string()]);
+        assert_eq!(reads() - before, 1, "second call must come from the cache");
+
+        replace_repositories_for_test(serde_json::json!({"repos": {
+            "/local": {}, "/other-repository": {}
+        }}))
+        .unwrap();
+        let mut paths = local_repository_paths();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["/local".to_string(), "/other-repository".to_string()]
+        );
+        assert_eq!(reads() - before, 2);
     }
 }

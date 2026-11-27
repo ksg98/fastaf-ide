@@ -66,6 +66,21 @@ fn offline_current_tool_list_is_a_complete_private_cache_result() {
     assert_eq!(result["result"]["cacheScope"], "private");
 }
 
+/// Catches: the offline bridge claims that a method the online server supports
+/// does not exist (-32601), so the client drops TUIC as a server without MCP
+/// 2026-07-28 instead of retrying later (story 3044-ddeb).
+#[test]
+fn offline_handshake_methods_answer_unavailable_not_method_not_found() {
+    for method in ["server/discover", "ping"] {
+        let response = offline_response(method, "2026-07-28");
+        assert_eq!(response["error"]["code"], -32000, "{method}: {response}");
+        assert_eq!(
+            response["error"]["message"], "FastAF MCP is unavailable",
+            "{method}: {response}"
+        );
+    }
+}
+
 #[test]
 fn offline_legacy_tool_list_keeps_its_shape() {
     let result = offline_response("tools/list", "2025-11-25");
@@ -73,4 +88,33 @@ fn offline_legacy_tool_list_keeps_its_shape() {
     assert!(result["result"].get("resultType").is_none());
     assert!(result["result"].get("ttlMs").is_none());
     assert!(result["result"].get("cacheScope").is_none());
+}
+
+/// Catches: the offline handshake still announcing the server under its old
+/// name, so a client that shows `serverInfo.name` says `tuicommander`.
+#[test]
+fn offline_initialize_names_the_server_fastaf() {
+    let response = offline_response("initialize", "2025-11-25");
+    assert_eq!(
+        response["result"]["serverInfo"]["name"],
+        tuic_ipc::MCP_SERVER_NAME,
+        "{response}"
+    );
+    assert_eq!(tuic_ipc::MCP_SERVER_NAME, "fastaf");
+}
+
+/// Catches: the offline text reworded, or the marker constant no longer used,
+/// so the app cannot tell a FastAF-built bridge from upstream's when it
+/// migrates an old `tuicommander` entry in an agent's MCP configuration.
+#[test]
+fn the_built_bridge_carries_the_family_marker_and_not_upstreams_text() {
+    let bytes = std::fs::read(env!("CARGO_BIN_EXE_tuic-bridge")).unwrap();
+    let carries = |needle: &str| {
+        bytes
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert_eq!(tuic_ipc::BRIDGE_FAMILY_MARKER, "FastAF MCP is unavailable");
+    assert!(carries(tuic_ipc::BRIDGE_FAMILY_MARKER));
+    assert!(!carries("TUICommander MCP is unavailable"));
 }

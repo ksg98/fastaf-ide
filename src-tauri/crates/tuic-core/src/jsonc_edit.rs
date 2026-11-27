@@ -140,6 +140,36 @@ pub fn remove_member(text: &str, key_path: &[&str], key: &str) -> Result<String,
     Ok(output)
 }
 
+/// Replace the member `<key_path>/<from>` with `<to>: value`, in the same place
+/// in its object, leaving the rest of the document byte-identical.
+///
+/// For a member whose key changes: removing it and appending the new one would
+/// move the user's entry to the end of the object. Refuses when `from` is not
+/// there or `to` already is, so the caller decides what those mean.
+pub fn replace_member(
+    text: &str,
+    key_path: &[&str],
+    from: &str,
+    to: &str,
+    value: &serde_json::Value,
+) -> Result<String, String> {
+    let root = CstRootNode::parse(text, &parse_options())
+        .map_err(|e| format!("JSONC parse error: {e}"))?;
+    let parent =
+        navigate(&root, key_path).ok_or_else(|| format!("document has no `{from}` to replace"))?;
+    if parent.get(to).is_some() {
+        return Err(format!("document already holds `{to}`"));
+    }
+    let prop = parent
+        .get(from)
+        .ok_or_else(|| format!("document has no `{from}` to replace"))?;
+    prop.replace_with(to, to_input(value));
+    let output = root.to_string();
+    validate(&output, key_path, to, Some(value))?;
+    validate(&output, key_path, from, None)?;
+    Ok(output)
+}
+
 /// Prove the edited document still parses and says what we meant it to say.
 ///
 /// This is the last gate before a write touches a file we do not own, so it
@@ -198,7 +228,7 @@ mod tests {
     "Rust": { "tab_size": 4 },
   },
 }"#;
-        let edited = upsert_member(original, &["context_servers"], "tuicommander", &entry())
+        let edited = upsert_member(original, &["context_servers"], "fastaf", &entry())
             .expect("edit succeeds");
 
         for line in [
@@ -213,7 +243,7 @@ mod tests {
 
         let value = parse(&edited).unwrap();
         assert_eq!(
-            value["context_servers"]["tuicommander"]["command"],
+            value["context_servers"]["fastaf"]["command"],
             "/usr/bin/tuic-bridge"
         );
         assert_eq!(value["buffer_font_size"], 14);
@@ -225,36 +255,34 @@ mod tests {
         let original = r#"{
   "context_servers": {
     "other": { "command": "/opt/other" },
-    "tuicommander": { "type": "stdio", "command": "/old/path", "args": [], "env": {} }
+    "fastaf": { "type": "stdio", "command": "/old/path", "args": [], "env": {} }
   }
 }"#;
-        let edited =
-            upsert_member(original, &["context_servers"], "tuicommander", &entry()).unwrap();
+        let edited = upsert_member(original, &["context_servers"], "fastaf", &entry()).unwrap();
         let value = parse(&edited).unwrap();
         assert_eq!(
-            value["context_servers"]["tuicommander"]["command"],
+            value["context_servers"]["fastaf"]["command"],
             "/usr/bin/tuic-bridge"
         );
         assert_eq!(value["context_servers"]["other"]["command"], "/opt/other");
-        assert_eq!(edited.matches("\"tuicommander\"").count(), 1);
+        assert_eq!(edited.matches("\"fastaf\"").count(), 1);
     }
 
     #[test]
     fn indentation_of_untouched_lines_survives() {
         let original = "{\n\t\"theme\": \"dark\"\n}";
-        let edited = upsert_member(original, &[], "tuicommander", &entry()).unwrap();
+        let edited = upsert_member(original, &[], "fastaf", &entry()).unwrap();
         assert!(edited.contains("\t\"theme\": \"dark\""), "{edited}");
     }
 
     #[test]
     fn nested_key_path_is_created_when_missing() {
         let original = r#"{ "amp": { "other": true } }"#;
-        let edited =
-            upsert_member(original, &["amp", "mcpServers"], "tuicommander", &entry()).unwrap();
+        let edited = upsert_member(original, &["amp", "mcpServers"], "fastaf", &entry()).unwrap();
         let value = parse(&edited).unwrap();
         assert_eq!(value["amp"]["other"], true);
         assert_eq!(
-            value["amp"]["mcpServers"]["tuicommander"]["command"],
+            value["amp"]["mcpServers"]["fastaf"]["command"],
             "/usr/bin/tuic-bridge"
         );
     }
@@ -262,15 +290,14 @@ mod tests {
     #[test]
     fn a_path_segment_holding_a_non_object_is_refused() {
         let original = r#"{ "context_servers": "disabled" }"#;
-        let error = upsert_member(original, &["context_servers"], "tuicommander", &entry())
+        let error = upsert_member(original, &["context_servers"], "fastaf", &entry())
             .expect_err("must refuse");
         assert!(error.contains("not an object"), "{error}");
     }
 
     #[test]
     fn a_non_object_root_is_refused() {
-        let error =
-            upsert_member("[1, 2, 3]", &[], "tuicommander", &entry()).expect_err("must refuse");
+        let error = upsert_member("[1, 2, 3]", &[], "fastaf", &entry()).expect_err("must refuse");
         assert!(error.contains("root value is not an object"), "{error}");
     }
 
@@ -278,8 +305,8 @@ mod tests {
     /// using them is one we do not understand — refusing beats guessing.
     #[test]
     fn undocumented_json_extensions_are_refused() {
-        let error = upsert_member("{ 'theme': 'dark' }", &[], "tuicommander", &entry())
-            .expect_err("must refuse");
+        let error =
+            upsert_member("{ 'theme': 'dark' }", &[], "fastaf", &entry()).expect_err("must refuse");
         assert!(error.contains("parse error"), "{error}");
     }
 
@@ -290,13 +317,13 @@ mod tests {
   "theme": "dark",
   "context_servers": {
     "other": { "command": "/opt/other" },
-    "tuicommander": { "command": "/usr/bin/tuic-bridge" }
+    "fastaf": { "command": "/usr/bin/tuic-bridge" }
   }
 }"#;
-        let edited = remove_member(original, &["context_servers"], "tuicommander").unwrap();
+        let edited = remove_member(original, &["context_servers"], "fastaf").unwrap();
         assert!(edited.contains("// keep me"), "{edited}");
         let value = parse(&edited).unwrap();
-        assert!(value["context_servers"].get("tuicommander").is_none());
+        assert!(value["context_servers"].get("fastaf").is_none());
         assert_eq!(value["context_servers"]["other"]["command"], "/opt/other");
         assert_eq!(value["theme"], "dark");
     }
@@ -304,18 +331,67 @@ mod tests {
     #[test]
     fn removing_an_absent_member_returns_the_input_unchanged() {
         let original = "{\n  \"theme\": \"dark\"\n}";
-        let edited = remove_member(original, &["context_servers"], "tuicommander").unwrap();
+        let edited = remove_member(original, &["context_servers"], "fastaf").unwrap();
         assert_eq!(edited, original);
     }
 
     #[test]
     fn an_empty_document_becomes_a_single_entry_object() {
-        let edited = upsert_member("", &["mcpServers"], "tuicommander", &entry()).unwrap();
+        let edited = upsert_member("", &["mcpServers"], "fastaf", &entry()).unwrap();
         let value = parse(&edited).unwrap();
         assert_eq!(
-            value["mcpServers"]["tuicommander"]["command"],
+            value["mcpServers"]["fastaf"]["command"],
             "/usr/bin/tuic-bridge"
         );
+    }
+
+    // Catches: a renamed member moving to the end of its object, losing the
+    // comment above it, or leaving the old key behind.
+    #[test]
+    fn replacing_a_member_keeps_its_place_and_the_lines_around_it() {
+        let original = r#"{
+  // keep me
+  "theme": "dark",
+  "context_servers": {
+    // my bridge
+    "tuicommander": { "command": "/old/path" },
+    "other": { "command": "/opt/other" }, // trailing note
+  },
+}"#;
+        let edited = replace_member(
+            original,
+            &["context_servers"],
+            "tuicommander",
+            "fastaf",
+            &entry(),
+        )
+        .unwrap();
+        let value = parse(&edited).unwrap();
+        assert!(value["context_servers"].get("tuicommander").is_none());
+        assert_eq!(
+            value["context_servers"]["fastaf"]["command"],
+            "/usr/bin/tuic-bridge"
+        );
+        assert_eq!(value["context_servers"]["other"]["command"], "/opt/other");
+        for kept in ["// keep me", "// my bridge", "// trailing note"] {
+            assert!(edited.contains(kept), "{kept}: {edited}");
+        }
+        assert!(
+            edited.find("\"fastaf\"").unwrap() < edited.find("\"other\"").unwrap(),
+            "the entry keeps its place: {edited}"
+        );
+    }
+
+    // Catches: a replace that silently overwrites an entry already under the
+    // new key, or invents one when the old key is not there.
+    #[test]
+    fn replacing_refuses_a_missing_source_or_a_taken_target() {
+        let both =
+            r#"{ "s": { "tuicommander": { "command": "/a" }, "fastaf": { "command": "/b" } } }"#;
+        assert!(replace_member(both, &["s"], "tuicommander", "fastaf", &entry()).is_err());
+        let neither = r#"{ "s": { "other": {} } }"#;
+        assert!(replace_member(neither, &["s"], "tuicommander", "fastaf", &entry()).is_err());
+        assert!(replace_member("{}", &["s"], "tuicommander", "fastaf", &entry()).is_err());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import type { MessageAction, MessageReactions } from "../../types/messageActions";
 /**
  * One ego for the whole app, with one ACP session per open chat tab.
  *
@@ -27,6 +28,7 @@ import { aiChatTabs } from "../../stores/aiChatTabs";
 import { appLogger } from "../../stores/appLogger";
 import { settingsStore } from "../../stores/settings";
 import { toastsStore } from "../../stores/toasts";
+import { subscribeEvents } from "../../transport";
 import type {
 	AcpAttachmentSnapshot,
 	AcpClientError,
@@ -136,9 +138,8 @@ function describe(error: unknown): string {
 	return String(error);
 }
 
-/** ego 0.2's recorded session/load refusal (ego-missing-session-2348.json).
- * The host currently preserves this ACP error as agent_error, not not_found. */
-function missingSavedSession(failure: unknown): boolean {
+/** Recorded session/load refusals. The host preserves these as agent_error, not not_found. */
+function missingSavedSession(failure: unknown, session: AcpSessionId): boolean {
 	let error = failure;
 	if (error instanceof Error || typeof error === "string") {
 		const message = error instanceof Error ? error.message : error;
@@ -152,11 +153,19 @@ function missingSavedSession(failure: unknown): boolean {
 	}
 	if (!error || typeof error !== "object") return false;
 	const refusal = error as Partial<AcpClientError>;
-	return (
-		refusal.code === "agent_error" &&
-		refusal.operation === "load" &&
-		refusal.message === 'Resource not found: "session not found"'
-	);
+	if (refusal.code !== "agent_error" || refusal.operation !== "load" || typeof refusal.message !== "string")
+		return false;
+	if (refusal.message === 'Resource not found: "session not found"') return true;
+	const prefix = `session not found: ${session} (store root: `;
+	if (!refusal.message.startsWith(prefix)) return false;
+	const separator = refusal.message.indexOf("): ", prefix.length);
+	if (separator < 0) return false;
+	try {
+		const details = JSON.parse(refusal.message.slice(separator + 3));
+		return details.sessionId === session && details.storeRoot === refusal.message.slice(prefix.length, separator);
+	} catch {
+		return false;
+	}
 }
 
 export function createAcpChat(
@@ -189,6 +198,65 @@ export function createAcpChat(
 		retried: boolean;
 	};
 	const [submitted, setSubmitted] = createSignal<SubmittedPrompt[]>([]);
+	// Presentation receipts are not an actor queue: no withdrawal is possible before a turn id exists.
+	// DEFERRED (2026-11-15) — dismissal and unconfirmed-ack recovery need product policy;
+	// a local receipt can remain until this panel is torn down.
+	type SendingPrompt = Omit<SubmittedPrompt, "id" | "session" | "turnId" | "retried"> & {
+		localId: number;
+		id: AcpConnectionId | null;
+		session: AcpSessionId | null;
+		turnId?: string;
+		observedTurns: Set<string>;
+		failed: boolean;
+		failure?: string;
+	};
+	let nextSendingId = 0;
+	const [sending, setSending] = createSignal<SendingPrompt[]>([]);
+
+	/** A successor replaces the source tab, so its local receipts must follow too.
+	 * Reset the source turn id so a late receipt cannot acknowledge a successor send. */
+	function addSessionTab(session: AcpSessionId, replacing?: AcpSessionId | null, replaceAll = false): void {
+		// A new conversation created without a selection adopts sessionless receipts.
+		const source = replacing;
+		if (source !== undefined && source !== session) {
+			setSending((pending) =>
+				pending.map((prompt) =>
+					prompt.session === source ? { ...prompt, session, id: null, turnId: undefined } : prompt,
+				),
+			);
+		}
+		if (replaceAll) aiChatTabs.replace(TABS, session);
+		else aiChatTabs.add(TABS, session, replacing ?? undefined);
+	}
+
+	const [messageReactions, setMessageReactions] = createSignal<Record<string, MessageReactions>>({});
+	let marksRevision = 0;
+	let marksDisposed = false;
+	const refreshMarks = async () => {
+		const session = sessionId();
+		if (!session) return;
+		const revision = ++marksRevision;
+		try {
+			const marks = await invoke<MessageReactions>("acp_message_reactions", { sessionId: session });
+			if (!marksDisposed && revision === marksRevision)
+				setMessageReactions((current) => ({ ...current, [session]: marks ?? {} }));
+		} catch (failure) {
+			appLogger.debug("ai-chat", "message marks unavailable", failure);
+		}
+	};
+	createEffect(() => {
+		sessionId();
+		void refreshMarks();
+	});
+	const marksSubscription = subscribeEvents(
+		{ "settings-changed": () => void refreshMarks() },
+		{ onResync: () => void refreshMarks() },
+	);
+	onCleanup(() => {
+		marksDisposed = true;
+		marksSubscription.then((stop) => stop()).catch(() => {});
+	});
+
 	const [compactingSource, setCompactingSource] = createSignal<{ id: AcpConnectionId; session: AcpSessionId } | null>(
 		null,
 	);
@@ -213,7 +281,7 @@ export function createAcpChat(
 			launch: opened.launch,
 		};
 		setLaunches((current) => ({ ...current, [opened.sessionId]: opened.launch }));
-		aiChatTabs.add(TABS, opened.sessionId);
+		addSessionTab(opened.sessionId, !request.sessionId && !aiChatTabs.active(TABS) ? null : undefined);
 		setRoot(opened.launch.workspace);
 		setConnectionId(binding.connectionId);
 		setSessionId(opened.sessionId);
@@ -221,8 +289,8 @@ export function createAcpChat(
 		return true;
 	}
 
-	async function remember(session: AcpSessionId): Promise<void> {
-		await sharedSelection.select(session);
+	async function remember(session: AcpSessionId, replacing?: AcpSessionId): Promise<void> {
+		await sharedSelection.select(session, replacing);
 	}
 
 	/** Listing is optional discovery, never evidence that the selected session
@@ -263,7 +331,12 @@ export function createAcpChat(
 	/** Selecting a saved tab requests attachment before the first message.
 	 *  Remounts preserve refused loads; explicit selections may retry them.
 	 *  Only the latest selection may change the visible tab. */
-	async function selectSession(session: AcpSessionId, explicit = true, publish = true): Promise<void> {
+	async function selectSession(
+		session: AcpSessionId,
+		explicit = true,
+		publish = true,
+		replacing?: AcpSessionId,
+	): Promise<void> {
 		if (sessionId() && sessionId() !== session) await stopChatVoice(sessionId());
 		if (publish) {
 			await sharedSelection.ready;
@@ -272,14 +345,21 @@ export function createAcpChat(
 		// Automatic open, Send and a tab click share the same attachment request.
 		// Returning it also makes callers wait for its success or refusal.
 		if (selecting?.session === session && session === sessionId()) return selecting.promise;
-		const promise = attachSelected(session, explicit, publish).finally(() => {
+		const promise = attachSelected(session, explicit, publish, replacing).finally(() => {
 			if (selecting?.promise === promise) selecting = null;
 		});
 		selecting = { session, promise };
 		return promise;
 	}
 
-	async function attachSelected(session: AcpSessionId, explicit: boolean, publish: boolean): Promise<void> {
+	/** The one place a selection opens a tab. `replacing` names the tab whose conversation
+	 *  continues as `session`, so a compaction never leaves its stale source open beside it. */
+	async function attachSelected(
+		session: AcpSessionId,
+		explicit: boolean,
+		publish: boolean,
+		replacing?: AcpSessionId,
+	): Promise<void> {
 		if (session === sessionId() && attachment() && !connecting() && !failedSession) return;
 		const request = ++selection;
 		const isCurrent = () => request === selection;
@@ -314,10 +394,11 @@ export function createAcpChat(
 			}
 			binding = current;
 			current.sessionId = attached;
-			aiChatTabs.add(TABS, attached);
+			addSessionTab(attached, replacing);
 			setSessionId(attached);
 			failedSession = null;
-			if (publish || attached !== session) await guard("saving conversation", () => remember(attached), isCurrent);
+			if (publish || attached !== session)
+				await guard("saving conversation", () => remember(attached, replacing), isCurrent);
 			if (isCurrent() && connection()?.capabilities?.list) void refreshSessions(current.connectionId, target);
 		} finally {
 			if (isCurrent()) setConnecting(false);
@@ -389,16 +470,15 @@ export function createAcpChat(
 		isCurrent = () => true,
 	): Promise<AcpSessionId | null> {
 		if (await replay("loading conversation", id, session, target, explicit, isCurrent)) return session;
-		if (!isCurrent() || !missingSavedSession(refused.get(`${id}/${session}`))) return null;
+		if (!isCurrent() || !missingSavedSession(refused.get(`${id}/${session}`), session)) return null;
 		const replacement = await guard(
 			"opening a replacement conversation",
 			() => client.newSession(id, target),
 			isCurrent,
 		);
 		if (!replacement || !isCurrent()) return null;
-		// Drop only this client's stale tab, never delete a durable conversation.
-		aiChatTabs.remove(TABS, session);
-		aiChatTabs.add(TABS, replacement);
+		// Replace only this client's stale tab, never delete a durable conversation.
+		addSessionTab(replacement, session);
 		return replacement;
 	}
 
@@ -462,7 +542,7 @@ export function createAcpChat(
 				aiChatTabs.ensure(TABS, saved);
 				setSessionId(saved);
 				const loaded = await loadSelected(current.connectionId, saved, target, false, isCurrent);
-				if (!loaded) {
+				if (!loaded || !isCurrent()) {
 					if (isCurrent()) failedSession = saved;
 					return null;
 				}
@@ -483,7 +563,7 @@ export function createAcpChat(
 			);
 			if (!session) return null;
 			current.sessionId = session;
-			aiChatTabs.replace(TABS, session);
+			addSessionTab(session, null, true);
 			setSessionId(session);
 			await guard("saving conversation", () => remember(session));
 			if (capabilities?.list) void refreshSessions(current.connectionId, target);
@@ -503,13 +583,15 @@ export function createAcpChat(
 		}
 		const session = snapshot.sessionId;
 		if (session === aiChatTabs.active(TABS) && session === sessionId() && attachment()) return;
-		aiChatTabs.adopt(TABS, session);
+		aiChatTabs.adopt(TABS, session, snapshot.replacing);
 		++selection; // Revoke an older attachment before it can republish stale focus.
+		// A revoked attempt never clears "starting"; the effect below begins a
+		// current attempt when the selection still needs one.
+		setConnecting(false);
 		failedSession = null;
 		if (!session) {
 			if (binding) binding.sessionId = null;
 			setSessionId(null);
-			setConnecting(false);
 		}
 		setSharedRevision((revision) => revision + 1);
 	});
@@ -608,6 +690,17 @@ export function createAcpChat(
 		return compacting() || state === "prompting" || state === "cancelling";
 	};
 
+	/** What the backend derived for this chat; null before the attachment exists. */
+	const activity = () => attachment()?.activity ?? null;
+
+	/**
+	 * Show the working indicator: a running turn, or a tool or child the
+	 * backend still reports live. Never an admission rule — `busy` alone
+	 * decides whether the composer sends, so background child work cannot open
+	 * a second prompt into an occupied turn or hold one back.
+	 */
+	const working = (): boolean => busy() || activity()?.state === "busy";
+
 	const held = (): boolean => {
 		const state = attachment()?.state;
 		return state === "paused" || state === "pause_pending";
@@ -690,7 +783,7 @@ export function createAcpChat(
 				setError(`Compaction was not published: ${compacted.publication.diagnostic}`);
 				return false;
 			}
-			await selectSession(compacted.targetSessionId);
+			await selectSession(compacted.targetSessionId, true, true, current.session);
 			if (sessionId() !== compacted.targetSessionId || !attachment() || error()) return false;
 			toastsStore.add("Conversation compacted", "Continuing in the compacted conversation", "info");
 			const target = root();
@@ -701,13 +794,124 @@ export function createAcpChat(
 		}
 	}
 
-	async function submitPrompt(prompt: Omit<SubmittedPrompt, "turnId">): Promise<void> {
-		const turnId = await guard("sending the turn", () =>
-			prompt.files.length
+	// ego compacted this session on its own and continues in a successor. The
+	// server rebinds the id on this connection only; after a restart the source
+	// would reload and compact again from stale history. Follow once the turn
+	// has settled so the live stream is never cut mid-answer.
+	const followedSuccessors = new Set<string>();
+	createEffect(() => {
+		const current = pair();
+		if (!current) return;
+		const target = acpStore.successor(current.id, current.session);
+		if (!target || acpStore.attachment(current.id, current.session)?.state !== "idle") return;
+		const key = `${current.id}:${current.session}`;
+		if (followedSuccessors.has(key)) return;
+		followedSuccessors.add(key);
+		untrack(() => {
+			void (async () => {
+				await selectSession(target, true, true, current.session);
+				if (sessionId() !== target || error()) {
+					followedSuccessors.delete(key);
+					return;
+				}
+				toastsStore.add(
+					"Conversation compacted",
+					"ego compacted the conversation and continues in the successor",
+					"info",
+				);
+				const root_ = root();
+				if (root_ && connection()?.capabilities?.list) void refreshSessions(connectionId()!, root_);
+			})();
+		});
+	});
+
+	async function submitPrompt(
+		prompt: Omit<SubmittedPrompt, "turnId">,
+	): Promise<{ turnId: string } | { failure: string }> {
+		const ownsView = () => connectionId() === prompt.id && sessionId() === prompt.session;
+		try {
+			const turnId = await (prompt.files.length
 				? client.prompt(prompt.id, prompt.session, prompt.text, prompt.images, prompt.repo, prompt.files)
-				: client.prompt(prompt.id, prompt.session, prompt.text, prompt.images, prompt.repo),
-		);
-		if (turnId !== null) setSubmitted((pending) => [...pending, { ...prompt, turnId }]);
+				: client.prompt(prompt.id, prompt.session, prompt.text, prompt.images, prompt.repo));
+			if (ownsView()) setError(null);
+			setSubmitted((pending) => [...pending, { ...prompt, turnId }]);
+			return { turnId };
+		} catch (failure) {
+			appLogger.error("ai-chat", "sending the turn failed", failure);
+			if (ownsView()) setError(describe(failure));
+			return { failure: describe(failure) };
+		}
+	}
+
+	createEffect(() => {
+		const confirmed = sending().filter((prompt) => {
+			if (!prompt.id || !prompt.session) return false;
+			const owner = acpStore.attachment(prompt.id, prompt.session);
+			// Frames can precede the request receipt and a later turn can replace the latest outcome.
+			for (const queued of owner?.queuedPrompts ?? []) prompt.observedTurns.add(queued.turnId);
+			if (owner?.activeTurn) prompt.observedTurns.add(owner.activeTurn.turnId);
+			const outcome = acpStore.turnOutcome(prompt.id, prompt.session);
+			if (outcome) prompt.observedTurns.add(outcome.turnId);
+			return !!prompt.turnId && prompt.observedTurns.has(prompt.turnId);
+		});
+		if (confirmed.length) setSending((pending) => pending.filter((prompt) => !confirmed.includes(prompt)));
+	});
+
+	async function deliver(prompt: SendingPrompt): Promise<void> {
+		const request = selection;
+		const update = (changes: Partial<SendingPrompt>) => {
+			Object.assign(
+				prompt,
+				sending().find((item) => item.localId === prompt.localId),
+			);
+			Object.assign(prompt, changes);
+			setSending((pending) => pending.map((item) => (item.localId === prompt.localId ? { ...prompt } : item)));
+		};
+		update({ id: prompt.id, failed: false, failure: undefined });
+		try {
+			if (compacting() && compaction) {
+				if (!(await compaction)) return;
+				Object.assign(
+					prompt,
+					sending().find((item) => item.localId === prompt.localId),
+				);
+				if ((sessionId() ?? aiChatTabs.active(TABS)) !== prompt.session) return;
+			}
+			if (failedSession) {
+				await selectSession(failedSession);
+				if (failedSession) return;
+			}
+			// Attachment may replace both the connection and the source session. Adopt
+			// only this receipt's current owner, never an unrelated selected tab.
+			Object.assign(
+				prompt,
+				sending().find((item) => item.localId === prompt.localId),
+			);
+			if ((sessionId() ?? aiChatTabs.active(TABS)) !== prompt.session) return;
+			let current = pair();
+			if (!current) {
+				const started = await start();
+				current = started ? { id: started.connectionId, session: started.sessionId } : null;
+			}
+			Object.assign(
+				prompt,
+				sending().find((item) => item.localId === prompt.localId),
+			);
+			if (!current || current.session !== prompt.session || sessionId() !== prompt.session) return;
+			update({ ...current });
+			const receipt = await submitPrompt({ ...prompt, ...current, retried: false });
+			const owner = sending().find((item) => item.localId === prompt.localId);
+			// A late response from a replaced source is not turn evidence for its successor.
+			update(owner?.id === current.id && owner.session === current.session ? receipt : {});
+		} catch (failure) {
+			update({ failure: describe(failure) });
+		} finally {
+			// Keep the complete payload for an explicit retry, without restoring over newer typing.
+			if (!prompt.turnId) {
+				if (!prompt.session && request === selection) update({ id: connectionId(), session: sessionId() });
+				update({ failed: true });
+			}
+		}
 	}
 
 	createEffect(() => {
@@ -737,6 +941,24 @@ export function createAcpChat(
 	});
 
 	return {
+		messageActions: {
+			reactions: () => messageReactions()[sessionId() ?? ""] ?? {},
+			async send(messageId: string, text: string, action: MessageAction): Promise<void> {
+				const current = pair();
+				if (!current || !acpStore.isStreaming(current.id))
+					throw new Error("Conversation unavailable. Action not sent; reconnect and retry.");
+				++marksRevision;
+				const receipt = await invoke<{ reactions: MessageReactions }>("acp_message_action", {
+					connectionId: current.id,
+					sessionId: current.session,
+					request: { messageId, text, action },
+				});
+				++marksRevision;
+				setMessageReactions((all) => ({ ...all, [current.session]: receipt.reactions }));
+				// A slower receipt can follow another device's newer action; reread the owner.
+				void refreshMarks();
+			},
+		},
 		pinnedRepo,
 		operatingRepo,
 		toggleRepoPin(): void {
@@ -766,8 +988,17 @@ export function createAcpChat(
 		},
 		retry,
 		busy,
+		activity,
+		working,
 		compacting,
 		queuedPrompts: () => attachment()?.queuedPrompts ?? [],
+		// Receipts belong to this panel's durable conversation, not its replaceable connection.
+		sendingPrompts: () => sending().filter((prompt) => prompt.session === sessionId()),
+		async retrySending(localId: number): Promise<void> {
+			const prompt = sending().find((item) => item.localId === localId && item.failed && item.session === sessionId());
+			// Only an explicit retry adopts the current connection.
+			if (prompt) await deliver({ ...prompt, id: connectionId() });
+		},
 		held,
 
 		capabilities: () => connection()?.capabilities ?? null,
@@ -902,27 +1133,19 @@ export function createAcpChat(
 			files: { name: string; path: string }[] = [],
 		): Promise<void> {
 			if (!text.trim() && images.length === 0 && files.length === 0) return;
-			// The composer can queue while busy. Wait for the continuation rather
-			// than dropping that new message or sending it to the exhausted source.
-			if (compacting() && compaction && !(await compaction)) return;
-			if (failedSession) {
-				await selectSession(failedSession);
-				if (failedSession) return;
-			}
-			let current = pair();
-			if (!current) {
-				const started = await start();
-				current = started ? { id: started.connectionId, session: started.sessionId } : null;
-			}
-			if (!current) return;
-			await submitPrompt({
-				...current,
+			const prompt: SendingPrompt = {
+				localId: ++nextSendingId,
+				id: connectionId(),
+				session: sessionId() ?? aiChatTabs.active(TABS),
 				text,
 				images: [...images],
 				files: [...files],
 				repo: operatingRepo(),
-				retried: false,
-			});
+				failed: false,
+				observedTurns: new Set(),
+			};
+			setSending((pending) => [...pending, prompt]);
+			await deliver(prompt);
 		},
 
 		async cancel(): Promise<void> {
@@ -969,7 +1192,7 @@ export function createAcpChat(
 		async fork(atMessageId?: string): Promise<void> {
 			const current = pair();
 			const target = root();
-			if (!current || !target || busy()) return;
+			if (!current || !target) return;
 			const child = await guard("forking the conversation", () =>
 				atMessageId
 					? client.forkSession(current.id, current.session, target, atMessageId)
@@ -1040,7 +1263,7 @@ export function createAcpChat(
 				const session = await guard("opening a session", () => client.newSession(id, target), isCurrent);
 				if (!session || !isCurrent()) return;
 				if (binding) binding.sessionId = session;
-				aiChatTabs.add(TABS, session);
+				addSessionTab(session, !aiChatTabs.active(TABS) ? null : undefined);
 				setSessionId(session);
 				failedSession = null;
 				await guard("saving conversation", () => remember(session), isCurrent);
@@ -1115,7 +1338,7 @@ export function createAcpChat(
 				const session = await guard("opening a session", () => client.newSession(snapshot.connectionId, target));
 				if (!session) return;
 				binding.sessionId = session;
-				aiChatTabs.replace(TABS, session);
+				addSessionTab(session, !aiChatTabs.active(TABS) ? null : undefined, true);
 				setSessionId(session);
 				await guard("saving conversation", () => remember(session));
 				if (snapshot.capabilities?.list) void refreshSessions(snapshot.connectionId, target);

@@ -502,7 +502,7 @@ impl StdioMcpClient {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "tuicommander",
+                    "name": tuic_ipc::MCP_SERVER_NAME,
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }),

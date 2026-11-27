@@ -10,6 +10,7 @@ import {
 	Switch,
 } from "solid-js";
 import { AGENT_DISPLAY } from "../../agents";
+import { usagePlacement } from "../../features/agentUsage";
 import { AGENT_USAGE_BLINK_THRESHOLD } from "../../features/usageThresholds";
 import { useGitHub } from "../../hooks/useGitHub";
 import { useOutsideDismiss } from "../../hooks/useOutsideDismiss";
@@ -308,31 +309,28 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						)}
 					</span>
 				</Show>
-				<TickerArea />
-				<Show when={terminalsStore.getActive()?.providerRecovery}>
-					{(recovery) => (
-						<ProviderRecoveryStatus recovery={recovery()} sessionId={terminalsStore.getActive()?.sessionId ?? ""} />
-					)}
-				</Show>
+			</div>
+
+			{/* One right-hand flow, including usage absorbed from plugin tickers. In the
+			    title bar the group has no box of its own (display: contents): its items
+			    join the toolbar's right cluster. */}
+			<div class={s.rightGroup}>
 				<Show when={!terminalsStore.getActive()?.providerRecovery && terminalsStore.getActive()?.agentType}>
 					{(agentType) => {
-						const display = () => AGENT_DISPLAY[agentType()];
+						const badgeAgent = () => {
+							const label = usageTicker()?.label?.toLowerCase();
+							return agentType() === "ego" && (label === "codex" || label === "claude" || label === "grok")
+								? label
+								: agentType();
+						};
+						const display = () => AGENT_DISPLAY[badgeAgent()];
 						const ul = () => terminalsStore.getActive()?.usageLimit ?? null;
 						const rl = rateLimitWarning;
-						// The shared usage slot follows Claude, Codex or ego. Absorb it only when
-						// its provider label matches this tab; an async provider switch may
-						// briefly leave the previous provider's result in the store.
+						// The shared placement rule picks the usage of this tab's own session; the
+						// ticker pool excludes the same messages.
 						const usageTicker = () => {
-							const provider = agentType();
-							if (provider !== "claude" && provider !== "codex" && provider !== "ego") return null;
-							return statusBarTicker
-								.getAll()
-								.find(
-									(message) =>
-										message.pluginId === "claude-usage" &&
-										message.label?.toLowerCase() === provider &&
-										(provider !== "ego" || message.sessionId === terminalsStore.getActive()?.sessionId),
-								);
+							const active = terminalsStore.getActive();
+							return statusBarTicker.getAll().find((message) => usagePlacement(message, active) === "badge");
 						};
 						return (
 							<span
@@ -349,7 +347,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 								}
 							>
 								<span style={{ color: display().color }}>
-									<AgentIcon agent={agentType()} size={12} />
+									<AgentIcon agent={badgeAgent()} size={12} />
 								</span>
 								<Switch fallback={<span style={{ color: display().color }}> {agentType()}</span>}>
 									<Match when={rl()}>{(rl) => <span class={s.agentRateLimited}> ⚠ {rl().remaining}</span>}</Match>
@@ -388,175 +386,181 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						);
 					}}
 				</Show>
-			</div>
-
-			{/* Remote machines holding registered repos that are not answering.
-			    Without this the only symptom is every operation on those repos
-			    failing one by one, with the real cause buried in Settings. */}
-			<Show when={unreachableMachines().length > 0}>
-				<div
-					class={s.remoteOffline}
-					title={t(
-						"statusBar.remoteOfflineHint",
-						"Open Settings → Remote Machines to reconnect. Repositories on these machines cannot be read.",
+				<Show when={terminalsStore.getActive()?.providerRecovery}>
+					{(recovery) => (
+						<ProviderRecoveryStatus recovery={recovery()} sessionId={terminalsStore.getActive()?.sessionId ?? ""} />
 					)}
-				>
-					{t("statusBar.remoteOffline", "Offline:")} {unreachableMachines().join(", ")}
-				</div>
-			</Show>
-
-			{/* GitHub PR + CI badges */}
-			<Show when={activePrData()}>
-				<div class={s.githubStatus}>
-					<PrBadge
-						number={activePrData()!.number}
-						title={activePrData()!.title}
-						readiness={prReadinessOf(activePrData()!)}
-						onClick={() => setShowPrDetailPopover(true)}
-					/>
-					<Show when={activePrData()!.checks && activePrData()!.checks!.total > 0}>
-						<span onClick={handleCiBadgeClick} style={{ cursor: "pointer" }}>
-							<CiBadge
-								status={
-									activePrData()!.checks!.failed > 0
-										? "completed"
-										: activePrData()!.checks!.pending > 0
-											? "in_progress"
-											: "completed"
-								}
-								conclusion={
-									activePrData()!.checks!.failed > 0
-										? "failure"
-										: activePrData()!.checks!.pending > 0
-											? null
-											: "success"
-								}
-								workflowName="CI"
-							/>
-						</span>
-					</Show>
-				</div>
-			</Show>
-
-			{/* Right section - controls */}
-			<div class={cx(s.section, s.controls)}>
-				{/* Toggle buttons */}
-				<Show when={appLogger.unseenErrorCount() > 0}>
-					<button
-						class={s.toggleBtn}
-						onClick={() => props.onToggleErrorLog?.()}
-						title={`Error Log (${keyFor("toggle-error-log")})`}
-						style={{ position: "relative" }}
-					>
-						<IconAlert size={16} />
-						<span class={s.toggleBadge} style={{ background: "var(--error)", color: "#000" }}>
-							{appLogger.unseenErrorCount()}
-						</span>
-					</button>
 				</Show>
-				<button
-					class={s.toggleBtn}
-					classList={{ [s.toggleActive]: uiStore.state.ideasPanelVisible }}
-					onClick={() => props.onToggleNotes?.()}
-					title={`${t("statusBar.toggleNotes", "Toggle Ideas Panel")} (${keyFor("toggle-notes")})`}
-					style={{ position: "relative" }}
-				>
-					<IconLightbulb size={16} />
-					<Show when={notesBadgeCount() > 0}>
-						<span class={s.toggleBadge}>{notesBadgeCount()}</span>
-					</Show>
-				</button>
-				<button
-					class={s.toggleBtn}
-					classList={{ [s.toggleActive]: uiStore.state.fileBrowserPanelVisible }}
-					onClick={() => props.onToggleFileBrowser?.()}
-					title={`${t("statusBar.fileBrowser", "File Browser")} (${keyFor("toggle-file-browser")})`}
-					style={{ position: "relative" }}
-				>
-					<IconFiles size={16} />
-				</button>
-				<button
-					class={s.toggleBtn}
-					classList={{ [s.toggleActive]: uiStore.state.markdownPanelVisible }}
-					onClick={props.onToggleMarkdown}
-					title={`${t("statusBar.markdown", "Markdown")} (${keyFor("toggle-markdown")})`}
-					style={{ position: "relative" }}
-				>
-					<IconDocument size={16} />
-				</button>
-				<button
-					class={s.toggleBtn}
-					classList={{ [s.toggleActive]: uiStore.state.gitPanelVisible }}
-					onClick={props.onToggleDiff}
-					title={`${t("statusBar.git", "Git")} (${keyFor("toggle-git-ops")})`}
-					style={{ position: "relative" }}
-				>
-					<IconGit size={16} />
-					<Show when={changesCount() > 0}>
-						<span class={s.toggleBadge}>{changesCount()}</span>
-					</Show>
-				</button>
+				<TickerArea />
 
-				<Show when={settingsStore.isAiChatEnabled()}>
-					<button
-						class={s.toggleBtn}
-						classList={{ [s.toggleActive]: uiStore.state.aiChatPanelVisible }}
-						onClick={() => props.onToggleAiChat?.()}
-						title={`AI Chat (${keyFor("toggle-ai-chat")})`}
-						data-coach="ai-chat"
-						style={{ position: "relative" }}
-					>
-						<IconChat size={16} />
-					</button>
-				</Show>
-
-				{/* A running voice conversation shows its orb here too, so the agent
-				    stays visible when the chat panel is closed. */}
-				<Show when={voiceStore.state.sessionActive}>
-					<button
-						class={cx(s.toggleBtn, s.voiceOrbBtn)}
-						onClick={() => props.onToggleAiChat?.()}
-						title="Voice conversation running — open AI Chat"
-						aria-label="Voice conversation running — open AI Chat"
-					>
-						<VoiceOrb
-							state={voiceStore.state.agentState}
-							mic={voiceStore.state.audioLevel}
-							output={voiceStore.state.outputLevel}
-							size={16}
-						/>
-					</button>
-				</Show>
-
-				{/* Mic button - hold to talk (rightmost). In the title bar the compose
-				    dock's Speak button is the way to dictate, so it stays out. */}
-				<Show when={!inline() && dictationStore.state.enabled}>
-					<button
-						class={cx(
-							s.toggleBtn,
-							dictationStore.state.recording && s.micRecording,
-							dictationStore.state.processing && s.micProcessing,
-							dictationStore.state.loading && s.micLoading,
+				{/* Remote machines holding registered repos that are not answering.
+				    Without this the only symptom is every operation on those repos
+				    failing one by one, with the real cause buried in Settings. */}
+				<Show when={unreachableMachines().length > 0}>
+					<div
+						class={s.remoteOffline}
+						title={t(
+							"statusBar.remoteOfflineHint",
+							"Open Settings → Remote Machines to reconnect. Repositories on these machines cannot be read.",
 						)}
-						onMouseDown={(e) => {
-							if (e.button === 0) props.onDictationStart();
-						}}
-						onMouseUp={(e) => {
-							if (e.button === 0) props.onDictationStop();
-						}}
-						onMouseLeave={() => {
-							if (dictationStore.state.recording || dictationStore.state.loading) props.onDictationStop();
-						}}
-						title={`${t("statusBar.voiceDictation", "Voice Dictation")} (${dictationStore.state.hotkey})`}
-						data-coach="dictation"
+					>
+						{t("statusBar.remoteOffline", "Offline:")} {unreachableMachines().join(", ")}
+					</div>
+				</Show>
+
+				{/* GitHub PR + CI badges */}
+				<Show when={activePrData()}>
+					<div class={s.githubStatus}>
+						<PrBadge
+							number={activePrData()!.number}
+							title={activePrData()!.title}
+							readiness={prReadinessOf(activePrData()!)}
+							onClick={() => setShowPrDetailPopover(true)}
+						/>
+						<Show when={activePrData()!.checks && activePrData()!.checks!.total > 0}>
+							<span onClick={handleCiBadgeClick} style={{ cursor: "pointer" }}>
+								<CiBadge
+									status={
+										activePrData()!.checks!.failed > 0
+											? "completed"
+											: activePrData()!.checks!.pending > 0
+												? "in_progress"
+												: "completed"
+									}
+									conclusion={
+										activePrData()!.checks!.failed > 0
+											? "failure"
+											: activePrData()!.checks!.pending > 0
+												? null
+												: "success"
+									}
+									workflowName="CI"
+								/>
+							</span>
+						</Show>
+					</div>
+				</Show>
+
+				{/* Right section - controls */}
+				<div class={cx(s.section, s.controls)}>
+					{/* Toggle buttons */}
+					<Show when={appLogger.unseenErrorCount() > 0}>
+						<button
+							class={s.toggleBtn}
+							onClick={() => props.onToggleErrorLog?.()}
+							title={`Error Log (${keyFor("toggle-error-log")})`}
+							style={{ position: "relative" }}
+						>
+							<IconAlert size={16} />
+							<span class={s.toggleBadge} style={{ background: "var(--error)", color: "var(--text-on-error)" }}>
+								{appLogger.unseenErrorCount()}
+							</span>
+						</button>
+					</Show>
+					<button
+						class={s.toggleBtn}
+						classList={{ [s.toggleActive]: uiStore.state.ideasPanelVisible }}
+						onClick={() => props.onToggleNotes?.()}
+						title={`${t("statusBar.toggleNotes", "Toggle Ideas Panel")} (${keyFor("toggle-notes")})`}
 						style={{ position: "relative" }}
 					>
-						<svg class={s.micIcon} viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-							<path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-							<path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-						</svg>
+						<IconLightbulb size={16} />
+						<Show when={notesBadgeCount() > 0}>
+							<span class={s.toggleBadge}>{notesBadgeCount()}</span>
+						</Show>
 					</button>
-				</Show>
+					<button
+						class={s.toggleBtn}
+						classList={{ [s.toggleActive]: uiStore.state.fileBrowserPanelVisible }}
+						onClick={() => props.onToggleFileBrowser?.()}
+						title={`${t("statusBar.fileBrowser", "File Browser")} (${keyFor("toggle-file-browser")})`}
+						style={{ position: "relative" }}
+					>
+						<IconFiles size={16} />
+					</button>
+					<button
+						class={s.toggleBtn}
+						classList={{ [s.toggleActive]: uiStore.state.markdownPanelVisible }}
+						onClick={props.onToggleMarkdown}
+						title={`${t("statusBar.markdown", "Markdown")} (${keyFor("toggle-markdown")})`}
+						style={{ position: "relative" }}
+					>
+						<IconDocument size={16} />
+					</button>
+					<button
+						class={s.toggleBtn}
+						classList={{ [s.toggleActive]: uiStore.state.gitPanelVisible }}
+						onClick={props.onToggleDiff}
+						title={`${t("statusBar.git", "Git")} (${keyFor("toggle-git-ops")})`}
+						style={{ position: "relative" }}
+					>
+						<IconGit size={16} />
+						<Show when={changesCount() > 0}>
+							<span class={s.toggleBadge}>{changesCount()}</span>
+						</Show>
+					</button>
+
+					<Show when={settingsStore.isAiChatEnabled()}>
+						<button
+							class={s.toggleBtn}
+							classList={{ [s.toggleActive]: uiStore.state.aiChatPanelVisible }}
+							onClick={() => props.onToggleAiChat?.()}
+							title={`AI Chat (${keyFor("toggle-ai-chat")})`}
+							data-coach="ai-chat"
+							style={{ position: "relative" }}
+						>
+							<IconChat size={16} />
+						</button>
+					</Show>
+
+					{/* A running voice conversation shows its orb here too, so the agent
+					    stays visible when the chat panel is closed. */}
+					<Show when={voiceStore.state.sessionActive}>
+						<button
+							class={cx(s.toggleBtn, s.voiceOrbBtn)}
+							onClick={() => props.onToggleAiChat?.()}
+							title="Voice conversation running — open AI Chat"
+							aria-label="Voice conversation running — open AI Chat"
+						>
+							<VoiceOrb
+								state={voiceStore.state.agentState}
+								mic={voiceStore.state.audioLevel}
+								output={voiceStore.state.outputLevel}
+								size={16}
+							/>
+						</button>
+					</Show>
+
+					{/* Mic button - hold to talk (rightmost). In the title bar the compose
+					    dock's Speak button is the way to dictate, so it stays out. */}
+					<Show when={!inline() && dictationStore.state.enabled}>
+						<button
+							class={cx(
+								s.toggleBtn,
+								dictationStore.state.recording && s.micRecording,
+								dictationStore.state.processing && s.micProcessing,
+								dictationStore.state.loading && s.micLoading,
+							)}
+							onMouseDown={(e) => {
+								if (e.button === 0) props.onDictationStart();
+							}}
+							onMouseUp={(e) => {
+								if (e.button === 0) props.onDictationStop();
+							}}
+							onMouseLeave={() => {
+								if (dictationStore.state.recording || dictationStore.state.loading) props.onDictationStop();
+							}}
+							title={`${t("statusBar.voiceDictation", "Voice Dictation")} (${dictationStore.state.hotkey})`}
+							data-coach="dictation"
+							style={{ position: "relative" }}
+						>
+							<svg class={s.micIcon} viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+								<path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+								<path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+							</svg>
+						</button>
+					</Show>
+				</div>
 			</div>
 
 			{/* Rich PR detail popover */}

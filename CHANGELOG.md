@@ -6,6 +6,178 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+FastAF now includes TUICommander 2.1.2 (Apache-2.0, by Stefano Straus), merged into FastAF's own design and AI
+engine. The desktop AI Chat panel, Smart Prompts API mode, PR review and story drafts keep running on FastAF's
+built-in engine and providers.
+
+### Added
+- Dictation on the GPU on Linux and Windows. Both builds use Vulkan when a driver is present and the CPU when
+  none is. macOS keeps Metal.
+- Split by dragging. Drag a tab onto the left, right, top or bottom edge of the terminal area or of a pane to
+  split it in half, with the tab on that side. A highlight shows the half the tab will take.
+- The `+` in the tab strip opens an agent menu with agent icons and a check on the default, ranked by what you
+  launched most on the branch. Alt/Option-click and Cmd/Ctrl+T still open a plain terminal.
+- Sidebar layouts. The layers menu at the foot of the sidebar (Workspaces, sorting & layout) offers Compact,
+  Rich and Live agents. Live agents shows only branches with a running agent; Show all returns to the layout
+  you came from.
+- A stalled agent, one that says it is working but has been silent too long, gets a steady amber dot on its
+  tab, and on its own row in the sidebar when Nested Terminal Tabs is on.
+- "FastAF shell" in the Open in menu opens a plain terminal tab in the current repository or worktree.
+- Click the Agents ticker in the title bar to open the Activity Dashboard.
+- All Changes covers the whole branch, not only uncommitted work. A scope selector offers Uncommitted, Branch
+  vs base and Commit / range, with an Include uncommitted switch.
+- Git › Stashes: Check if still needed on a stash, and Check all in the Git panel header. A stash is dropped
+  only when it is proven redundant, and the command that restores it stays on screen with a copy button;
+  otherwise the verdict shows under the stash.
+- Compose: each queued prompt has Steer and Cancel beside it, and Cmd/Ctrl+S parks a draft.
+- AI Chat: each message has a ⋯ menu on hover with Copy message, Show raw Markdown, Quote reply and Fork from
+  here. `/clear` or `/new` starts a new conversation and keeps the old one in History, and `/fork` branches
+  at the last completed answer.
+- AI Chat: a message you send shows Sending… until the reply starts. One that could not be sent stays as Not
+  sent, and a turn the provider failed as No reply, each with Retry and Discard. A long notice or error shows
+  its first line and opens on click.
+- Chat view for agent terminals: a ⋯ menu on each message with Copy message, Show raw Markdown and Quote
+  reply. In the phone's Chat tab the menu also has reactions (thumbs up or down, heart, celebrate) and
+  comments; those are on the phone only.
+- Image attachments show as framed previews above the text in AI Chat, in the Chat view, in pending prompts
+  and in queue lists.
+- Plans and Stories: a Waiting on you list at the top collects stories that wait for a manual check,
+  unanswered workflow questions and unread reports. The bell notifies each item once.
+- Plans and Stories: the story backend in use is named beside the title, with a popover that says why it was
+  chosen and lets you override it. A connector that needs your approval asks in the dialog itself. Each story
+  has a Delivery workflow section.
+- A Workflows dialog with four views: Designer (steps as forms and lists, with saved presets), Triggers
+  (schedules and GitHub polling), Preview and Definition. Validate, Save draft and Publish act on the open
+  draft, and each write action needs its own approval. Jira and GitLab steps appear only with their plugins
+  installed; FastAF bundles neither.
+- Automations: pick a timezone from a searchable list, and let an automation close its own tab when it
+  finishes (`close_on_finish`, off by default).
+- Remote access: a signed-in phone or browser can open files outside the registered repositories, and a
+  signed-in remote MCP client can manage sessions, agents, tasks and agent mail like a local one.
+- The code editor in a browser or on the phone opens text files above 10 MB with Load in pages, up to 250 MB,
+  and saves files larger than 2 MB.
+- The phone shows which tool an agent is running now, on the session card and in the session details.
+- Claude Code's 5-hour and weekly quota updates from its status line, without a usage request. pi sessions
+  show their subscription quota too (reinstall the pi extension in Settings).
+- Agents can be called from scripts: `fastaf notify <agent> <text>` and `POST /agent/webhook/{to}` put a
+  message in an agent's inbox and wake it. `fastaf bg` gives a detached command a deadline: one hour by
+  default, set with `TUIC_BG_TIMEOUT_SECONDS`.
+- Spawned agents take a fixed capability set (`land`, `push`, `tag`, `children`, `progress`) and get none by
+  default. FastAF refuses a spawn, launch, progress report or `git push` outside the set and tells the parent
+  once.
+- A `.tuic-child-contract.md` in an orchestrating agent's working directory is added to the prompt of every
+  child it spawns.
+- Tab context menu: Allow Literal Terminal Reads, for an agent that must read secret-shaped text from that
+  terminal. Registered secrets stay masked.
+- Links to network (UNC) paths and custom schemes such as `editor://`, in Markdown and in terminal output,
+  open with the system handler after you click and confirm the exact target.
+- Design Mode: one click on Allow agents on this host enables capture, page errors, navigation and eval for
+  the armed session. Large screenshots are downscaled instead of refused.
+- Plugins: `execCli` takes a timeout of up to one hour, runs in any absolute folder and finds programs through
+  the backend PATH. `fs:read`, `fs:list` and `fs:watch` reach any path you can access.
+- A plugin ZIP can be installed from `http://localhost` or a loopback address. Downloads from the internet
+  stay HTTPS-only.
+- Web Push: add a push service host in Settings › All Settings. A secret can be requested on a headless host
+  through a one-time link sent to your phone.
+- A tab's progress bar shows an animated full-width bar for an indeterminate report and keeps its value while
+  paused.
+- `tuic-remote --no-automations` starts the remote daemon without the automation scheduler.
+- Command Palette: picking a repository also expands it in the sidebar and scrolls it into view.
+
+### Changed
+- AI Chat: Cmd/Ctrl+K with the cursor in the chat clears the chat view only. Nothing is deleted and the
+  terminal's scrollback is left alone. The header's trash is now Delete conversation, the one action that
+  deletes.
+- Linux: the .deb and .rpm now depend on the Vulkan loader and the AppImage carries it. Windows: the installer
+  adds the loader when the system has none.
+- Title bar: the agent badge comes first and shows subscription usage for the active session (the weekly
+  percent, what is left before the monthly limit and the time to each reset). Several tickers show side by
+  side while the tabs leave them room, and step aside when the tabs need it.
+- Toasts move to the bottom left while a dialog is open, so they no longer cover its buttons, and the empty
+  space around them no longer blocks clicks.
+- Plans and Stories: one Workflows button replaces the Stories / Run history / Designer pills and Start story
+  workflow. Actions the story backend does not support are disabled.
+- Git › Branches: the list appears at once; Merged badges and the Delete merged count follow when the merge
+  check is done.
+- An agent that asks to change Settings needs your confirmation only when the change adds authority, such as
+  enabling a listener, loosening authentication or adding an executable. Narrowing changes and edits in your
+  own Settings window apply directly.
+- MCP: `workflow` is listed only when the repository has its own workflow or an active run, and `automations`
+  only when an automation exists. The `settings` tool has one switch, the opt-in in Settings.
+- MCP `agent` tool: only an agent registered as orchestrator can launch agents and subscribe to their mail.
+  Managed child agents get a smaller tool (register, list_peers, send, inbox, wait, help).
+- A managed agent that goes silent gets one nudge, and its parent one stalled notice, instead of being stopped
+  automatically.
+- Dictation reports whether it really runs on the CPU or the GPU.
+- Markdown review: sending your edits names the changed line ranges, so the agent reads only those sections.
+- Smart Prompts that compare a branch with its base are disabled on the base branch and say why.
+- Remote sign-in: after too many wrong passwords the page shows how long to wait and that the QR code in
+  Settings › Remote Access signs in at once.
+- Files and Markdown images follow your symbolic links consistently, also to another volume.
+- MCP: the server is now named `fastaf`, so its tools appear as `mcp__fastaf__…` (in Codex, `mcp__fastaf.…`).
+  FastAF moves its own existing `tuicommander` entry to the new name the next time it installs or repairs its
+  MCP entry, and leaves entries written by other installs alone. Permission rules written for the old
+  `mcp__tuicommander__` prefix need the new one. ego still sees the server as `tuicommander`, so ego rule files
+  keep working.
+
+### Fixed
+- AI Chat: an Ask turn no longer leaves the chat stuck on "Agent running", Retry no longer repeats the
+  question or drops the chosen model and effort, History shows the right dates, and after a click in the
+  chat your typing no longer lands in the terminal beside it.
+- Send now, Steer and urgent agent mail interrupt Claude Code and Codex at once instead of queuing behind
+  active work. Send now to a working Codex session no longer drops the prompt.
+- Agent hooks report through a local socket instead of the terminal, so hook data no longer prints over the
+  agent's screen and large tool results keep their state updates.
+- Agent state follows the agent's own busy and idle signals. A suggestion no longer turns a busy agent green,
+  and an interrupted Codex turn returns to idle.
+- Claude Code sessions started through `env` or a script, or restored after a restart, report their state like
+  freshly launched ones.
+- A question card that opens before its transcript row arrives fills in within about a quarter of a second
+  instead of waiting up to 30 seconds.
+- Returning to a terminal tab shows its last rows at once instead of a blank until new output arrives.
+- Lower idle CPU with many agents and repositories. Repository refreshes interrupt typing and rendering less,
+  and wheel scrolling of a terminal stays fast on a loaded machine.
+- Browser and remote mode keep the diff scope, so a staged diff or a commit's file list no longer shows
+  unstaged changes. The diff of a repository's first commit shows its files.
+- Remote repositories: worktrees created or removed on the remote daemon show up without a manual refresh, and
+  file watchers come back after a reconnect.
+- A running `tuic-remote` picks up a relay pairing stored after it started and stops accepting a deleted or
+  replaced one, without a restart.
+- Tailscale commands always run in CLI mode, whatever the environment says.
+- MCP: while FastAF is unreachable the bridge returns a transient "unavailable" error instead of "method not
+  found", so clients keep FastAF as a server. `search_tools` ranks a tool first when the query names it
+  exactly.
+- Codex `/hooks` lists FastAF's hooks as "FastAF session" instead of "Unnamed hook".
+- Agent launch menus no longer pin the generic agent label as the tab's name, so the agent's intent or the
+  terminal title can name it. Your own renames stay.
+- Smart Prompts find the base branch from `origin/HEAD` first, so a remote-only base no longer leaves
+  `{base_branch}` empty.
+- Automation run output shows rendered terminal text instead of raw spinner repaints.
+- An explicit `fastaf --instance` wins over an inherited `TUIC_SOCKET`, and a conflict is reported.
+- Windows: agent status hooks no longer depend on a POSIX shell.
+- macOS: when an agent's own update replaces its running executable, input queued for it is still delivered.
+- Chat view: answer bars sit outside bullets and numbering, also in nested lists.
+- Activity Dashboard no longer warns about Unknown health only because an agent has no live stage.
+- Sidebar: a branch row's actions also appear on keyboard focus, and the list no longer scrolls sideways.
+- Phone: terminal history paging no longer skips lines, the terminal no longer shakes on overscroll with the
+  keyboard open, and queued prompts show inline in the chat view with Send now and Cancel.
+- Workflows: a scheduled trigger whose project folder was deleted no longer stops the other triggers, a
+  scheduled run started before a restart resumes after it, and a refused action answers 400, 403, 404 or 409
+  instead of 500.
+
+### Removed
+- The legacy workflow engine: role and kind graph workflows with their definitions, runs, trigger bindings and
+  run history, and the automations built on it for PR review, GitHub issue intake and triage. On the first
+  start FastAF backs up each affected store next to itself (`*.legacy-workflows.bak`), then removes that data.
+  Prompt schedules in Automations are kept.
+- Stories, plans and Ideas are no longer actions of the `workflow` MCP tool. They have a separate `story`
+  tool: call `story action=<action>` with the former `input` fields at the top level.
+- The `fastaf diff` command. It never opened a two-file comparison.
+- The three guided "Configure…" Smart Prompts (issue to draft PR, incoming PR review, authorized bounded fix)
+  and their tips, which set up the removed automations.
+- The sidebar's Auto layout. A saved Auto preference opens in Compact.
+- Automations: the "Select first automation on open" switch. The first definition always opens.
+
 ## [2.2.2] - 2026-11-16
 
 ### Fixed

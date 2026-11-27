@@ -3,7 +3,7 @@
 # or a headless feature graph after CI has already built dictation tests.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-work="$(mktemp -d "${TMPDIR:-$root/.tmp}/fixture-build-profile.XXXXXX")"
+work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 cat > "$work/bin/cargo" <<'EOF'
@@ -31,20 +31,20 @@ for shell in sh pwsh; do
     builder=(sh scripts/build-fixture-bins.sh)
   fi
   unset TUIC_FIXTURE_FEATURES FIXTURE_BUILD_EXIT CARGO_LLVM_COV LLVM_PROFILE_FILE
-  check build --profile test --no-default-features \
+  check build --profile test --no-default-features --features test-fixtures \
     --bin tuic-acp-fixture-agent --bin tuic-mcp-fixture-server
-  export TUIC_FIXTURE_FEATURES=dictation
+  export TUIC_FIXTURE_FEATURES=dictation,test-fixtures
   # Catches: CI selecting a binary-only graph without test dev-dependencies.
-  check test --workspace --no-run --features dictation
+  check test --workspace --no-run --features dictation,test-fixtures
   # Catches: llvm-cov setup succeeding while fixtures land outside the test tree.
   # A nonstandard directory with spaces rejects hardcoded llvm-cov-target paths
   # and unquoted shell argument expansion. Both feature selections must route it.
   export CARGO_LLVM_COV=1
   export LLVM_PROFILE_FILE="$work/custom coverage/tuicommander-%p-%m.profraw"
-  check test --workspace --no-run --features dictation \
+  check test --workspace --no-run --features dictation,test-fixtures \
     --target-dir "$work/custom coverage"
   unset TUIC_FIXTURE_FEATURES
-  check build --profile test --no-default-features \
+  check build --profile test --no-default-features --features test-fixtures \
     --bin tuic-acp-fixture-agent --bin tuic-mcp-fixture-server \
     --target-dir "$work/custom coverage"
   # Catches: a failed fixture build being reported as successful setup.

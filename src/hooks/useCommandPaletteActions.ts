@@ -11,6 +11,7 @@ import { repositoriesStore } from "../stores/repositories";
 import { terminalsStore } from "../stores/terminals";
 import { updaterStore } from "../stores/updater";
 import { runWithFeedback } from "../utils/promptContext";
+import { revealRepoInSidebar } from "../utils/revealRepoInSidebar";
 import type { useGitOperations } from "./useGitOperations";
 import type { ShortcutHandlers } from "./useKeyboardShortcuts";
 import type { SmartPromptResult } from "./useSmartPrompts";
@@ -43,6 +44,7 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 					// handleBranchSelect switches the active repo itself — setting it
 					// here first would make save-on-leave key the OLD layout under the
 					// NEW repo, losing the split when switching back.
+					revealRepoInSidebar(repo.path);
 					const branch = repo.activeWorkspaceId || Object.keys(repo.workspaces)[0];
 					if (branch) void options.gitOps.handleBranchSelect(repo.path, branch);
 					else repositoriesStore.setActive(repo.path);
@@ -59,6 +61,7 @@ export function useCommandPaletteActions(options: CommandPaletteActionOptions): 
 				keybinding: "",
 				execute: () => {
 					repositoriesStore.setPark(repo.path, false);
+					revealRepoInSidebar(repo.path);
 					const branch = repo.activeWorkspaceId || Object.keys(repo.workspaces)[0];
 					if (branch) void options.gitOps.handleBranchSelect(repo.path, branch);
 					else repositoriesStore.setActive(repo.path);

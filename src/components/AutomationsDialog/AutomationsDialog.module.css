@@ -752,3 +752,34 @@ button.item[data-control-layout="card"]:disabled {
     max-width: none;
   }
 }
+
+/* The timezone trigger: a button that opens a searchable menu, drawn as the
+   form's selects (recessed, value at the left, chevrons at the right). */
+.dialog button.zoneButton {
+  justify-content: space-between;
+  width: 100%;
+  background: var(--bg-primary);
+  box-shadow: var(--inset-well);
+  font-weight: 400;
+}
+
+.dialog button.zoneButton:hover:enabled {
+  background: var(--bg-primary);
+  border-color: var(--border-strong);
+}
+
+.zoneButton > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zoneButton > svg {
+  flex-shrink: 0;
+  color: var(--fg-secondary);
+}
+
+/* The timezone menu portals outside the dialog, so it sits above the overlay. */
+.timezoneMenu {
+  z-index: calc(var(--z-modal) + 1);
+}

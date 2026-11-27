@@ -65,7 +65,8 @@
     color var(--duration-fast) var(--ease-out);
 }
 
-.item:hover {
+.item:hover,
+.item:focus-visible {
   background: var(--surface-hover);
   color: var(--fg-primary);
 }
@@ -95,4 +96,25 @@
   height: 1px;
   background: var(--border-subtle);
   margin: 4px 6px;
+}
+
+@media (pointer: coarse) {
+  .item { min-height: 44px; box-sizing: border-box; }
+}
+
+/* A filter field pinned over a scrolling list (the timezone picker).
+   The menu gives up its top inset to the pinned row (.searchable), and the row
+   spans the side insets, so nothing scrolls past above or beside the field.
+   The raised tone, opaque, so the rows passing under it do not show through. */
+.searchable {
+  padding-top: 0;
+}
+
+.search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 -4px 2px;
+  padding: 6px 6px 4px;
+  background: var(--bg-tertiary);
 }

@@ -68,10 +68,21 @@
   padding-left: 8px;
 }
 
-/* With the tab strip in it, the centre is the strip — no breadcrumb padding. */
+/* With the tab strip in it, the centre is the strip — no breadcrumb padding.
+   It is as wide as its tabs and shrinks (then scrolls) only when the row runs
+   out; the spare room goes to the right cluster below. */
 .centerTabs {
+  flex: 0 1 auto;
   gap: 0;
   padding-left: 6px;
+}
+
+/* Next to the tab strip the right cluster takes the row's spare room. Its
+   controls stay packed at the far end (flex-end), so the room reads as the
+   same empty drag space as before; the one thing that grows into it is the
+   status cluster's ticker pool, which is how tickers give way to tabs. */
+.centerTabs + .right {
+  flex: 1 0 auto;
 }
 
 .right {
@@ -628,7 +639,7 @@
   height: 3px;
   margin-left: 3px;
   border-radius: 2px;
-  background: var(--bg-tertiary);
+  background: var(--fg-muted);
   overflow: hidden;
 }
 
@@ -654,5 +665,15 @@
   .center,
   .right {
     height: 44px;
+  }
+
+  /* The wrapped touch row keeps the strip and the cluster on one line: the
+     strip takes what the cluster leaves, as before; no room for tickers here. */
+  .centerTabs {
+    flex: 1 1 0%;
+  }
+
+  .centerTabs + .right {
+    flex: none;
   }
 }

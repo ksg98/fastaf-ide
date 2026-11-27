@@ -1,9 +1,11 @@
+import { createResource, getOwner } from "solid-js";
 import { invoke } from "../invoke";
 import { agentConfigsStore } from "../stores/agentConfigs";
 import { appLogger } from "../stores/appLogger";
 import { githubStore } from "../stores/github";
 import { promptLibraryStore, type SavedPrompt } from "../stores/promptLibrary";
 import { providerRegistryStore } from "../stores/providerRegistry";
+import { repoSettingsStore } from "../stores/repoSettings";
 import { repositoriesStore } from "../stores/repositories";
 import { terminalsStore } from "../stores/terminals";
 import { writeClipboard } from "../utils/clipboard";
@@ -106,6 +108,13 @@ function canExecuteApi(): CanExecuteResult {
 	return { ok: true };
 }
 
+/** The checkout a prompt runs against: the active terminal's directory, else the
+ *  active repository's. The same fallback `executeHeadless` uses, so the git
+ *  context a prompt is checked and filled from is the place it will run in. */
+function apiRoot(): string {
+	return terminalsStore.getActive()?.cwd ?? repositoriesStore.getActive()?.path ?? "";
+}
+
 /** Resolve whether an inject-mode prompt submits after insertion.
  *
  * Explicit UI actions win: Insert always withholds Enter, while Insert & Run
@@ -130,11 +139,76 @@ function resolveHeadlessAgent(prompt: SavedPrompt): ResolvedAgent {
 	return { agent: global ?? null };
 }
 
+/** A two-branch template cannot operate on a branch and itself. */
+function branchPromptCheck(prompt: SavedPrompt, branch?: string, baseBranch?: string): CanExecuteResult {
+	if (
+		prompt.content.includes("{branch}") &&
+		prompt.content.includes("{base_branch}") &&
+		branch &&
+		branch === baseBranch
+	) {
+		return {
+			ok: false,
+			reason: `Already on base branch "${baseBranch}" — select a different branch to run this prompt`,
+		};
+	}
+	return { ok: true };
+}
+
 export function useSmartPrompts() {
 	const pty = usePty();
 
+	function checkoutContext() {
+		const repo = repositoriesStore.getActive();
+		return { path: apiRoot(), revision: repo ? repositoriesStore.getGitRevision(repo.path) : 0 };
+	}
+
+	function effectiveBaseBranch(detected?: string): string | undefined {
+		const repo = repositoriesStore.getActive();
+		const configured = repo ? repoSettingsStore.getEffectiveField(repo.path, "baseBranch") : undefined;
+		return configured && configured !== "automatic" ? configured : detected;
+	}
+
+	// Mounted consumers need refreshed checkout data for disabled states. Callers
+	// outside a reactive owner only need execution's fresh resolution below.
+	const [checkout] = getOwner()
+		? createResource(
+				() => {
+					const context = checkoutContext();
+					return context.path ? context : false;
+				},
+				async (context) => {
+					try {
+						const { vars } = await invoke<{ vars: Record<string, string> }>("resolve_prompt_variables", {
+							content: "{branch} {base_branch}",
+							repoPath: context.path,
+						});
+						return { ...context, vars };
+					} catch (err) {
+						appLogger.warn("prompts", "Cannot resolve checkout for prompt availability", err);
+						return undefined;
+					}
+				},
+			)
+		: [() => undefined];
+
 	/** Check if a smart prompt can be executed right now */
 	function canExecute(prompt: SavedPrompt): CanExecuteResult {
+		const check = canExecuteMode(prompt);
+		if (!check.ok) return check;
+		const resolved = checkout();
+		if (resolved) {
+			const context = checkoutContext();
+			if (resolved.path === context.path && resolved.revision === context.revision) {
+				return branchPromptCheck(prompt, resolved.vars.branch, effectiveBaseBranch(resolved.vars.base_branch));
+			}
+		}
+		// Unknown or refreshing context is not a workspace-based veto. Execution
+		// always resolves the target checkout before it can inject anything.
+		return check;
+	}
+
+	function canExecuteMode(prompt: SavedPrompt): CanExecuteResult {
 		if (prompt.enabled === false) return { ok: false, reason: "Prompt is disabled" };
 
 		if (prompt.executionMode === "shell") {
@@ -175,7 +249,7 @@ export function useSmartPrompts() {
 	function resolveFrontendVars(repoPath: string): Record<string, string> {
 		const vars: Record<string, string> = {};
 		const repo = repositoriesStore.get(repoPath);
-		const branch = repo?.activeWorkspaceId ?? "";
+		const branch = repo?.activeWorkspaceId ? (repo.workspaces?.[repo.activeWorkspaceId]?.branchName ?? "") : "";
 		if (branch) {
 			const pr = githubStore.getBranchPrData(repoPath, branch);
 			if (pr) Object.assign(vars, prContextVariables(pr));
@@ -201,7 +275,7 @@ export function useSmartPrompts() {
 		prompt: SavedPrompt,
 		manualVariables?: Record<string, string>,
 	): Promise<SmartPromptResult> {
-		const check = canExecute(prompt);
+		const check = canExecuteMode(prompt);
 		if (!check.ok) {
 			appLogger.warn("prompts", `Cannot execute "${prompt.name}": ${check.reason}`);
 			return check;
@@ -211,12 +285,22 @@ export function useSmartPrompts() {
 
 		// Single IPC: extract needed variable names + resolve only those from git.
 		const activeRepo = repositoriesStore.getActive();
-		const repoPath = activeRepo?.path ?? "";
+		// Git context must come from the checkout where execution happens, not
+		// the parent repository (which often still has the base checked out).
+		const repoPath = apiRoot();
 		const { vars: gitVars, needed: varNames } = await invoke<{ vars: Record<string, string>; needed: string[] }>(
 			"resolve_prompt_variables",
 			{ content: prompt.content, repoPath: repoPath || null },
 		);
-		const allVars: Record<string, string> = { ...gitVars, ...resolveFrontendVars(repoPath), ...manualVariables };
+		const baseBranch = effectiveBaseBranch(gitVars.base_branch);
+		const allVars: Record<string, string> = {
+			...gitVars,
+			...(baseBranch ? { base_branch: baseBranch } : {}),
+			...resolveFrontendVars(activeRepo?.path ?? repoPath),
+			...manualVariables,
+		};
+		const branchCheck = branchPromptCheck(prompt, allVars.branch, allVars.base_branch);
+		if (!branchCheck.ok) return branchCheck;
 		// The open review threads are read from GitHub only when the prompt asks for them.
 		if (varNames.includes("pr_open_threads") && !("pr_open_threads" in allVars) && allVars.pr_number && repoPath) {
 			try {

@@ -101,3 +101,51 @@
 .submenu .item {
   white-space: nowrap;
 }
+
+/* Leading columns. A row's icon and a checkable menu's tick both sit in a 16px
+   slot, 8px before the label, so labels share one left edge down the menu. */
+.icon,
+.check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  margin-right: 8px;
+}
+
+/* Quieter than the label beside them; a brand glyph is a filled shape and
+   would otherwise outweigh 13px text. */
+.icon,
+.check {
+  color: var(--fg-secondary);
+}
+
+/* The new-tab agent picker (AgentLaunchMenu): the standard menu recipe (28px
+   rows, 13px text, 16px leading icon), only wider, so an agent name and its
+   run configuration fit on one line. */
+.large {
+  min-width: min(240px, calc(100vw - 16px));
+}
+
+.launchLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The run configuration follows the agent's name a step quieter, the way a
+   Codex menu row puts its description after the label. */
+.configName {
+  color: var(--fg-muted);
+}
+
+/* "This configuration is the agent's default" — shown only where an agent
+   offers several. */
+.defaultMark {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--fg-muted);
+}

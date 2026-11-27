@@ -56,12 +56,6 @@ export function runTriggerLabel(kind: AutomationRun["trigger"]["kind"] | string)
 			return t("automations.trigger.manual", "Manual");
 		case "scheduled":
 			return t("automations.trigger.scheduled", "Scheduled");
-		case "event":
-			return t("automations.trigger.event", "Issue label");
-		case "pull_request_review":
-			return t("automations.trigger.pullRequestReview", "Pull request review");
-		case "triage":
-			return t("automations.trigger.triage", "Issue triage");
 		default:
 			return humanize(kind);
 	}

@@ -549,7 +549,7 @@ export const GeneralTab: Component = () => {
 						label="Content index memory budget (MB)"
 						value={String(settingsStore.state.indexMemoryBudgetMb)}
 						onInput={(value) => value.trim() !== "" && settingsStore.setIndexMemoryBudgetMb(Number(value))}
-						hint="Total memory available for content search indexes before older indexes are dropped."
+						hint="Approximate memory budget for content search indexes. The default is 256 MiB; older indexes reload when needed."
 					/>
 				</ExpertSetting>
 				<ExpertSetting configKey="app.attachment_max_bytes" value={settingsStore.state.attachmentMaxBytes}>

@@ -25,16 +25,18 @@ import { editorTabsStore } from "../../stores/editorTabs";
 import { globalWorkspaceStore } from "../../stores/globalWorkspace";
 import { mdTabsStore, type PluginPanelTab } from "../../stores/mdTabs";
 import { multiviewStore } from "../../stores/multiview";
-import { paneLayoutStore } from "../../stores/paneLayout";
+import { type PaneTab, paneLayoutStore } from "../../stores/paneLayout";
 import { currentBranchKey, repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { tabOrderingStore } from "../../stores/tabManager";
 import { terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
+import { isTauri } from "../../transport";
 import { cx } from "../../utils";
-import { copyPathToClipboard, writeClipboard } from "../../utils/clipboard";
+import { copyPathToClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
+import { literalReadsStore } from "../../utils/literalReads";
 import { markdownDocumentPanelId } from "../../utils/markdownDocumentPanelId";
 import { computeGrid } from "../../utils/multiviewGrid";
 import { handleOpenUrl, openLocalPath } from "../../utils/openUrl";
@@ -49,10 +51,19 @@ import { fileContextSmartMenuItem } from "../../utils/promptContext";
 import { ptyCaptureStore } from "../../utils/ptyCapture";
 import { getRepoColor } from "../../utils/repoColor";
 import { resumeTerminal, type SuspendOutcome, suspendRefusal, suspendTerminal } from "../../utils/suspendTerminal";
+import { AgentLaunchMenu, type AgentLaunchMenuItem } from "../ContextMenu/AgentLaunchMenu";
 import type { ContextMenuItem } from "../ContextMenu/ContextMenu";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
 import { createAgentLaunchMenu } from "../ContextMenu/createAgentLaunchMenu";
+import { createSessionCopyItems } from "../ContextMenu/sessionCopyItems";
 import { IconGrid, IconPlus } from "../icons";
+import {
+	applyEdgeDrop,
+	edgeDropTargetAt,
+	hideEdgeDropPreview,
+	paneTabTypeOf,
+	showEdgeDropPreview,
+} from "../PaneTree/paneEdgeDrop";
 import s from "./TabBar.module.css";
 import { alignDockedTabs, DiffTabView, EditorTabView, MarkdownTabView, TerminalTabView } from "./TabViews";
 
@@ -64,8 +75,8 @@ export interface TabBarProps {
 	onCloseOthers: (id: string) => void;
 	onCloseToRight: (id: string) => void;
 	onNewTab: () => void;
-	/** Agents a long press on the + button offers; each opens a new tab running that agent. */
-	getNewAgentMenuItems?: () => ContextMenuItem[];
+	/** Agents the + button offers; each opens a new tab running that agent. */
+	getNewAgentMenuItems?: () => AgentLaunchMenuItem[];
 	onReorder?: (fromIndex: number, toIndex: number) => void;
 	onDetachTab?: (id: string) => void;
 	onReattachTab?: (id: string) => void;
@@ -113,6 +124,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 	// Context menu for tabs
 	const tabMenu = createContextMenu();
 	const [contextTabId, setContextTabId] = createSignal<string | null>(null);
+	const sessionCopyItems = createSessionCopyItems(contextTabId, tabMenu.visible, "values");
 
 	// Context menu for overflow tabs (right-click on scroll arrows)
 	const overflowMenu = createContextMenu();
@@ -122,12 +134,17 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		const root = paneLayoutStore.getRoot();
 		return root ? computeLeafRects(root) : [];
 	});
-	// Long press or right click on + lists the agents (see createAgentLaunchMenu).
-	const newAgentMenu = createAgentLaunchMenu(() => props.getNewAgentMenuItems?.() ?? []);
+	// Reuse the long-press/right-click menu for the primary click as well.
+	const newAgentMenu = createAgentLaunchMenu(() => {
+		const agents = props.getNewAgentMenuItems?.() ?? [];
+		const items = agents.length === 1 && agents[0].children ? agents[0].children : agents;
+		return [...items, { label: "Terminal", action: props.onNewTab, separator: items.length > 0 }];
+	});
 
-	const handleNewTabClick = () => {
+	const handleNewTabClick = (event: MouseEvent) => {
 		if (newAgentMenu.consumeClick()) return;
-		props.onNewTab();
+		if (event.altKey) props.onNewTab();
+		else newAgentMenu.openBelow(event.currentTarget as HTMLElement);
 	};
 
 	const reportOutcome = async (pending: Promise<SuspendOutcome>) => {
@@ -354,21 +371,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				},
 			);
 		}
-		// The alias is the address another agent is told to notify, so it has to be
-		// readable and copyable from the tab that owns it — otherwise it exists only
-		// inside an MCP payload.
-		if (term?.alias) {
-			const alias = term.alias;
-			items.push(
-				{ label: "", separator: true, action: () => {} },
-				{
-					label: t("tabBar.alias", "Alias: {alias}", { alias }),
-					action: () => {
-						writeClipboard(alias).catch((err) => appLogger.error("app", "Failed to copy alias", err));
-					},
-				},
-			);
-		}
+		items.push({ label: "", separator: true, action: () => {} }, ...sessionCopyItems());
 		// Global workspace promote/unpromote
 		const isPromoted = globalWorkspaceStore.isPromoted(id);
 		items.push(
@@ -404,6 +407,20 @@ export const TabBar: Component<TabBarProps> = (props) => {
 								})),
 							}
 						: {}),
+				},
+			);
+		}
+		// Owner-only literal reads (#2643-6b38): desktop IPC is the one surface a
+		// model cannot reach, so the grant is offered only in the native window.
+		if (isTauri() && sessionId && !exited) {
+			const literal = literalReadsStore.isGranted(sessionId);
+			items.push(
+				{ label: "", separator: true, action: () => {} },
+				{
+					label: literal
+						? t("tabBar.revokeLiteralReads", "Mask Terminal Reads Again")
+						: t("tabBar.allowLiteralReads", "Allow Literal Terminal Reads"),
+					action: () => void literalReadsStore.toggle(sessionId),
 				},
 			);
 		}
@@ -637,11 +654,23 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		id: string,
 		_tabType: "terminal" | "markdown" | "diff" | "editor" = "terminal",
 	) => {
-		initMouseDrag(e, e.currentTarget as HTMLElement, {
+		const sourceEl = e.currentTarget as HTMLElement;
+		// Dragging the tab on screen needs another tab to stay in the first pane:
+		// its neighbour in the strip, preferring the next one.
+		const companion = (): PaneTab | null => {
+			for (const sib of [sourceEl.nextElementSibling, sourceEl.previousElementSibling]) {
+				const sibId = (sib as HTMLElement | null)?.dataset?.tabId;
+				const type = sibId ? paneTabTypeOf(sibId) : null;
+				if (sibId && type) return { id: sibId, type };
+			}
+			return null;
+		};
+		initMouseDrag(e, sourceEl, {
 			onStart: () => setDraggingId(id),
 			onMove: (x, y) => {
 				const el = document.elementFromPoint(x, y);
 				const tabEl = el?.closest("[data-tab-id]") as HTMLElement | null;
+				showEdgeDropPreview(tabEl ? null : edgeDropTargetAt(x, y, id, companion()));
 				if (tabEl && tabEl.dataset.tabId !== id) {
 					const targetId = tabEl.dataset.tabId!;
 					const rect = tabEl.getBoundingClientRect();
@@ -664,6 +693,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 			},
 			onDrop: (x, y) => {
 				const sourceId = id;
+				hideEdgeDropPreview();
 				// 1. Tab reorder (highest priority — dragOverId from onMove is reliable)
 				const overId = dragOverId();
 				const overSide = dragOverSide();
@@ -706,7 +736,16 @@ export const TabBar: Component<TabBarProps> = (props) => {
 					resetDragState();
 					return;
 				}
-				// 2. Cross-pane move / assign orphan (split mode, dropped on pane area)
+				// 2. Pane edge: split that pane (or the unsplit area) around the tab
+				const sourceType = paneTabTypeOf(sourceId);
+				if (
+					sourceType &&
+					applyEdgeDrop(edgeDropTargetAt(x, y, sourceId, companion()), { id: sourceId, type: sourceType }, companion())
+				) {
+					resetDragState();
+					return;
+				}
+				// 3. Cross-pane move / assign orphan (split mode, dropped on pane center)
 				if (paneLayoutStore.isSplit()) {
 					const targetGroup = findPaneGroupAtPoint(x, y);
 					if (targetGroup) {
@@ -737,7 +776,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 						}
 					}
 				}
-				// 3. Detach from split (dropped outside panes AND not on a tab)
+				// 4. Detach from split (dropped outside panes AND not on a tab)
 				if (paneLayoutStore.isSplit()) {
 					const fromGroup = paneLayoutStore.getGroupForTab(sourceId);
 					if (fromGroup) {
@@ -752,7 +791,10 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				}
 				resetDragState();
 			},
-			onCancel: () => resetDragState(),
+			onCancel: () => {
+				hideEdgeDropPreview();
+				resetDragState();
+			},
 		});
 	};
 
@@ -1107,7 +1149,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				class={s.newBtn}
 				onClick={handleNewTabClick}
 				{...newAgentMenu.buttonHandlers}
-				title={`${t("tabBar.newTab", "New Tab")} (${keyFor("new-terminal")})`}
+				title={`Launch agent · Alt/Option-click: Terminal (${keyFor("new-terminal")})`}
 			>
 				<IconPlus size={16} />
 			</button>
@@ -1177,7 +1219,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				visible={tabMenu.visible()}
 				onClose={tabMenu.close}
 			/>
-			<ContextMenu
+			<AgentLaunchMenu
 				items={newAgentMenu.items()}
 				x={newAgentMenu.position().x}
 				y={newAgentMenu.position().y}

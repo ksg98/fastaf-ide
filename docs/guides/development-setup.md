@@ -5,7 +5,11 @@
 The macOS desktop app supports macOS 12 Monterey or later and requires system WebKit updated to Safari 17.4 or later for Mermaid diagrams. The bundle declares macOS 12.0 as its minimum; this does not guarantee that Safari updates are installed. `src-tauri/.cargo/config.toml` forces `MACOSX_DEPLOYMENT_TARGET=12.0` for Rust and native dependencies, including WebRTC and whisper.cpp, overriding inherited shell defaults. The Cargo config also forces `CMAKE_OSX_DEPLOYMENT_TARGET=12.0` so whisper.cpp updates existing CMake caches instead of retaining an older target. Make does not set a separate default. `scripts/test-macos-deployment-target.sh` checks both values against the bundle minimum and runs with system Python without extra dependencies. The installed Xcode SDK's libc++ `__configuration/availability.h` warns for macOS deployment targets below 11.0, so 12.0 needs no increase. Windows uses the Evergreen WebView2 runtime; Linux builds use WebKitGTK 4.1 API packages.
 
 - **Node.js 24+** (the repository version is pinned in [`.nvmrc`](https://github.com/ksg98/fastaf-ide/blob/main/.nvmrc))
-- **Rust** (stable toolchain via rustup)
+- **Rust 1.99.1** via rustup, the version CI pins (`RUST_VERSION` in `.github/workflows/`). An older
+  stable does not compile the code: 1.96.0 fails with `use of unstable library feature uint_bit_width`.
+  The repository has no `rust-toolchain.toml` (see [CI](ci.md#the-rust-toolchain-is-pinned)), so select
+  it yourself: `rustup toolchain install 1.99.1`, then `RUSTUP_TOOLCHAIN=1.99.1` in front of a command
+  (`RUSTUP_TOOLCHAIN=1.99.1 make dev`) or `rustup default 1.99.1`
 - **Tauri CLI** (`cargo install tauri-cli`)
 - **git** for git features. `gh` (GitHub CLI) is only a release tool; the app does not run it.
 
@@ -16,6 +20,26 @@ The macOS desktop app supports macOS 12 Monterey or later and requires system We
 ```bash
 pnpm install
 ```
+
+### Dependency release policy
+
+The application and the standalone `website/` project pin pnpm 12.15.0 in
+`packageManager`. CI uses that pin through `pnpm/action-setup`.
+Each project's `pnpm-workspace.yaml` sets `minimumReleaseAge: 10080`:
+new direct and transitive package releases must be at least seven days old.
+There are no release-age exclusions. Use `pnpm install --frozen-lockfile`
+for reproducible installs. pnpm 12 also verifies locked releases against this
+policy, so an existing lockfile is not an exception.
+
+Do not approve a young release interactively or add an exclusion to make an
+install pass. Wait for the release to mature, or ask for an explicit policy
+decision. `minimumReleaseAgeExclude` exists, but this project does not use it.
+See the [pnpm release-age settings](https://pnpm.io/settings/dependency-resolution#minimumreleaseage).
+
+Package popularity is a separate review. npm reports downloads, not users.
+Use last-week downloads as the agreed proxy and review every package below
+10,000 downloads per week, including transitive and development packages.
+A low count is not permission to remove or replace a dependency.
 
 ### TypeScript target
 
@@ -31,29 +55,31 @@ on `~2.4.0` and updater on `~2.11.0` in both manifests until their next minor
 versions are validated together. The direct `rfd` dependency must match the
 version and features used by `tauri-plugin-dialog`; dialog 2.8.1 uses `rfd 0.16`.
 
-### Temporary dependency audit exception
+### Dependency audit exceptions
 
 `pnpm-workspace.yaml` configures `auditConfig.ignoreGhsas` for
 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) only.
 Boss approved this exception on 2026-10-04 and extended it on 2026-11-03; it
 expires on **2027-02-04**. GitHub withdrew the advisory on 2026-10-23 as "not a
 practically exploitable vulnerability". Delete the `auditConfig` block once
-`pnpm audit` passes without it.
+`pnpm audit` passes without it (upstream removed its copy on 2026-11-14).
 At approval time, `braces` 3.0.3 had no patched version on npm (`3.0.4`
 returned 404). Its only dependency path is build-only:
 `vite-plugin-purgecss → purgecss → fast-glob → micromatch → braces`.
 The advisory concerns stack exhaustion from deeply nested patterns. This path
 processes repository build inputs, rather than runtime terminal or Markdown
-content. Remove the exception when a patch becomes available, and review it
-by the expiry date; pnpm does not enforce the date automatically.
-No other advisory is ignored. `pnpm-workspace.yaml` pins DOMPurify 3.4.16
-for the application and Mermaid, and the development-only `qs` to 6.16.0.
-Rechecked on 2026-10-09: npm still publishes 3.0.3 as latest, and the advisory
-still lists no patch. The dependency tree still has only the build path above;
-retain the existing exception and its expiry. The frontend audit now requires
-Seroval >=1.6.3 and source-map-js >=1.2.2. KaTeX 0.16.47 remains under
-Mermaid 11; its patched >=0.18.2 line requires the separate Mermaid upgrade
-and browser compatibility review. No KaTeX advisory is ignored.
+content. Review the exception by the expiry date; pnpm does not enforce the
+date automatically. No other advisory is ignored.
+
+Transitive security pins live in the `overrides` block of
+`pnpm-workspace.yaml`, each with its reason: DOMPurify for the application and
+Mermaid, the development-only `qs`, Seroval >=1.6.3, source-map-js >=1.2.2, and
+the test-only zod ^4.6.6 and undici ^8.12.2. KaTeX 0.16.47 remains under
+Mermaid 11; its patched >=0.18.2 line requires the separate Mermaid upgrade and
+browser compatibility review. No KaTeX advisory is ignored.
+Rust exceptions live in `src-tauri/.cargo/audit.toml`, each with a reason and
+a review date.
+
 pnpm 11 ignores the legacy `pnpm.auditConfig` field in `package.json`.
 
 ## Development
@@ -73,6 +99,16 @@ The macOS application firewall uses code signing for initial and tracking decisi
 Vite excludes backend files and repository tooling output such as `.tmp/`, `target/`, `dist/`, coverage, reports, plans, stories, and docs from its watcher. Mutation testing keeps its disposable checkout under `.tmp/`; its HTML files must not reload the live WebView. Changes to this watch configuration require restarting the Vite dev server.
 The watch allowlist and Tauri version are resolved from the directory containing `vite.config.ts`, so starting Vite from another working directory still uses this checkout's inputs.
 
+### macOS application icon
+
+FastAF's application icon is its own artwork: `src-tauri/icons/icon.icns` for the
+bundle and the Dock, the shared PNGs and ICO for Linux and Windows. Tauri embeds
+the ICNS for the Dock when running `pnpm tauri dev`; restart the development
+process after changing it. Upstream 2.1.2 added a macOS-only icon (a rounded body
+with transparent margins, generated from its `icon.png`) and a script and test
+for it. FastAF takes none of the three: `src-tauri/tauri.macos.conf.json` lists no
+icons, so the icon set in `tauri.conf.json` applies on every platform.
+
 ### Isolated agent desktop checks (macOS)
 
 Use a linked worktree, not the daily checkout. Inspect the complete plan first:
@@ -87,8 +123,11 @@ make agent-test-stop
 The dry run does not build, create runtime files, read application configuration,
 or start a desktop process. The launch runs in the foreground. It builds the
 frontend, then uses one Cargo build through the mbx shim for
-`tuicommander-agent-test`, `tuic-bridge` and `tuic`. The existing orchestrator
-build-slot wrapper serializes these builds when installed. `mbx doctor` must
+`tuicommander-agent-test`, `tuic-bridge` and `fastaf-cli`. A build admission wrapper
+(e.g. the orchestrator's build-slot script) serializes these builds when
+`TUIC_BUILD_SLOT` names an executable one; `scripts/replay-oracle.sh` honours it
+too. When `TUIC_BUILD_FREEZE` names an existing freeze file, the launch refuses to
+build unless that file allows it. `mbx doctor` must
 succeed. Do not set `CARGO_TARGET_DIR`. No Vite server, Tauri watcher, release
 bundle, signing operation or installed executable is involved. Embedded frontend
 assets use `tauri/custom-protocol` even though this is a debug build.
@@ -106,6 +145,9 @@ as a ready-to-run `connect` command in the launch JSON:
 curl --unix-socket '<socket from launch JSON>' http://localhost/health
 ```
 
+`fastaf --instance <instance> <command>` reaches the same socket from any shell:
+the app publishes the path in its instance config directory.
+
 Replace `/health` with the endpoint needed for the check. The socket does not
 require HTTP authentication. TCP requests to `127.0.0.1:<port>` require Basic
 auth (or another configured authenticated session); an unauthenticated request
@@ -118,9 +160,18 @@ are rejected, not interpreted as production defaults. The dedicated Rust entry
 point also validates instance and port before any config read, and refuses
 release, non-macOS or dictation-enabled builds.
 
-The compiled executable has a distinct Cargo target name and is copied to
-`<worktree>/.tmp/agent-test/<instance>/tuicommander-agent-test`. The running copy
-is not a symlink into mbx's target cache. The default instance stores app state
+The compiled executable has a distinct Cargo target name and is copied outside
+the checkout, to
+`<base>/<hash8>/<instance>/tuicommander-agent-test`, where `<base>` is
+`$TUIC_AGENT_TEST_BUILD_ROOT` if set, else `tuic-agent-test` under the host temp
+dir (`$TUIC_TEST_HOST_TMPDIR`, else the system temp dir), and `<hash8>` is the
+first 8 hex digits of the SHA-256 of the checkout's resolved path, so each
+worktree has its own binary. The running copy is not a symlink into mbx's target
+cache. The temp dir is purged by the OS eventually (macOS clears untouched files
+in the per-user temp dir after a few days): the binary is a rebuild-on-demand
+artifact. `--reuse-build-sha256` against a purged build fails with `agent-test:
+reuse requires the existing regular artifact tuicommander-agent-test` (a
+`RuntimeError`, exit 1, nothing launched); run without the flag to rebuild. The default instance stores app state
 in `~/Library/Application Support/com.tuic.commander/instances/agent-test/`.
 It never seeds from the daily config. Never copy daily tokens or config there.
 
@@ -228,7 +279,7 @@ WebView through its Unix socket, and stops the supervised instance in cleanup:
 
 ```bash
 python3 -B scripts/agent-test-visible.py --instance at-2090 --port 19883 \
-  --evidence-dir "$HOME/Gits/.tmp/results/agent-test-visible-$(date +%s)"
+  --evidence-dir "${TMPDIR%/}/results/agent-test-visible-$(date +%s)"
 ```
 
 Add `--duration 300` to observe presentation for five minutes. Add `--cover` as
@@ -246,7 +297,7 @@ These observations do not read `NSWindow.occlusionState` directly or prove App N
 This needs explicit desktop-execution authorization, macOS, a linked worktree
 with build inputs, an unused named instance/port, and an unrelated foreground
 application at launch. Do not use an existing instance with sessions. The evidence directory
-must be new and under `~/Gits`.
+must be new and under the host temp dir (`$TMPDIR`).
 
 `agent_test_window_renders_visible_without_focus` checks document/native
 visibility, positive terminal canvas area, actual `fillText` paint, no native or
@@ -266,7 +317,7 @@ part of the unattended shell/Rust/JS suites.
 | --- | --- |
 | Daily binary, dev-bin and installed app bundle | No writes. Only the worktree's distinctly named binary and adjacent sidecars are copied. A held supervisor lock prevents replacing the running test executable. |
 | Config, credential vault, databases and file locks | Existing named-instance namespace; debug credentials remain file-backed. The test never claims the global-input lock, even in its own namespace. |
-| HTTP and MCP | Explicit loopback-only `127.0.0.1:19876`; never port 9876 or automatic next-port fallback. Unix MCP socket uses the selected instance hash and the launch's short `TMPDIR` under `~/Gits/.tuic/tuic-at/`. Child CLI/bridge processes inherit the same namespace. Runtime temp stays outside the intentional ego scratch grant `~/Gits/.tmp`, so its negative filesystem probe remains meaningful. Do not grant the runtime temp parent to ego or disable confinement to admit a conversation. Stop older instances with their original launcher before updating: their FIFO/socket remains at the old path. |
+| HTTP and MCP | Explicit loopback-only `127.0.0.1:19876`; never port 9876 or automatic next-port fallback. Unix MCP socket uses the selected instance hash and the launch's short `TMPDIR`, `<host temp>/tuic-at/<first 8 hex digits of the hash>/`: the host temp dir is `TUIC_TEST_HOST_TMPDIR` (recorded by `scripts/with-test-tmp.sh`), else `TMPDIR`; `TUIC_AGENT_TEST_ROOT` replaces `<host temp>/tuic-at` when the socket path would exceed the macOS 104-byte limit. Child CLI/bridge processes inherit the same namespace. |
 | Global window shortcut and Fn/Globe monitor | Input ownership refused and shortcut registration rejected at runtime, including later Settings changes. The verification window is non-focusable; drive its own HTTP/socket API. |
 | Microphone and dictation | Not compiled by default. With explicit authorization, `AGENT_TEST_SPEECH_OUTPUT=1` and an `agent-test-<name>` instance enable runtime speech output only: effective listening is forced off, microphone permission/capture is refused, and global input ownership stays disabled. Speech output is audible; do not use this option without authorization. |
 | Telegram bot | Supervisor never starts, tool availability is false, and setup changes are rejected. A copied or previously saved bot configuration cannot start polling. |
@@ -362,16 +413,140 @@ Produces platform-specific installers:
 
 ## Testing
 
-Rust socket tests use `tuic-test-support::short_socket_test_temp_root()`. If the
-checkout's test path exceeds the Unix socket limit, the helper uses a short
-checkout-specific directory under the nearest short `Gits/.tmp/s<checkout-hash>`.
-Outside `Gits`, or when all such ancestors are too long, it uses
-`/tmp/tuic-s<checkout-hash>`. It measures every candidate against the socket
-budget, including the full mdkb staging filename and eight bytes of margin. The
-`scripts/with-test-tmp.sh` wrapper removes abandoned Gits socket directories and
-test-run directories under `~/Gits/.tmp/tuic-tests` and the checkout's
-`.tmp/tuic-tests` after they have been unused for more than seven days. Run
-standalone Rust tests through that wrapper.
+Test scratch comes from your temp directory, never from `$HOME`:
+
+| Root | Resolution (first match wins) |
+|---|---|
+| host temp | `TUIC_TEST_HOST_TMPDIR` (exported by every entry point before it repoints `TMPDIR`, so a default never nests) → `$TMPDIR` → the OS temp dir |
+| base | `TUIC_TEST_TMP_BASE` (opt-in) → `<host temp>/tuic-tests` |
+| root | an inherited `TUIC_TEST_TMP_ROOT`, used as is and never deleted → `scripts/with-test-tmp.sh`: a fresh `<base>/tuic-run.XXXXXX`, removed on exit; nextest without the wrapper, a bare test binary and the shell tests: the per-checkout `<base>/tuic-co-<checkout hash>` |
+| Unix sockets | `TUIC_TEST_SOCKET_ROOT` → a private, random `<host temp>/t.XXXXXX` per test process (mode 0700, removed when the process exits) → fail; never `/tmp` |
+
+`scripts/with-test-tmp.sh`, `src-tauri/scripts/nextest-test-tmp.{sh,ps1}`,
+`scripts/mutants.sh` and the shell tests (all through `scripts/test-tmp-lib.sh`),
+`tuic-test-support` and `scripts/test-tmp-root.mjs` (vitest, cycle checker) all
+apply that order. The checkout hash is FNV-1a 64 of the checkout's physical path,
+the same in every one, so parallel worktrees never share a default root.
+
+Two opt-ins of `scripts/with-test-tmp.sh` change what a wrapped command sees
+beyond its temp dirs:
+
+| Variable | Effect | Set by |
+|---|---|---|
+| `TUIC_TEST_FAKE_HOME=1` | `HOME=<root>/home` for the command. `CARGO_HOME`/`RUSTUP_HOME` are pinned to the real home first (from the passwd entry when `HOME` is unset), so cargo keeps its registry and toolchains. The nextest setup script applies the same flag to the test processes only, so `TUIC_TEST_FAKE_HOME=1 cargo nextest run` works without the wrapper too. On Windows the setup script sets `HOME` alone (the `dirs` crate reads Known Folders there) | `make check`'s and `make cov`'s Rust test steps, `scripts/mutants.sh`, CI's Linux/macOS Rust test steps |
+| `TUIC_TEST_ISOLATE_GIT_CONFIG=1` | git reads `<root>/gitconfig` (the same content as `tuic-test-support`'s `TEST_GITCONFIG`) and no system config, instead of yours. Not the default: `pnpm audit`, `cargo audit` and the submodule checks need your credential helper, `url.*.insteadOf` and proxy settings | `make test-shell` |
+
+On macOS with `sccache` on `PATH` the wrapper also exports `CC=cc CXX=c++` (unless
+you set them), so meson does not wrap its compiler with sccache, whose socket
+would not fit `sun_path` under the long per-run `TMPDIR`. Nowhere else: `CC` is
+part of the native build fingerprint.
+
+On macOS the wrapper also exports `AR` as the real toolchain `ar` (what `xcrun --find ar`
+prints), unless you set it. `/usr/bin/ar` is a shim that runs `xcrun`; where `xcrun` cannot
+write its lookup cache (the agent sandbox) a cache miss prints `couldn't create cache file`
+*before* the usage text, and meson accepts Apple's `ar` only when stderr starts with
+`usage` — so the bundled WebRTC build (`tuic-dictation`) fails with `Unknown linker(s): ar`
+whenever the environment is one `xcrun` has not cached. Which environments are cached
+changes over time, so this does not depend on the cache. (A separate, intermittent sandbox
+failure: the proxy sometimes truncates meson's abseil download, which surfaces as
+`Incorrect hash for source`; re-running the build succeeds.)
+
+`TUIC_TEST_TMP_BASE=<checkout>/.tmp/tuic-tests` still puts scratch in the
+checkout, but only as an explicit opt-in: it is unsafe wherever writes to the
+checkout's `.git/hooks` or `.git/config` are denied (observed in the agent
+sandbox), and a fixture created inside the checkout can reach the real
+repository through `find_repo_root`. Nothing defaults there any more.
+
+Rust socket tests bind in `tuic_test_support::socket_dir()` (a fresh 4-character
+directory in the socket root) or `short_socket_path(name)`. Rust's std binds at
+most 103 bytes (104-byte `sun_path` minus the NUL), and the longest name a test
+binds is 16 bytes (`mcp-<7-digit pid>.sock`), so the socket root may be at most 81
+bytes and the host temp dir at most 72:
+
+| `$TMPDIR` | bytes | longest test socket | result |
+|---|---|---|---|
+| macOS default (`/var/folders/xx/…/T`) | 49 | 80 | fits, 23 bytes spare |
+| agent sandbox | 72 | 103 | fits, 0 bytes spare — for self-named sockets only (fixed-name ones go `UNCHECKED`, below) |
+| long CI-like | 90 | 121 | fails with the budget message |
+| agent sandbox, short symlink (`/tmp/srtmon.XXXXXXXX`) | 20 | 51 | fits, 52 bytes spare |
+
+The host temp dir can be spelled two ways for the same directory: the sandbox's
+real path (72 bytes) and a short symlink to it (20 bytes). Both hold every socket
+this repo names itself, but only the short one holds mdkb's own staging socket
+(`HOME/.mdkb/daemon-hook.sock.<pid>.tmp`, a name the tests cannot shorten; it needs
+a host temp dir of at most 54 bytes). In the long spelling that test (and any other
+entry in `tuic_test_support::FIXED_NAME_SOCKETS`) would print `UNCHECKED` and pass
+without running. `tuic-test-support`'s `socket_environment` test is the runtime
+blocker for that: it fails, naming the sockets, the host temp dir and its length,
+unless the run uses a shorter `TMPDIR`, sets `TUIC_TEST_SOCKET_ROOT`, or accepts
+the gap with `TUIC_ALLOW_UNCHECKED_SOCKET_TESTS=1`. It also pins the outcome for
+both layouts, so a change to the budget constants cannot move the line silently.
+Add every new fixed-name socket test's path to `FIXED_NAME_SOCKETS`.
+
+Over budget, the panic names the host temp dir and its length, the would-be root
+length, the 81/72-byte budgets and `TUIC_TEST_SOCKET_ROOT=<short private dir>`;
+nothing falls back to `/tmp`. The root is created with `mkdir` (no symlink is
+followed) at a random name, checked to be ours and 0700, and marked with
+`.tuic-socket-root`. Three sockets have names the tests cannot shorten: the
+named-instance tests (`fastaf-cli`/`tuic-bridge` `named_instance.rs`) bind
+`tuic-mcp-<16 hex>[-<pid>].sock` by a relative name with the working directory
+in its dir (`SocketSpelling`, `in_dir`: process-wide, so it panics unless the
+process runs one test at a time, under `cargo nextest` or `RUST_TEST_THREADS=1`);
+`remote_runtime`'s named Local-identity test and mdkb's contract test
+(`HOME/.mdkb/daemon-hook.sock.<pid>.tmp`, mdkb's own name) print `UNCHECKED …`
+and return when the path cannot fit.
+
+The wrapper prunes, after more than six days unused, only what this tooling
+creates: `tuic-run.*` and the per-checkout `tuic-co-*` (and the older
+`tuic-proc-*`/`tuic-nextest-*`) under the base, the old
+`<checkout>/.tmp/tuic-tests` and an inherited root,
+your own `tuic-s<16 hex>` socket directories in the host temp dir, and after a
+day a `t.XXXXXX` socket root there that a killed test process left (only one that
+is ours, not a symlink and carries `.tuic-socket-root`). Nothing in `/tmp`.
+A prune it cannot complete prints a warning and never fails the command. Earlier
+versions used `~/Gits/.tmp/tuic-tests`, `~/Gits/.tmp/s<16 hex>` and
+`<checkout>/.tmp/tuic-tests`; nothing touches those any more, and you may delete
+them by hand. `make check` runs `scripts/check-no-home-gits.mjs`, which fails on a
+`$HOME/Gits` path in code or tooling. Run standalone Rust tests through the
+wrapper.
+
+### Git inside tests
+
+`scripts/with-test-tmp.sh` and the nextest setup script
+(`src-tauri/scripts/nextest-test-tmp.sh`) give every test process two git settings,
+and `tuic-test-support`'s constructor gives the same to a bare `cargo test` binary:
+
+- `GIT_TEMPLATE_DIR` is a template under the scratch root that holds an empty `hooks/`
+  directory and git's one-line `info/exclude`, so `git init` and `git clone` in a fixture copy no
+  `hooks/*.sample` files (slower, machine-dependent, and an EPERM where writes to
+  `.git/hooks` are denied) while `.git/hooks` and `.git/info/exclude` still exist.
+- `GIT_CEILING_DIRECTORIES` holds the scratch root's parent (lexical and physical
+  spelling, appended to any value already set; the physical spelling of a symlinked
+  or `..`-containing root is resolved by the OS), so git run under the root never
+  discovers a repository above it. A fixture whose `git init` failed used to fall
+  through to this checkout and rename or delete its branches.
+
+Both apply to test processes only; production git calls never see them.
+
+Two inherited settings are removed rather than honoured, so the suite never depends on
+the developer's shell: an exported `GIT_TEMPLATE_DIR` is replaced by the empty template,
+and `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`
+(and `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_PREFIX`) are cleared
+(`scripts/with-test-tmp.sh` unsets them before its own git calls; test binaries clear them
+in the `tuic-test-support` constructor). The ceiling never restricts an explicit `GIT_DIR`.
+
+Nothing may be written, created or bound under a hard-coded `/tmp`, `/var/tmp`,
+`/private/tmp` or `/dev/shm`: derive scratch from the caller's temp dir
+(`std::env::temp_dir()`/`tempfile`, `os.tmpdir()`, `"${TMPDIR:-/tmp}"`, the test
+roots above). `make check` runs `scripts/check-no-hardcoded-tmp.mjs`, which fails
+on a write-shaped use of those literals in code or tooling (including the code
+blocks of skill docs such as `tests/terminal-stress/SKILL.md`). Other mentions — a fixture string, a
+classifier input — are allowed only through its `file::fn` allow-list (each entry
+with a reason) or the shrink-only per-file counts in
+`scripts/hardcoded-tmp-baseline.json`: a count may go down (lower the baseline in
+the same change, `node scripts/check-no-hardcoded-tmp.mjs --write-baseline`) but
+never up. New tests use a fake root that never exists rather than a `/tmp/...`
+string.
 
 Rust coverage uses `make cov` (`cargo llvm-cov nextest`). Nextest builds the ACP
 and MCP fixture executables once for the library tests that launch them. Under
@@ -429,9 +604,10 @@ in a cleanup trap. It does not start Tauri or use a running app. The browser
 harness closes its own named tab and does not close shared Chrome.
 
 Prerequisites: installed frontend dependencies, `agent-browser`, matching Chrome
-for Testing, and the approved `ab-stealth.sh` wrapper under
-`~/Gits/personal/brainstorming/tools/browser-stealth/`. Set
-`TUIC_CHAT_BROWSER_WRAPPER` to override the wrapper path. Evidence defaults to a
+for Testing, and the approved `ab-stealth.sh` wrapper: `TUIC_BROWSER_WRAPPER`
+names it, else the first `ab-stealth.sh` on `PATH` (`scripts/browser-wrapper.mjs`;
+the other live browser harnesses resolve it the same way). Set
+`TUIC_CHAT_BROWSER_WRAPPER` to override the wrapper path for this gate only. Evidence defaults to a
 new `.tmp/chat-readability-*` directory in the checkout; set
 `TUIC_CHAT_EVIDENCE_DIR` to retain it elsewhere. Managed agents run this target
 through the shared build slot.
@@ -476,8 +652,8 @@ that checkout's artifacts instead of a target supplied by the parent
 FastAF process. The worktrees' `tuic-terminal` builds have the same Cargo
 fingerprint key, while [Cargo checks path sources by file mtime](https://doc.rust-lang.org/stable/nightly-rustc/cargo/core/compiler/fingerprint/index.html);
 sharing one target can therefore make an older checkout look fresh against an
-artifact from another checkout. The wrapper also keeps test scratch files under
-`~/Gits`.
+artifact from another checkout. The wrapper also gives each run its own scratch
+directory under `$TMPDIR/tuic-tests` (see Testing above).
 
 ### TypeScript mutation testing
 
@@ -593,8 +769,10 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 winget install Rustlang.Rustup
 ```
 
-Restart your terminal after installation, then verify:
+Restart your terminal after installation, install the toolchain CI pins, then verify:
 ```powershell
+rustup toolchain install 1.99.1
+rustup default 1.99.1
 rustc --version
 cargo --version
 ```
@@ -655,3 +833,40 @@ src-tauri\target\release\bundle\nsis\FastAF_0.x.x_x64-setup.exe
 | WiX `.msi` bundle fails | WiX `light.exe` tooling issue | Use `--bundles nsis` instead |
 | App window opens but shows a **black screen** | Navigation guard in `lib.rs` blocked `http://tauri.localhost/` (Windows' internal Tauri URL) | Fixed in current code — `tauri.localhost` is explicitly allowed |
 | `Update check failed: windows-x86_64-nsis not found` | Custom local build isn't listed in official release manifest | Harmless — auto-update simply won't trigger |
+
+### Updater diagnostics and fixture binaries
+
+Product builds leave Cargo's `test-fixtures` feature disabled. The ACP and MCP
+fixture executables are never product sidecars. Nextest's fixture setup enables
+this feature for the library consumers and the `main` integration-test binary;
+plain Cargo integration runs must use `--features test-fixtures`.
+
+On macOS, verify release binary selection without compiling the app:
+`PYTHON=python3 scripts/with-test-tmp.sh node --test scripts/test-release-fixture-binaries.mjs`
+(Python 3.11+ and the installed Tauri CLI are required). This probes the real
+bundler against the manifest declarations, with stale fixture executables present.
+
+The checked updater resource is installed by FastAF's host-only `install_app_update`
+command. It downloads and verifies through the plugin, checks the macOS extraction
+volume, and uses the plugin's native installer. It preserves nested IO causes in
+the returned error. A resource id and progress Channel belong to the calling
+WebView, so HTTP clients cannot use this command to replace the host application.
+
+The macOS preflight sums archive entries rounded to the volume's allocation unit
+and adds 1 MiB of metadata headroom. Download bytes stay in memory; extraction and
+backup use the same volume and renames. The check reports required and available
+bytes; concurrent disk use can still cause a later install failure, whose cause
+is retained. Relaunch deferral remains owned by the existing updater store.
+
+### Reusing a pinned agent-test build
+
+For workflow restart evidence, pass `AGENT_TEST_REUSE_BUILD_SHA256=<full-sha256>`
+to `make agent-test` with the same named instance and port. It verifies the exact
+existing binary and all three regular executable artifacts before launch; no
+rebuild or copy occurs. Capture the digest from the original build and health
+response. Worktree and process isolation still apply. Use the normal build path
+after application-source changes.
+
+### Heap diagnostic preset
+
+Set `AGENT_TEST_HEAP_PROFILE=1` with a named isolated `make agent-test` instance to compile the opt-in whole-backend allocator profiler. Set `_RJEM_MALLOC_CONF` before launch; use the shared diagnostic HTTP endpoints to verify activation. Preserve the exact executable and symbols before rebuilding. See [Heap profiling](../backend/heap-profiling.md).

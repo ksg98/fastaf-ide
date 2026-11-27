@@ -1,3 +1,4 @@
+import { initAgentActivity } from "../features/agentActivity";
 import { destroyAgentUsage, initAgentUsage } from "../features/agentUsage";
 import { pluginStore } from "../stores/pluginStore";
 import { planPlugin } from "./planPlugin";
@@ -62,6 +63,8 @@ export async function initPlugins(): Promise<void> {
 	if (!isPluginDisabled("claude-usage")) {
 		initAgentUsage();
 	}
+
+	initAgentActivity();
 
 	await loadUserPlugins(false);
 }

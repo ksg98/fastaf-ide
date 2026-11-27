@@ -130,7 +130,7 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 				class={cx(s.splitMain, busy() && s.splitBusy, !canExecute(current()).ok && s.splitDisabled)}
 				disabled={busy() || !canExecute(current()).ok}
 				onClick={() => runPrompt(current())}
-				title={current().description}
+				title={canExecute(current()).ok ? current().description : canExecute(current()).reason}
 			>
 				<Show when={busy()} fallback={<IconSparkle size={12} />}>
 					<span class={s.spinner} />

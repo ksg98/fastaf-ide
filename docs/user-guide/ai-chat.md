@@ -168,6 +168,60 @@ Every fenced code block in the AI reply has a small toolbar:
 
 Language hints in the fence control button visibility — a ` ```text ` block hides *Run*.
 
+## Message menu, new conversations and forks
+
+Each message has a **⋯** button that appears when you hover the message or move
+keyboard focus to it:
+
+| Entry | Effect |
+|-------|--------|
+| **Copy message** | The whole raw message, fenced code included. |
+| **Show raw Markdown** / **Show formatted message** | Answers only. Changes the view of that one message. |
+| **Quote reply** | Adds the message as a `>` quote under your draft and focuses the composer. Nothing is sent. |
+| **Fork from here** | Answers only. The turns up to that answer become a new saved conversation titled "Fork: …". The original stays in History. |
+
+Reactions and comments are not offered here; they exist only in the phone's Chat
+tab ([below](#ego-chat-on-the-phone-acp)).
+
+Each turn reaches the model with the terminal context and your one new message,
+not with the earlier turns of the chat. Quote reply is how you point at an
+earlier answer. A fork is therefore a branch of the transcript: the model sees
+no earlier turns in either conversation.
+
+Commands typed alone in the composer (a lone `/` lists them):
+
+| Command | Effect |
+|---------|--------|
+| `/clear`, `/new` | Saves the conversation on screen and starts an empty one. Refused while a reply is running, and the draft is kept. |
+| `/fork` | Forks at the last completed answer. While a reply is still running here, the fork is saved to History and not opened. |
+
+A path or a sentence that starts with a slash is still an ordinary message.
+
+Three ways to clear, from lightest to heaviest:
+
+- `Cmd/Ctrl+K` with the cursor in the chat hides the messages on screen. Nothing
+  is deleted, History opens them again, and the terminal's scrollback is left
+  alone. With the cursor in the terminal the same key clears the terminal's
+  scrollback, as before.
+- `/clear` starts a new conversation and keeps the old one in History.
+- The trash in the header, **Delete conversation**, is the one action that
+  deletes.
+
+**Sending and failures.** A message you send shows **Sending…** until the reply
+starts. A message that could not be sent stays as **Not sent**, and a turn the
+provider failed stays as **No reply**, each with its reason, **Retry** (the same
+text, model and effort; your current draft is untouched) and **Discard**. Neither
+is written to the saved conversation. A failed agent task has **Run the task
+again** on its error row.
+
+**Images and long notices.** A `[image: /path]` marker in a message shows as a
+framed preview above it; the model itself still receives text only. A long
+notice or error shows its first line and opens on click.
+
+The header dot says what the chat is doing: idle, working (a pulse) or waiting
+for you (an approval is open, or the run is paused). A conversation that is busy
+in another terminal carries the same dot on its History row.
+
 ## Agent mode (ReAct)
 
 Flip the panel into agent mode via the header toggle or the command palette (`Agent: start`). Give it a goal ("set up pnpm and install deps", "fix the failing test") and press Enter. The loop:
@@ -291,6 +345,7 @@ change them:
 | `Cmd+Alt+A` | Toggle panel |
 | `Cmd+Enter` (panel focused) | Send message |
 | `Esc` (panel focused) | Cancel in-flight stream |
+| `Cmd+K` / `Ctrl+K` (cursor in the chat) | Clear the chat view; nothing is deleted |
 | *(palette)* Agent: start / stop / pause / resume | Agent-mode control |
 
 ## Files & storage
@@ -302,6 +357,44 @@ change them:
 | `<config_dir>/ai-sessions/<session_id>.json` | Per-session knowledge store |
 | `<config_dir>/ai-cron.json` | Scheduled tasks |
 | OS keyring (`tuicommander-ai-chat` / `api-key`) | Provider API key |
+
+## ego chat on the phone (ACP)
+
+Everything above describes the desktop panel, which runs on FastAF's own engine.
+The **Chat** tab of the mobile companion is a different chat: it talks to
+[ego](ai-agents.md) over ACP, one cross-repository conversation list for the
+whole app, and it needs an ego executable on the host. The 2.1.2 sync brought
+these changes to it. The desktop panel has its own version of the message
+menu, `/clear`, `/fork`, sending states and image previews
+([above](#message-menu-new-conversations-and-forks)); reactions and comments
+are here only:
+
+- **Message actions.** The **⋯** button on a message (always shown on touch
+  screens) opens **Copy message**, **Show raw Markdown** / **Show formatted
+  message** (answers only) and **Quote reply**, which appends the message as a
+  `>` quote to the draft and never sends.
+- **Reactions and comments.** Answers that carry a native message ID also offer
+  **Thumbs up**, **Thumbs down**, **Heart**, **Celebrate** and **Comment on
+  message**. A reaction is sent to the conversation as an ordinary user turn;
+  tap its mark to remove it. A mark means the host accepted the action, not that
+  the model read it. If the host accepted an action but could not save its mark,
+  the error says **Do not resend**.
+- **Sending receipts.** Submitted text and attachments show **Sending…** at
+  once, also while another turn runs. A failed submission shows **Send failed**
+  with **Retry**, which resends the original payload and leaves a newer draft
+  alone. Check the conversation before retrying: a lost receipt does not prove
+  the agent missed the first submission.
+- **`/clear` and `/fork`.** `/clear` starts a fresh conversation, the same
+  action as **New**; saved history is kept, and it waits for the current turn.
+  `/fork` opens a new conversation from the last successfully completed turn,
+  also while a turn runs.
+- **Long messages.** A message capped in the stream offers **Show full text**.
+- **Images.** A message with `[image: /absolute/path.png]` attachments shows
+  framed previews above its text; an unreadable file shows **Image unavailable**.
+- **Diagrams.** The host tells attended ego sessions that fenced `mermaid`
+  blocks render as diagrams, so the agent may prefer them over ASCII.
+- **Layout.** The title and the conversation picker share one header row, and
+  **+** starts a new conversation.
 
 ## See also
 

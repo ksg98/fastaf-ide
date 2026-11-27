@@ -90,7 +90,7 @@ into it, code bundled through another package, and vendored source.
 | rfd | 0.16.0 | MIT |
 | ring | 0.17.14 | Apache-2.0 AND ISC |
 | rodio | 0.23.0 | MIT OR Apache-2.0 |
-| rusqlite | 0.40.2 | MIT |
+| rusqlite | 0.41.1 | MIT |
 | rust-stemmers | 1.2.0 | MIT OR BSD-3-Clause |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT |
 | safetensors | 0.6.2 | Apache-2.0 |
@@ -158,6 +158,8 @@ into it, code bundled through another package, and vendored source.
 | rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Linux |
 | rustix-openpty | 0.2.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Linux |
 | signal-hook | 0.4.4 | MIT OR Apache-2.0 | Linux |
+| tikv-jemalloc-ctl | 0.7.0 | MIT OR Apache-2.0 | macOS, Linux |
+| tikv-jemallocator | 0.7.0 | MIT OR Apache-2.0 | macOS, Linux |
 | webview2-com | 0.39.1 | MIT | Windows |
 | windows-core | 0.62.2 | MIT OR Apache-2.0 | Windows |
 | windows-sys | 0.59.0 | MIT OR Apache-2.0 | Windows |
@@ -229,7 +231,7 @@ into it, code bundled through another package, and vendored source.
 | @types/qrcode | 1.5.6 | MIT |
 | @typescript/typescript6 | 6.0.2 | Apache-2.0 |
 | @vitest/coverage-v8 | 5.0.0 | MIT |
-| happy-dom | 20.11.0 | MIT |
+| happy-dom | 21.0.4 | MIT |
 | jsdom | 30.0.1 | MIT |
 | lightningcss | 1.33.0 | MPL-2.0 |
 | rollup | 4.62.2 | MIT |
@@ -251,7 +253,7 @@ Counts below collapse equivalent SPDX expressions (`MIT OR Apache-2.0` ≡ `Apac
 <!-- BEGIN GENERATED:summary -->
 | License | Count |
 |---------|-------|
-| MIT OR Apache-2.0 | 84 |
+| MIT OR Apache-2.0 | 86 |
 | MIT | 71 |
 | Apache-2.0 | 8 |
 | Unlicense OR MIT | 7 |
@@ -317,6 +319,16 @@ meson subproject (`abseil-cpp` 20240722.0, fetched from
 <https://github.com/abseil/abseil-cpp> during the build). It is a dependency of
 the WebRTC sources above, unmodified, and is linked statically into the same
 binary.
+
+### Vulkan loader
+
+GPU dictation on Windows and Linux uses whisper.cpp's Vulkan backend, which
+needs the **Vulkan loader** (`vulkan-1.dll`, `libvulkan.so.1`), by **The Khronos
+Group, LunarG and Valve**, licensed **Apache-2.0** (parts **MIT**). The `.deb`
+and `.rpm` require the distribution package; the AppImage carries the Ubuntu
+24.04 build of it unmodified. The Windows installer carries LunarG's Vulkan
+Runtime 1.4.309.0 `vulkan-1.dll`, unmodified, and installs it only when Windows
+has no loader, together with that runtime's `VulkanRT-License.txt`. Source: <https://github.com/KhronosGroup/Vulkan-Loader>.
 
 ---
 

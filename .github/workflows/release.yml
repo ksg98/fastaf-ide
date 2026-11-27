@@ -22,7 +22,11 @@ env:
 
 jobs:
   build:
-    timeout-minutes: 90
+    # The macOS desktop build needs about 75 minutes on a cold cache and has hit
+    # a flat 90-minute limit several times. Windows and Linux finish well inside
+    # it, so only the macOS leg gets more — the same per-platform expression
+    # nightly.yml uses.
+    timeout-minutes: ${{ matrix.platform == 'macos-latest' && 120 || 90 }}
     permissions:
       contents: write
     strategy:
@@ -40,11 +44,23 @@ jobs:
           # no longer supported targets for the desktop app. The remote-daemon
           # jobs below stay on 22.04: they build without the `desktop` feature,
           # so they never link ort and keep the wider compatibility.
+          #
+          # --features vulkan: GPU dictation through whisper.cpp's Vulkan backend.
+          # With the loader but no usable Vulkan device whisper.cpp runs on the
+          # CPU; without the loader the binary does not start, so every Linux
+          # package carries or requires libvulkan.so.1, and the Windows
+          # installer adds vulkan-1.dll when System32 has none.
+          #
+          # No Linux-ARM64 desktop leg: upstream builds one on ubuntu-22.04-arm,
+          # which cannot link ort for the reason above, and FastAF has not built
+          # or run an ARM64 desktop package. finalize-release needs every leg, so
+          # an untested one would hold back the whole release. The remote daemon
+          # still ships for Linux ARM64 (remote-daemon.yml).
           - platform: ubuntu-24.04
-            args: ''
+            args: '--features vulkan'
             label: Linux-x64
           - platform: windows-latest
-            args: '--bundles nsis'
+            args: '--bundles nsis --features vulkan'
             label: Windows-x64
 
     runs-on: ${{ matrix.platform }}
@@ -70,12 +86,25 @@ jobs:
         run: bash scripts/release-flags.sh "$(jq -r '.version' src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
 
       - name: Install Linux dependencies
-        if: startsWith(matrix.platform, 'ubuntu')
+        if: startsWith(matrix.platform, 'ubuntu-')
         run: |
           sudo apt-get update
           # libayatana-appindicator3-dev, not libappindicator3-dev: the latter
-          # was dropped in Ubuntu 24.04.
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+          # was dropped in Ubuntu 24.04. libvulkan-dev links the vulkan feature;
+          # rpm, rpm2cpio, cpio, binutils and libarchive-tools serve the package
+          # checks after the build.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev mold libvulkan-dev rpm rpm2cpio cpio binutils libarchive-tools
+
+      # whisper-rs-sys needs VULKAN_SDK (headers, glslc, the Windows import
+      # library) for the vulkan feature. The stripped-down SDK has no Linux
+      # libvulkan.so; libvulkan-dev above links it.
+      - name: Install Vulkan SDK
+        if: matrix.platform != 'macos-latest'
+        uses: jakoch/install-vulkan-sdk-action@655818d26aa39d663e587b5620dd26519358981f # v1.5.4
+        with:
+          vulkan_version: 1.4.309.0
+          cache: true
+          stripdown: true
 
       # Keep the Windows build/target dir short (C:/t): whisper.cpp's nested
       # CMake TryCompile paths can exceed the 260-char MAX_PATH that MSBuild's
@@ -86,6 +115,19 @@ jobs:
         shell: bash
         run: echo "CARGO_TARGET_DIR=C:/t" >> $GITHUB_ENV
 
+      # whisper-rs-sys adds every directory below its CMake build tree as a rustc
+      # -L path. The Visual Studio generator of CMake 4.5 (3.29 does not) makes
+      # Debug, MinSizeRel, RelWithDebInfo and Release folders for each target,
+      # also in the vulkan-shaders-gen sub-build. With --features vulkan, the rustc command
+      # for tuicommander_lib became 35,835 characters, and sccache 0.19 cannot
+      # spawn more than 32,767 on Windows (os error 206). Only Release is built,
+      # so CMake makes only Release folders: 60 fewer -L paths, 28,772 characters.
+      # CMake reads this variable from the environment, so the sub-build gets it too.
+      - name: Build only the Release CMake configuration (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: echo "CMAKE_CONFIGURATION_TYPES=Release" >> "$GITHUB_ENV"
+
       # The windows-latest image (mid windows-2025/2026 migration) ships VS 18
       # 2026, but the preinstalled CMake is too old to know that generator —
       # whisper-rs-sys's build fails with "CMake Error: generator: Visual
@@ -93,6 +135,11 @@ jobs:
       - name: Upgrade CMake (Windows)
         if: matrix.platform == 'windows-latest'
         uses: lukka/get-cmake@f86dd60acae0d132056913e248bdabf0e0580b7a # v4.4.5
+
+      - name: Install LLVM 22 for bindgen (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./.github/scripts/install-ci-llvm.ps1
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -106,6 +153,12 @@ jobs:
       - name: Install meson and ninja
         shell: bash
         run: python -m pip install meson==1.11.2 ninja==1.13.2
+
+      # The NSIS hook installs this loader only where System32 has none.
+      - name: Fetch Vulkan loader for the installer (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: python scripts/fetch-vulkan-loader.py
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
@@ -145,6 +198,18 @@ jobs:
               Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           }
 
+      # whisper-rs-sys passes every GGML_* env var to CMake but does not declare
+      # it with rerun-if-env-changed, so cargo keeps a restored ggml build that
+      # was configured with other flags (#151). Drop its build-script output and
+      # fingerprints so CMake runs again with the GGML_NATIVE value below.
+      - name: Drop cached whisper-rs-sys build
+        shell: bash
+        run: |
+          target="${CARGO_TARGET_DIR:-src-tauri/target}"
+          [ -d "$target" ] || exit 0
+          find "$target/" -maxdepth 4 -type d \( -path '*/build/whisper-rs-sys-*' -o -path '*/.fingerprint/whisper-rs-sys-*' \) \
+            -prune -print -exec rm -rf {} +
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -177,7 +242,7 @@ jobs:
           CMAKE_C_COMPILER_LAUNCHER: "sccache"
           CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
           # mold linker on Linux
-          RUSTFLAGS: ${{ matrix.label == 'Linux-x64' && '-C link-arg=-fuse-ld=mold' || '' }}
+          RUSTFLAGS: ${{ startsWith(matrix.label, 'Linux-') && '-C link-arg=-fuse-ld=mold' || '' }}
           # macOS signing/notarization env (APPLE_SIGNING_IDENTITY, KEYCHAIN_PATH,
           # APPLE_API_*) is exported via
           # GITHUB_ENV by the macos-signing action ONLY when signing is available. The tauri bundler treats even
@@ -189,7 +254,14 @@ jobs:
           # whisper.cpp build flags per platform:
           # - macOS: override -march to avoid i8mm detection mismatch on M-series < M4 (Metal GPU always active)
           # - Linux: -fPIC required for whisper-rs-sys static linking
-          # - Windows: whisper-rs is CPU-only (Vulkan backend's shader build is broken on the runner); -Z7 for sccache MSVC compat
+          # - Windows: -Z7 for sccache MSVC compat
+          # GGML_NATIVE OFF on every leg: ggml must target a fixed CPU baseline, not the
+          # runner CPU. x64 then gets SSE4.2/AVX/AVX2/FMA/F16C/BMI2 and no AVX-512, which
+          # crashed dictation on AVX2-only CPUs (#151). macOS keeps only -march=armv8.4-a,
+          # which every M1 supports; native would add the runner chip's features.
+          GGML_NATIVE: "OFF"
+          # The NSIS hook fails the build instead of shipping without the loader.
+          TUIC_REQUIRE_VULKAN_LOADER: ${{ matrix.label == 'Windows-x64' && '1' || '' }}
           CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
           CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '-Z7' || '' }}
         with:
@@ -242,6 +314,27 @@ jobs:
           name: macos-signing-state
           path: macos-signing-state
 
+      # Proves the shipped ggml has no AVX-512 (zmm) code. A failure keeps the
+      # draft release from being published by finalize-release.
+      - name: Check ggml x86-64 baseline (no AVX-512)
+        if: matrix.label == 'Linux-x64' || matrix.label == 'Windows-x64'
+        shell: bash
+        run: bash scripts/check-ggml-x86-baseline.sh "${CARGO_TARGET_DIR:-src-tauri/target}"
+
+      # The vulkan build imports libvulkan.so.1 and does not start without it.
+      # The .deb/.rpm declare the loader package; the AppImage must carry it.
+      - name: Check AppImage carries the Vulkan loader
+        if: startsWith(matrix.label, 'Linux-')
+        run: bash scripts/check-appimage-vulkan-loader.sh src-tauri/target/release/bundle/appimage
+
+      - name: Verify native Linux desktop packages and publish checksums
+        if: startsWith(matrix.label, 'Linux-')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/check-linux-desktop-packages.sh src-tauri/target/release "${{ matrix.label }}"
+          gh release upload "v$(jq -r .version src-tauri/tauri.conf.json)" src-tauri/target/release/bundle/SHA256SUMS-${{ matrix.label }}.txt --clobber
+
       - name: Cleanup macOS keychain
         if: always() && startsWith(matrix.platform, 'macos-')
         run: |
@@ -274,6 +367,17 @@ jobs:
         with:
           name: macos-signing-state
 
+      # The three desktop legs each merge their entries into latest.json. A lost
+      # entry would leave that platform without updates, so check the whole set
+      # before the draft is published.
+      - name: Verify complete desktop updater target selection
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p .tmp/tuic-tests/updater
+          gh release download "v$(jq -r .version src-tauri/tauri.conf.json)" --pattern latest.json --dir .tmp/tuic-tests/updater
+          python3 scripts/check-linux-updater.py .tmp/tuic-tests/updater/latest.json
+
       # The README's download button links to
       # releases/latest/download/FastAF_aarch64.dmg, which needs a file of that
       # exact name in every release. The bundler puts the version in the DMG's
@@ -285,10 +389,11 @@ jobs:
         run: |
           VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
           TAG="v${VERSION}"
-          mkdir -p /tmp/dmg
-          if gh release download "${TAG}" --pattern "FastAF_${VERSION}_aarch64.dmg" --dir /tmp/dmg; then
-            cp "/tmp/dmg/FastAF_${VERSION}_aarch64.dmg" /tmp/dmg/FastAF_aarch64.dmg
-            gh release upload "${TAG}" /tmp/dmg/FastAF_aarch64.dmg --clobber
+          DMG_DIR="${RUNNER_TEMP}/dmg"
+          mkdir -p "${DMG_DIR}"
+          if gh release download "${TAG}" --pattern "FastAF_${VERSION}_aarch64.dmg" --dir "${DMG_DIR}"; then
+            cp "${DMG_DIR}/FastAF_${VERSION}_aarch64.dmg" "${DMG_DIR}/FastAF_aarch64.dmg"
+            gh release upload "${TAG}" "${DMG_DIR}/FastAF_aarch64.dmg" --clobber
           else
             echo "::warning::FastAF_${VERSION}_aarch64.dmg is not in ${TAG}; the README download button will 404 until FastAF_aarch64.dmg is uploaded"
           fi

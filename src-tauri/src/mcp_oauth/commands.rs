@@ -149,7 +149,7 @@ pub(crate) async fn start_mcp_upstream_oauth_inner(
                     )
                 })?;
 
-                let dcr_req = DcrRequest::for_tuicommander(&redirect_uri, None);
+                let dcr_req = DcrRequest::for_fastaf(&redirect_uri, None);
                 let dcr_resp = register_client(&http_client, &reg_endpoint, &dcr_req)
                     .await
                     .map_err(|e| format!("Dynamic Client Registration failed for '{name}': {e}"))?;

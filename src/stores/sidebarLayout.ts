@@ -1,3 +1,4 @@
+import { hasLiveHarness } from "../components/Sidebar/liveHarness";
 import type { GroupedLayout, RepositoryState } from "./repositories";
 import { repositoriesStore, sortRepos } from "./repositories";
 import { uiStore } from "./ui";
@@ -17,19 +18,31 @@ function repoIsActive(repo: RepositoryState): boolean {
 	return Object.values(repo.workspaces).some((b) => b.terminals.length > 0);
 }
 
+/** True when a branch of the repo runs a live agent (the "Live agents" layout,
+ *  upstream's H view). */
+function repoHasHarness(repo: RepositoryState): boolean {
+	return Object.values(repo.workspaces).some((b) => hasLiveHarness(b.terminals));
+}
+
 /** Apply a repo predicate to a layout, dropping groups it empties entirely so
- *  no orphaned group header is left behind. */
+ *  no orphaned group header is left behind. A group the predicate does not
+ *  touch keeps its wrapper: re-spreading it would throw away the identity
+ *  getGroupedLayout works to preserve and rebuild every row under it. */
 function filterLayout(layout: GroupedLayout, keep: (repo: RepositoryState) => boolean): GroupedLayout {
 	return {
 		groups: layout.groups
-			.map((entry) => ({ ...entry, repos: entry.repos.filter(keep) }))
+			.map((entry) => {
+				const repos = entry.repos.filter(keep);
+				return repos.length === entry.repos.length ? entry : { ...entry, repos };
+			})
 			.filter((entry) => entry.repos.length > 0),
 		ungrouped: layout.ungrouped.filter(keep),
 	};
 }
 
 /** Grouped layout after the full visibility pipeline:
- *  raw layout → named-workspace filter → active-only filter → search filter → sort. */
+ *  raw layout → named-workspace filter → live-agents or active-only filter →
+ *  search filter → sort. */
 export function getVisibleLayout(): GroupedLayout {
 	let layout = repositoriesStore.getGroupedLayout();
 
@@ -41,8 +54,12 @@ export function getVisibleLayout(): GroupedLayout {
 		layout = filterLayout(layout, (repo) => members.has(repo.path));
 	}
 
-	// "Active only" toolbar filter — repos with at least one open terminal
-	if (uiStore.state.repoFilterActiveOnly) {
+	// The "Live agents" layout keeps repos with a running agent and takes
+	// precedence over "active only" (repos with at least one open terminal),
+	// which it is a subset of.
+	if (uiStore.state.repoFilterHarnessOnly) {
+		layout = filterLayout(layout, repoHasHarness);
+	} else if (uiStore.state.repoFilterActiveOnly) {
 		layout = filterLayout(layout, repoIsActive);
 	}
 

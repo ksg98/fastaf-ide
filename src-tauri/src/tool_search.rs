@@ -106,11 +106,28 @@ impl ToolSearchIndex {
             }
         }
         if required.is_empty() {
-            let results: Vec<SearchResult<u32>> = self.engine.search(query, limit);
-            return results
+            // A word that is a tool's exact name selects that tool first: BM25 alone
+            // ranks short descriptions that mention the word ("agent") above the
+            // tool's own longer description.
+            let mut results: Vec<&ToolEntry> = self
+                .entries
+                .iter()
+                .filter(|e| optional.iter().any(|w| w.eq_ignore_ascii_case(&e.name)))
+                .take(limit)
+                .collect();
+            let ranked: Vec<SearchResult<u32>> = self.engine.search(query, limit);
+            for entry in ranked
                 .into_iter()
                 .filter_map(|r| self.entries.get(r.document.id as usize))
-                .collect();
+            {
+                if results.len() == limit {
+                    break;
+                }
+                if !results.iter().any(|e| std::ptr::eq(*e, entry)) {
+                    results.push(entry);
+                }
+            }
+            return results;
         }
 
         let matches: Vec<bool> = self
@@ -274,21 +291,21 @@ mod tests {
     #[test]
     fn required_name_terms_all_match_including_alias_prefixes() {
         let mut tools = sample_tools();
-        tools[1]["name"] = json!("tuicommander__repo");
+        tools[1]["name"] = json!("fastaf__repo");
         let index = ToolSearchIndex::build(&tools);
         for query in [
-            "+tuicommander +repo",
-            "+repo +tuicommander status",
-            "+TUICOMMANDER +REPO zzzunknown",
+            "+fastaf +repo",
+            "+repo +fastaf status",
+            "+FASTAF +REPO zzzunknown",
         ] {
             let names: Vec<_> = index
                 .search(query, 1)
                 .iter()
                 .map(|e| e.name.as_str())
                 .collect();
-            assert_eq!(names, ["tuicommander__repo"], "query: {query}");
+            assert_eq!(names, ["fastaf__repo"], "query: {query}");
         }
-        assert!(index.search("+tuicommander +session", 10).is_empty());
+        assert!(index.search("+fastaf +session", 10).is_empty());
     }
 
     // Catches dropping optional-word ranking after required names have been filtered.

@@ -150,6 +150,7 @@ export interface ToolbarProps {
 	runCommand?: string;
 	onBranchClick?: () => void;
 	onRun?: (shiftKey: boolean) => void;
+	onNewShell?: () => void;
 	onReviewPr?: (repoPath: string, branchName: string, command: string) => void;
 	/** Opens Settings on the Smart Prompts tab. */
 	onOpenSettings?: () => void;
@@ -356,7 +357,9 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 				{props.tabs}
 			</div>
 
-			<div class={s.right}>
+			{/* The cluster owns the row's spare room (see .centerTabs + .right), so its
+			    empty start is window drag space like the tab strip's used to be. */}
+			<div class={s.right} data-tauri-drag-region>
 				<Show when={props.repoPath}>
 					<StoriesButton repoPath={props.repoPath as string} />
 				</Show>
@@ -718,6 +721,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 							cursorCol={editorTabsStore.getActive()?.cursorCol}
 							runCommand={props.runCommand}
 							onRun={props.onRun}
+							onNewShell={props.onNewShell}
 						/>
 					</span>
 				</Show>

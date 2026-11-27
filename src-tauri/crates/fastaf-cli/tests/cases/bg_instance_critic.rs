@@ -7,10 +7,7 @@ use std::time::{Duration, Instant};
 // marker, or forgets to propagate an explicit identity to its detached runner.
 #[test]
 fn bg_explicit_instance_writes_one_namespace_and_runner_inherits_selection() {
-    let temp = tempfile::Builder::new()
-        .prefix("bic-")
-        .tempdir_in(tuic_test_support::short_socket_test_temp_root())
-        .unwrap();
+    let temp = tuic_test_support::socket_dir();
     let log = temp.path().join("child.log");
     let output = Command::new(env!("CARGO_BIN_EXE_fastaf-cli"))
         .args(["--instance", "critic-bg", "bg"])
@@ -60,6 +57,15 @@ fn bg_explicit_instance_writes_one_namespace_and_runner_inherits_selection() {
         recorded_env
             .lines()
             .any(|line| line == "TUIC_APP_INSTANCE=critic-bg"),
+        "{recorded_env}"
+    );
+    // Catches: the runner reverting to the inherited socket after --instance
+    // was applied only in the launcher. Digest is SHA-256 of "critic-bg".
+    let socket = temp.path().join("tuic-mcp-3c22e8785b4188ce.sock");
+    assert!(
+        recorded_env
+            .lines()
+            .any(|line| line == format!("TUIC_SOCKET={}", socket.display())),
         "{recorded_env}"
     );
     let base = if cfg!(target_os = "macos") {

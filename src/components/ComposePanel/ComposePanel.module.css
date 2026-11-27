@@ -36,6 +36,39 @@
   transition: none;
 }
 
+/* Keep the footer's natural height and one shared editor row in flow.
+   Drafts, images and queue details grow upward without resizing the PTY. */
+@media (min-width: 601px) {
+  .panelMinimum {
+    position: relative;
+    flex-shrink: 0;
+    transition: none;
+  }
+
+  .panelMinimum .body {
+    position: relative;
+  }
+
+  .panelMinimum .bodyContents {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--bg-primary);
+  }
+
+  /* Returning to the terminal reveals its input row without changing its grid.
+     CodeMirror keeps the complete draft and scrolls inside the minimum box. */
+  .panelMinimum:not(:focus-within) .editor {
+    --auto-grow-max-height: var(--control-height, 36px);
+  }
+
+  .panelMinimum:not(:focus-within) .bodyContents {
+    max-height: 100%;
+    overflow: hidden;
+  }
+}
+
 .editor {
   flex-shrink: 0;
   --auto-grow-max-height: 96px;
@@ -129,21 +162,27 @@
 }
 
 .queueChevron {
-  transition: transform 0.12s ease-out;
+  flex-shrink: 0;
+  transition: transform var(--duration-fast) var(--ease-out);
 }
 
 .queueChevronOpen {
   transform: rotate(180deg);
 }
 
+/* ── Queued prompts: what waits for the agent to go idle ────────────────
+   A short list over the footer: one muted line that says what it is, then a
+   row per prompt with its two answers (Steer sends it now, Cancel drops it)
+   as labelled ghost buttons at the right end. One hairline above. */
 .queueList {
   /* The queue scrolls independently; it never consumes the reserved editor space. */
-  max-height: 78px;
+  max-height: 156px;
+  padding: 2px 0 6px;
   overflow-y: auto;
-  border-top: 1px solid var(--border);
-  background: var(--bg-secondary);
+  border-top: var(--hairline-w) solid var(--hairline);
+  background: transparent;
   font-family: var(--font-ui);
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   flex-shrink: 0;
 }
 
@@ -151,32 +190,37 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 3px 12px;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 6px 0 14px;
   color: var(--fg-muted);
   user-select: none;
 }
 
-.queueClearAll {  background: transparent;
+.queueClearAll {
   color: var(--fg-muted);
-  font-family: var(--font-ui);
-  font-size: var(--font-xs);
-  cursor: pointer;
 }
 
-.queueClearAll:hover {
+.queueClearAll:hover:enabled {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
 }
 
+/* A row: 6px in from both edges, so its hover reads as a rounded pill. */
 .queueItem {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 12px;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0 6px;
+  padding: 0 2px 0 8px;
+  border-radius: var(--radius-md);
   color: var(--fg-primary);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .queueItem:hover {
-  background: var(--bg-tertiary);
+  background: var(--wash-0);
 }
 
 .queueItemText {
@@ -188,18 +232,21 @@
   font-family: var(--font-mono);
 }
 
-.queueItemRemove {
+/* Steer and Cancel: quiet until the row is pointed at, never hidden. */
+.queueItemActions {
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--fg-muted);
-  cursor: pointer;
+  gap: 2px;
   flex-shrink: 0;
 }
 
-.queueItemRemove:hover {
-  color: var(--error);
+.queueItemActions > button {
+  color: var(--fg-muted);
+}
+
+.queueItem:hover .queueItemActions > button:enabled,
+.queueItemActions > button:focus-visible {
+  color: var(--fg-primary);
 }
 
 .queueButton {
@@ -238,4 +285,9 @@
   color: var(--error);
   font-size: var(--font-xs);
   font-family: var(--font-ui);
+}
+
+/* Keep an attachment grid readable without expanding text-only queues. */
+.queueList:has([data-prompt-images]) {
+  max-height: min(50vh, 440px);
 }

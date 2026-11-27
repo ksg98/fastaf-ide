@@ -218,7 +218,9 @@ Compose from these; never hand-roll a button.
 - Repo row: leading 16px folder icon — open while expanded, closed while collapsed — name 13.5px/500. Hover reveals `⋯` and `+` in place.
 - Branch row: a 16px slot under the folder icon holds the **state dot** (6px), so branch text lines up with the repo name. Name 13.5px/400 at 74 % `--fg-primary`. Diff counts (11.5px, muted, tabular) only on hover and on the selected row.
 - The dot is the only state signal: none = no terminal, grey = a terminal is open, busy = `--activity` pulse, question = `--attention` pulse, error = `--error`, unseen = `--unseen`. Kind (main / worktree / shell) is the tooltip.
+- A stalled agent is a steady `--warning` dot — no pulse — on its tab and on its own row under the branch (Nested Terminal Tabs). The branch row's dot stays busy.
 - Footer: one 44px row — git sync icons (pull, push, fetch, stash) left, workspace / help / settings right, all 28px ghost buttons.
+- The footer's layers menu ("Workspaces, sorting & layout") carries the layout choice — Compact, Rich, Live agents — beside the sort order, the current one ticked in the menu's tick column. The title bar gets no layout or filter toggle.
 
 ### Tab bar
 - Lives in the title bar's centre. Tabs are 28px pills, radius 8, 2px apart, padding 0 6 0 10; 13px/400 label in every state (so switching never reflows the strip). Active = `--row-selected` (Codex #353535 on #242424) with `--fg-primary` text; resting tabs are transparent with a `--wash-0` hover. A leading 6px dot carries state (grey idle, `--activity` busy, `--attention` / `--warning` awaiting, `--unseen`) or the tab kind's colour. Close appears on hover and at 70 % on the active tab. `+` and Multiview follow the last tab as 28px icon buttons; empty strip space drags the window.
@@ -226,9 +228,11 @@ Compose from these; never hand-roll a button.
 
 ### Status cluster (title bar)
 - There is no bottom status bar: `StatusBar` renders with `placement="toolbar"` as a `display: contents` cluster inside the title bar's right end. Transient status text (anything but "Ready"), agent usage and PR/CI badges flow before the notifications; the panel toggles (Ideas, Files, Markdown, Git, Chat) end the row as 28px ghost buttons — an **open panel lights its toggle** with `--row-selected`. Zoom shows only when it is not 100 %. The cwd and the hold-to-talk mic stay out (the compose dock's Dictate replaces the mic). `placement="bar"` keeps the old strip for any surface that still wants it.
+- Cluster order: status text, agent badge, tickers, PR, bell, IDE launcher, toggles. Tickers take only the room the tab strip leaves, up to their natural width and 320px: they sit side by side while they fit, the rest rotate in the last slot, and under one slot's width (110px) they step aside altogether.
 
 ### Side panels (`shared/panel.module.css`; Files, Git)
 - 40px header, 13px/500 title, 28px icon buttons on the right, one divider below; one divider on the panel's left edge (`--hairline-w` / `--hairline`; the resize handle draws no second line — it lights accent only while hovered or dragged). A panel with tabs (Git) puts them where the title goes: 28px pills, radius 8, 13px/500 in every state, `--fg-muted` at rest, `--row-selected` behind the active one — no ring, no counts. When the strip overflows (below ~330px) it scrolls sideways, a cut-off end fades out over 16px, and the open tab is always scrolled clear of the fades. A pair of view toggles (Files' List / Tree): the pressed one is `--row-selected`, the other hovers a step lighter (`--wash-0`), so pointing at it never shows two pressed buttons.
+- A Git tab may put one list-level action in the panel header's slot, beside the detach and close buttons (Stashes: Check all), instead of spending a row of the list on it.
 - Geometry: rows are 28px (`--row-h`), 6px in from both edges, 8px padding, radius 6, a 16px leading slot and an 8px gap, so every name starts 38px from the edge. Blocks — the commit composer, a search field, an error banner, a diff well — sit 10px from both edges. Two-line rows (commits, stashes, file history) are 48px: a 13px line, then a 12px meta line; whatever marks the row (a graph dot, an icon) centres on the first line.
 - Row anatomy: icon · name (13px `--fg-primary`) · context (12px `--fg-muted`: a file's folder, a commit's author and time) · numbers (tabular; `+N` `--success`, `−N` `--error`) · state as a coloured letter or a 6px dot. The basename comes before its folder, as in Codex's file picker; a full path is a tooltip, not a name.
 - Row states: hover `--wash-0`; the row whose content is open `--row-active`; a multi-selection `--row-picked`; keyboard focus a 1px inset accent ring. Per-row actions (stage, discard, apply) may appear on hover, focus or selection and take the numbers' place in the same cell — never on top of them.
@@ -240,7 +244,11 @@ Compose from these; never hand-roll a button.
 
 ### Menus, popovers, dialogs
 - Menus/popovers: `--surface-overlay`, hairline, radius 8, `--shadow-dropdown`, 4px inset, 28px items.
+- The agent launch menu (`+` in the tab strip) is the same recipe (28px rows, a 16px agent icon); a run configuration follows the agent's name in muted type and the default one is ticked only where an agent has several.
+- A menu of alternatives marks the chosen row in a leading 16px tick column (`ContextMenuItem.checked`), never with a `✓` typed into the label.
+- Toasts sit top right under the title bar. While a modal dialog is open they move to the bottom left (`bottom: 8px`), clear of the dialog's right-aligned buttons.
 - Dialogs: radius 12 (`--radius-panel`), `--shadow-2xl`, header 14px/600, actions bar with a hairline above. Scrim = `--scrim`.
+- A dialog with views puts them in one 44px bar as pills, with the list's or the draft's actions on the same row (Automations, Workflows). No second header, no stacked disclosures.
 
 ## Interactive states
 
@@ -280,6 +288,10 @@ A conversation, not a control panel (`components/AIChatPanel`):
 - **Header** carries only what the chat is attached to (session dot + terminal chip), history, clear, window controls.
 - **Composer** is the compose dock's card — glass in a flat theme, plain in a tonal one: textarea on top, a chip row beneath. Left chips shape the turn (Ask/Agent, model, effort; Steps and Approvals appear in Agent mode) — filled pills with a rim light in a flat theme, ghost in a tonal one. Right: voice, dictate, and the round `--fg-primary` send button. Chips are native `<select>`s dressed as pills so macOS pops the system menu.
 - **Thread** is flat: assistant text sits on the panel, user turns are `--wash-1` blocks on the right, tool calls are 26px expandable rows, and agent progress, results, errors and approvals are rows at the *end* of the thread (`.statusRow`, `.errorBanner`, `.approvalCard`), never banners above it.
+- **Message menu** (`MessageMenu`): a 24px ghost icon button, invisible at rest, shown on hover or focus of its message (44px on coarse pointers). An answer's sits in a 24px row under the text, a user turn's in the gutter left of its block, so nothing moves on hover. It opens the shared `Dropdown`; every row has an icon from `components/icons`. No permanent chrome on a message.
+- **Notices** (`NoticeText`): a system message is a quiet row (`.noticeRow`: `--wash-0`, an inset hairline, `--fg-secondary` at `--font-sm`). It, an error and a failed turn's reason show their first line with a chevron that opens the rest; nothing is cut with an ellipsis.
+- **Sending and failed turns**: the user block stays in the thread. While it is sent it dims to 60 % with a small "Sending…" under it, both after 300ms so a fast send never flashes them. A failed one is labelled "Not sent" or "No reply" in `--error` under the block, with two ghost buttons, Retry and Discard (`.noteBtn`), then the reason. No banner above the thread.
+- **Header dot** (6px) carries the chat's state: hollow with no terminal focused, `--success` when attached and idle, `--activity` pulse working, `--attention` pulse waiting for you. The words are in the tooltip, so colour never speaks alone.
 - **Empty state** teaches by doing: three starter prompts that send on click plus a hand-off to Agent mode.
 - **Voice stage** (`.voiceStage`) shows the `VoiceOrb` (`components/ui/VoiceOrb.tsx`): a canvas sphere fed by the mic level and the speaker level from `voice_status`. Idle breathes, listening grows a halo, speaking brightens the core, thinking orbits a glint, muted drains to grey. A 16px twin sits in the status bar while a session runs.
 
@@ -387,6 +399,10 @@ the font-size scale). When a core palette colour changes in `global.css`, change
 instead of the desktop layout variables, enables text selection, honours
 `env(safe-area-inset-*)`, keeps native inputs at 16px (below that iOS zooms) and keeps
 every touch target at least 44px.
+
+Inside the mobile composer use `Textarea embedded` (`src/components/ui/Textarea.tsx`):
+the surrounding shell owns the border and the focus frame, so the editor adds no
+form-field chrome of its own and there is never a box inside a box.
 
 ## Anti-patterns (DO NOT)
 

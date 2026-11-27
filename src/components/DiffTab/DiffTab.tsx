@@ -17,7 +17,7 @@ import { DomSearchEngine } from "../shared/DomSearchEngine";
 import { DomSearchOverview } from "../shared/DomSearchOverview";
 import { createSearchVisibility, SearchBar } from "../shared/SearchBar";
 import { DiffViewer } from "../ui/DiffViewer";
-import { BranchDiffScrollView } from "./BranchDiffScrollView";
+import { AllChangesView } from "./AllChangesView";
 import s from "./DiffTab.module.css";
 import { buildPartialPatch, extractHunks, extractSelectedLines } from "./diffPatch";
 import { diffLineCount, isDiffTooLarge } from "./diffSize";
@@ -573,7 +573,7 @@ export const DiffTab: Component<DiffTabProps> = (props) => {
 			/>
 			{/* Scroll mode: show all-files view instead of single-file diff */}
 			<Show when={mode() === "scroll"}>
-				<BranchDiffScrollView
+				<AllChangesView
 					repoPath={props.repoPath}
 					contentRef={(el) => {
 						contentRef = el;

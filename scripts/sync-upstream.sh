@@ -11,6 +11,11 @@
 # squash merge (a real 3-way merge), then removes the graft. Nothing is committed:
 # resolve any conflicts, run the checks, then `git commit` (the message is prefilled).
 #
+# Files that .gitattributes marks `merge=union` (CHANGELOG.md, to-test.md) get
+# FastAF's version back after the merge. A union merge keeps both sides' lines and
+# reports no conflict, so it would interleave upstream's release sections and manual
+# checks with FastAF's. Carry over by hand what FastAF needs; the script says how.
+#
 #   --base <sha>   the upstream commit the last sync matches, when the one in the
 #                  trailer is gone because upstream rewrote its history
 
@@ -23,7 +28,7 @@ REF="upstream/main"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--base) BASE="$2"; shift 2 ;;
-		-h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,20p' "$0"; exit 0 ;;
 		*) REF="$1"; shift ;;
 	esac
 done
@@ -39,6 +44,14 @@ rewritten_twin() {
 }
 
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "commit or stash tracked changes first"
+
+# The files .gitattributes merges with `merge=union`, read now, while it is still
+# FastAF's file: the merge may change it. git resolves the patterns, so nothing is
+# named here.
+UNION_FILES=()
+while IFS= read -r f; do
+	UNION_FILES+=("$f")
+done < <(git ls-files | git check-attr --stdin merge | sed -n 's/: merge: union$//p')
 
 git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM_URL"
 # Upstream's tags reuse FastAF's version numbers, and pushing one would start a
@@ -77,6 +90,13 @@ trap 'git replace -d "$LAST" >/dev/null 2>&1 || true' EXIT
 rc=0
 git merge --squash "$NEW" || rc=$?
 
+# A union merge never conflicts: it keeps both sides' lines, so upstream's changelog
+# sections and manual checks are now mixed into FastAF's. Put FastAF's version back,
+# in the working tree and the index.
+if [[ ${#UNION_FILES[@]} -gt 0 ]]; then
+	git checkout HEAD -- "${UNION_FILES[@]}"
+fi
+
 # --squash fills the message with every upstream commit's log; replace it.
 msg="chore(upstream): sync TUICommander v${VERSION:-?} ($COUNT commits)
 
@@ -96,4 +116,14 @@ else
 	echo "==> merged cleanly. Next:"
 fi
 echo "    git grep -n TUICommander    # keep FastAF naming; the README credit stays"
+if [[ ${#UNION_FILES[@]} -gt 0 ]]; then
+	short=$(git rev-parse --short "$NEW")
+	for f in "${UNION_FILES[@]}"; do
+		case "$f" in
+			CHANGELOG.md) echo "    $f is FastAF's again: write its [Unreleased] section by hand from \`git show $short:$f\`" ;;
+			to-test.md) echo "    $f is FastAF's again: review \`git show $short:$f\` for upstream checks worth adopting" ;;
+			*) echo "    $f is FastAF's again: compare with \`git show $short:$f\` and carry over by hand what FastAF needs" ;;
+		esac
+	done
+fi
 echo "    run tsc, biome, vitest and the cargo checks, then: git commit"

@@ -68,6 +68,8 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 	const [selectedFile, setSelectedFile] = createSignal<string | null>(null);
 	const [historyExpanded, setHistoryExpanded] = createSignal(false);
 	const [blameExpanded, setBlameExpanded] = createSignal(false);
+	/** Where the open tab puts its one list-level action (Stashes: Check all). */
+	const [headerSlot, setHeaderSlot] = createSignal<HTMLElement>();
 	const gitPath = () => (props.fsRoot || props.repoPath) as string | null;
 	// What the tabs get: null while the panel is hidden, so no hidden tab fetches.
 	// Memos, not ternaries in the JSX: Solid wraps a JSX ternary in a fresh memo on
@@ -198,6 +200,7 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 						</button>
 					))}
 				</div>
+				<div ref={setHeaderSlot} class={s.headerActions} />
 				<PanelWindowControls panelId="git" mode={mode()} onInlineClose={props.onClose} />
 			</div>
 			{/* Main tab content — <Switch>/<Match> unmounts inactive tabs, preventing hidden
@@ -220,7 +223,7 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 					</Match>
 					<Match when={activeTab() === "stashes"}>
 						<Suspense>
-							<StashesTab repoPath={tabRepoPath()} />
+							<StashesTab repoPath={tabRepoPath()} headerSlot={headerSlot()} />
 						</Suspense>
 					</Match>
 					<Match when={activeTab() === "branches"}>

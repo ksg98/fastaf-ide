@@ -14,6 +14,7 @@ import { useRepository } from "../../hooks/useRepository";
 import { t } from "../../i18n";
 import { cx } from "../../utils";
 import { keyFor } from "../../utils/hotkey";
+import { IconCheck, IconChevronDown, IconPlay, IconTerminal } from "../icons";
 import s from "./IdeLauncher.module.css";
 
 export interface IdeLauncherProps {
@@ -28,11 +29,12 @@ export interface IdeLauncherProps {
 	runCommand?: string;
 	onOpenInIde?: (ide: IdeType) => void;
 	onRun?: (shiftKey: boolean) => void;
+	onNewShell?: () => void;
 }
 
 /** IDE icon component - renders the SVG icon at specified size */
 const IdeIcon: Component<{ ide: IdeType; size?: number }> = (props) => {
-	const size = () => props.size ?? 14;
+	const size = () => props.size ?? 16;
 	return (
 		<img class={s.icon} src={IDE_ICON_PATHS[props.ide]} width={size()} height={size()} alt={IDE_NAMES[props.ide]} />
 	);
@@ -42,8 +44,8 @@ const IdeIcon: Component<{ ide: IdeType; size?: number }> = (props) => {
 const CustomToolIcon: Component<{ size?: number }> = (props) => (
 	<svg
 		class={s.icon}
-		width={props.size ?? 14}
-		height={props.size ?? 14}
+		width={props.size ?? 16}
+		height={props.size ?? 16}
 		viewBox="0 0 16 16"
 		fill="currentColor"
 		aria-hidden="true"
@@ -209,10 +211,11 @@ export const IdeLauncher: Component<IdeLauncherProps> = (props) => {
 				<button
 					class={cx(s.btn, s.arrowBtn)}
 					aria-label={t("ideLauncher.chooseEditor", "Choose editor")}
+					aria-expanded={isOpen()}
 					onClick={() => setIsOpen(!isOpen())}
 					title={t("ideLauncher.chooseEditor", "Choose editor")}
 				>
-					<span class={s.arrow}>{isOpen() ? "▲" : "▼"}</span>
+					<IconChevronDown size={12} class={s.arrow} />
 				</button>
 			</div>
 
@@ -222,12 +225,28 @@ export const IdeLauncher: Component<IdeLauncherProps> = (props) => {
 						{(cat) => {
 							const items = () => filterInstalled(IDE_CATEGORIES[cat.key]);
 							return (
-								<Show when={items().length > 0}>
+								<Show when={items().length > 0 || cat.key === "terminals"}>
 									<Show when={cat.key !== "editors"}>
 										<div class={s.divider} />
 									</Show>
 									<div class={s.section}>
 										<div class={s.sectionTitle}>{cat.label}</div>
+										<Show when={cat.key === "terminals"}>
+											<button
+												type="button"
+												class={s.item}
+												disabled={!props.repoPath || !props.onNewShell}
+												onClick={() => {
+													setIsOpen(false);
+													props.onNewShell?.();
+												}}
+											>
+												{/* FastAF's own terminal, not another app: the stroke set's
+												    terminal, in the app icons' 16px slot. */}
+												<IconTerminal size={16} class={s.glyph} />
+												<span class={s.itemName}>FastAF shell</span>
+											</button>
+										</Show>
 										<For each={items()}>
 											{(ide) => (
 												<button
@@ -238,7 +257,7 @@ export const IdeLauncher: Component<IdeLauncherProps> = (props) => {
 													<IdeIcon ide={ide} />
 													<span class={s.itemName}>{IDE_NAMES[ide]}</span>
 													<Show when={currentIde() === ide}>
-														<span class={s.itemCheck}>✓</span>
+														<IconCheck size={14} class={s.itemCheck} />
 													</Show>
 												</button>
 											)}
@@ -268,8 +287,8 @@ export const IdeLauncher: Component<IdeLauncherProps> = (props) => {
 					{/* Actions */}
 					<div class={s.divider} />
 					<div class={s.section}>
-						<button class={cx(s.item, s.action)} onClick={handleRun} disabled={!props.repoPath}>
-							<span class={cx(s.icon, s.iconEmoji)}>▶</span>
+						<button class={s.item} onClick={handleRun} disabled={!props.repoPath}>
+							<IconPlay size={16} class={s.glyph} />
 							<span class={s.itemName}>{runLabel()}</span>
 							<span class={s.shortcut}>{keyFor("run-command")}</span>
 						</button>

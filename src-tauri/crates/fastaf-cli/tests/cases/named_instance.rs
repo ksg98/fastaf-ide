@@ -1,30 +1,33 @@
 #![cfg(unix)]
 
 use std::io::Write;
-use std::os::unix::net::UnixListener;
 use std::process::Command;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
+// The named socket's absolute path (`<TMPDIR>/tuic-mcp-<16 hex>.sock`, a
+// production name) cannot fit sun_path under a long TMPDIR (the agent
+// sandbox's is 72 bytes). Then the listener binds it by a RELATIVE name
+// (`SocketSpelling::Relative`: chdir under a process-wide lock, then restore),
+// and the child runs in that directory with `TMPDIR=.`. That needs one test
+// per process: `cargo nextest` (the gate's runner), or RUST_TEST_THREADS=1;
+// `tuic_test_support::in_dir` panics otherwise.
 // Catches: CLI --instance/env routing to the default socket, or ignoring TUIC_SOCKET.
 #[test]
 fn named_instance_cli_reaches_its_socket_and_override_wins() {
-    let root = tuic_test_support::short_socket_test_temp_root();
-    let dir = tempfile::Builder::new()
-        .prefix("ipc")
-        .tempdir_in(root)
-        .unwrap();
-    let named = dir.path().join("tuic-mcp-1953e60b4e4d5340.sock");
-    let explicit = dir.path().join("override.sock");
+    let dir = tuic_test_support::socket_dir();
+    let named = "tuic-mcp-1953e60b4e4d5340.sock";
+    let spelling = tuic_test_support::SocketSpelling::for_dir(dir.path(), named);
     for mode in ["flag", "env", "override"] {
-        let path = if mode == "override" {
-            &explicit
+        let name = if mode == "override" {
+            "override.sock"
         } else {
-            &named
+            named
         };
-        let listener = UnixListener::bind(path).unwrap();
+        let path = dir.path().join(name);
+        let listener = spelling.bind(dir.path(), name).unwrap();
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = stop.clone();
@@ -55,7 +58,8 @@ fn named_instance_cli_reaches_its_socket_and_override_wins() {
         command
             .env_remove("TUIC_SOCKET")
             .env_remove("TUIC_APP_INSTANCE")
-            .env("TMPDIR", dir.path());
+            .current_dir(dir.path())
+            .env("TMPDIR", spelling.temp_dir(dir.path()));
         if mode == "flag" {
             command.args(["--instance", "ipc-cli-regression"]);
             // Explicit selection must override even an invalid inherited env.
@@ -64,12 +68,12 @@ fn named_instance_cli_reaches_its_socket_and_override_wins() {
             command.env("TUIC_APP_INSTANCE", "ipc-cli-regression");
         }
         if mode == "override" {
-            command.env("TUIC_SOCKET", path);
+            command.env("TUIC_SOCKET", spelling.path(dir.path(), name));
         }
         let output = command.args(["ls", "--json"]).output().unwrap();
         stop.store(true, Ordering::Relaxed);
         let seen = server.join().unwrap();
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(&path).unwrap();
         assert!(
             output.status.success(),
             "{mode}: {}",

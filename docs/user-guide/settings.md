@@ -67,7 +67,7 @@ The following search rules are deliberate:
   repository, and a global box has no way to know which one you mean.
 - **Per-agent controls in expandable cards are not searched.** Search cannot
   select a specific agent card or scroll to a control inside it. For managed
-  workspace trust, open **Settings → Agents**, expand **Claude** or **Codex**,
+  workspace trust, open **Settings → Agents**, expand **Claude**, **Codex** or **ego**,
   then use **Accept workspace trust for managed spawns** in Expert Mode.
 - **ego permissions are searchable.** Permissions and Filesystem sandbox are
   in a visible section on the Agents page; no agent card needs expansion.
@@ -110,7 +110,7 @@ never all expert: in basic mode it would show an empty page.
 | Notifications | Master Volume, Audio Output Device |
 | Terminal | Shell, Font Weight, Allow OSC 52 clipboard writes, Block folding, Show scrollbar marks, Reflow scrollback on resize |
 | Git & GitHub | Auto-Delete on PR Close, Copy ignored files, Copy untracked files, Storage Strategy, Auto-archive merged worktrees, Orphan Worktree Cleanup and safe cleanup countdown, After Merge Behavior, Auto-Fetch Interval, the **Add another GitHub account** button (shown while no additional account exists) |
-| Agents | Collect project progress, Launch instructions (global); per agent: Launch instructions, Close idle managed child after, Auto-retry on server errors, Prevent alternate screen, Accept workspace trust for managed spawns (Claude and Codex), Native status signals, Install hooks globally, Track agent intent, Collect progress, Show suggested follow-ups, Headless Command Template; Claude only: Environment Flags |
+| Agents | Collect project progress, Launch instructions (global); per agent: Launch instructions, Close idle managed child after, Auto-retry on server errors, Prevent alternate screen, Accept workspace trust for managed spawns (Claude, Codex and ego), Native status signals, Install hooks globally, Track agent intent, Collect progress, Show suggested follow-ups, Headless Command Template; Claude only: Environment Flags |
 | Dictation | Long-press threshold, Auto-send, Input device, Level gate, Speech confidence gate; in browser mode also Hold-back before sending, Speech engine, Speech command, Voice volume and Levelling |
 | MCP | Collapse tools |
 | Remote Access | Port, Session Token Duration, Enable IPv6 (dual-stack) |
@@ -137,6 +137,7 @@ never all expert: in basic mode it would show an empty page.
 | **fastaf CLI** | Install or uninstall the `fastaf` command-line tool, with its status. Desktop app only. See [CLI](cli.md). |
 | **Code Intelligence** | Shows whether MDKB is installed, with an **Uninstall** button when it is. There is no Install button: install `mdkb` yourself and put it on your `PATH`, and FastAF picks it up on its own. MDKB gives the editor go-to-definition, find references, and symbol outline, and serves as a memory manager for AI agents. Desktop app only. |
 | **Default IDE** | IDE for "Open in..." actions (**IDE** section). Only installed apps are offered, grouped by category: Code Editors (VS Code, Cursor, Zed, Windsurf, Neovim, Xcode, `$EDITOR`), JetBrains (IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, PhpStorm, RubyMine, Rider, DataGrip, RustRover, Android Studio, Fleet), Terminals (Ghostty, WezTerm, Alacritty, Kitty, Warp, iTerm2), Git Tools (Sourcetree, GitHub Desktop, Fork, GitKraken, Sublime Merge, Tower), System (Terminal, Finder) |
+| **FastAF shell** | Open a plain shell tab in the active repository or worktree from the Open in menu. |
 | **Custom Launchers** | Define your own tools for the "Open in" menu. Each launcher has a name, an executable (bare name resolved on `PATH`, or absolute path), and arguments (one per line). Arguments may use placeholders, expanded at launch: `{path}`/`{file}` (focused file, else repo root), `{fileDir}` (directory of the focused file), `{repo}` (repo/worktree root), `{cwd}` (focused terminal's working directory), `{home}` (your home directory), `{line}`/`{column}` (1-based editor cursor position). Args are passed verbatim (no shell parsing), so paths with spaces are safe. |
 | **Shell** | Custom shell path (e.g., `/bin/zsh`, `/usr/local/bin/fish`). Leave empty for system default. |
 | **Confirm before quitting** | Show dialog when closing app with active terminals |
@@ -318,7 +319,7 @@ arguments and the managed-launch wrapper warning.
 | **MCP Integration** | Install/remove FastAF as MCP server for supported agents. Shows install status with a dot indicator. |
 | **Native status signals** | Claude and Codex only. Enabled by default; injects process-scoped status configuration at launch without changing global agent files. The **Signals: at launch** badge identifies this mode. |
 | **Prevent alternate screen** | Enabled by default for every agent. TUIC applies a verified native-scrollback control when the installed CLI supports one. Turning it off leaves new launches without TUIC's screen control. Existing shells need to be reopened to receive the changed policy. |
-| **Accept workspace trust for managed spawns** | Claude and Codex only. In Expert Mode, expand the agent's card to change whether agent-to-agent spawns skip that agent's workspace trust question in a new folder. |
+| **Accept workspace trust for managed spawns** | Claude, Codex and ego only. In Expert Mode, expand the agent's card to change whether agent-to-agent spawns skip that agent's workspace trust question in a new folder. |
 | **Install hooks globally** | Codex, Gemini, Grok, and OpenCode. Explicitly installs/removes sentinel-owned lifecycle hooks in the agent's global configuration. Off by default. Codex verifies native trust; **Hooks: review in /hooks** requires normal Codex review. Profile-specific hooks require review in that profile. |
 | **Show agent intent as tab title** | When agents declare their current work phase, update the tab name with a short title |
 | **Show suggested follow-up actions** | Display actionable suggestions from agents after completing a task |
@@ -722,6 +723,16 @@ The explicit source ledgers distinguish read-only identities, derived credential
 
 ## Assisted startup
 
+Ego credential presence uses the configured Ego's machine inventory. Named
+accounts and legacy provider slots stay separate, even when their names match.
+Presence does not confirm remote access. Named accounts do not create legacy
+authentication edit fields. An older Ego without the machine inventory contract
+returns a failed owner read instead of using human status text.
+The inventory retains full account IDs, but the existing Settings pointer limit
+allows individual reads only through 245 ASCII bytes for named IDs. Longer
+pointers return `unknown_path`; unrelated settings remain readable. Credential
+presence stays read-only, and no account-key enumeration API is added.
+
 The [Settings startup contract](../backend/settings-startup.md) describes discoverable GitHub device/Enterprise workflows and Ego settings/readback. GitHub `list_accounts` discovers existing account IDs and credential presence. Typed Ego `begin_login` opens a terminal for you to authenticate; `login_status` reports process lifetime and owner credential readback separately. Native inventory completeness does not mean every onboarding or live UI check is complete.
 
 ### CircleCI Settings owner (#1991-bd88)
@@ -751,3 +762,12 @@ Git & GitHub access diagnostics show exact per-repository messages grouped by ow
 ## Archived worktree retention
 
 Git & GitHub → Worktree Defaults includes **Archived worktree retention (days)**. `0` is Off, the default. Repository → Worktree has a nullable override: leave it empty to inherit, or enter `0` to keep that repository’s archives. Cleanup uses recorded archive age on repository refresh, preserves committed work in archive refs, and keeps dirty or otherwise unsafe archives with named reasons. See [Worktrees](worktrees.md#archived-worktree-retention).
+
+## Grok hook updates
+
+After updating native hooks in agent settings, relaunch Grok to load completion, cancellation, failure and permission lifecycle coverage. Installation updates the TUIC-owned hook file and preserves other hook files.
+
+
+### Windows agent hook controls
+
+Native Windows does not install or inject FastAF's external POSIX status hooks. Hook state returns `unsupported`, and hook/status setters reject changes before writing preferences or user hook files. Saved preferences and existing hooks remain intact. Settings hides these controls based on the owning backend response, including remote machines. External agents retain heuristic detection; ego keeps native PTY OSC signals and its separate ACP path.

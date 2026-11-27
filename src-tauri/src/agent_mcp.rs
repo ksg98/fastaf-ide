@@ -17,13 +17,13 @@ pub(crate) struct AgentMcpStatus {
 /// How an agent stores its MCP server list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum McpFormat {
-    /// JSON: `{ <key_path>: { "tuicommander": { type, command, args, env } } }`
+    /// JSON: `{ <key_path>: { "fastaf": { type, command, args, env } } }`
     Json,
-    /// JSON, opencode flavour: `{ "mcp": { "tuicommander": { type: "local",
+    /// JSON, opencode flavour: `{ "mcp": { "fastaf": { type: "local",
     /// command: [path], enabled: true } } }`. The schema is
     /// `additionalProperties: false`, so the standard entry shape is rejected.
     OpenCode,
-    /// TOML: `[mcp_servers.tuicommander]`. `forward_session` adds the
+    /// TOML: `[mcp_servers.fastaf]`. `forward_session` adds the
     /// `env_vars` allowlist Codex needs to pass identity and endpoint selection
     /// to its bridge; agents that inherit the environment do not use it.
     Toml { forward_session: bool },
@@ -81,7 +81,49 @@ fn default_stdio_type() -> String {
     "stdio".to_string()
 }
 
-const TUIC_MCP_KEY: &str = "tuicommander";
+/// The key FastAF's entry is written under in every agent's server list, which
+/// is also the server's name: clients build tool names from it.
+const FASTAF_MCP_KEY: &str = tuic_ipc::MCP_SERVER_NAME;
+
+/// The key the entry had before the rename. Upstream TUICommander still writes
+/// it, so an entry under it is ours only when [`is_fastaf_bridge`] says so.
+const LEGACY_MCP_KEY: &str = tuic_ipc::LEGACY_MCP_SERVER_NAME;
+
+/// Largest file [`is_fastaf_bridge`] reads. A bridge is 1 to 3 MB; the cap only
+/// keeps a mistyped command from making a status check read something huge.
+const BRIDGE_SCAN_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Is `command` a bridge FastAF built?
+///
+/// The answer decides whether an entry under [`LEGACY_MCP_KEY`] is ours to
+/// rename or remove. Upstream TUICommander writes the same key and publishes
+/// its bridges into the same `mcp-bridge/<sha256>/` store, and every release
+/// has a new path there, so neither the key nor the path says whose entry it
+/// is. The bytes do: see [`tuic_ipc::BRIDGE_FAMILY_MARKER`].
+///
+/// Only an absolute path to a readable `tuic-bridge` file can pass. A wrapper
+/// (`bash -lc tuic-bridge`), a bare name, a URL transport and a missing file
+/// all name something this cannot inspect, and an entry that cannot be shown
+/// to be ours is left alone.
+fn is_fastaf_bridge(command: &str) -> bool {
+    let path = std::path::Path::new(command);
+    if !path.is_absolute()
+        || path
+            .file_name()
+            .is_none_or(|name| name != resolved_bridge_name())
+    {
+        return false;
+    }
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() > BRIDGE_SCAN_LIMIT {
+        return false;
+    }
+    let marker = tuic_ipc::BRIDGE_FAMILY_MARKER.as_bytes();
+    std::fs::read(path)
+        .is_ok_and(|bytes| bytes.windows(marker.len()).any(|window| window == marker))
+}
 
 /// Get the home directory, panicking on failure (should never happen in practice)
 fn home() -> PathBuf {
@@ -422,7 +464,8 @@ pub(crate) fn bridge_search_paths() -> Vec<PathBuf> {
 /// Separate from [`get_mcp_bridge_info`], which reports installed copies:
 /// a config file written for an agent may name `tuic-bridge` and still
 /// work, since the agent resolves it against its own `PATH` at launch. ego is
-/// not such an agent any more — it reaches `tuicommander` over ACP.
+/// not such an agent: AI Chat reaches `fastaf` over ACP, and an MCP-spawned
+/// ego child gets this path in an invocation-scoped server file.
 pub(crate) fn locate_bridge_binary() -> Option<PathBuf> {
     // Primary: sidecar bundled alongside the main executable
     if let Ok(exe) = std::env::current_exe()
@@ -461,6 +504,18 @@ fn locate_installed_bridge(source: Option<&std::path::Path>) -> Option<PathBuf> 
         })
         .max_by_key(|(modified, _)| *modified)
         .map(|(_, path)| path)
+}
+
+/// Every published bridge copy, valid or not: the startup exec-probe must reach
+/// a copy the kernel kills, whatever its bytes look like.
+pub(crate) fn installed_bridge_paths() -> Vec<PathBuf> {
+    std::fs::read_dir(crate::config::config_dir().join("mcp-bridge"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| bridge_path_in(&entry.path()))
+        .filter(|path| usable_executable(path))
+        .collect()
 }
 
 fn installed_revision_is_valid(path: &std::path::Path) -> bool {
@@ -541,6 +596,7 @@ fn install_bridge_binary(source: &std::path::Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "Bridge installation directory unavailable".to_string())?;
     let matches = || usable_executable(&target) && std::fs::read(&target).is_ok_and(|b| b == bytes);
     if matches() {
+        crate::exec_probe::heal(&target, crate::exec_probe::BRIDGE_ARGS);
         return Ok(target);
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create bridge directory: {e}"))?;
@@ -563,6 +619,7 @@ fn install_bridge_binary(source: &std::path::Path) -> Result<PathBuf, String> {
     {
         return Err(format!("Failed to publish bridge: {}", error.error));
     }
+    crate::exec_probe::heal(&target, crate::exec_probe::BRIDGE_ARGS);
     Ok(target)
 }
 
@@ -798,6 +855,10 @@ fn json_entry_is_current(
 
 /// Ensure a single agent's MCP config has the correct bridge entry.
 /// Returns true if the config was written (installed or updated).
+///
+/// An entry of ours under the old key is moved to the current one in the same
+/// edit: in place when it stands alone, dropped when the current entry is
+/// already there. A foreign entry under the old key is not looked at.
 fn ensure_agent_mcp_entry(
     config_path: &std::path::Path,
     key_path: &[&str],
@@ -812,14 +873,23 @@ fn ensure_agent_mcp_entry(
         Some(root) => root,
         None => return false,
     };
-    let existing_entry = navigate(&root, key_path)
-        .and_then(|v| v.as_object())
-        .and_then(|obj| obj.get(TUIC_MCP_KEY));
-
-    if json_entry_is_current(format, existing_entry, bridge_path) {
+    let servers = navigate(&root, key_path).and_then(|v| v.as_object());
+    let current_entry = servers.and_then(|obj| obj.get(FASTAF_MCP_KEY));
+    let legacy_entry = servers
+        .and_then(|obj| obj.get(LEGACY_MCP_KEY))
+        .filter(|entry| legacy_entry_is_ours(format, entry));
+    let current_is_current = json_entry_is_current(format, current_entry, bridge_path);
+    if legacy_entry.is_none() && current_is_current {
         return false;
     }
+    let existing_entry = current_entry.or(legacy_entry);
+    if legacy_entry.is_some() {
+        tracing::info!(source = "mcp", agent = %agent_label,
+            "Renaming the `{LEGACY_MCP_KEY}` entry to `{FASTAF_MCP_KEY}`");
+    }
     match existing_entry.and_then(|entry| entry.get("command")) {
+        Some(_) if current_is_current => {}
+        Some(old) if old.as_str() == Some(bridge_path) => {}
         Some(old) => {
             tracing::info!(source = "mcp", agent = %agent_label, "Rewriting entry: {old} → {bridge_path}");
         }
@@ -861,8 +931,27 @@ fn ensure_agent_mcp_entry(
             entry.entry("type").or_insert_with(|| "stdio".into());
         }
     }
-    let edited = match crate::jsonc_edit::upsert_member(&text, key_path, TUIC_MCP_KEY, &entry_value)
-    {
+    let edit = || match (current_entry.is_some(), legacy_entry.is_some()) {
+        // Ours stands alone under the old key: rename it where it is.
+        (false, true) => crate::jsonc_edit::replace_member(
+            &text,
+            key_path,
+            LEGACY_MCP_KEY,
+            FASTAF_MCP_KEY,
+            &entry_value,
+        ),
+        // Both are there: the current entry is the one that stays.
+        (true, true) => {
+            let updated = if current_is_current {
+                text.clone()
+            } else {
+                crate::jsonc_edit::upsert_member(&text, key_path, FASTAF_MCP_KEY, &entry_value)?
+            };
+            crate::jsonc_edit::remove_member(&updated, key_path, LEGACY_MCP_KEY)
+        }
+        _ => crate::jsonc_edit::upsert_member(&text, key_path, FASTAF_MCP_KEY, &entry_value),
+    };
+    let edited = match edit() {
         Ok(edited) => edited,
         Err(e) => {
             tracing::error!(source = "mcp", agent = %agent_label, path = %config_path.display(), "{e} — leaving the file untouched");
@@ -950,12 +1039,60 @@ fn write_toml_file(path: &std::path::Path, value: &toml::Value) -> Result<(), St
     write_text_file(path, &output)
 }
 
+/// The variables the bridge reads to find its TUIC instance and its caller.
+pub(crate) const BRIDGE_ENV_VARS: [&str; 4] = [
+    "TUIC_SESSION",
+    "TUIC_SOCKET",
+    "TUIC_APP_INSTANCE",
+    "TUIC_CONFIG_DIR",
+];
+
+/// File name of the bridge server that a managed ego child gets with `--mcp @FILE`.
+pub(crate) const EGO_BRIDGE_SERVER_FILE: &str = "ego-tuic-mcp.json";
+
+/// Write the bridge as one ego invocation-scoped stdio server in `dir`, or
+/// return `None` when no bridge binary is on this machine.
+///
+/// ego refuses an invocation server whose name is also configured, so the
+/// entry is `tuicommander`, not a name an owner is likely to have configured.
+/// It is ego's name for the server, not [`FASTAF_MCP_KEY`]: ego matches tool
+/// permissions on it (see [`crate::acp::EGO_MCP_SERVER_NAME`]).
+/// ego also refuses the server when an inherited variable is unset, so the
+/// caller passes only the variables the child environment holds.
+pub(crate) fn write_ego_bridge_server(
+    dir: &std::path::Path,
+    inherited: &[&str],
+) -> Result<Option<PathBuf>, String> {
+    let Some(bridge) = locate_bridge_binary() else {
+        return Ok(None);
+    };
+    let server = ego_bridge_server(&bridge, inherited);
+    let path = dir.join(EGO_BRIDGE_SERVER_FILE);
+    crate::config::persist_atomic(&path, server.to_string().as_bytes())?;
+    Ok(Some(path))
+}
+
+/// The server [`write_ego_bridge_server`] writes for `bridge`.
+fn ego_bridge_server(bridge: &std::path::Path, inherited: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "transport": "stdio",
+        "name": crate::acp::EGO_MCP_SERVER_NAME,
+        "command": bridge.to_string_lossy(),
+        "args": [],
+        "inherit_env": inherited,
+    })
+}
+
 /// Ensure a TOML config (`[mcp_servers.<name>]`) has the correct bridge entry.
 /// Returns true if the config was written (installed or updated).
 ///
 /// `forward_session` adds identity and endpoint selectors to the entry's
 /// `env_vars` allowlist. Codex filters its bridge environment; Grok inherits
 /// the environment, and its schema has no `env_vars` key.
+///
+/// A table of ours under the old key is renamed in the same edit, keeping its
+/// place, comments and the keys the owner added; when the current table is
+/// already there the old one is dropped instead.
 fn ensure_toml_mcp_entry(
     config_path: &std::path::Path,
     forward_session: bool,
@@ -966,45 +1103,53 @@ fn ensure_toml_mcp_entry(
         return false;
     };
 
-    let existing_entry = root
-        .get("mcp_servers")
-        .and_then(|s| s.get(TUIC_MCP_KEY))
+    let format = McpFormat::Toml { forward_session };
+    let servers = root.get("mcp_servers");
+    let current_entry = servers
+        .and_then(|s| s.get(FASTAF_MCP_KEY))
         .and_then(|entry| entry.as_table());
+    let legacy_entry = servers
+        .and_then(|s| s.get(LEGACY_MCP_KEY))
+        .filter(|entry| {
+            serde_json::to_value(entry).is_ok_and(|entry| legacy_entry_is_ours(format, &entry))
+        })
+        .and_then(|entry| entry.as_table());
+    let existing_entry = current_entry.or(legacy_entry);
     let existing_command = existing_entry
         .and_then(|entry| entry.get("command"))
         .and_then(toml::Value::as_str);
-    let missing_forwarded_vars: Vec<_> = [
-        "TUIC_SESSION",
-        "TUIC_SOCKET",
-        "TUIC_APP_INSTANCE",
-        "TUIC_CONFIG_DIR",
-    ]
-    .into_iter()
-    .filter(|name| {
-        forward_session
-            && !existing_entry
-                .and_then(|entry| entry.get("env_vars"))
-                .and_then(toml::Value::as_array)
-                .is_some_and(|env_vars| {
-                    env_vars.iter().any(|value| {
-                        value.as_str() == Some(*name)
-                            || value.as_table().is_some_and(|entry| {
-                                entry.get("name").and_then(toml::Value::as_str) == Some(*name)
-                                    && entry
-                                        .get("source")
-                                        .and_then(toml::Value::as_str)
-                                        .is_none_or(|source| source == "local")
-                            })
+    let missing_forwarded_vars: Vec<_> = BRIDGE_ENV_VARS
+        .into_iter()
+        .filter(|name| {
+            forward_session
+                && !existing_entry
+                    .and_then(|entry| entry.get("env_vars"))
+                    .and_then(toml::Value::as_array)
+                    .is_some_and(|env_vars| {
+                        env_vars.iter().any(|value| {
+                            value.as_str() == Some(*name)
+                                || value.as_table().is_some_and(|entry| {
+                                    entry.get("name").and_then(toml::Value::as_str) == Some(*name)
+                                        && entry
+                                            .get("source")
+                                            .and_then(toml::Value::as_str)
+                                            .is_none_or(|source| source == "local")
+                                })
+                        })
                     })
-                })
-    })
-    .collect();
+        })
+        .collect();
 
     let session_ok = missing_forwarded_vars.is_empty();
+    if legacy_entry.is_some() {
+        tracing::info!(source = "mcp", agent = %agent_label,
+            "Renaming the `{LEGACY_MCP_KEY}` entry to `{FASTAF_MCP_KEY}`");
+    }
     match existing_command {
-        Some(cmd) if cmd == bridge_path && session_ok => {
+        Some(cmd) if cmd == bridge_path && session_ok && legacy_entry.is_none() => {
             return false;
         }
+        Some(cmd) if cmd == bridge_path && session_ok => {}
         Some(cmd) if cmd == bridge_path => {
             tracing::info!(
                 source = "mcp",
@@ -1039,14 +1184,23 @@ fn ensure_toml_mcp_entry(
         tracing::error!(source = "mcp", agent = %agent_label, "TOML mcp_servers is not a table");
         return false;
     }
-    if document["mcp_servers"].get(TUIC_MCP_KEY).is_none() {
-        document["mcp_servers"][TUIC_MCP_KEY] = toml_edit::table();
+    if legacy_entry.is_some()
+        && let Some(servers) = document["mcp_servers"].as_table_mut()
+        && let Some(legacy) = servers.remove(LEGACY_MCP_KEY)
+        && !servers.contains_key(FASTAF_MCP_KEY)
+    {
+        // The table keeps its position in the document, so the renamed
+        // header prints where the old one stood.
+        servers.insert(FASTAF_MCP_KEY, legacy);
     }
-    if !document["mcp_servers"][TUIC_MCP_KEY].is_table() {
+    if document["mcp_servers"].get(FASTAF_MCP_KEY).is_none() {
+        document["mcp_servers"][FASTAF_MCP_KEY] = toml_edit::table();
+    }
+    if !document["mcp_servers"][FASTAF_MCP_KEY].is_table() {
         tracing::error!(source = "mcp", agent = %agent_label, "TOML bridge entry is not a table");
         return false;
     }
-    let entry = &mut document["mcp_servers"][TUIC_MCP_KEY];
+    let entry = &mut document["mcp_servers"][FASTAF_MCP_KEY];
     let decor = entry
         .get("command")
         .and_then(toml_edit::Item::as_value)
@@ -1082,7 +1236,8 @@ fn ensure_toml_mcp_entry(
     }
 }
 
-/// Remove the tuicommander entry from a TOML config.
+/// Remove our entry from a TOML config: the current table, and the old-key
+/// table when it runs one of FastAF's bridges.
 fn remove_toml_mcp_entry(config_path: &std::path::Path, agent_label: &str) -> Result<(), String> {
     if !config_path.exists() {
         return Ok(());
@@ -1091,21 +1246,38 @@ fn remove_toml_mcp_entry(config_path: &std::path::Path, agent_label: &str) -> Re
     let mut document = original
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("Cannot parse {}: {e}", config_path.display()))?;
+    let legacy_is_ours = read_toml_file(config_path).is_some_and(|root| {
+        root.get("mcp_servers")
+            .and_then(|servers| servers.get(LEGACY_MCP_KEY))
+            .and_then(|entry| serde_json::to_value(entry).ok())
+            .is_some_and(|entry| {
+                legacy_entry_is_ours(
+                    McpFormat::Toml {
+                        forward_session: false,
+                    },
+                    &entry,
+                )
+            })
+    });
     if let Some(servers) = document
         .get_mut("mcp_servers")
         .and_then(toml_edit::Item::as_table_mut)
     {
-        servers.remove(TUIC_MCP_KEY);
+        servers.remove(FASTAF_MCP_KEY);
+        if legacy_is_ours {
+            servers.remove(LEGACY_MCP_KEY);
+        }
     }
     backup_config_once(config_path, agent_label, &original);
     write_text_file_if_unchanged(config_path, Some(&original), &document.to_string())
 }
 
-/// Check if a TOML config has the tuicommander MCP entry installed.
+/// Check if a TOML config has the entry under the current key.
+#[cfg(test)]
 fn is_toml_mcp_installed(config_path: &std::path::Path) -> bool {
     read_toml_file(config_path).is_some_and(|root| {
         root.get("mcp_servers")
-            .and_then(|s| s.get(TUIC_MCP_KEY))
+            .and_then(|s| s.get(FASTAF_MCP_KEY))
             .is_some()
     })
 }
@@ -1137,39 +1309,153 @@ fn yaml_indent(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
-fn yaml_command_edit(original: &str, key: &str, bridge_path: &str) -> Option<String> {
-    let lines: Vec<&str> = original.lines().collect();
+/// Byte range of every line of `text`, without its line ending, so an edit
+/// lands on the right bytes whether the file ends its lines with LF or CRLF.
+fn yaml_line_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            let end = if index > start && text.as_bytes()[index - 1] == b'\r' {
+                index - 1
+            } else {
+                index
+            };
+            ranges.push(start..end);
+            start = index + 1;
+        }
+    }
+    if start < text.len() {
+        ranges.push(start..text.len());
+    }
+    ranges
+}
+
+/// Where the entry `entry_key` of the top-level `section_key` sits: the line of
+/// its key and the line one past the end of its block. Only a direct child of
+/// the section counts, so the same word deeper in another entry is not it.
+fn yaml_entry_lines(lines: &[&str], section_key: &str, entry_key: &str) -> Option<(usize, usize)> {
     let section = lines
         .iter()
-        .position(|line| yaml_indent(line) == 0 && yaml_line_key(line, key))?;
-    let section_indent = yaml_indent(lines[section]);
-    let entry = ((section + 1)..lines.len()).find(|&index| {
-        let line = lines[index];
-        !line.trim().is_empty()
-            && yaml_indent(line) > section_indent
-            && yaml_line_key(line, TUIC_MCP_KEY)
+        .position(|line| yaml_indent(line) == 0 && yaml_line_key(line, section_key))?;
+    let inside = |line: &str| {
+        line.trim().is_empty() || yaml_indent(line) > 0 || line.trim_start().starts_with('#')
+    };
+    let children: Vec<usize> = ((section + 1)..lines.len())
+        .take_while(|&index| inside(lines[index]))
+        .collect();
+    let child_indent = children
+        .iter()
+        .map(|&index| lines[index])
+        .find(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .map(yaml_indent)?;
+    let start = children.into_iter().find(|&index| {
+        yaml_indent(lines[index]) == child_indent && yaml_line_key(lines[index], entry_key)
     })?;
-    let entry_indent = yaml_indent(lines[entry]);
-    let command = ((entry + 1)..lines.len()).find(|&index| {
-        let line = lines[index];
-        !line.trim().is_empty() && yaml_indent(line) > entry_indent && yaml_line_key(line, "cmd")
-    })?;
-    let line = lines[command];
-    let colon = line.find(':')?;
-    let tail = &line[colon + 1..];
-    let comment = tail.find(" #").map(|offset| &tail[offset..]).unwrap_or("");
-    let scalar = if bridge_path
+    let end = ((start + 1)..lines.len())
+        .find(|&index| !lines[index].trim().is_empty() && yaml_indent(lines[index]) <= child_indent)
+        .unwrap_or(lines.len());
+    Some((start, end))
+}
+
+/// A scalar the way this file's own lines would write it.
+fn yaml_scalar(value: &str) -> Option<String> {
+    if value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
     {
-        bridge_path.to_string()
+        Some(value.to_string())
     } else {
-        serde_json::to_string(bridge_path).ok()?
-    };
-    let replacement = format!("{} {}{}", &line[..=colon], scalar, comment);
+        serde_json::to_string(value).ok()
+    }
+}
+
+/// Rewrite the value of the `field:` line inside one entry, keeping the line's
+/// indentation and its trailing comment. `only_if` restricts the rewrite to a
+/// line that currently holds that value.
+fn yaml_field_edit(
+    original: &str,
+    section_key: &str,
+    entry_key: &str,
+    field: &str,
+    only_if: Option<&str>,
+    value: &str,
+) -> Option<String> {
+    let ranges = yaml_line_ranges(original);
+    let lines: Vec<&str> = ranges
+        .iter()
+        .map(|range| &original[range.clone()])
+        .collect();
+    let (entry, end) = yaml_entry_lines(&lines, section_key, entry_key)?;
+    let entry_indent = yaml_indent(lines[entry]);
+    let index = ((entry + 1)..end).find(|&index| {
+        let line = lines[index];
+        !line.trim().is_empty() && yaml_indent(line) > entry_indent && yaml_line_key(line, field)
+    })?;
+    let line = lines[index];
+    let colon = line.find(':')?;
+    let tail = &line[colon + 1..];
+    let comment = tail.find(" #").map(|offset| &tail[offset..]).unwrap_or("");
+    if let Some(expected) = only_if {
+        let current = tail[..tail.len() - comment.len()].trim();
+        let current = current
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .or_else(|| {
+                current
+                    .strip_prefix('\'')
+                    .and_then(|rest| rest.strip_suffix('\''))
+            })
+            .unwrap_or(current);
+        if current != expected {
+            return Some(original.to_string());
+        }
+    }
+    let replacement = format!("{} {}{}", &line[..=colon], yaml_scalar(value)?, comment);
     let mut edited = original.to_string();
-    let start: usize = lines.iter().take(command).map(|line| line.len() + 1).sum();
-    edited.replace_range(start..start + line.len(), &replacement);
+    edited.replace_range(ranges[index].clone(), &replacement);
+    Some(edited)
+}
+
+fn yaml_command_edit(
+    original: &str,
+    section_key: &str,
+    entry_key: &str,
+    bridge_path: &str,
+) -> Option<String> {
+    yaml_field_edit(original, section_key, entry_key, "cmd", None, bridge_path)
+}
+
+/// Rename the entry `from` of `section_key` to `to` where it stands: its key
+/// line, and its `name:` field when that still says `from`. Everything else in
+/// the entry, the owner's fields and comments included, is left as written.
+fn yaml_entry_renamed(original: &str, section_key: &str, from: &str, to: &str) -> Option<String> {
+    let ranges = yaml_line_ranges(original);
+    let lines: Vec<&str> = ranges
+        .iter()
+        .map(|range| &original[range.clone()])
+        .collect();
+    let (entry, _) = yaml_entry_lines(&lines, section_key, from)?;
+    let line = lines[entry];
+    let indent = yaml_indent(line);
+    let replacement = format!("{}{to}{}", &line[..indent], &line[indent + from.len()..]);
+    let mut edited = original.to_string();
+    edited.replace_range(ranges[entry].clone(), &replacement);
+    yaml_field_edit(&edited, section_key, to, "name", Some(from), to).or(Some(edited))
+}
+
+/// Cut the entry `entry_key` of `section_key` out of the text, block and all.
+fn yaml_entry_removed(original: &str, section_key: &str, entry_key: &str) -> Option<String> {
+    let ranges = yaml_line_ranges(original);
+    let lines: Vec<&str> = ranges
+        .iter()
+        .map(|range| &original[range.clone()])
+        .collect();
+    let (entry, end) = yaml_entry_lines(&lines, section_key, entry_key)?;
+    let start = ranges[entry].start;
+    let stop = ranges.get(end).map_or(original.len(), |range| range.start);
+    let mut edited = original.to_string();
+    edited.replace_range(start..stop, "");
     Some(edited)
 }
 
@@ -1190,7 +1476,7 @@ fn yaml_entry_insert(original: &str, key: &str, bridge_path: &str) -> Option<Str
     } else {
         2
     };
-    let mut block = format!("{}{TUIC_MCP_KEY}:\n", " ".repeat(indent));
+    let mut block = format!("{}{FASTAF_MCP_KEY}:\n", " ".repeat(indent));
     for line in entry.lines() {
         block.push_str(&format!("{}{line}\n", " ".repeat(indent * 2)));
     }
@@ -1220,46 +1506,31 @@ fn yaml_entry_insert(original: &str, key: &str, bridge_path: &str) -> Option<Str
     }
 }
 
-/// Reject a YAML edit unless the parsed document differs only at our entry.
-fn yaml_edit_is_surgical(
-    before: &serde_yaml::Value,
-    after: &serde_yaml::Value,
+/// Is `actual` the document we meant to write?
+///
+/// `expected` is the parsed original with only our change applied to it, so
+/// any other difference is an edit that touched something it should not have.
+/// A section left without entries reads as null, as an empty mapping or not at
+/// all depending on how it was written; those are the same document.
+fn yaml_is_expected_document(
+    expected: &serde_yaml::Value,
+    actual: &serde_yaml::Value,
     key: &str,
-    expected_entry: Option<serde_yaml::Value>,
 ) -> bool {
-    let (mut before, mut after) = (before.clone(), after.clone());
-    before
-        .get_mut(key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .and_then(|map| map.remove(TUIC_MCP_KEY));
-    let actual = after
-        .get_mut(key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .and_then(|map| map.remove(TUIC_MCP_KEY));
-    // Removing the last entry leaves `extensions:` with no value, which YAML
-    // reads as null; that is the same document as an empty section.
-    if after.get(key).is_some_and(serde_yaml::Value::is_null)
-        && before
-            .get(key)
-            .and_then(serde_yaml::Value::as_mapping)
-            .is_some_and(serde_yaml::Mapping::is_empty)
-        && let Some(root) = after.as_mapping_mut()
-    {
-        root.insert(
-            serde_yaml::Value::String(key.to_string()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-    if before.get(key).is_none()
-        && after.get(key).is_some_and(|section| {
-            section
-                .as_mapping()
-                .is_some_and(serde_yaml::Mapping::is_empty)
-        })
-    {
-        after.as_mapping_mut().unwrap().remove(key);
-    }
-    before == after && actual == expected_entry
+    let normalized = |document: &serde_yaml::Value| {
+        let mut document = document.clone();
+        let empty = document.get(key).is_some_and(|section| {
+            section.is_null()
+                || section
+                    .as_mapping()
+                    .is_some_and(serde_yaml::Mapping::is_empty)
+        });
+        if empty && let Some(root) = document.as_mapping_mut() {
+            root.remove(key);
+        }
+        document
+    };
+    normalized(expected) == normalized(actual)
 }
 
 /// goose's `ExtensionEntry` for a stdio server. `name` and `timeout` have no
@@ -1269,7 +1540,7 @@ fn goose_entry_value(bridge_path: &str) -> serde_yaml::Value {
     for (key, value) in [
         ("enabled", serde_yaml::Value::Bool(true)),
         ("type", "stdio".into()),
-        ("name", TUIC_MCP_KEY.into()),
+        ("name", FASTAF_MCP_KEY.into()),
         ("description", "FastAF bridge".into()),
         ("cmd", bridge_path.into()),
         ("args", serde_yaml::Value::Sequence(Vec::new())),
@@ -1282,12 +1553,19 @@ fn goose_entry_value(bridge_path: &str) -> serde_yaml::Value {
     serde_yaml::Value::Mapping(entry)
 }
 
+/// Does this goose entry, found under [`LEGACY_MCP_KEY`], run one of FastAF's bridges?
+fn yaml_legacy_entry_is_ours(entry: &serde_yaml::Value) -> bool {
+    serde_json::to_value(entry).is_ok_and(|entry| legacy_entry_is_ours(McpFormat::Yaml, &entry))
+}
+
 /// Ensure a YAML config's `extensions:` map has the correct bridge entry.
 /// Returns true if the config was written (installed or updated).
 ///
-/// Round-tripping through serde drops comments the user may have written in
-/// `config.yaml`. goose owns this file (`goose configure` rewrites it the same
-/// way), so that is the same treatment the agent itself applies.
+/// The edit is made on the text, one line or one block at a time, so the
+/// owner's comments and fields stay as written, and the result is parsed back
+/// and compared with the document the edit was meant to produce before it is
+/// written. An entry of ours under the old key is renamed where it stands, or
+/// dropped when the current entry is already there.
 fn ensure_yaml_mcp_entry(
     config_path: &std::path::Path,
     key: &str,
@@ -1297,13 +1575,22 @@ fn ensure_yaml_mcp_entry(
     let Some(root) = read_yaml_file(config_path) else {
         return false;
     };
-    let existing_command = root
-        .get(key)
-        .and_then(|extensions| extensions.get(TUIC_MCP_KEY))
+    let section = root.get(key);
+    let current_entry = section.and_then(|entries| entries.get(FASTAF_MCP_KEY));
+    let legacy_entry = section
+        .and_then(|entries| entries.get(LEGACY_MCP_KEY))
+        .filter(|entry| yaml_legacy_entry_is_ours(entry));
+    let existing_command = current_entry
+        .or(legacy_entry)
         .and_then(|entry| entry.get("cmd"))
         .and_then(|cmd| cmd.as_str());
+    if legacy_entry.is_some() {
+        tracing::info!(source = "mcp", agent = %agent_label,
+            "Renaming the `{LEGACY_MCP_KEY}` entry to `{FASTAF_MCP_KEY}`");
+    }
     match existing_command {
-        Some(cmd) if cmd == bridge_path => return false,
+        Some(cmd) if cmd == bridge_path && legacy_entry.is_none() => return false,
+        Some(cmd) if cmd == bridge_path => {}
         Some(old) => {
             tracing::info!(source = "mcp", agent = %agent_label, "Updating path: {old} → {bridge_path}");
         }
@@ -1313,50 +1600,83 @@ fn ensure_yaml_mcp_entry(
     }
 
     let original = std::fs::read_to_string(config_path).unwrap_or_default();
-    if existing_command.is_some() {
-        let Some(edited) = yaml_command_edit(&original, key, bridge_path) else {
-            tracing::error!(source = "mcp", agent = %agent_label, "Cannot safely edit goose cmd line");
-            return false;
-        };
-        let parsed: serde_yaml::Value = match serde_yaml::from_str(&edited) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::error!(source = "mcp", agent = %agent_label, "Edited YAML is invalid: {e}");
-                return false;
-            }
-        };
-        let mut expected_entry = root[key][TUIC_MCP_KEY].clone();
-        expected_entry["cmd"] = bridge_path.into();
-        if !yaml_edit_is_surgical(&root, &parsed, key, Some(expected_entry)) {
-            tracing::error!(source = "mcp", agent = %agent_label, "Edited YAML changed fields outside the bridge command");
-            return false;
-        }
-        backup_config_once(config_path, agent_label, &original);
-        return match write_text_file_if_unchanged(config_path, Some(&original), &edited) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!(source = "mcp", agent = %agent_label, "Write error: {e}");
-                false
-            }
-        };
-    }
-    let Some(output) = yaml_entry_insert(&original, key, bridge_path) else {
-        tracing::error!(source = "mcp", agent = %agent_label, "Cannot safely insert goose entry");
-        return false;
+    // `text` is what gets written; `expected` is the parsed original with the
+    // same changes applied, to check the text edit against.
+    let mut text = original.clone();
+    let mut expected = root.clone();
+    let refuse = |what: &str| {
+        tracing::error!(source = "mcp", agent = %agent_label, "{what}");
+        false
     };
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(&output) {
+
+    if let Some(legacy) = legacy_entry {
+        let Some(entries) = expected
+            .get_mut(key)
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        else {
+            return refuse("goose extensions is not a mapping");
+        };
+        entries.remove(LEGACY_MCP_KEY);
+        let edited = if current_entry.is_some() {
+            yaml_entry_removed(&text, key, LEGACY_MCP_KEY)
+        } else {
+            let mut moved = legacy.clone();
+            if moved.get("name").and_then(serde_yaml::Value::as_str) == Some(LEGACY_MCP_KEY) {
+                moved["name"] = FASTAF_MCP_KEY.into();
+            }
+            entries.insert(FASTAF_MCP_KEY.into(), moved);
+            yaml_entry_renamed(&text, key, LEGACY_MCP_KEY, FASTAF_MCP_KEY)
+        };
+        let Some(edited) = edited else {
+            return refuse("Cannot safely rename the goose entry");
+        };
+        text = edited;
+    }
+    match existing_command {
+        Some(cmd) if cmd == bridge_path => {}
+        Some(_) => {
+            let Some(edited) = yaml_command_edit(&text, key, FASTAF_MCP_KEY, bridge_path) else {
+                return refuse("Cannot safely edit goose cmd line");
+            };
+            text = edited;
+            expected[key][FASTAF_MCP_KEY]["cmd"] = bridge_path.into();
+        }
+        None => {
+            let Some(edited) = yaml_entry_insert(&text, key, bridge_path) else {
+                return refuse("Cannot safely insert goose entry");
+            };
+            text = edited;
+            let Some(document) = expected.as_mapping_mut() else {
+                return refuse("goose config is not a mapping");
+            };
+            let entries = document
+                .entry(key.into())
+                .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            if entries.is_null() {
+                *entries = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            }
+            let Some(entries) = entries.as_mapping_mut() else {
+                return refuse("goose extensions is not a mapping");
+            };
+            if entries.contains_key(FASTAF_MCP_KEY) {
+                return refuse("goose entry has no cmd to repair");
+            }
+            entries.insert(FASTAF_MCP_KEY.into(), goose_entry_value(bridge_path));
+        }
+    }
+
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(&text) {
         Ok(parsed) => parsed,
         Err(e) => {
             tracing::error!(source = "mcp", agent = %agent_label, "Edited YAML is invalid: {e}");
             return false;
         }
     };
-    if !yaml_edit_is_surgical(&root, &parsed, key, Some(goose_entry_value(bridge_path))) {
-        tracing::error!(source = "mcp", agent = %agent_label, "Edited YAML changed other goose extensions");
-        return false;
+    if !yaml_is_expected_document(&expected, &parsed, key) {
+        return refuse("Edited YAML changed fields outside the bridge entry");
     }
     backup_config_once(config_path, agent_label, &original);
-    match write_text_file_if_unchanged(config_path, Some(&original), &output) {
+    match write_text_file_if_unchanged(config_path, Some(&original), &text) {
         Ok(()) => {
             tracing::debug!(source = "mcp", agent = %agent_label, path = %config_path.display(), "Config written");
             true
@@ -1368,7 +1688,8 @@ fn ensure_yaml_mcp_entry(
     }
 }
 
-/// Remove the tuicommander entry from a YAML config.
+/// Remove our entry from a YAML config: the current one, and the old-key one
+/// when it runs one of FastAF's bridges.
 fn remove_yaml_mcp_entry(
     config_path: &std::path::Path,
     key: &str,
@@ -1379,98 +1700,159 @@ fn remove_yaml_mcp_entry(
     }
     let root = read_yaml_file(config_path)
         .ok_or_else(|| format!("Cannot parse {} — not modified", config_path.display()))?;
-    if root
-        .get(key)
-        .and_then(|extensions| extensions.get(TUIC_MCP_KEY))
-        .is_none()
-    {
+    let section = root.get(key);
+    let ours: Vec<&str> = [
+        section
+            .and_then(|entries| entries.get(FASTAF_MCP_KEY))
+            .map(|_| FASTAF_MCP_KEY),
+        section
+            .and_then(|entries| entries.get(LEGACY_MCP_KEY))
+            .filter(|entry| yaml_legacy_entry_is_ours(entry))
+            .map(|_| LEGACY_MCP_KEY),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if ours.is_empty() {
         return Ok(());
     }
     let original = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-    let lines: Vec<&str> = original.lines().collect();
-    let section = lines
-        .iter()
-        .position(|line| yaml_indent(line) == 0 && yaml_line_key(line, key))
-        .ok_or_else(|| "Cannot safely find goose extensions".to_string())?;
-    let start_line = ((section + 1)..lines.len())
-        .find(|&index| yaml_indent(lines[index]) > 0 && yaml_line_key(lines[index], TUIC_MCP_KEY))
-        .ok_or_else(|| "Cannot safely find goose entry".to_string())?;
-    let indent = yaml_indent(lines[start_line]);
-    let end_line = ((start_line + 1)..lines.len())
-        .find(|&index| !lines[index].trim().is_empty() && yaml_indent(lines[index]) <= indent)
-        .unwrap_or(lines.len());
-    let start: usize = lines
-        .iter()
-        .take(start_line)
-        .map(|line| line.len() + 1)
-        .sum();
-    let end: usize = lines.iter().take(end_line).map(|line| line.len() + 1).sum();
     let mut edited = original.clone();
-    edited.replace_range(start..end.min(edited.len()), "");
+    let mut expected = root.clone();
+    for entry_key in ours {
+        edited = yaml_entry_removed(&edited, key, entry_key)
+            .ok_or_else(|| "Cannot safely find goose entry".to_string())?;
+        if let Some(entries) = expected
+            .get_mut(key)
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        {
+            entries.remove(entry_key);
+        }
+    }
     let parsed = serde_yaml::from_str::<serde_yaml::Value>(&edited)
         .map_err(|e| format!("Edited YAML is invalid: {e}"))?;
-    if !yaml_edit_is_surgical(&root, &parsed, key, None) {
+    if !yaml_is_expected_document(&expected, &parsed, key) {
         return Err("Edited YAML changed fields outside the goose entry".to_string());
     }
     backup_config_once(config_path, agent_label, &original);
     write_text_file_if_unchanged(config_path, Some(&original), &edited)
 }
 
+/// What one key of a target's server list holds.
+#[derive(Default)]
+struct EntryView {
+    present: bool,
+    /// The program the entry runs, when it names one.
+    command: Option<String>,
+    /// A URL or a transport other than stdio: an entry its owner wrote by hand.
+    custom_transport: bool,
+}
+
+/// Read one entry, already converted to JSON, the way its format spells it.
+fn entry_view(format: McpFormat, entry: &serde_json::Value) -> EntryView {
+    const URL_KEYS: [&str; 4] = ["url", "httpUrl", "serverUrl", "uri"];
+    let command = match format {
+        McpFormat::Yaml => entry.get("cmd").and_then(serde_json::Value::as_str),
+        McpFormat::OpenCode => entry
+            .get("command")
+            .and_then(|command| command.get(0))
+            .and_then(serde_json::Value::as_str),
+        McpFormat::Json | McpFormat::Toml { .. } => {
+            entry.get("command").and_then(serde_json::Value::as_str)
+        }
+    };
+    let foreign_type = entry
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| match format {
+            McpFormat::Yaml => kind != "stdio",
+            _ => kind != "stdio" && kind != "local",
+        });
+    EntryView {
+        present: true,
+        command: command.map(str::to_string),
+        custom_transport: foreign_type || URL_KEYS.iter().any(|key| entry.get(*key).is_some()),
+    }
+}
+
+/// Does this entry, found under [`LEGACY_MCP_KEY`], run one of FastAF's bridges?
+fn legacy_entry_is_ours(format: McpFormat, entry: &serde_json::Value) -> bool {
+    let view = entry_view(format, entry);
+    !view.custom_transport && view.command.as_deref().is_some_and(is_fastaf_bridge)
+}
+
+/// Our entry in one target's config.
+#[derive(Default)]
+struct OurEntries {
+    /// The entry under [`FASTAF_MCP_KEY`].
+    current: EntryView,
+    /// The entry under [`LEGACY_MCP_KEY`], and only when it is ours: a foreign
+    /// one (upstream TUICommander's, or anything that cannot be attributed)
+    /// reads as absent everywhere, so nothing counts, repairs or removes it.
+    legacy: EntryView,
+}
+
+impl OurEntries {
+    fn read(spec: &McpConfigSpec) -> Self {
+        let entry = |key: &str| -> Option<serde_json::Value> {
+            match spec.format {
+                McpFormat::Toml { .. } => read_toml_file(&spec.config_path)?
+                    .get("mcp_servers")?
+                    .get(key)
+                    .and_then(|entry| serde_json::to_value(entry).ok()),
+                McpFormat::Yaml => read_yaml_file(&spec.config_path)?
+                    .get(spec.key_path.first().copied().unwrap_or("extensions"))?
+                    .get(key)
+                    .and_then(|entry| serde_json::to_value(entry).ok()),
+                McpFormat::Json | McpFormat::OpenCode => {
+                    let root = read_json_file(&spec.config_path)?;
+                    navigate(&root, &spec.key_path)?.get(key).cloned()
+                }
+            }
+        };
+        if !spec.config_path.exists() {
+            return Self::default();
+        }
+        Self {
+            current: entry(FASTAF_MCP_KEY)
+                .map(|entry| entry_view(spec.format, &entry))
+                .unwrap_or_default(),
+            legacy: entry(LEGACY_MCP_KEY)
+                .filter(|entry| legacy_entry_is_ours(spec.format, entry))
+                .map(|entry| entry_view(spec.format, &entry))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The entry the rest of the code reasons about: the current one, else ours
+    /// under the old key.
+    fn effective(&self) -> &EntryView {
+        if self.current.present {
+            &self.current
+        } else {
+            &self.legacy
+        }
+    }
+}
+
 /// Is the bridge entry already present in this target's config?
 /// A target we configured earlier keeps getting path repairs even if the
 /// presence heuristic no longer recognises it (manual install, tool removed
 /// from PATH), so a stale bridge path can never be left behind.
+///
+/// An entry of ours under the old key counts: it is an installed integration
+/// that the next write renames, not a missing one.
 fn has_bridge_entry(spec: &McpConfigSpec) -> bool {
-    if !spec.config_path.exists() {
-        return false;
-    }
-    match spec.format {
-        McpFormat::Toml { .. } => is_toml_mcp_installed(&spec.config_path),
-        McpFormat::Yaml => read_yaml_file(&spec.config_path).is_some_and(|root| {
-            spec.key_path
-                .first()
-                .and_then(|key| root.get(*key))
-                .and_then(|extensions| extensions.get(TUIC_MCP_KEY))
-                .is_some()
-        }),
-        _ => read_json_file(&spec.config_path).is_some_and(|root| {
-            navigate(&root, &spec.key_path)
-                .and_then(|v| v.as_object())
-                .is_some_and(|obj| obj.contains_key(TUIC_MCP_KEY))
-        }),
-    }
+    OurEntries::read(spec).effective().present
+}
+
+/// Our entry still sits under the old key, alone or beside the current one.
+fn has_legacy_entry(spec: &McpConfigSpec) -> bool {
+    OurEntries::read(spec).legacy.present
 }
 
 fn configured_bridge_command(spec: &McpConfigSpec) -> Option<String> {
-    match spec.format {
-        McpFormat::Toml { .. } => read_toml_file(&spec.config_path)?
-            .get("mcp_servers")?
-            .get(TUIC_MCP_KEY)?
-            .get("command")?
-            .as_str()
-            .map(str::to_string),
-        McpFormat::Yaml => read_yaml_file(&spec.config_path)?
-            .get(spec.key_path.first().copied().unwrap_or("extensions"))?
-            .get(TUIC_MCP_KEY)?
-            .get("cmd")?
-            .as_str()
-            .map(str::to_string),
-        McpFormat::OpenCode => read_json_file(&spec.config_path)?
-            .get(spec.key_path.first().copied().unwrap_or("mcp"))?
-            .get(TUIC_MCP_KEY)?
-            .get("command")?
-            .get(0)?
-            .as_str()
-            .map(str::to_string),
-        McpFormat::Json => {
-            let root = read_json_file(&spec.config_path)?;
-            navigate(&root, &spec.key_path)?
-                .get(TUIC_MCP_KEY)?
-                .get("command")?
-                .as_str()
-                .map(str::to_string)
-        }
-    }
+    OurEntries::read(spec).effective().command.clone()
 }
 
 fn working_configured_command(spec: &McpConfigSpec) -> Option<String> {
@@ -1480,40 +1862,7 @@ fn working_configured_command(spec: &McpConfigSpec) -> Option<String> {
 }
 
 fn entry_has_custom_transport(spec: &McpConfigSpec) -> bool {
-    const URL_KEYS: [&str; 4] = ["url", "httpUrl", "serverUrl", "uri"];
-    match spec.format {
-        McpFormat::Toml { .. } => read_toml_file(&spec.config_path)
-            .and_then(|root| root.get("mcp_servers")?.get(TUIC_MCP_KEY).cloned())
-            .is_some_and(|entry| {
-                URL_KEYS.iter().any(|key| entry.get(*key).is_some())
-                    || entry
-                        .get("type")
-                        .and_then(toml::Value::as_str)
-                        .is_some_and(|kind| kind != "stdio" && kind != "local")
-            }),
-        McpFormat::Yaml => read_yaml_file(&spec.config_path)
-            .and_then(|root| {
-                root.get(spec.key_path.first().copied().unwrap_or("extensions"))?
-                    .get(TUIC_MCP_KEY)
-                    .cloned()
-            })
-            .is_some_and(|entry| {
-                URL_KEYS.iter().any(|key| entry.get(*key).is_some())
-                    || entry
-                        .get("type")
-                        .and_then(serde_yaml::Value::as_str)
-                        .is_some_and(|kind| kind != "stdio")
-            }),
-        McpFormat::Json | McpFormat::OpenCode => read_json_file(&spec.config_path)
-            .and_then(|root| navigate(&root, &spec.key_path)?.get(TUIC_MCP_KEY).cloned())
-            .is_some_and(|entry| {
-                URL_KEYS.iter().any(|key| entry.get(*key).is_some())
-                    || entry
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|kind| kind != "stdio" && kind != "local")
-            }),
-    }
+    OurEntries::read(spec).current.custom_transport
 }
 
 fn custom_command_should_be_kept(command: &str, bridge_path: &str) -> bool {
@@ -1795,8 +2144,12 @@ fn ensure_mcp_configs_for<'a>(
             if !auto_install_allowed(spec, agent) || entry_has_custom_transport(spec) {
                 return false;
             }
+            // A command the owner chose is kept. The agent still gets a write
+            // when our entry sits under the old key: that one renames the key
+            // and leaves the command alone.
             if let Some(command) = configured_bridge_command(spec)
                 && custom_command_should_be_kept(&command, &source_command)
+                && !has_legacy_entry(spec)
             {
                 return false;
             }
@@ -1821,7 +2174,9 @@ fn ensure_mcp_configs_for<'a>(
     let bridge_path = bridge.to_string_lossy();
     tracing::info!(source = "mcp", bridge = %bridge_path, "Ensuring bridge configs");
     for (agent, spec) in pending {
-        ensure_spec_entry(&spec, &bridge_path, agent);
+        let kept = configured_bridge_command(&spec)
+            .filter(|command| custom_command_should_be_kept(command, &source_command));
+        ensure_spec_entry(&spec, kept.as_deref().unwrap_or(&bridge_path), agent);
     }
 }
 
@@ -1901,6 +2256,16 @@ fn install_spec(spec: &McpConfigSpec, bridge_path: &str, agent_label: &str) -> R
     {
         tracing::info!(source = "mcp", agent = %agent_label, command,
                 "Keeping working bridge entry during explicit install");
+        // Kept as written, but under the current key.
+        if has_legacy_entry(spec)
+            && !ensure_spec_entry(spec, &command, agent_label)
+            && has_legacy_entry(spec)
+        {
+            return Err(format!(
+                "Failed to rename the MCP entry at {}",
+                spec.config_path.display()
+            ));
+        }
         return Ok(());
     }
     if bridge_path == BRIDGE_NAME && has_bridge_entry(spec) {
@@ -1948,7 +2313,8 @@ pub(crate) fn remove_agent_mcp(
     Ok(())
 }
 
-/// Drop the bridge entry from one target's config, dispatching on its format.
+/// Drop our entry from one target's config, dispatching on its format: the
+/// current one, and the old-key one when it runs one of FastAF's bridges.
 fn remove_spec_entry(spec: &McpConfigSpec, agent_label: &str) -> Result<(), String> {
     if crate::agent_test::active() {
         return Err("Global MCP configuration is disabled in agent-test".into());
@@ -1966,8 +2332,21 @@ fn remove_spec_entry(spec: &McpConfigSpec, agent_label: &str) -> Result<(), Stri
             }
             let text = read_json_text(&spec.config_path)
                 .ok_or_else(|| format!("Cannot read {}", spec.config_path.display()))?;
-            let edited = crate::jsonc_edit::remove_member(&text, &spec.key_path, TUIC_MCP_KEY)
-                .map_err(|e| format!("{e} in {} — not modified", spec.config_path.display()))?;
+            let not_modified =
+                |e: String| format!("{e} in {} — not modified", spec.config_path.display());
+            let mut edited =
+                crate::jsonc_edit::remove_member(&text, &spec.key_path, FASTAF_MCP_KEY)
+                    .map_err(not_modified)?;
+            // Ours under the old key goes too; another install's stays.
+            let legacy_is_ours = parse_existing(&text, &spec.config_path).is_some_and(|root| {
+                navigate(&root, &spec.key_path)
+                    .and_then(|servers| servers.get(LEGACY_MCP_KEY))
+                    .is_some_and(|entry| legacy_entry_is_ours(spec.format, entry))
+            });
+            if legacy_is_ours {
+                edited = crate::jsonc_edit::remove_member(&edited, &spec.key_path, LEGACY_MCP_KEY)
+                    .map_err(not_modified)?;
+            }
             commit_json_edit(&spec.config_path, agent_label, &text, &edited);
             Ok(())
         }
@@ -2087,7 +2466,7 @@ fn bridge_info_from_location(source: Option<&std::path::Path>) -> McpBridgeInfo 
         env: BTreeMap::new(),
     };
     let wrapper = serde_json::json!({
-        "tuicommander": entry,
+        FASTAF_MCP_KEY: entry,
     });
     let config_snippet = serde_json::to_string_pretty(&wrapper).unwrap_or_default();
     McpBridgeInfo {
@@ -2206,7 +2585,7 @@ mod tests {
         let spec = spec_at(path.clone());
         write_fixture(
             &path,
-            &serde_json::json!({"mcpServers": {TUIC_MCP_KEY: {
+            &serde_json::json!({"mcpServers": {FASTAF_MCP_KEY: {
                 "type": "stdio", "command": missing, "args": [], "env": {}
             }}}),
         );
@@ -2381,7 +2760,7 @@ mod tests {
             .unwrap()
             .as_object()
             .unwrap();
-        assert!(servers.contains_key(TUIC_MCP_KEY));
+        assert!(servers.contains_key(FASTAF_MCP_KEY));
         assert!(servers.contains_key("other-server"));
         assert_eq!(servers.len(), 2);
 
@@ -2393,7 +2772,7 @@ mod tests {
             .unwrap()
             .as_object()
             .unwrap();
-        assert!(!servers.contains_key(TUIC_MCP_KEY));
+        assert!(!servers.contains_key(FASTAF_MCP_KEY));
         assert!(servers.contains_key("other-server"));
         assert_eq!(servers.len(), 1);
     }
@@ -2418,8 +2797,8 @@ mod tests {
             .unwrap()
             .as_object()
             .unwrap();
-        assert!(servers.contains_key(TUIC_MCP_KEY));
-        let entry = servers.get(TUIC_MCP_KEY).unwrap();
+        assert!(servers.contains_key(FASTAF_MCP_KEY));
+        let entry = servers.get(FASTAF_MCP_KEY).unwrap();
         assert_eq!(entry["command"], "tui-mcp-bridge");
         assert_eq!(entry["type"], "stdio");
     }
@@ -2448,7 +2827,7 @@ mod tests {
         let root = read_json_file(&config_path).unwrap();
         // Verify the nested structure
         assert_eq!(root["amp"]["someOtherSetting"], true);
-        assert!(root["amp"]["mcpServers"][TUIC_MCP_KEY].is_object());
+        assert!(root["amp"]["mcpServers"][FASTAF_MCP_KEY].is_object());
     }
 
     #[test]
@@ -2528,7 +2907,7 @@ mod tests {
         assert!(wrote, "should write when entry is missing");
 
         let root = read_json_file(&config_path).unwrap();
-        assert_eq!(root["mcpServers"][TUIC_MCP_KEY]["command"], "/path/a");
+        assert_eq!(root["mcpServers"][FASTAF_MCP_KEY]["command"], "/path/a");
     }
 
     #[test]
@@ -2556,7 +2935,7 @@ mod tests {
         assert!(wrote, "should write when path changed");
 
         let root = read_json_file(&config_path).unwrap();
-        assert_eq!(root["mcpServers"][TUIC_MCP_KEY]["command"], "/new/path");
+        assert_eq!(root["mcpServers"][FASTAF_MCP_KEY]["command"], "/new/path");
     }
 
     #[test]
@@ -2609,7 +2988,7 @@ mod tests {
         );
 
         let root = read_json_file(&config_path).unwrap();
-        let entry = &root["mcpServers"][TUIC_MCP_KEY];
+        let entry = &root["mcpServers"][FASTAF_MCP_KEY];
         assert!(
             entry["args"].is_array(),
             "args must be an array, got {:?}",
@@ -2632,7 +3011,7 @@ mod tests {
         // Write an entry shaped like Claude Code's rejected form: args/env are null
         let initial = serde_json::json!({
             "mcpServers": {
-                TUIC_MCP_KEY: {
+                FASTAF_MCP_KEY: {
                     "type": "stdio",
                     "command": "/bridge",
                     "args": null,
@@ -2653,7 +3032,7 @@ mod tests {
         assert!(wrote, "should rewrite when args/env are null");
 
         let root = read_json_file(&config_path).unwrap();
-        let entry = &root["mcpServers"][TUIC_MCP_KEY];
+        let entry = &root["mcpServers"][FASTAF_MCP_KEY];
         assert!(entry["args"].is_array());
         assert!(entry["env"].is_object());
     }
@@ -2682,7 +3061,7 @@ mod tests {
         let servers = root["mcpServers"].as_object().unwrap();
         assert_eq!(servers.len(), 2);
         assert_eq!(servers["other-server"]["command"], "other-cmd");
-        assert_eq!(servers[TUIC_MCP_KEY]["command"], "/bridge");
+        assert_eq!(servers[FASTAF_MCP_KEY]["command"], "/bridge");
     }
 
     #[test]
@@ -2704,7 +3083,7 @@ mod tests {
         let root = read_json_file(&config_path).unwrap();
         assert_eq!(root["amp"]["setting"], true);
         assert_eq!(
-            root["amp"]["mcpServers"][TUIC_MCP_KEY]["command"],
+            root["amp"]["mcpServers"][FASTAF_MCP_KEY]["command"],
             "/bridge"
         );
     }
@@ -2726,7 +3105,7 @@ mod tests {
         );
         assert!(config_path.exists());
         let root = read_json_file(&config_path).unwrap();
-        assert!(root["mcpServers"][TUIC_MCP_KEY].is_object());
+        assert!(root["mcpServers"][FASTAF_MCP_KEY].is_object());
 
         // Remove the file and verify ensure_mcp_configs logic
         // (we test the skip logic directly since ensure_mcp_configs uses home paths)
@@ -2813,12 +3192,12 @@ mod tests {
         assert!(config_path.exists());
 
         let root = read_toml_file(&config_path).unwrap();
-        let cmd = root["mcp_servers"][TUIC_MCP_KEY]["command"]
+        let cmd = root["mcp_servers"][FASTAF_MCP_KEY]["command"]
             .as_str()
             .unwrap();
         assert_eq!(cmd, "/usr/local/bin/tuic-bridge");
         assert_eq!(
-            root["mcp_servers"][TUIC_MCP_KEY]["env_vars"]
+            root["mcp_servers"][FASTAF_MCP_KEY]["env_vars"]
                 .as_array()
                 .unwrap(),
             &[
@@ -2851,7 +3230,7 @@ mod tests {
         let root = read_toml_file(&config_path).unwrap();
         // Our entry was added
         assert_eq!(
-            root["mcp_servers"][TUIC_MCP_KEY]["command"]
+            root["mcp_servers"][FASTAF_MCP_KEY]["command"]
                 .as_str()
                 .unwrap(),
             "/path/to/tuic-bridge",
@@ -2878,7 +3257,7 @@ mod tests {
 
         let root = read_toml_file(&config_path).unwrap();
         assert_eq!(
-            root["mcp_servers"][TUIC_MCP_KEY]["command"]
+            root["mcp_servers"][FASTAF_MCP_KEY]["command"]
                 .as_str()
                 .unwrap(),
             "/new/path",
@@ -2890,7 +3269,7 @@ mod tests {
         let _config = with_temp_config_dir();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let before = "# user's model note\nmodel = 'o3'\n\n[mcp_servers.tuicommander]\ncommand = '/missing/bridge' # keep this note\nenv = { TOKEN = 'secret' }\nenabled = false\n";
+        let before = "# user's model note\nmodel = 'o3'\n\n[mcp_servers.fastaf]\ncommand = '/missing/bridge' # keep this note\nenv = { TOKEN = 'secret' }\nenabled = false\n";
         std::fs::write(&path, before).unwrap();
         assert!(ensure_toml_mcp_entry(&path, true, "/new/bridge", "codex"));
         let after = std::fs::read_to_string(&path).unwrap();
@@ -2899,7 +3278,7 @@ mod tests {
         assert!(after.contains("env = { TOKEN = 'secret' }"), "{after}");
         assert!(after.contains("enabled = false"), "{after}");
         assert_eq!(
-            read_toml_file(&path).unwrap()["mcp_servers"][TUIC_MCP_KEY]["command"].as_str(),
+            read_toml_file(&path).unwrap()["mcp_servers"][FASTAF_MCP_KEY]["command"].as_str(),
             Some("/new/bridge")
         );
     }
@@ -2909,13 +3288,13 @@ mod tests {
         let _config = with_temp_config_dir();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let before = "# model note\nmodel = 'o3'\n\n[mcp_servers.other]\ncommand = '/other' # keep\n\n[mcp_servers.tuicommander]\ncommand = '/bridge'\n";
+        let before = "# model note\nmodel = 'o3'\n\n[mcp_servers.other]\ncommand = '/other' # keep\n\n[mcp_servers.fastaf]\ncommand = '/bridge'\n";
         std::fs::write(&path, before).unwrap();
         remove_toml_mcp_entry(&path, "codex").unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# model note"));
         assert!(after.contains("command = '/other' # keep"));
-        assert!(!after.contains("[mcp_servers.tuicommander]"));
+        assert!(!after.contains("[mcp_servers.fastaf]"));
     }
 
     #[test]
@@ -2923,7 +3302,7 @@ mod tests {
         let _config = with_temp_config_dir();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let before = "# user's note\nextensions:\n  tuicommander:\n    type: stdio\n    name: tuicommander\n    cmd: /missing/bridge # keep this note\n    args: [--flag]\n    enabled: false\n    timeout: 900\n";
+        let before = "# user's note\nextensions:\n  fastaf:\n    type: stdio\n    name: fastaf\n    cmd: /missing/bridge # keep this note\n    args: [--flag]\n    enabled: false\n    timeout: 900\n";
         std::fs::write(&path, before).unwrap();
         assert!(ensure_yaml_mcp_entry(
             &path,
@@ -2958,7 +3337,7 @@ mod tests {
             "{after}"
         );
         assert_eq!(
-            read_yaml_file(&path).unwrap()["extensions"][TUIC_MCP_KEY]["cmd"].as_str(),
+            read_yaml_file(&path).unwrap()["extensions"][FASTAF_MCP_KEY]["cmd"].as_str(),
             Some("/bridge")
         );
     }
@@ -2973,7 +3352,7 @@ mod tests {
         let path = dir.path().join("goose.yaml");
         std::fs::write(
             &path,
-            "extensions:\n  tuicommander:\n    cmd: /bridge\n    enabled: true\n",
+            "extensions:\n  fastaf:\n    cmd: /bridge\n    enabled: true\n",
         )
         .unwrap();
         remove_yaml_mcp_entry(&path, "extensions", "goose")
@@ -2983,7 +3362,7 @@ mod tests {
         assert!(
             after
                 .get("extensions")
-                .and_then(|extensions| extensions.get(TUIC_MCP_KEY))
+                .and_then(|extensions| extensions.get(FASTAF_MCP_KEY))
                 .is_none()
         );
     }
@@ -3009,17 +3388,17 @@ mod tests {
             let mut expected: serde_yaml::Value = serde_yaml::from_str(&before).unwrap();
             let mut actual: serde_yaml::Value = serde_yaml::from_str(&after).unwrap();
             assert_eq!(
-                actual["extensions"][TUIC_MCP_KEY]["cmd"].as_str(),
+                actual["extensions"][FASTAF_MCP_KEY]["cmd"].as_str(),
                 Some("/bridge")
             );
             actual["extensions"]
                 .as_mapping_mut()
                 .unwrap()
-                .remove(TUIC_MCP_KEY);
+                .remove(FASTAF_MCP_KEY);
             expected["extensions"]
                 .as_mapping_mut()
                 .unwrap()
-                .remove(TUIC_MCP_KEY);
+                .remove(FASTAF_MCP_KEY);
             assert_eq!(
                 actual, expected,
                 "other extensions changed at {indent} spaces: {after}"
@@ -3037,7 +3416,7 @@ mod tests {
         let _config = with_temp_config_dir();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let before = "# root note\nextensions:\n  tuicommander:\n    cmd: /bridge\n    enabled: true\n  other:\n    cmd: /other # keep this\n";
+        let before = "# root note\nextensions:\n  fastaf:\n    cmd: /bridge\n    enabled: true\n  other:\n    cmd: /other # keep this\n";
         std::fs::write(&path, before).unwrap();
         remove_yaml_mcp_entry(&path, "extensions", "goose").unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
@@ -3059,9 +3438,7 @@ mod tests {
         ] {
             std::fs::write(
                 &config_path,
-                format!(
-                    "[mcp_servers.tuicommander]\ncommand = '/bridge'\nenv_vars = {initial_vars}\n"
-                ),
+                format!("[mcp_servers.fastaf]\ncommand = '/bridge'\nenv_vars = {initial_vars}\n"),
             )
             .unwrap();
 
@@ -3070,7 +3447,7 @@ mod tests {
                 "missing local endpoint forwarding must be repaired: {initial_vars}"
             );
             let root = read_toml_file(&config_path).unwrap();
-            let vars = root["mcp_servers"][TUIC_MCP_KEY]["env_vars"]
+            let vars = root["mcp_servers"][FASTAF_MCP_KEY]["env_vars"]
                 .as_array()
                 .unwrap();
             for required in [
@@ -3093,7 +3470,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
         let initial = toml::toml! {
-            [mcp_servers.tuicommander]
+            [mcp_servers.fastaf]
             command = "/correct/path"
             args = ["--keep"]
             env_vars = ["EXISTING_VAR"]
@@ -3105,7 +3482,7 @@ mod tests {
         assert!(wrote, "missing TUIC_SESSION forwarding must be repaired");
 
         let root = read_toml_file(&config_path).unwrap();
-        let entry = &root["mcp_servers"][TUIC_MCP_KEY];
+        let entry = &root["mcp_servers"][FASTAF_MCP_KEY];
         assert_eq!(entry["command"].as_str(), Some("/correct/path"));
         assert_eq!(
             entry["args"].as_array().unwrap(),
@@ -3129,7 +3506,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
         let initial = toml::toml! {
-            [mcp_servers.tuicommander]
+            [mcp_servers.fastaf]
             command = "/correct/path"
             env_vars = [
                 { name = "TUIC_SESSION", source = "local" },
@@ -3184,14 +3561,14 @@ mod tests {
 
         // Verify both exist
         let root = read_toml_file(&config_path).unwrap();
-        assert!(root["mcp_servers"].get(TUIC_MCP_KEY).is_some());
+        assert!(root["mcp_servers"].get(FASTAF_MCP_KEY).is_some());
         assert!(root["mcp_servers"].get("other_tool").is_some());
 
         // Remove
         remove_toml_mcp_entry(&config_path, "codex").unwrap();
 
         let root = read_toml_file(&config_path).unwrap();
-        assert!(root["mcp_servers"].get(TUIC_MCP_KEY).is_none());
+        assert!(root["mcp_servers"].get(FASTAF_MCP_KEY).is_none());
         assert!(root["mcp_servers"].get("other_tool").is_some());
     }
 
@@ -3252,22 +3629,22 @@ mod tests {
     fn command_at_spec(spec: &McpConfigSpec) -> String {
         let path = &spec.config_path;
         match spec.format {
-            McpFormat::Toml { .. } => {
-                read_toml_file(path).unwrap()["mcp_servers"][TUIC_MCP_KEY]["command"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            }
-            McpFormat::Yaml => read_yaml_file(path).unwrap()["extensions"][TUIC_MCP_KEY]["cmd"]
+            McpFormat::Toml { .. } => read_toml_file(path).unwrap()["mcp_servers"][FASTAF_MCP_KEY]
+                ["command"]
                 .as_str()
                 .unwrap()
                 .to_string(),
-            McpFormat::OpenCode => read_json_file(path).unwrap()["mcp"][TUIC_MCP_KEY]["command"][0]
+            McpFormat::Yaml => read_yaml_file(path).unwrap()["extensions"][FASTAF_MCP_KEY]["cmd"]
                 .as_str()
                 .unwrap()
                 .to_string(),
+            McpFormat::OpenCode => read_json_file(path).unwrap()["mcp"][FASTAF_MCP_KEY]["command"]
+                [0]
+            .as_str()
+            .unwrap()
+            .to_string(),
             McpFormat::Json => {
-                read_json_file(path).unwrap()[spec.key_path[0]][TUIC_MCP_KEY]["command"]
+                read_json_file(path).unwrap()[spec.key_path[0]][FASTAF_MCP_KEY]["command"]
                     .as_str()
                     .unwrap()
                     .to_string()
@@ -3296,6 +3673,30 @@ mod tests {
         assert!(!installed.starts_with(dir.path()));
         std::fs::remove_dir_all(dir.path().join("target")).unwrap();
         bridge_fixture::assert_runs(installed);
+    }
+
+    /// Catches: an installed bridge that exits 137 on exec is left in place and
+    /// every new session loses the MCP (#2902-dcc7).
+    #[cfg(unix)]
+    #[test]
+    fn bridge_probe_republishes_on_sigkill() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _config = with_temp_config_dir();
+        let dir = TempDir::new().unwrap();
+        let source = bridge_path_in(dir.path());
+        // A script that kills itself stands for a binary the kernel kills on exec.
+        std::fs::write(&source, "#!/bin/sh\nkill -9 $$\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let installed = install_bridge_binary(&source).unwrap();
+        let inode = installed.metadata().unwrap().ino();
+        assert_eq!(install_bridge_binary(&source).unwrap(), installed);
+        let after = installed.metadata().unwrap();
+        assert_ne!(after.ino(), inode, "a killed bridge must be republished");
+        assert_eq!(
+            std::fs::read(&installed).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        assert_eq!(after.permissions().mode() & 0o777, 0o700);
     }
 
     /// Catches: overwriting or deleting an old installed executable on upgrade,
@@ -3487,13 +3888,13 @@ mod tests {
                 "claude",
                 McpFormat::Json,
                 vec!["mcpServers"],
-                r#"{"mcpServers":{"tuicommander":{"type":"stdio","command":"bash","args":["-lc","tuic-bridge"],"env":{}}}}"#,
+                r#"{"mcpServers":{"fastaf":{"type":"stdio","command":"bash","args":["-lc","tuic-bridge"],"env":{}}}}"#,
             ),
             (
                 "opencode",
                 McpFormat::OpenCode,
                 vec!["mcp"],
-                r#"{"mcp":{"tuicommander":{"type":"local","command":["bash","-lc","tuic-bridge"],"enabled":true}}}"#,
+                r#"{"mcp":{"fastaf":{"type":"local","command":["bash","-lc","tuic-bridge"],"enabled":true}}}"#,
             ),
             (
                 "codex",
@@ -3501,13 +3902,13 @@ mod tests {
                     forward_session: true,
                 },
                 vec![],
-                "[mcp_servers.tuicommander]\ncommand = 'bash'\nargs = ['-lc', 'tuic-bridge']\n",
+                "[mcp_servers.fastaf]\ncommand = 'bash'\nargs = ['-lc', 'tuic-bridge']\n",
             ),
             (
                 "goose",
                 McpFormat::Yaml,
                 vec!["extensions"],
-                "extensions:\n  tuicommander:\n    type: stdio\n    cmd: bash\n    args: [-lc, tuic-bridge]\n",
+                "extensions:\n  fastaf:\n    type: stdio\n    cmd: bash\n    args: [-lc, tuic-bridge]\n",
             ),
         ] {
             let path = dir.path().join(format!("{label}.config"));
@@ -3540,13 +3941,13 @@ mod tests {
                 "claude",
                 McpFormat::Json,
                 vec!["mcpServers"],
-                r#"{"mcpServers":{"tuicommander":{"type":"http","url":"http://127.0.0.1:9876/mcp"}}}"#,
+                r#"{"mcpServers":{"fastaf":{"type":"http","url":"http://127.0.0.1:9876/mcp"}}}"#,
             ),
             (
                 "opencode",
                 McpFormat::OpenCode,
                 vec!["mcp"],
-                r#"{"mcp":{"tuicommander":{"type":"remote","url":"http://127.0.0.1:9876/mcp"}}}"#,
+                r#"{"mcp":{"fastaf":{"type":"remote","url":"http://127.0.0.1:9876/mcp"}}}"#,
             ),
             (
                 "codex",
@@ -3554,13 +3955,13 @@ mod tests {
                     forward_session: true,
                 },
                 vec![],
-                "[mcp_servers.tuicommander]\nurl = 'http://127.0.0.1:9876/mcp'\n",
+                "[mcp_servers.fastaf]\nurl = 'http://127.0.0.1:9876/mcp'\n",
             ),
             (
                 "goose",
                 McpFormat::Yaml,
                 vec!["extensions"],
-                "extensions:\n  tuicommander:\n    type: streamable_http\n    uri: http://127.0.0.1:9876/mcp\n",
+                "extensions:\n  fastaf:\n    type: streamable_http\n    uri: http://127.0.0.1:9876/mcp\n",
             ),
         ] {
             let path = dir.path().join(format!("{label}.config"));
@@ -3620,7 +4021,7 @@ mod tests {
             };
             write_fixture(
                 &path,
-                &serde_json::json!({(key): {(TUIC_MCP_KEY): entry.clone()}}),
+                &serde_json::json!({(key): {(FASTAF_MCP_KEY): entry.clone()}}),
             );
             assert!(ensure_agent_mcp_entry(
                 &path,
@@ -3629,7 +4030,7 @@ mod tests {
                 "/new/bridge",
                 "test"
             ));
-            let repaired = &read_json_file(&path).unwrap()[key][TUIC_MCP_KEY];
+            let repaired = &read_json_file(&path).unwrap()[key][FASTAF_MCP_KEY];
             assert_eq!(
                 repaired["command"],
                 if format == McpFormat::OpenCode {
@@ -3831,7 +4232,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         std::fs::write(dir.path().join(".claude/marker"), b"installed").unwrap();
         let config = dir.path().join(".claude.json");
-        let original = r#"{"mcpServers":{"tuicommander":{"type":"stdio","command":"/working/bridge","args":[],"env":{}}}}"#;
+        let original = r#"{"mcpServers":{"fastaf":{"type":"stdio","command":"/working/bridge","args":[],"env":{}}}}"#;
         std::fs::write(&config, original).unwrap();
         let exe = std::env::current_exe().unwrap();
         assert!(bridge_beside(exe.parent().unwrap()).is_none());
@@ -4042,10 +4443,10 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&configs[0].0).unwrap()).unwrap();
         let codex: toml::Value =
             toml::from_str(&std::fs::read_to_string(&configs[1].0).unwrap()).unwrap();
-        let claude_command = claude["mcpServers"][TUIC_MCP_KEY]["command"]
+        let claude_command = claude["mcpServers"][FASTAF_MCP_KEY]["command"]
             .as_str()
             .unwrap();
-        let codex_command = codex["mcp_servers"][TUIC_MCP_KEY]["command"]
+        let codex_command = codex["mcp_servers"][FASTAF_MCP_KEY]["command"]
             .as_str()
             .unwrap();
         assert_eq!(claude_command, codex_command);
@@ -4122,7 +4523,7 @@ mod tests {
                 path,
                 &serde_json::json!({
                     "unrelated": "keep me",
-                    "mcpServers": {"tuicommander": {
+                    "mcpServers": {"fastaf": {
                         "type": "stdio", "command": sandbox.path().join("target/debug/tuic-bridge"),
                         "args": [], "env": {}
                     }}
@@ -4142,7 +4543,7 @@ mod tests {
             let value: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             assert_eq!(
-                value["mcpServers"][TUIC_MCP_KEY]["command"],
+                value["mcpServers"][FASTAF_MCP_KEY]["command"],
                 sandbox
                     .path()
                     .join("target/debug/tuic-bridge")
@@ -4165,7 +4566,7 @@ mod tests {
             let value: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             let command = PathBuf::from(
-                value["mcpServers"][TUIC_MCP_KEY]["command"]
+                value["mcpServers"][FASTAF_MCP_KEY]["command"]
                     .as_str()
                     .unwrap(),
             );
@@ -4183,7 +4584,7 @@ mod tests {
         write_fixture(
             &paths[1],
             &serde_json::json!({
-                "mcpServers": {"tuicommander": {"type": "http", "url": "http://localhost:9876/mcp"}}
+                "mcpServers": {"fastaf": {"type": "http", "url": "http://localhost:9876/mcp"}}
             }),
         );
         let custom = std::fs::read(&paths[1]).unwrap();
@@ -4232,7 +4633,7 @@ mod tests {
 
         // Catches secondary ownership changes independently of custom-command
         // preservation: a leading slash is only rooted, not absolute, on Windows.
-        let original = serde_json::json!({"mcpServers": {"tuicommander": {
+        let original = serde_json::json!({"mcpServers": {"fastaf": {
             "type": "stdio", "command": sandbox.path().join("missing/bridge"),
             "args": [], "env": {}
         }}})
@@ -4269,11 +4670,8 @@ mod tests {
             let after = std::fs::read_to_string(&config).unwrap();
             if should_write {
                 let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
-                let command = PathBuf::from(
-                    parsed["mcpServers"]["tuicommander"]["command"]
-                        .as_str()
-                        .unwrap(),
-                );
+                let command =
+                    PathBuf::from(parsed["mcpServers"]["fastaf"]["command"].as_str().unwrap());
                 // Compare filesystem identities, not a normal Windows path
                 // against canonicalize's verbatim path spelling.
                 let command = command.canonicalize().unwrap();
@@ -4431,7 +4829,7 @@ mod tests {
 
         ensure_spec_entry(&spec, "/new/bridge", "test");
         let root = read_json_file(&config_path).unwrap();
-        assert_eq!(root["mcpServers"][TUIC_MCP_KEY]["command"], "/new/bridge");
+        assert_eq!(root["mcpServers"][FASTAF_MCP_KEY]["command"], "/new/bridge");
     }
 
     // --- unparseable configs are never overwritten ---
@@ -4459,7 +4857,7 @@ mod tests {
         assert!(written.starts_with("// user comment"), "{written}");
         let root = read_json_file(&config_path).unwrap();
         assert_eq!(root["servers"]["mine"]["command"], "x");
-        assert_eq!(root["servers"][TUIC_MCP_KEY]["command"], "/bridge");
+        assert_eq!(root["servers"][FASTAF_MCP_KEY]["command"], "/bridge");
     }
 
     #[test]
@@ -4522,7 +4920,7 @@ mod tests {
         }
         let root = read_json_file(&config_path).unwrap();
         assert_eq!(
-            root["context_servers"][TUIC_MCP_KEY]["command"],
+            root["context_servers"][FASTAF_MCP_KEY]["command"],
             "/usr/bin/tuic-bridge"
         );
         assert_eq!(root["buffer_font_size"], 14);
@@ -4546,7 +4944,7 @@ mod tests {
     fn removal_keeps_the_users_comments() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("settings.json");
-        let original = "{\n  // keep me\n  \"theme\": \"dark\",\n  \"mcpServers\": { \"tuicommander\": { \"command\": \"/bridge\" } }\n}";
+        let original = "{\n  // keep me\n  \"theme\": \"dark\",\n  \"mcpServers\": { \"fastaf\": { \"command\": \"/bridge\" } }\n}";
         std::fs::write(&config_path, original).unwrap();
 
         let spec = spec_at(config_path.clone());
@@ -4555,7 +4953,7 @@ mod tests {
         let written = std::fs::read_to_string(&config_path).unwrap();
         assert!(written.contains("// keep me"), "{written}");
         let root = read_json_file(&config_path).unwrap();
-        assert!(root["mcpServers"].get(TUIC_MCP_KEY).is_none());
+        assert!(root["mcpServers"].get(FASTAF_MCP_KEY).is_none());
         assert_eq!(root["theme"], "dark");
     }
 
@@ -4596,7 +4994,7 @@ mod tests {
 
         ensure_spec_entry(&spec, "/new/bridge", "zed");
         let root = read_json_file(&config_path).unwrap();
-        assert_eq!(root["mcpServers"][TUIC_MCP_KEY]["command"], "/new/bridge");
+        assert_eq!(root["mcpServers"][FASTAF_MCP_KEY]["command"], "/new/bridge");
     }
 
     #[test]
@@ -4646,7 +5044,7 @@ mod tests {
         ));
 
         let root = read_json_file(&config_path).unwrap();
-        let entry = &root["mcp"][TUIC_MCP_KEY];
+        let entry = &root["mcp"][FASTAF_MCP_KEY];
         assert_eq!(entry["type"], "local");
         assert_eq!(entry["command"], serde_json::json!(["/bridge"]));
         assert_eq!(entry["enabled"], true);
@@ -4678,7 +5076,7 @@ mod tests {
             "grok"
         ));
         let root = read_toml_file(&config_path).unwrap();
-        let entry = &root["mcp_servers"][TUIC_MCP_KEY];
+        let entry = &root["mcp_servers"][FASTAF_MCP_KEY];
         assert_eq!(entry["command"].as_str(), Some("/bridge"));
         assert!(entry.get("env_vars").is_none());
         // Unrelated sections survive
@@ -4709,12 +5107,12 @@ mod tests {
             "goose"
         ));
         let root = read_yaml_file(&config_path).unwrap();
-        let entry = &root["extensions"][TUIC_MCP_KEY];
+        let entry = &root["extensions"][FASTAF_MCP_KEY];
         // goose deserializes into ExtensionEntry { enabled, #[flatten] config }
         // where Stdio requires name, cmd, args and timeout.
         assert_eq!(entry["enabled"], serde_yaml::Value::Bool(true));
         assert_eq!(entry["type"].as_str(), Some("stdio"));
-        assert_eq!(entry["name"].as_str(), Some(TUIC_MCP_KEY));
+        assert_eq!(entry["name"].as_str(), Some(FASTAF_MCP_KEY));
         assert_eq!(entry["cmd"].as_str(), Some("/bridge"));
         assert!(entry["args"].is_sequence());
         assert_eq!(entry["timeout"].as_u64(), Some(300));
@@ -4735,7 +5133,7 @@ mod tests {
 
         remove_yaml_mcp_entry(&config_path, "extensions", "goose").unwrap();
         let root = read_yaml_file(&config_path).unwrap();
-        assert!(root["extensions"].get(TUIC_MCP_KEY).is_none());
+        assert!(root["extensions"].get(FASTAF_MCP_KEY).is_none());
         assert!(root["extensions"].get("developer").is_some());
     }
 
@@ -5070,10 +5468,7 @@ mod tests {
         let info = bridge_info_from_location(None);
         assert_eq!(info.bridge_path, installed.to_str().unwrap());
         let snippet: serde_json::Value = serde_json::from_str(&info.config_snippet).unwrap();
-        assert_eq!(
-            snippet["tuicommander"]["command"],
-            installed.to_str().unwrap()
-        );
+        assert_eq!(snippet["fastaf"]["command"], installed.to_str().unwrap());
     }
 
     /// Catches: installing a full executable when every agent is disabled,
@@ -5093,8 +5488,8 @@ mod tests {
             };
             match case {
                 "absent" => spec.presence_dir = Some(dir.path().join("absent-agent")),
-                "http" => std::fs::write(&path, r#"{"mcpServers":{"tuicommander":{"type":"http","url":"http://localhost:9876/mcp"}}}"#).unwrap(),
-                "wrapper" => std::fs::write(&path, r#"{"mcpServers":{"tuicommander":{"command":"bash","args":["-lc","tuic-bridge"],"env":{}}}}"#).unwrap(),
+                "http" => std::fs::write(&path, r#"{"mcpServers":{"fastaf":{"type":"http","url":"http://localhost:9876/mcp"}}}"#).unwrap(),
+                "wrapper" => std::fs::write(&path, r#"{"mcpServers":{"fastaf":{"command":"bash","args":["-lc","tuic-bridge"],"env":{}}}}"#).unwrap(),
                 "malformed" => std::fs::write(&path, b"{malformed").unwrap(),
                 _ => { assert!(ensure_spec_entry(&spec, BRIDGE_NAME, "claude")); }
             }
@@ -5213,7 +5608,7 @@ mod tests {
     fn seed_command(path: &std::path::Path, command: &str) {
         write_fixture(
             path,
-            &serde_json::json!({"mcpServers": {TUIC_MCP_KEY: {"command": command, "args": ["--serve"]}}}),
+            &serde_json::json!({"mcpServers": {FASTAF_MCP_KEY: {"command": command, "args": ["--serve"]}}}),
         );
     }
 
@@ -5384,5 +5779,676 @@ mod tests {
         let mut temp = tempfile::NamedTempFile::new_in(config_dir.path()).unwrap();
         let error = copy_verified_bridge(&source, &mut temp, &digest).unwrap_err();
         assert!(error.contains("changed during installation"), "{error}");
+    }
+
+    // --- server rename: `tuicommander` → `fastaf` ---
+
+    mod server_rename {
+        use super::*;
+
+        /// A `tuic-bridge` that carries FastAF's text, as every FastAF build does.
+        fn fastaf_bridge(dir: &std::path::Path) -> PathBuf {
+            std::fs::create_dir_all(dir).unwrap();
+            fake_bridge(
+                dir,
+                format!("\0binary\0{}\0more", tuic_ipc::BRIDGE_FAMILY_MARKER).as_bytes(),
+            )
+        }
+
+        /// A `tuic-bridge` another app built: same file name, upstream's text.
+        fn foreign_bridge(dir: &std::path::Path) -> PathBuf {
+            std::fs::create_dir_all(dir).unwrap();
+            fake_bridge(dir, b"\0binary\0TUICommander MCP is unavailable\0more")
+        }
+
+        /// The same four targets every test walks: one per on-disk format.
+        fn specs(dir: &std::path::Path) -> Vec<McpConfigSpec> {
+            vec![
+                spec_at(dir.join("mcp.json")),
+                McpConfigSpec {
+                    format: McpFormat::OpenCode,
+                    key_path: vec!["mcp"],
+                    ..spec_at(dir.join("opencode.json"))
+                },
+                McpConfigSpec {
+                    format: McpFormat::Toml {
+                        forward_session: false,
+                    },
+                    key_path: vec![],
+                    ..spec_at(dir.join("config.toml"))
+                },
+                McpConfigSpec {
+                    format: McpFormat::Yaml,
+                    key_path: vec!["extensions"],
+                    ..spec_at(dir.join("config.yaml"))
+                },
+            ]
+        }
+
+        /// Write a config holding these `(key, command)` entries plus one of the
+        /// owner's own servers, in the target's format.
+        fn write_config(spec: &McpConfigSpec, entries: &[(&str, &str)]) {
+            let mut text = String::new();
+            match spec.format {
+                McpFormat::Json | McpFormat::OpenCode => {
+                    let mut servers = serde_json::Map::new();
+                    // In the target's own shape: opencode's `command` is an array.
+                    servers.insert("other".into(), json_entry_value(spec.format, "/opt/other"));
+                    for (key, command) in entries {
+                        servers.insert((*key).into(), json_entry_value(spec.format, command));
+                    }
+                    text = serde_json::to_string_pretty(
+                        &serde_json::json!({ (spec.key_path[0]): servers, "theme": "dark" }),
+                    )
+                    .unwrap();
+                }
+                McpFormat::Toml { .. } => {
+                    text.push_str("model = 'o3'\n\n[mcp_servers.other]\ncommand = '/opt/other'\n");
+                    for (key, command) in entries {
+                        text.push_str(&format!("\n[mcp_servers.{key}]\ncommand = '{command}'\n"));
+                    }
+                }
+                McpFormat::Yaml => {
+                    text.push_str("extensions:\n  other:\n    cmd: /opt/other\n");
+                    for (key, command) in entries {
+                        text.push_str(&format!(
+                            "  {key}:\n    type: stdio\n    name: {key}\n    cmd: {command}\n    enabled: true\n"
+                        ));
+                    }
+                }
+            }
+            std::fs::write(&spec.config_path, text).unwrap();
+        }
+
+        /// The command stored under `key`, read the way the installer reads it.
+        fn command_under(spec: &McpConfigSpec, key: &str) -> Option<String> {
+            let entry = match spec.format {
+                McpFormat::Toml { .. } => serde_json::to_value(
+                    read_toml_file(&spec.config_path)?
+                        .get("mcp_servers")?
+                        .get(key)?,
+                )
+                .ok()?,
+                McpFormat::Yaml => serde_json::to_value(
+                    read_yaml_file(&spec.config_path)?
+                        .get("extensions")?
+                        .get(key)?,
+                )
+                .ok()?,
+                _ => navigate(&read_json_file(&spec.config_path)?, &spec.key_path)?
+                    .get(key)?
+                    .clone(),
+            };
+            entry_view(spec.format, &entry).command
+        }
+
+        fn format_name(spec: &McpConfigSpec) -> &'static str {
+            match spec.format {
+                McpFormat::Json => "json",
+                McpFormat::OpenCode => "opencode",
+                McpFormat::Toml { .. } => "toml",
+                McpFormat::Yaml => "yaml",
+            }
+        }
+
+        // Catches: a rewording or a path test replacing the content test, so an
+        // old FastAF revision reads as foreign or upstream's bridge as ours.
+        #[test]
+        fn only_a_fastaf_built_bridge_file_is_ours() {
+            let dir = TempDir::new().unwrap();
+            let ours = fastaf_bridge(&dir.path().join("mcp-bridge/aaaa"));
+            let theirs = foreign_bridge(&dir.path().join("mcp-bridge/bbbb"));
+            assert!(is_fastaf_bridge(ours.to_str().unwrap()));
+            assert!(!is_fastaf_bridge(theirs.to_str().unwrap()));
+            // Same bytes under another file name: not something we wrote.
+            let renamed = dir.path().join("wrapper");
+            std::fs::copy(&ours, &renamed).unwrap();
+            assert!(!is_fastaf_bridge(renamed.to_str().unwrap()));
+            for unattributable in [
+                "tuic-bridge",
+                "bash",
+                "",
+                dir.path().join("gone").join(BRIDGE_NAME).to_str().unwrap(),
+                dir.path().to_str().unwrap(),
+            ] {
+                assert!(!is_fastaf_bridge(unattributable), "{unattributable}");
+            }
+        }
+
+        // Catches: an upgrade leaving the old-key entry beside a new one (two
+        // identical servers in every agent), or a rename that loses the entry.
+        #[test]
+        fn an_old_entry_running_a_fastaf_bridge_moves_to_the_new_key() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            // An earlier release's revision, and the one this build would write.
+            let old = fastaf_bridge(&dir.path().join("mcp-bridge/1111"));
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let (old, new) = (old.to_str().unwrap(), new.to_str().unwrap());
+            for spec in specs(dir.path()) {
+                let name = format_name(&spec);
+                write_config(&spec, &[(LEGACY_MCP_KEY, old)]);
+                assert!(has_bridge_entry(&spec), "{name}: installed, not missing");
+                assert!(has_legacy_entry(&spec), "{name}: needs the rename");
+                assert_eq!(configured_bridge_command(&spec).as_deref(), Some(old));
+
+                assert!(ensure_spec_entry(&spec, new, "test"), "{name}");
+                assert_eq!(command_under(&spec, FASTAF_MCP_KEY).as_deref(), Some(new));
+                assert_eq!(command_under(&spec, LEGACY_MCP_KEY), None, "{name}");
+                assert_eq!(
+                    command_under(&spec, "other").as_deref(),
+                    Some("/opt/other"),
+                    "{name}: the owner's server is untouched"
+                );
+                assert!(
+                    has_bridge_entry(&spec) && !has_legacy_entry(&spec),
+                    "{name}"
+                );
+
+                let settled = std::fs::read(&spec.config_path).unwrap();
+                assert!(
+                    !ensure_spec_entry(&spec, new, "test"),
+                    "{name}: second pass"
+                );
+                assert_eq!(std::fs::read(&spec.config_path).unwrap(), settled, "{name}");
+            }
+        }
+
+        // Catches: the rename only working when the path changes. An entry that
+        // already names the very bridge this app writes still has the old key.
+        #[test]
+        fn an_old_entry_naming_this_apps_own_bridge_is_renamed_too() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let bridge = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let bridge = bridge.to_str().unwrap();
+            for spec in specs(dir.path()) {
+                let name = format_name(&spec);
+                write_config(&spec, &[(LEGACY_MCP_KEY, bridge)]);
+                assert!(ensure_spec_entry(&spec, bridge, "test"), "{name}");
+                assert_eq!(
+                    command_under(&spec, FASTAF_MCP_KEY).as_deref(),
+                    Some(bridge)
+                );
+                assert_eq!(command_under(&spec, LEGACY_MCP_KEY), None, "{name}");
+            }
+        }
+
+        // Catches: FastAF renaming, repairing or counting an entry that belongs
+        // to upstream TUICommander or that nobody can attribute.
+        #[test]
+        fn an_old_entry_of_another_install_is_left_alone() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let upstream = foreign_bridge(&dir.path().join("mcp-bridge/9999"));
+            let missing = dir.path().join("mcp-bridge/0000").join(BRIDGE_NAME);
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let new = new.to_str().unwrap();
+            for foreign in [
+                upstream.to_str().unwrap(),
+                missing.to_str().unwrap(),
+                BRIDGE_NAME,
+                "bash",
+            ] {
+                for spec in specs(dir.path()) {
+                    let name = format!("{} / {foreign}", format_name(&spec));
+                    write_config(&spec, &[(LEGACY_MCP_KEY, foreign)]);
+                    assert!(!has_bridge_entry(&spec), "{name}: reads as not installed");
+                    assert!(!has_legacy_entry(&spec), "{name}");
+                    assert_eq!(configured_bridge_command(&spec), None, "{name}");
+
+                    assert!(ensure_spec_entry(&spec, new, "test"), "{name}");
+                    assert_eq!(
+                        command_under(&spec, LEGACY_MCP_KEY).as_deref(),
+                        Some(foreign),
+                        "{name}: the other install's entry stays as written"
+                    );
+                    assert_eq!(command_under(&spec, FASTAF_MCP_KEY).as_deref(), Some(new));
+
+                    // Uninstalling ours does not take theirs along.
+                    remove_spec_entry(&spec, "test").unwrap();
+                    assert_eq!(command_under(&spec, FASTAF_MCP_KEY), None, "{name}");
+                    assert_eq!(
+                        command_under(&spec, LEGACY_MCP_KEY).as_deref(),
+                        Some(foreign),
+                        "{name}"
+                    );
+                }
+            }
+        }
+
+        // Catches: a URL entry under the old key being taken for a stdio bridge
+        // and rewritten or removed.
+        #[test]
+        fn an_old_entry_with_a_url_transport_is_left_alone() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let spec = spec_at(dir.path().join("mcp.json"));
+            let url = serde_json::json!({"type": "http", "url": "http://127.0.0.1:9876/mcp"});
+            write_fixture(
+                &spec.config_path,
+                &serde_json::json!({"mcpServers": {(LEGACY_MCP_KEY): url.clone()}}),
+            );
+            assert!(!has_bridge_entry(&spec) && !entry_has_custom_transport(&spec));
+            install_spec(&spec, new.to_str().unwrap(), "test").unwrap();
+            let servers = read_json_file(&spec.config_path).unwrap()["mcpServers"].clone();
+            assert_eq!(servers[LEGACY_MCP_KEY], url);
+            assert_eq!(servers[FASTAF_MCP_KEY]["command"], new.to_str().unwrap());
+        }
+
+        // Catches: both keys present after an upgrade staying both, or the
+        // wrong one surviving.
+        #[test]
+        fn with_both_present_ours_under_the_old_key_is_dropped() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let old = fastaf_bridge(&dir.path().join("mcp-bridge/1111"));
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let (old, new) = (old.to_str().unwrap(), new.to_str().unwrap());
+            // The current entry is stale in one round and already right in the other.
+            for current in [old, new] {
+                for spec in specs(dir.path()) {
+                    let name = format!("{} / current={current}", format_name(&spec));
+                    write_config(&spec, &[(LEGACY_MCP_KEY, old), (FASTAF_MCP_KEY, current)]);
+                    assert!(has_legacy_entry(&spec), "{name}");
+                    assert!(ensure_spec_entry(&spec, new, "test"), "{name}");
+                    assert_eq!(command_under(&spec, LEGACY_MCP_KEY), None, "{name}");
+                    assert_eq!(command_under(&spec, FASTAF_MCP_KEY).as_deref(), Some(new));
+                    assert_eq!(command_under(&spec, "other").as_deref(), Some("/opt/other"));
+                }
+            }
+        }
+
+        // Catches: a foreign old-key entry being dropped because a current entry
+        // exists next to it.
+        #[test]
+        fn with_both_present_another_installs_old_entry_stays() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let upstream = foreign_bridge(&dir.path().join("mcp-bridge/9999"));
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let (upstream, new) = (upstream.to_str().unwrap(), new.to_str().unwrap());
+            for spec in specs(dir.path()) {
+                let name = format_name(&spec);
+                write_config(&spec, &[(LEGACY_MCP_KEY, upstream), (FASTAF_MCP_KEY, new)]);
+                let before = std::fs::read(&spec.config_path).unwrap();
+                assert!(!has_legacy_entry(&spec), "{name}");
+                assert!(
+                    !ensure_spec_entry(&spec, new, "test"),
+                    "{name}: nothing to do"
+                );
+                assert_eq!(std::fs::read(&spec.config_path).unwrap(), before, "{name}");
+            }
+        }
+
+        // Catches: uninstall leaving our entry behind under the old key, where
+        // the next launch would count it as installed again.
+        #[test]
+        fn uninstall_removes_ours_under_either_key() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let old = fastaf_bridge(&dir.path().join("mcp-bridge/1111"));
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let (old, new) = (old.to_str().unwrap(), new.to_str().unwrap());
+            for entries in [
+                vec![(LEGACY_MCP_KEY, old)],
+                vec![(FASTAF_MCP_KEY, new)],
+                vec![(LEGACY_MCP_KEY, old), (FASTAF_MCP_KEY, new)],
+            ] {
+                for spec in specs(dir.path()) {
+                    let name = format!("{} / {entries:?}", format_name(&spec));
+                    write_config(&spec, &entries);
+                    assert!(has_bridge_entry(&spec), "{name}");
+                    remove_spec_entry(&spec, "test").unwrap();
+                    assert!(!has_bridge_entry(&spec), "{name}");
+                    assert_eq!(command_under(&spec, LEGACY_MCP_KEY), None, "{name}");
+                    assert_eq!(command_under(&spec, FASTAF_MCP_KEY), None, "{name}");
+                    assert_eq!(
+                        command_under(&spec, "other").as_deref(),
+                        Some("/opt/other"),
+                        "{name}"
+                    );
+                }
+            }
+        }
+
+        // Catches: the rename rewriting the whole entry or the lines around it:
+        // the owner's fields, comments and the entry's place must survive.
+        #[test]
+        fn the_rename_keeps_the_owners_fields_comments_and_place() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let old = fastaf_bridge(&dir.path().join("mcp-bridge/1111"));
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let (old, new) = (old.to_str().unwrap(), new.to_str().unwrap());
+
+            let json = dir.path().join("settings.json");
+            std::fs::write(
+                &json,
+                format!(
+                    "{{\n  // my settings\n  \"theme\": \"dark\",\n  \"context_servers\": {{\n    // bridge\n    \"tuicommander\": {{ \"type\": \"stdio\", \"command\": \"{old}\", \"args\": [\"--flag\"], \"env\": {{ \"TOKEN\": \"secret\" }}, \"timeout\": 900 }},\n    \"other\": {{ \"command\": \"/opt/other\" }}, // keep\n  }},\n}}\n"
+                ),
+            )
+            .unwrap();
+            assert!(ensure_agent_mcp_entry(
+                &json,
+                &["context_servers"],
+                McpFormat::Json,
+                new,
+                "test"
+            ));
+            let text = std::fs::read_to_string(&json).unwrap();
+            for kept in [
+                "// my settings",
+                "// bridge",
+                "// keep",
+                "\"theme\": \"dark\"",
+            ] {
+                assert!(text.contains(kept), "{kept}: {text}");
+            }
+            assert!(!text.contains("tuicommander"), "{text}");
+            assert!(
+                text.find("\"fastaf\"").unwrap() < text.find("\"other\"").unwrap(),
+                "{text}"
+            );
+            let entry = &read_json_file(&json).unwrap()["context_servers"]["fastaf"];
+            assert_eq!(entry["command"], new);
+            assert_eq!(entry["args"], serde_json::json!(["--flag"]));
+            assert_eq!(entry["env"]["TOKEN"], "secret");
+            assert_eq!(entry["timeout"], 900);
+
+            let toml = dir.path().join("config.toml");
+            std::fs::write(
+                &toml,
+                format!(
+                    "# model note\nmodel = 'o3'\n\n# my bridge\n[mcp_servers.tuicommander]\ncommand = '{old}' # keep this note\nenabled = false\n\n[mcp_servers.other]\ncommand = '/opt/other'\n"
+                ),
+            )
+            .unwrap();
+            assert!(ensure_toml_mcp_entry(&toml, false, new, "test"));
+            let text = std::fs::read_to_string(&toml).unwrap();
+            for kept in [
+                "# model note\nmodel = 'o3'\n",
+                "# my bridge\n[mcp_servers.fastaf]\n",
+                "# keep this note",
+                "enabled = false\n",
+                "[mcp_servers.other]\ncommand = '/opt/other'\n",
+            ] {
+                assert!(text.contains(kept), "{kept:?}: {text}");
+            }
+            assert!(!text.contains("tuicommander"), "{text}");
+            assert!(
+                text.find("[mcp_servers.fastaf]").unwrap()
+                    < text.find("[mcp_servers.other]").unwrap(),
+                "{text}"
+            );
+            assert_eq!(
+                read_toml_file(&toml).unwrap()["mcp_servers"]["fastaf"]["command"].as_str(),
+                Some(new)
+            );
+
+            let yaml = dir.path().join("config.yaml");
+            std::fs::write(
+                &yaml,
+                format!(
+                    "# root note\nextensions:\n  tuicommander: # mine\n    type: stdio\n    name: tuicommander\n    cmd: {old} # keep this note\n    enabled: false\n    timeout: 900\n  other:\n    cmd: /opt/other # keep\n"
+                ),
+            )
+            .unwrap();
+            assert!(ensure_yaml_mcp_entry(&yaml, "extensions", new, "test"));
+            assert_eq!(
+                std::fs::read_to_string(&yaml).unwrap(),
+                format!(
+                    "# root note\nextensions:\n  fastaf: # mine\n    type: stdio\n    name: fastaf\n    cmd: {new} # keep this note\n    enabled: false\n    timeout: 900\n  other:\n    cmd: /opt/other # keep\n"
+                )
+            );
+        }
+
+        // Catches: the launch pass skipping an agent whose command the owner
+        // chose (so the old key stays forever), or replacing that command.
+        #[test]
+        fn launch_renames_a_kept_command_without_replacing_it() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            // Where an app bundle keeps its bridge: outside the store and any
+            // build directory, so the path-repair rules keep it as written.
+            let bundled = fastaf_bridge(&dir.path().join("FastAF.app/Contents/MacOS"));
+            let source = fastaf_bridge(&dir.path().join("elsewhere"));
+            let bundled = bundled.to_str().unwrap();
+            for spec in specs(dir.path()) {
+                let name = format_name(&spec);
+                write_config(&spec, &[(LEGACY_MCP_KEY, bundled)]);
+                ensure_mcp_configs_for(&[], Some(&source), [("claude", spec_at_format(&spec))]);
+                assert_eq!(
+                    command_under(&spec, FASTAF_MCP_KEY).as_deref(),
+                    Some(bundled),
+                    "{name}"
+                );
+                assert_eq!(command_under(&spec, LEGACY_MCP_KEY), None, "{name}");
+            }
+        }
+
+        // Catches: a shared settings file (Zed, Amp, Gemini) keeping the old key
+        // because launch refuses the first write there, or getting a first
+        // write it never asked for because another install's entry was counted.
+        #[test]
+        fn launch_renames_in_a_shared_settings_file_but_never_adds_there() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let old = fastaf_bridge(&dir.path().join("target/debug"));
+            let upstream = foreign_bridge(&dir.path().join("mcp-bridge/9999"));
+            let source = fastaf_bridge(&dir.path().join("elsewhere"));
+            let shared = || McpConfigSpec {
+                shared_settings_file: true,
+                key_path: vec!["context_servers"],
+                ..spec_at(dir.path().join("settings.json"))
+            };
+
+            write_fixture(
+                &shared().config_path,
+                &serde_json::json!({"context_servers": {(LEGACY_MCP_KEY): json_entry_value(McpFormat::Json, old.to_str().unwrap())}}),
+            );
+            ensure_mcp_configs_for(&[], Some(&source), [("zed", shared())]);
+            let servers = read_json_file(&shared().config_path).unwrap()["context_servers"].clone();
+            assert!(servers.get(LEGACY_MCP_KEY).is_none(), "{servers}");
+            let installed = servers[FASTAF_MCP_KEY]["command"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(is_fastaf_bridge(&installed), "{installed}");
+
+            write_fixture(
+                &shared().config_path,
+                &serde_json::json!({"context_servers": {(LEGACY_MCP_KEY): json_entry_value(McpFormat::Json, upstream.to_str().unwrap())}}),
+            );
+            let before = std::fs::read(shared().config_path).unwrap();
+            ensure_mcp_configs_for(&[], Some(&source), [("zed", shared())]);
+            assert_eq!(std::fs::read(shared().config_path).unwrap(), before);
+        }
+
+        // Catches: pressing Install on an agent whose working entry still has
+        // the old key reporting success while leaving the key as it was.
+        #[test]
+        fn explicit_install_renames_a_working_kept_entry() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let bundled = fastaf_bridge(&dir.path().join("FastAF.app/Contents/MacOS"));
+            let store = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let bundled = bundled.to_str().unwrap();
+            for spec in specs(dir.path()) {
+                let name = format_name(&spec);
+                write_config(&spec, &[(LEGACY_MCP_KEY, bundled)]);
+                install_spec(&spec, store.to_str().unwrap(), "test").unwrap();
+                assert_eq!(
+                    command_under(&spec, FASTAF_MCP_KEY).as_deref(),
+                    Some(bundled),
+                    "{name}"
+                );
+                assert_eq!(command_under(&spec, LEGACY_MCP_KEY), None, "{name}");
+            }
+        }
+
+        // Catches: an old-key entry FastAF cannot show to be its own being
+        // edited at all: reformatted, its fields or comments touched, counted
+        // as installed, or taken along by uninstall. Upstream's bridge, a
+        // missing file, a wrapper and a URL transport, in JSON, TOML and YAML.
+        #[test]
+        fn a_foreign_old_entry_stays_byte_for_byte_beside_the_new_one() {
+            let _config = with_temp_config_dir();
+            let dir = TempDir::new().unwrap();
+            let upstream = foreign_bridge(&dir.path().join("mcp-bridge/9999"));
+            let upstream = upstream.to_str().unwrap();
+            let missing = dir.path().join("mcp-bridge/0000").join(BRIDGE_NAME);
+            let missing = missing.to_str().unwrap();
+            let new = fastaf_bridge(&dir.path().join("mcp-bridge/2222"));
+            let new = new.to_str().unwrap();
+
+            // (label, spec, old-key block exactly as the owner wrote it, whole file)
+            let mut cases: Vec<(String, McpConfigSpec, String, String)> = Vec::new();
+            for (label, entry) in [
+                (
+                    "upstream",
+                    format!(
+                        r#"{{ "type": "stdio", "command": "{upstream}", "args": ["--x"], "env": {{ "K": "v" }}, "timeout": 5 }}"#
+                    ),
+                ),
+                (
+                    "missing",
+                    format!(r#"{{ "command": "{missing}", "args": [], "env": {{}} }}"#),
+                ),
+                (
+                    "wrapper",
+                    r#"{ "command": "/bin/sh", "args": ["-lc", "tuic-bridge"], "env": {} }"#
+                        .to_string(),
+                ),
+                (
+                    "url",
+                    r#"{ "type": "http", "url": "http://127.0.0.1:9876/mcp" }"#.to_string(),
+                ),
+            ] {
+                let block = format!("    // theirs\n    \"tuicommander\": {entry},\n");
+                let file = format!(
+                    "{{\n  // owner's note\n  \"mcpServers\": {{\n{block}    \"other\": {{ \"command\": \"/opt/other\" }}\n  }}\n}}\n"
+                );
+                let spec = spec_at(dir.path().join(format!("{label}.json")));
+                cases.push((format!("json/{label}"), spec, block, file));
+            }
+            for (label, body) in [
+                (
+                    "upstream",
+                    format!("command = '{upstream}' # theirs\nargs = ['--x']\nenabled = false\n"),
+                ),
+                ("missing", format!("command = '{missing}'\n")),
+                (
+                    "wrapper",
+                    "command = '/bin/sh'\nargs = ['-lc', 'tuic-bridge']\n".to_string(),
+                ),
+                ("url", "url = 'http://127.0.0.1:9876/mcp'\n".to_string()),
+            ] {
+                let block = format!("# owner's bridge\n[mcp_servers.tuicommander]\n{body}");
+                let file = format!(
+                    "model = 'o3'\n\n{block}\n[mcp_servers.other]\ncommand = '/opt/other'\n"
+                );
+                let spec = McpConfigSpec {
+                    format: McpFormat::Toml {
+                        forward_session: true,
+                    },
+                    key_path: vec![],
+                    ..spec_at(dir.path().join(format!("{label}.toml")))
+                };
+                cases.push((format!("toml/{label}"), spec, block, file));
+            }
+            for (label, body) in [
+                ("upstream", format!("    type: stdio\n    name: tuicommander\n    cmd: {upstream} # keep\n    enabled: false\n    timeout: 900\n")),
+                ("missing", format!("    type: stdio\n    name: tuicommander\n    cmd: {missing}\n    enabled: true\n")),
+                ("wrapper", "    type: stdio\n    name: tuicommander\n    cmd: /bin/sh\n    args:\n    - -lc\n    - tuic-bridge\n    enabled: true\n".to_string()),
+                ("url", "    type: streamable_http\n    name: tuicommander\n    uri: http://127.0.0.1:9876/mcp\n    enabled: true\n".to_string()),
+            ] {
+                let block = format!("  tuicommander: # theirs\n{body}");
+                let file = format!("# root\nextensions:\n{block}  other:\n    cmd: /opt/other\n");
+                let spec = McpConfigSpec {
+                    format: McpFormat::Yaml,
+                    key_path: vec!["extensions"],
+                    ..spec_at(dir.path().join(format!("{label}.yaml")))
+                };
+                cases.push((format!("yaml/{label}"), spec, block, file));
+            }
+
+            for (name, spec, block, file) in cases {
+                std::fs::write(&spec.config_path, &file).unwrap();
+                let legacy_before = command_under(&spec, LEGACY_MCP_KEY);
+                // Status: not ours, so not installed and nothing to rename.
+                assert!(!has_bridge_entry(&spec), "{name}: reads as not installed");
+                assert!(!has_legacy_entry(&spec), "{name}: nothing to rename");
+                assert!(!entry_has_custom_transport(&spec), "{name}");
+                assert_eq!(configured_bridge_command(&spec), None, "{name}");
+
+                install_spec(&spec, new, "test").unwrap();
+                let text = std::fs::read_to_string(&spec.config_path).unwrap();
+                assert!(
+                    text.contains(&block),
+                    "{name}: old entry rewritten:\n{text}"
+                );
+                assert_eq!(
+                    command_under(&spec, LEGACY_MCP_KEY),
+                    legacy_before,
+                    "{name}"
+                );
+                assert_eq!(
+                    command_under(&spec, FASTAF_MCP_KEY).as_deref(),
+                    Some(new),
+                    "{name}"
+                );
+                assert_eq!(command_under(&spec, "other").as_deref(), Some("/opt/other"));
+                assert!(
+                    has_bridge_entry(&spec) && !has_legacy_entry(&spec),
+                    "{name}"
+                );
+
+                // A second pass, and the launch pass, change nothing.
+                assert!(
+                    !ensure_spec_entry(&spec, new, "test"),
+                    "{name}: second pass"
+                );
+                assert_eq!(std::fs::read_to_string(&spec.config_path).unwrap(), text);
+
+                remove_spec_entry(&spec, "test").unwrap();
+                let text = std::fs::read_to_string(&spec.config_path).unwrap();
+                assert!(
+                    text.contains(&block),
+                    "{name}: uninstall touched it:\n{text}"
+                );
+                assert_eq!(command_under(&spec, FASTAF_MCP_KEY), None, "{name}");
+                assert!(!has_bridge_entry(&spec), "{name}");
+            }
+        }
+
+        // Catches: the manual-setup snippet and the goose entry still handing
+        // out the old name.
+        #[test]
+        fn new_entries_are_written_under_fastaf() {
+            let _config = with_temp_config_dir();
+            assert_eq!(FASTAF_MCP_KEY, "fastaf");
+            assert_eq!(LEGACY_MCP_KEY, "tuicommander");
+            let snippet: serde_json::Value =
+                serde_json::from_str(&bridge_info_from_location(None).config_snippet).unwrap();
+            assert!(snippet.get("fastaf").is_some() && snippet.get("tuicommander").is_none());
+            assert_eq!(goose_entry_value("/bridge")["name"], "fastaf");
+        }
+
+        // Catches: the managed ego child's server following the rename. ego
+        // matches its permission rules on this name, so `fastaf` there would
+        // stop users' `tool(tuicommander/...)` DENY rules from matching, and
+        // the launch's own `--allow` pre-approvals would name another server.
+        #[test]
+        fn the_ego_child_server_keeps_egos_name() {
+            let server =
+                ego_bridge_server(std::path::Path::new("/b/tuic-bridge"), &["TUIC_SESSION"]);
+            assert_eq!(server["name"], "tuicommander");
+            assert_eq!(server["name"], crate::acp::EGO_MCP_SERVER_NAME);
+            assert_eq!(server["command"], "/b/tuic-bridge");
+            assert_eq!(server["inherit_env"], serde_json::json!(["TUIC_SESSION"]));
+        }
     }
 }

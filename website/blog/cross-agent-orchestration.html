@@ -60,7 +60,7 @@
       <h2>Setup: connecting Codex to FastAF</h2>
       <p>Codex CLI supports MCP servers as tool providers. FastAF auto-installs itself into Codex's TOML config when you enable the MCP bridge in Settings &gt; Services. The result in <code>~/.codex/config.toml</code>:</p>
       <pre><code># ~/.codex/config.toml
-[mcp_servers.tuicommander]
+[mcp_servers.fastaf]
 command = "/path/to/tuic-bridge"</code></pre>
       <p>That's it. Codex now has access to all <code>ai_terminal_*</code> tools. Every write tool (send_input, send_key, drive_agent) prompts you for confirmation before executing — FastAF never lets an external agent type into a terminal silently.</p>
       <p>The bridge binary communicates with FastAF over the local Unix socket — no port configuration needed.</p>

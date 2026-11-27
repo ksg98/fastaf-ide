@@ -1,7 +1,7 @@
 /* StashesTab — the stash list (STYLE_GUIDE › Side panels). A stash is a 48px
    two-line row: archive icon on line 1, the stash's subject, then
-   `stash@{n}` · where it came from. Apply, Pop and Drop sit on the right,
-   quiet at rest and bright while the row is hovered, focused or open.
+   `stash@{n}` · where it came from. Apply, Pop, Check and Drop sit on the
+   right, quiet at rest and bright while the row is hovered, focused or open.
    Clicking the row opens its diff in a well under it. */
 .container {
   display: flex;
@@ -9,6 +9,12 @@
   height: 100%;
   overflow: hidden;
   outline: none;
+  container-type: inline-size;
+}
+
+/* "Check all", in the Git panel header beside the window controls. */
+.headerBtn {
+  composes: iconBtn from "../shared/controls.module.css";
 }
 
 .list {
@@ -197,6 +203,72 @@
 .iconBtn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* ── What a check said about a stash it kept, under that stash and in its
+   text column. Selectable. ─────────────────────────────────────────────── */
+.stashNote {
+  margin: 0 var(--list-inset-end, 6px) 8px 38px;
+  font-size: var(--font-sm);
+  line-height: 18px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ── What a check said outside the rows: why it cannot run, or a stash it
+   dropped. A quiet block 10px in from both edges, like the panel's other
+   blocks: an icon on its first line, the words, then (a dropped stash) the
+   command that restores it and a button that copies it. ───────────────── */
+.checkLine {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px calc(var(--list-inset-end, 6px) + 4px) 8px 10px;
+  padding: 7px 4px 7px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--wash-0);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  line-height: 18px;
+}
+
+.checkIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--fg-muted);
+}
+
+.checkText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.checkTitle {
+  overflow: hidden;
+  color: var(--fg-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The restore command: mono, on its own lines, selectable. */
+.checkCommand {
+  display: block;
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  line-height: 16px;
+}
+
+.checkLine > .iconBtn {
+  flex-shrink: 0;
+  --stash-action: var(--fg-muted);
 }
 
 /* ── A failed apply / pop / drop, under its row ──────────────────────── */
@@ -397,4 +469,27 @@
   padding: 0 2px;
   font-size: var(--font-sm);
   color: var(--fg-muted);
+}
+
+/* ── At the panel's narrow end (its minimum is 300px) four actions leave the
+   title a few characters, so they wait for the row: hovered, focused, open or
+   under its menu, they slide in where the title's tail was. ─────────────── */
+@container (max-width: 339px) {
+  .actionGroup {
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition:
+      max-width var(--duration-fast) var(--ease-out),
+      opacity var(--duration-fast) var(--ease-out);
+  }
+
+  .stashHead:hover .actionGroup,
+  .stashHead:focus-within .actionGroup,
+  .stashHeadMenuOpen .actionGroup,
+  .stashHeadExpanded .actionGroup,
+  .container:focus-within .stashEntryFocused .actionGroup {
+    max-width: 180px;
+    opacity: 1;
+  }
 }

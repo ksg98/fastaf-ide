@@ -1,4 +1,6 @@
 //! The `tuicommander` MCP server, served to ego over the ACP connection itself.
+//! ego keeps that name while every other agent sees `fastaf`; see
+//! [`super::EGO_MCP_SERVER_NAME`] for why.
 //!
 //! ego used to reach it through a stdio `tuic-bridge` entry, which opened a
 //! fresh HTTP MCP session for every tool operation — 13,409 initializes from one
@@ -22,12 +24,13 @@ use parking_lot::Mutex;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
-/// The `serverId` every session's `tuicommander` entry names.
+/// The `serverId` every ego session's `tuicommander` entry names.
 ///
 /// One server per connection, so the id only has to be unique on it. The name
 /// and the id are the same word on purpose: ego matches tool permissions on the
-/// server name, and nothing is gained by making the id say something else.
-pub const TUICOMMANDER_MCP_SERVER_ID: &str = "tuicommander";
+/// server name, and nothing is gained by making the id say something else. So
+/// it stays `tuicommander` with [`super::EGO_MCP_SERVER_NAME`], not `fastaf`.
+pub const EGO_MCP_SERVER_ID: &str = super::EGO_MCP_SERVER_NAME;
 
 /// An MCP error, carried back to ego as the ACP error of its `mcp/message`.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +91,13 @@ pub trait McpOverAcpHost: Send + Sync {
     /// Release everything the connection held. Called once per connection,
     /// whether ego disconnected it or the ACP connection ended.
     fn disconnect(&self, connection_id: &str);
+
+    /// Tools whose every call this host already admits through its own ledger.
+    /// A mediated launch pre-approves them in ego, which otherwise asks a person
+    /// that no unattended turn has and refuses the call.
+    fn preapproved_tools(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The MCP connections one ACP connection has open, and the host behind them.
@@ -146,7 +156,7 @@ impl McpChannel {
         request: &v1::ConnectMcpRequest,
         connection: ConnectionTo<Agent>,
     ) -> Result<v1::ConnectMcpResponse, Error> {
-        if request.server_id.0.as_ref() != TUICOMMANDER_MCP_SERVER_ID {
+        if request.server_id.0.as_ref() != EGO_MCP_SERVER_ID {
             return Err(Error::invalid_params().data(format!(
                 "no MCP server {} on this connection",
                 request.server_id

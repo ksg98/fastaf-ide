@@ -25,3 +25,26 @@ Both macOS installers verify before they install. `website/public/install.sh` un
 - **Milestones**: Assign issues to version milestones (v0.4.0, v1.0.0, etc.)
 - **Issue templates**: Bug reports and feature requests use `.github/ISSUE_TEMPLATE/*.yml` forms
 - **Token for project ops**: Use `GH_TOKEN=$GH_STRAUS gh ...` when commands need the `project` scope (the default `gh auth` token only has `repo` + `workflow`)
+
+## What the Release workflow gates on
+
+A release stays a draft, and nothing reaches the updater, unless every one of
+these passes (see [the CI guide](guides/ci.md)):
+
+- **macOS:** the bundle is Developer ID signed, notarized and stapled
+  (`require: 'true'` on the signing step, then `codesign` and `stapler` checks).
+  The macOS leg may run for 120 minutes; Linux and Windows for 90.
+- **Linux and Windows:** built with `--features vulkan` for GPU dictation. The
+  x64 whisper.cpp libraries must contain no AVX-512 code
+  (`scripts/check-ggml-x86-baseline.sh`).
+- **Linux:** the AppImage carries `libvulkan.so.1`, and the `.deb`, `.rpm` and
+  AppImage hold x64 builds of `FastAF`, `fastaf-cli` and `tuic-bridge`
+  (`scripts/check-linux-desktop-packages.sh`). The job uploads
+  `SHA256SUMS-Linux-x64.txt` to the release.
+- **Updater feed:** `latest.json` lists macOS ARM64, Windows x64 and Linux x64
+  with every format-specific entry (`scripts/check-linux-updater.py`).
+
+FastAF publishes no Linux ARM64 desktop build; the remote daemon does ship for
+Linux ARM64. `make nightly` pushes `main`, which starts the Nightly workflow.
+Run a nightly and confirm all three desktop legs before tagging when the build
+setup changed since the last release.

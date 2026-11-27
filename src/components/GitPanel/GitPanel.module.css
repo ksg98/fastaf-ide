@@ -74,6 +74,18 @@
   mask-image: linear-gradient(to right, transparent, currentColor 16px, currentColor calc(100% - 16px), transparent);
 }
 
+/* The open tab's own action (Stashes: Check all), between the tabs and the
+   window controls. A tab portals its button in; the wrapper takes no box. */
+.headerActions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.headerActions > div {
+  display: contents;
+}
+
 /* 13px/500 in every state, so switching never reflows the strip. */
 .tab {
   flex-shrink: 0;

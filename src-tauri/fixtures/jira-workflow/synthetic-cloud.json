@@ -1,0 +1,412 @@
+{
+  "provenance": "Written for FastAF from the public Jira Cloud REST API v3 reference (issue, createmeta, transitions, enhanced JQL search, comments). Every value is synthetic: this is not a recording of a Jira site and nothing here comes from the upstream plugins repository, which FastAF does not vendor. It proves response shape and the identity, pagination and read-back checks only.",
+  "issue": {
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "id": "10004",
+    "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issue/10004",
+    "key": "FA-5",
+    "fields": {
+      "summary": "Export drops the last row",
+      "description": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Synthetic issue body."
+              }
+            ]
+          }
+        ]
+      },
+      "issuetype": {
+        "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issuetype/10006",
+        "id": "10006",
+        "name": "Bug",
+        "subtask": false
+      },
+      "project": {
+        "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/project/10001",
+        "id": "10001",
+        "key": "FA",
+        "name": "FastAF fixture",
+        "projectTypeKey": "software"
+      },
+      "status": {
+        "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/status/10002",
+        "id": "10002",
+        "name": "To Do",
+        "statusCategory": {
+          "id": 2,
+          "key": "new",
+          "name": "To Do"
+        }
+      },
+      "priority": {
+        "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/priority/3",
+        "id": "3",
+        "name": "Medium"
+      },
+      "labels": [
+        "fixture"
+      ],
+      "assignee": null,
+      "reporter": {
+        "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/user?accountId=fixture-user-1",
+        "accountId": "fixture-user-1",
+        "displayName": "Fixture User",
+        "active": true
+      },
+      "created": "2026-11-27T10:00:00.000+0000",
+      "updated": "2026-11-27T10:00:00.000+0000"
+    }
+  },
+  "create": {
+    "id": "10004",
+    "key": "FA-5",
+    "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issue/10004"
+  },
+  "createmeta": {
+    "maxResults": 100,
+    "startAt": 0,
+    "total": 8,
+    "fields": [
+      {
+        "required": true,
+        "schema": {
+          "type": "string",
+          "system": "summary"
+        },
+        "name": "Summary",
+        "key": "summary",
+        "hasDefaultValue": false,
+        "operations": [
+          "set"
+        ],
+        "fieldId": "summary"
+      },
+      {
+        "required": true,
+        "schema": {
+          "type": "issuetype",
+          "system": "issuetype"
+        },
+        "name": "Issue Type",
+        "key": "issuetype",
+        "hasDefaultValue": false,
+        "operations": [],
+        "fieldId": "issuetype"
+      },
+      {
+        "required": true,
+        "schema": {
+          "type": "project",
+          "system": "project"
+        },
+        "name": "Project",
+        "key": "project",
+        "hasDefaultValue": false,
+        "operations": [
+          "set"
+        ],
+        "fieldId": "project"
+      },
+      {
+        "required": true,
+        "schema": {
+          "type": "user",
+          "system": "reporter"
+        },
+        "name": "Reporter",
+        "key": "reporter",
+        "hasDefaultValue": true,
+        "operations": [
+          "set"
+        ],
+        "fieldId": "reporter"
+      },
+      {
+        "required": false,
+        "schema": {
+          "type": "string",
+          "system": "description"
+        },
+        "name": "Description",
+        "key": "description",
+        "hasDefaultValue": false,
+        "operations": [
+          "set"
+        ],
+        "fieldId": "description"
+      },
+      {
+        "required": false,
+        "schema": {
+          "type": "array",
+          "items": "string",
+          "system": "labels"
+        },
+        "name": "Labels",
+        "key": "labels",
+        "hasDefaultValue": false,
+        "operations": [
+          "add",
+          "set",
+          "remove"
+        ],
+        "fieldId": "labels"
+      },
+      {
+        "required": false,
+        "schema": {
+          "type": "priority",
+          "system": "priority"
+        },
+        "name": "Priority",
+        "key": "priority",
+        "hasDefaultValue": true,
+        "operations": [
+          "set"
+        ],
+        "fieldId": "priority"
+      },
+      {
+        "required": false,
+        "schema": {
+          "type": "user",
+          "system": "assignee"
+        },
+        "name": "Assignee",
+        "key": "assignee",
+        "hasDefaultValue": false,
+        "operations": [
+          "set"
+        ],
+        "fieldId": "assignee"
+      }
+    ]
+  },
+  "transitions": {
+    "expand": "transitions",
+    "transitions": [
+      {
+        "id": "11",
+        "name": "To Do",
+        "to": {
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/status/10002",
+          "id": "10002",
+          "name": "To Do",
+          "statusCategory": {
+            "id": 2,
+            "key": "new",
+            "name": "To Do"
+          }
+        },
+        "hasScreen": false,
+        "isGlobal": true,
+        "isInitial": false,
+        "isAvailable": true,
+        "isConditional": false,
+        "isLooped": false
+      },
+      {
+        "id": "21",
+        "name": "In Progress",
+        "to": {
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/status/10003",
+          "id": "10003",
+          "name": "In Progress",
+          "statusCategory": {
+            "id": 4,
+            "key": "indeterminate",
+            "name": "In Progress"
+          }
+        },
+        "hasScreen": false,
+        "isGlobal": true,
+        "isInitial": false,
+        "isAvailable": true,
+        "isConditional": false,
+        "isLooped": false
+      },
+      {
+        "id": "31",
+        "name": "Done",
+        "to": {
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/status/10005",
+          "id": "10005",
+          "name": "Done",
+          "statusCategory": {
+            "id": 3,
+            "key": "done",
+            "name": "Done"
+          }
+        },
+        "hasScreen": false,
+        "isGlobal": true,
+        "isInitial": false,
+        "isAvailable": true,
+        "isConditional": false,
+        "isLooped": false
+      }
+    ]
+  },
+  "searchPages": [
+    {
+      "issues": [
+        {
+          "expand": "operations,versionedRepresentations,editmeta,changelog,renderedFields",
+          "id": "10004",
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issue/10004",
+          "key": "FA-5",
+          "fields": {
+            "summary": "Export drops the last row",
+            "project": {
+              "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/project/10001",
+              "id": "10001",
+              "key": "FA",
+              "name": "FastAF fixture",
+              "projectTypeKey": "software"
+            },
+            "status": {
+              "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/status/10002",
+              "id": "10002",
+              "name": "To Do",
+              "statusCategory": {
+                "id": 2,
+                "key": "new",
+                "name": "To Do"
+              }
+            },
+            "labels": [
+              "fixture"
+            ]
+          }
+        }
+      ],
+      "nextPageToken": "Zml4dHVyZS1wYWdlLTI",
+      "isLast": false
+    },
+    {
+      "issues": [
+        {
+          "expand": "operations,versionedRepresentations,editmeta,changelog,renderedFields",
+          "id": "10005",
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issue/10005",
+          "key": "FA-6",
+          "fields": {
+            "summary": "Import rejects quoted commas",
+            "project": {
+              "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/project/10001",
+              "id": "10001",
+              "key": "FA",
+              "name": "FastAF fixture",
+              "projectTypeKey": "software"
+            },
+            "status": {
+              "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/status/10002",
+              "id": "10002",
+              "name": "To Do",
+              "statusCategory": {
+                "id": 2,
+                "key": "new",
+                "name": "To Do"
+              }
+            },
+            "labels": [
+              "fixture"
+            ]
+          }
+        }
+      ],
+      "isLast": true
+    }
+  ],
+  "commentPages": [
+    {
+      "startAt": 0,
+      "maxResults": 1,
+      "total": 2,
+      "comments": [
+        {
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issue/10004/comment/10000",
+          "id": "10000",
+          "author": {
+            "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/user?accountId=fixture-user-1",
+            "accountId": "fixture-user-1",
+            "displayName": "Fixture User",
+            "active": true
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "First synthetic comment."
+                  }
+                ]
+              }
+            ]
+          },
+          "updateAuthor": {
+            "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/user?accountId=fixture-user-1",
+            "accountId": "fixture-user-1",
+            "displayName": "Fixture User",
+            "active": true
+          },
+          "created": "2026-11-27T10:10:00.000+0000",
+          "updated": "2026-11-27T10:10:00.000+0000",
+          "jsdPublic": true
+        }
+      ]
+    },
+    {
+      "startAt": 1,
+      "maxResults": 1,
+      "total": 2,
+      "comments": [
+        {
+          "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/issue/10004/comment/10001",
+          "id": "10001",
+          "author": {
+            "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/user?accountId=fixture-user-1",
+            "accountId": "fixture-user-1",
+            "displayName": "Fixture User",
+            "active": true
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Second synthetic comment."
+                  }
+                ]
+              }
+            ]
+          },
+          "updateAuthor": {
+            "self": "https://fastaf-fixture.atlassian.example.invalid/rest/api/3/user?accountId=fixture-user-1",
+            "accountId": "fixture-user-1",
+            "displayName": "Fixture User",
+            "active": true
+          },
+          "created": "2026-11-27T10:10:00.000+0000",
+          "updated": "2026-11-27T10:10:00.000+0000",
+          "jsdPublic": true
+        }
+      ]
+    }
+  ]
+}

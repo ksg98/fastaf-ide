@@ -94,7 +94,8 @@ With no work-item plugin installed, a pasted URL is searched like any other text
 
 ## Activity Dashboard
 
-Open with `Cmd+Shift+A`. A real-time overview of all your terminal sessions.
+Open with `Cmd+Shift+A`, or click the **Agents** ticker in the title bar. You can also focus the ticker and press Enter or Space. Its cycle badge still advances to the next ticker.
+A real-time overview of all your terminal sessions.
 The overlay stays compact in the main window and fits narrow windows; detaching
 it keeps the same list in a separate window.
 
@@ -140,5 +141,9 @@ The entry is available in desktop and browser mode. See the
 ### Plans and Stories
 
 **Plans and Stories** opens the Plans and Stories dialog for the active repository.
+
+### Workflows
+
+**Workflows** opens the Workflows dialog for the active repository, with four views: **Designer**, **Triggers**, **Preview** and **Definition**. **Validate**, **Save draft** and **Publish** act on the open draft. It opens without a selected plan or story. Its header has a **Plans and stories** button, and Plans and Stories has a **Workflows** button; each keeps its own selection.
 It does nothing when no repository is active. The entry is available in desktop and browser mode. See
 [Native Stories](native-stories.md).

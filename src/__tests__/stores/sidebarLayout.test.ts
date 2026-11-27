@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("sidebarLayout selectors", () => {
 	let repositoriesStore: typeof import("../../stores/repositories").repositoriesStore;
 	let uiStore: typeof import("../../stores/ui").uiStore;
+	let terminalsStore: typeof import("../../stores/terminals").terminalsStore;
 	let layout: typeof import("../../stores/sidebarLayout");
 
 	beforeEach(async () => {
@@ -24,6 +25,7 @@ describe("sidebarLayout selectors", () => {
 
 		repositoriesStore = (await import("../../stores/repositories")).repositoriesStore;
 		uiStore = (await import("../../stores/ui")).uiStore;
+		terminalsStore = (await import("../../stores/terminals")).terminalsStore;
 		layout = await import("../../stores/sidebarLayout");
 		repositoriesStore._testSetHydrated(true);
 	});
@@ -93,6 +95,34 @@ describe("sidebarLayout selectors", () => {
 
 				// /a is a member but inactive; /c is active but not a member
 				expect(flatPaths(layout.getVisibleLayout())).toEqual(["/b"]);
+			});
+		});
+
+		// Catches: the "Live agents" layout (upstream's H view) filtering only inside
+		// the sidebar component, so shortcut numbering still walks the hidden repos;
+		// a plain shell or an exited agent counted as live; active-only winning over it.
+		it("the live-agents layout keeps repos with a running agent and wins over active-only", () => {
+			testInScope(() => {
+				addRepo("/a", "Alpha");
+				addRepo("/b", "Beta");
+				addRepo("/c", "Gamma");
+				const shell = terminalsStore.add({ sessionId: "s1", fontSize: 14, name: "sh", cwd: "/b", awaitingInput: null });
+				const agent = terminalsStore.add({ sessionId: "s2", fontSize: 14, name: "ag", cwd: "/c", awaitingInput: null });
+				terminalsStore.update(agent, { agentType: "claude" });
+				repositoriesStore.addTerminalToWorkspace("/b", "main", shell);
+				repositoriesStore.addTerminalToWorkspace("/c", "main", agent);
+
+				uiStore.setRepoFilterActiveOnly(true);
+				expect(flatPaths(layout.getVisibleLayout())).toEqual(["/b", "/c"]);
+				uiStore.setRepoFilterHarnessOnly(true);
+				expect(flatPaths(layout.getVisibleLayout())).toEqual(["/c"]);
+				expect(layout.getVisibleRepoSequence().map((r) => r.path)).toEqual(["/c"]);
+
+				terminalsStore.update(agent, { shellState: "exited" });
+				expect(flatPaths(layout.getVisibleLayout())).toEqual([]);
+
+				uiStore.setRepoFilterHarnessOnly(false);
+				expect(flatPaths(layout.getVisibleLayout())).toEqual(["/b", "/c"]);
 			});
 		});
 

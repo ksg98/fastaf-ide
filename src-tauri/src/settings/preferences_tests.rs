@@ -197,6 +197,24 @@ async fn unknown_density_is_rejected_and_nothing_is_written() {
     assert_eq!(on_disk(&f), json!({"sidebar_density": "rich"}));
 }
 
+/// Catches: the sidebar's "harness" layout, which the toolbar toggle saves,
+/// being refused when All Settings, `POST /settings/action` or the MCP settings
+/// tool sets it, because the schema enum lagged behind the UI.
+#[tokio::test]
+async fn harness_density_is_accepted_and_reads_back() {
+    let f = fixture(Some(json!({"sidebar_density": "rich"})));
+    let rev = get(&f, &["/sidebar_density"]).await.revision;
+    let reply = set(&f, rev, "/sidebar_density", json!("harness"))
+        .await
+        .unwrap();
+    assert!(reply.persisted);
+    assert_eq!(on_disk(&f)["sidebar_density"], json!("harness"));
+    assert_eq!(
+        get(&f, &["/sidebar_density"]).await.values["/sidebar_density"].stored,
+        json!("harness")
+    );
+}
+
 /// Catches: a no-op edit rewriting the file (mtime churn, cross-process clobber window).
 #[tokio::test]
 async fn unchanged_value_does_not_write() {

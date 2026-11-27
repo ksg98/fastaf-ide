@@ -43,7 +43,8 @@
     "push": {
       "enabled": false,
       "vapid_public_key": "",
-      "vapid_subject": "https://github.com/ksg98/fastaf-ide"
+      "vapid_subject": "https://github.com/ksg98/fastaf-ide",
+      "added_providers": []
     }
   },
   "confirm_before_quit": true,

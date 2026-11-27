@@ -1,0 +1,35 @@
+/* MCP usage: one block per role. The role's name, then its week as one muted
+   line; under it the shared table (McpAuditPanel.module.css) with the
+   operation taking the room and the counts in columns that line up. */
+.role {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 14px 0 6px;
+}
+
+.role strong {
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  font-weight: 600;
+}
+
+.role span {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.count {
+  width: 76px;
+}
+
+.size {
+  width: 104px;
+}
+
+/* A count's heading sits over its numbers' right edge. */
+table th.numHead {
+  text-align: right;
+}

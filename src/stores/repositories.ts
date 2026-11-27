@@ -427,6 +427,7 @@ const DERIVED_BRANCH_FIELDS = [
 	"deletions",
 	"isMerged",
 	"lifecycleStatus",
+	"cleanup",
 	"lastActiveTerminal",
 	"lastCommitTs",
 	// Persisted, but session state all the same: it suppresses auto-spawn after the
@@ -478,6 +479,7 @@ function withLiveBranchFields(fresh: RepositoryState, live: RepositoryState | un
 			deletions: liveBranch.deletions,
 			isMerged: liveBranch.isMerged,
 			lifecycleStatus: liveBranch.lifecycleStatus,
+			cleanup: liveBranch.cleanup,
 			lastActiveTerminal: liveBranch.lastActiveTerminal,
 			lastCommitTs: liveBranch.lastCommitTs,
 			ciAutoHeal:
@@ -496,15 +498,28 @@ function withLiveBranchFields(fresh: RepositoryState, live: RepositoryState | un
 	return { ...incoming, workspaces };
 }
 
+/** Branch fields that only mirror `git`: recomputed on every refresh, never an edit. */
+const GIT_STAT_FIELDS = ["additions", "deletions", "isMerged", "lastCommitTs", "lifecycleStatus", "cleanup"] as const;
+
+function withoutGitStats(record: RepositoryState): unknown {
+	const view = cloneJson(record);
+	for (const branch of Object.values(view.workspaces ?? {})) {
+		for (const field of GIT_STAT_FIELDS) delete (branch as unknown as Record<string, unknown>)[field];
+	}
+	return view;
+}
+
 function keyedMutations<T extends RepositoryState | RepoGroup | NamedWorkspace>(
 	before: Record<string, T>,
 	after: Record<string, T>,
+	/** Whether two different records still say the same thing; derived stats alone are no edit. */
+	sameIntent?: (previous: T | null, next: T | null) => boolean,
 ): KeyedRepositoryMutation[] {
 	const mutations: KeyedRepositoryMutation[] = [];
 	for (const id of new Set([...Object.keys(before), ...Object.keys(after)])) {
 		const previous = before[id] ?? null;
 		const next = after[id] ?? null;
-		if (!jsonEqual(previous, next)) {
+		if (!jsonEqual(previous, next) && !sameIntent?.(previous, next)) {
 			mutations.push({ id, before: previous, after: next });
 		}
 	}
@@ -514,7 +529,15 @@ function keyedMutations<T extends RepositoryState | RepoGroup | NamedWorkspace>(
 function repositoryMutationBatch(before: RepositorySnapshot, after: RepositorySnapshot): RepositoryMutationBatch {
 	const mutation: RepositoryMutationBatch = {
 		mutationVersion: 1,
-		repos: keyedMutations(before.repos, after.repos),
+		// A diffstat tick moves derived fields every few seconds. Saving it rewrote the whole
+		// repositories.json (310 KB, ~5 GB a day); a stat is recomputed on load, so it rides
+		// along with the next real edit instead.
+		repos: keyedMutations(
+			before.repos,
+			after.repos,
+			(previous, next) =>
+				previous !== null && next !== null && jsonEqual(withoutGitStats(previous), withoutGitStats(next)),
+		),
 		groups: keyedMutations(before.groups, after.groups),
 		workspaces: keyedMutations(before.workspaces, after.workspaces),
 	};
@@ -876,17 +899,17 @@ function createRepositoriesStore() {
 		// The common event by far is this client's own echo, and the whole body below
 		// is `JSON.stringify` on every repository. Leave before paying for it.
 		if (jsonEqual(baseline, fresh)) return;
-		const current = serializableSnapshot(
-			state.repositories,
-			state.repoOrder,
-			state.activeRepoPath,
-			state.groups,
-			state.groupOrder,
-			state.sortMode,
-			state.namedWorkspaces,
-			state.namedWorkspaceOrder,
-			state.activeNamedWorkspaceId,
-		);
+		// Repository removal also edits placement (order, groups, workspace members).
+		// Capture that small intent view before adoption mutates it, without
+		// traversing live repository metadata.
+		const current = {
+			groups: cloneJson(state.groups),
+			repoOrder: [...state.repoOrder],
+			groupOrder: [...state.groupOrder],
+			sortMode: state.sortMode,
+			workspaces: cloneJson(state.namedWorkspaces),
+			workspaceOrder: [...state.namedWorkspaceOrder],
+		};
 		const previousOwners = Object.values(state.repositories).map((repo) => repo.connectionId);
 		const next = cloneJson(baseline);
 		let adopted = false;
@@ -897,7 +920,9 @@ function createRepositoriesStore() {
 			if (jsonEqual(mine, incoming)) continue;
 			// Unsaved local intent for this repo — leave it to the save path. Derived
 			// fields are excluded: a diffstat that moved under us is not an edit.
-			if (!jsonEqual(repositoryIntentView(mine), repositoryIntentView(current.repos[id] ?? null))) continue;
+			// Only inspect live intent for records that actually changed on disk.
+			const live = state.repositories[id];
+			if (!jsonEqual(repositoryIntentView(mine), repositoryIntentView(live ? serializableRepo(live) : null))) continue;
 			if (incoming) {
 				const normalized = cloneJson(incoming);
 				normalizeLoadedRepo(normalized);
@@ -1037,21 +1062,10 @@ function createRepositoriesStore() {
 			return;
 		}
 		remoteSyncPending = false;
-		loadPersistedSnapshot()
-			.then((fresh) => {
-				if (!fresh) return;
-				// A save can have started while the read was in flight — same window,
-				// checked again on the near side of it.
-				if (saveInFlight) {
-					remoteSyncPending = true;
-					return;
-				}
-				adoptRemoteRepositories(fresh);
-			})
-			.catch((err) => appLogger.error("store", "Failed to re-read repositories after a remote change", err));
+		settingsRefresh.invalidate("repositories_registration");
 	};
 
-	/** Subscribe once to the backend's `repositories-changed` broadcast. Started
+	/** Register one refresh owner and bridge the legacy broadcast into it. Started
 	 *  from `hydrate`, so the first adoption always has a baseline to diff against.
 	 *  This client's own saves echo back here too; they adopt nothing, because every
 	 *  key they moved still differs from the baseline they were diffed from. */
@@ -1063,11 +1077,14 @@ function createRepositoriesStore() {
 			read: loadPersistedSnapshot,
 			apply: (fresh) => {
 				if (!fresh) return;
+				// A save may have started while this read was in flight. Its reply
+				// owns the baseline until onSaveSettled requests a fresh read.
 				if (saveInFlight) {
 					remoteSyncPending = true;
 					return;
 				}
-				adoptRemoteRepositories(fresh);
+				// Publish one complete document, with its baseline settled before consumers run.
+				batch(() => adoptRemoteRepositories(fresh));
 			},
 		});
 		window.addEventListener("beforeunload", stopSettings, { once: true });

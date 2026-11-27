@@ -233,8 +233,11 @@ const term = (name: string, sessionId: string, parentSession?: string) => ({
 
 describe("rich agent rows: cycles and flow polling (critic r6)", () => {
 	beforeEach(() => {
-		// These cases exercise the auto density budget; pin it whatever the app default is.
-		while (uiStore.state.sidebarDensityMode !== "auto") uiStore.cycleSidebarDensityMode();
+		// These cases exercise the rich rows; pin the layout whatever the app default is
+		// (FastAF starts on compact, and "auto" is no longer a mode).
+		uiStore.setSidebarDensityMode("rich");
+		// The pick schedules a debounced save; write it now so no timer outlives the case.
+		uiStore.flushSave();
 		vi.clearAllMocks();
 		mockGetActive.mockReturnValue(null);
 		mockGetSubAgentTag.mockReturnValue(null);

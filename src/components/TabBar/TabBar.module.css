@@ -404,6 +404,13 @@
   animation: pulse-opacity 1.5s ease-in-out infinite;
 }
 
+/* Silent past the stall threshold while the agent claims to work: a steady
+   warning dot (no pulse). The dot is drawn by .tabIcon; its glyph stays hidden. */
+.tab.shellStalled .tabIcon {
+  color: var(--warning);
+  opacity: 1;
+}
+
 .tab.shellIdle .tabIcon {
   color: var(--fg-muted);
   opacity: 0.8;
@@ -489,7 +496,7 @@
   opacity: 0.9;
 }
 
-.tab.remoteTab:not(.awaitingInput):not(.shellBusy):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
+.tab.remoteTab:not(.awaitingInput):not(.shellBusy):not(.shellStalled):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
   color: rgb(var(--tab-remote-rgb));
   opacity: 0.9;
 }

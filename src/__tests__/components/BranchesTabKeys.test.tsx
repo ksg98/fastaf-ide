@@ -21,7 +21,6 @@ function branch(name: string, extra: Partial<BranchDetail> = {}): BranchDetail {
 		is_current: false,
 		is_remote: name.startsWith("origin/"),
 		is_main: name === "main",
-		is_merged: false,
 		ahead: null,
 		behind: null,
 		upstream: null,
