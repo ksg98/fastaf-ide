@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-27
+
 FastAF now includes TUICommander 2.1.2 (Apache-2.0, by Stefano Straus), merged into FastAF's own design and AI
 engine. The desktop AI Chat panel, Smart Prompts API mode, PR review and story drafts keep running on FastAF's
 built-in engine and providers.
